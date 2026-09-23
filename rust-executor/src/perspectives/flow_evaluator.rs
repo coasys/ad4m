@@ -77,12 +77,14 @@ pub struct SatisfiedTransition {
     pub evidence_hash: String,
     /// The target state's `semanticCheck` hint, if it declares one.
     pub semantic_check: Option<String>,
-    /// `Some` exactly when `to_state` is terminal: the nodes the proposer
-    /// names as the run's outputs. The proposal carries them and signs
-    /// their `outputs_hash` next to the evidence seal (#1104); see
+    /// `Some` exactly when `to_state` is terminal: the instances the
+    /// proposer names as the run's outputs, each with the content this
+    /// replica's `model_query` returned for it. The proposal names their
+    /// `(class, id)` and signs `outputs_hash` over the content next to the
+    /// evidence seal (#1104); see
     /// `flow_instance::atom::check_outputs_commitment` for what a voter
     /// checks.
-    pub outputs: Option<Vec<String>>,
+    pub outputs: Option<Vec<EvidenceItem>>,
 }
 
 /// One hydrated piece of guard evidence: an instance a `requires` query
@@ -165,10 +167,28 @@ pub(crate) fn canonical_json(v: &Value) -> String {
 /// hash regardless of result order; **editing a cited instance changes the
 /// hash**, which is what lets a voter detect a stale seal before co-signing.
 pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
-    fn frame(hasher: &mut Sha256, field: &str) {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
+    for name in class_names {
+        frame(&mut hasher, name);
     }
+    frame_items(&mut hasher, evidence);
+    hex::encode(hasher.finalize())
+}
+
+/// Length-prefix one field, so no field's content can shift bytes across a
+/// boundary. The one framing [`evidence_hash`] and [`tagged_items_hash`]
+/// share.
+fn frame(hasher: &mut Sha256, field: &str) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field.as_bytes());
+}
+
+/// Each item's `(class, id, canonical_json(content))` triple, sorted and
+/// framed. Sorting makes the result independent of the order `model_query`
+/// returned the instances in; [`canonical_json`] makes it independent of
+/// their key order. Non-JSON content is framed verbatim.
+fn frame_items(hasher: &mut Sha256, evidence: &[EvidenceItem]) {
     let mut items: Vec<(String, String, String)> = evidence
         .iter()
         .map(|e| {
@@ -179,16 +199,28 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         })
         .collect();
     items.sort();
-    let mut hasher = Sha256::new();
-    hasher.update((class_names.len() as u64).to_le_bytes());
-    for name in class_names {
-        frame(&mut hasher, name);
-    }
     for (class, id, content) in &items {
-        frame(&mut hasher, class);
-        frame(&mut hasher, id);
-        frame(&mut hasher, content);
+        frame(hasher, class);
+        frame(hasher, id);
+        frame(hasher, content);
     }
+}
+
+/// The [`evidence_hash`] item framing under a domain `tag`, for a hash that
+/// must never be read as an evidence seal (the flow outputs commitment,
+/// `flow_instance::atom::outputs_hash`).
+///
+/// The digest input opens with `u64::MAX` where an evidence seal has its
+/// class-name count. No evidence seal can open that way: it would need
+/// 2^64 − 1 class names. The framed `tag` follows, then the items exactly as
+/// [`evidence_hash`] frames them. So the two hashes share one
+/// canonicalisation and one item framing, and cannot collide by
+/// construction.
+pub(crate) fn tagged_items_hash(tag: &str, items: &[EvidenceItem]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(u64::MAX.to_le_bytes());
+    frame(&mut hasher, tag);
+    frame_items(&mut hasher, items);
     hex::encode(hasher.finalize())
 }
 
@@ -913,7 +945,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         flow,
                         &state.name,
                     )
-                    .then(|| evidence_ids.clone());
+                    .then(|| evidence.clone());
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -2152,8 +2184,12 @@ mod tests {
                 ),
                 semantic_check: Some("Agreed?".into()),
                 // `scoped` is terminal, so the engine names what the guard
-                // matched as the run's outputs (#1104).
-                outputs: Some(vec!["ad4m://task/1".into()]),
+                // matched as the run's outputs, with its content (#1104).
+                outputs: Some(vec![EvidenceItem {
+                    id: "ad4m://task/1".into(),
+                    class_name: "ns://Task".into(),
+                    content: json!({ "id": "ad4m://task/1" }).to_string(),
+                }]),
             }]
         );
     }

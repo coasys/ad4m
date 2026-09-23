@@ -1,6 +1,6 @@
 {
   "target_class": "ad4m://FlowTransitionProposal",
-  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits. A proposal into a terminal state also names the run's outputs and signs a hash over their ids.",
+  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits. A proposal into a terminal state also names the run's outputs as (class, id) pairs and signs a hash over their content.",
   "constructor_actions": [
     {"action": "addLink", "source": "this", "predicate": "ad4m://flow/instance", "target": "placeholder"}
   ],

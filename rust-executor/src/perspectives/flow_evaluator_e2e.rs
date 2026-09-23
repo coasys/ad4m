@@ -9,7 +9,8 @@ use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
 use super::flow_context::FlowInstanceRecord;
 use super::flow_context::{load_flow_instances, load_shacl_flows};
 use super::flow_evaluator::{
-    evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
+    evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, EvidenceItem,
+    SatisfiedTransition,
 };
 use super::flow_instance::{fold::DerivedState, FlowInstance, ReadSet};
 use super::flow_semantic_check::SemanticCheckLlm;
@@ -187,6 +188,9 @@ impl Fixture {
     ) -> String {
         let acting_did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
         let instance_uri = self.instance_uri.clone();
+        // Committed the way the engine commits: the cited Tasks are the
+        // outputs, with the content this replica reads for them now.
+        let outputs = self.task_outputs(evidence_ids).await;
         write_flow_transition_proposal(
             &mut self.perspective,
             proposal_id,
@@ -196,13 +200,31 @@ impl Fixture {
             to_state,
             evidence_ids,
             evidence_hash,
-            Some(evidence_ids),
+            Some(&outputs),
             None,
             None,
             &self.ctx,
         )
         .await
         .unwrap_or_else(|e| panic!("write `{proposal_id}` proposal: {e:#}"))
+    }
+
+    /// Each id's content as an `ns://Task`, read through the loader every
+    /// voter uses. An id that is no Task is left out.
+    pub(super) async fn task_outputs(&self, ids: &[String]) -> Vec<EvidenceItem> {
+        use crate::perspectives::flow_instance::atom::OutputRef;
+        let refs: Vec<OutputRef> = ids
+            .iter()
+            .map(|id| OutputRef {
+                class_name: "ns://Task".to_string(),
+                id: id.clone(),
+            })
+            .collect();
+        let loaded =
+            crate::perspectives::flow_instance::accept::load_outputs(&self.perspective, &refs)
+                .await
+                .expect("load outputs");
+        refs.iter().filter_map(|r| loaded.get(r).cloned()).collect()
     }
 
     pub(super) async fn instances(&self) -> Vec<FlowInstanceRecord> {
@@ -447,20 +469,32 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
     );
 
     // `scoped` is terminal, so the engine names the matched Tasks as the
-    // run's outputs and commits to them (#1104). Stored like `evidence` and
-    // `evidence_hashes`: ids raw, the hash literal-wrapped. That the atom
-    // reads them back is pinned through the real writer in
+    // run's outputs and commits to their content (#1104): each output link
+    // carries the encoded `(class, id)`, and the hash is literal-wrapped.
+    // That the atom reads them back is pinned through the real writer in
     // `propose_commits_to_the_named_outputs_and_refuses_a_missing_one`.
-    use crate::perspectives::flow_instance::atom::outputs_hash;
-    let expected = vec!["ad4m://task/1".to_string(), "ad4m://task/2".to_string()];
-    assert_eq!(t.outputs.as_deref(), Some(&expected[..]));
-    assert_has_target(&by_pred, "ad4m://flow/output", "ad4m://task/1");
-    assert_has_target(&by_pred, "ad4m://flow/output", "ad4m://task/2");
+    use crate::perspectives::flow_instance::atom::{outputs_hash, OutputRef};
+    assert_eq!(t.outputs.as_deref(), Some(&t.evidence[..]));
+    for item in &t.evidence {
+        assert_has_target(
+            &by_pred,
+            "ad4m://flow/output",
+            &literal(&OutputRef::of(item).encode()),
+        );
+    }
     assert_has_target(
         &by_pred,
         "ad4m://flow/outputs_hash",
-        &literal(&outputs_hash(&expected)),
+        &literal(&outputs_hash(&t.evidence)),
     );
+    // The guard's hydration and a voter's by-id load read the same content,
+    // or no voter could ever reproduce an engine-written commitment.
+    let mut by_id = f.task_outputs(&t.evidence_ids).await;
+    let mut guarded = t.evidence.clone();
+    let key = |i: &EvidenceItem| (i.class_name.clone(), i.id.clone());
+    by_id.sort_by_key(key);
+    guarded.sort_by_key(key);
+    assert_eq!(by_id, guarded);
 }
 
 #[tokio::test(flavor = "multi_thread")]

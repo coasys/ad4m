@@ -19,7 +19,8 @@
 //!   │                         a hash cannot reconstruct a definition, so
 //!   │                         nothing here can be replayed against old rules.
 //!   ├── terminal_state      derived by the fold at mint, never asserted
-//!   ├── outputs             must hash to the final edge's signed outputs_hash
+//!   ├── outputs             (class, id, content) per output; must hash to
+//!   │                       the final edge's signed outputs_hash
 //!   ├── read_set            the proof body — signed links, carried raw
 //!   └── evidence_preimage   what each counted atom's seal was taken over
 //! ```
@@ -45,27 +46,51 @@
 //! out on (<https://github.com/coasys/ad4m/issues/1104>). So it is bound to
 //! voter-signed material.
 //!
-//! A proposal into a terminal state names the run's output nodes and carries
-//! `outputs_hash`, the hash over their sorted, deduplicated ids
+//! An output is an instance **of a class**, and what a consumer pays out on is
+//! that instance as it stood, not just its id: any of its properties can
+//! change while the id stays the same. So a proposal into a terminal state
+//! names the run's outputs as `(class, id)` pairs and carries
+//! `outputs_hash`, the evidence-seal framing over each output's
+//! `(class, id, canonical content)` under its own domain tag
 //! ([`outputs_hash`](super::atom::outputs_hash)), as a signed field next to
-//! the evidence seal. Every voter recomputes that hash from the named ids and
-//! checks each named node exists before co-signing
+//! the evidence seal. Every voter loads each named output through its class
+//! on its own replica, refuses one that is not an instance of it, and
+//! recomputes the hash over what it read before co-signing
 //! ([`check_outputs_commitment`](super::atom::check_outputs_commitment)).
+//!
+//! "Content" is what `model_query` returns for the instance through its
+//! class, the same hydration the evidence seal hashes: every scalar
+//! property, every relation and collection **as the ids it points at** (not
+//! the related instances' own content), property getters, and the synthetic
+//! `createdAt` / `updatedAt` / `author` / `timestamp` read off the shape's
+//! links. Re-asserting a value therefore changes the hash too: it moves
+//! `updatedAt`.
 //!
 //! [`final_edge_commitment`] reads the commitment off the fold's last settled
 //! edge (the one into the terminal state). Every atom the fold counted there
-//! must carry an `outputs_hash`, and they must all carry the same one. `mint`
-//! refuses outputs that do not hash to it, and `verify_receipt` hashes
-//! `receipt.outputs` and refuses any receipt whose hash differs
+//! must carry an `outputs_hash`, and they must all carry the same one. The
+//! receipt carries each output's preimage (an
+//! [`EvidenceItem`]: class, id, content). `mint` refuses outputs that do not
+//! hash to the commitment, and `verify_receipt` re-hashes `receipt.outputs`
+//! and refuses any receipt whose hash differs
 //! (`ReceiptVerdict::OutputsNotCommitted`). A re-mint of somebody else's run
-//! can therefore only name what that run's quorum committed to.
+//! can therefore only name what that run's quorum committed to, with the
+//! content it committed to.
+//!
+//! **A receipt attests to the content at completion.** Editing an output
+//! later does not invalidate a receipt already minted: its preimages are
+//! frozen inside it, and they still hash to the signed commitment. It does
+//! mean a receipt can no longer be minted from the live graph, because the
+//! live content no longer hashes to the commitment; a minter has to hold the
+//! content as it stood at completion.
 //!
 //! Outputs do not depend on the terminal state's `requires`. A guarded
 //! terminal state and an unguarded one bind outputs the same way.
 //!
-//! The receipt still carries the id list, not just the hash, because a
-//! reader needs the ids: to answer "does this receipt speak for node X", and
-//! to list every output of a flow.
+//! The receipt carries the preimages, not just the hash, because a verifier
+//! needs them to re-hash, and a reader needs the `(class, id)` pairs: to
+//! answer "does this receipt speak for node X", and to list every output of
+//! a flow.
 //!
 //! # What is NOT here
 //!
@@ -107,7 +132,7 @@
 //! that the receipt names the node whose edge it followed. The edges have
 //! exactly the status `resolved_as` marks have — an index, never an input.
 
-use super::atom::{normalised_outputs, outputs_hash, OUTPUTS_HASH_PREDICATE};
+use super::atom::{outputs_hash, OutputRef, OUTPUTS_HASH_PREDICATE};
 use super::fold::DerivedState;
 use super::{fold_read_set, ReadSet};
 use crate::perspectives::flow_evaluator::{canonical_json, evidence_hash, EvidenceItem};
@@ -199,16 +224,17 @@ pub struct FlowReceipt {
     /// always terminal ([`is_terminal_state`]): a receipt is a completion
     /// claim, not a per-edge event.
     pub terminal_state: String,
-    /// The nodes this receipt speaks for — the binding a verifier checks
+    /// The outputs this receipt speaks for, each with its content as the
+    /// final edge's quorum committed to it: the binding a verifier checks
     /// before honouring a `granted_by` edge. Never empty; `mint` writes it
-    /// sorted and deduplicated.
+    /// sorted by `(class, id)`, one entry per output.
     ///
     /// **Bound to signed material.** Its
     /// [`outputs_hash`](super::atom::outputs_hash) must equal the
     /// `outputs_hash` every counted atom on the final edge carries.
     /// `verify_receipt` checks that and refuses any difference. See the
     /// module header, § *Outputs are what the quorum committed to*.
-    pub outputs: Vec<String>,
+    pub outputs: Vec<EvidenceItem>,
     /// The proof body: signed links, carried raw, exactly as the fold
     /// received them.
     pub read_set: ReadSet,
@@ -281,10 +307,14 @@ impl FlowReceipt {
     ///
     /// The terminal state is a *return* of this function, not a parameter:
     /// `mint` folds the read-set itself under `flow`, so no caller can claim a
-    /// state the carried material does not reach. `outputs` is a parameter,
-    /// and it is checked against the commitment the final edge's quorum
-    /// signed ([`final_edge_commitment`]), so no caller can name a node that
-    /// quorum did not commit to. `mint` writes it sorted and deduplicated.
+    /// state the carried material does not reach. `outputs` is a parameter:
+    /// each output's `(class, id)` and the content `model_query` returned for
+    /// it when the run completed. It is checked against the commitment the
+    /// final edge's quorum signed ([`final_edge_commitment`]), so no caller
+    /// can name an output, or content, that quorum did not commit to. An
+    /// output edited since completion no longer hashes to it, so a minter
+    /// needs the content as it stood then. `mint` writes the outputs sorted
+    /// by `(class, id)`.
     ///
     /// Refuses, rather than minting something that would fail its own
     /// verification:
@@ -299,15 +329,31 @@ impl FlowReceipt {
     ///   refuse a contested derivation;
     /// - a counted atom on the final edge carries no `outputs_hash`, or two
     ///   of them carry different ones;
+    /// - `outputs` names one output twice with different content;
     /// - `outputs` does not hash to the final edge's `outputs_hash`;
     /// - the serialised receipt exceeds [`MAX_RECEIPT_BYTES`].
     pub fn mint(
         flow: &SHACLFlow,
         read_set: ReadSet,
-        outputs: Vec<String>,
+        mut outputs: Vec<EvidenceItem>,
         evidence_preimage: Vec<EvidencePreimage>,
     ) -> anyhow::Result<FlowReceipt> {
-        let outputs = normalised_outputs(&outputs);
+        outputs.sort_by(|a, b| {
+            (&a.class_name, &a.id, &a.content).cmp(&(&b.class_name, &b.id, &b.content))
+        });
+        outputs.dedup();
+        if let Some(pair) = outputs
+            .windows(2)
+            .find(|w| OutputRef::of(&w[0]) == OutputRef::of(&w[1]))
+        {
+            anyhow::bail!(
+                "FlowReceipt::mint: {}: output `{}` of class `{}` is given twice with different \
+                 content; a receipt carries one content per output",
+                read_set.instance_uri,
+                pair[0].id,
+                pair[0].class_name
+            );
+        }
         if outputs.is_empty() {
             anyhow::bail!(
                 "FlowReceipt::mint: {} has no outputs to speak for; a receipt with no binding \
@@ -350,10 +396,11 @@ impl FlowReceipt {
         match final_edge_commitment(&derived, &ingested) {
             OutputsCommitment::Committed(committed) if committed == outputs_hash(&outputs) => {}
             OutputsCommitment::Committed(committed) => anyhow::bail!(
-                "FlowReceipt::mint: {}: outputs {outputs:?} hash to `{}`, but the final edge's \
-                 quorum committed to `{committed}`; a receipt may only name what that quorum \
-                 agreed to",
+                "FlowReceipt::mint: {}: outputs {:?} hash to `{}`, but the final edge's quorum \
+                 committed to `{committed}`; a receipt may only carry the outputs, and the \
+                 content, that quorum agreed to",
                 read_set.instance_uri,
+                outputs.iter().map(OutputRef::of).collect::<Vec<_>>(),
                 outputs_hash(&outputs)
             ),
             other => anyhow::bail!("FlowReceipt::mint: {}: {other}", read_set.instance_uri),
@@ -567,7 +614,7 @@ pub fn final_edge_commitment(derived: &DerivedState, ingested: &ReadSet) -> Outp
 mod tests {
     use super::*;
     use crate::perspectives::flow_instance::atom::fixtures::{
-        did_of, hash_of, signed_proposal, signed_terminal_proposal, T1, T2,
+        did_of, hash_of, out_item, out_items, signed_proposal, signed_terminal_proposal, T1, T2,
     };
     use crate::perspectives::flow_instance::ProposalLinks;
 
@@ -663,8 +710,9 @@ mod tests {
         )
     }
 
-    fn outs(ids: &[&str]) -> Vec<String> {
-        ids.iter().map(|s| s.to_string()).collect()
+    /// Each id's preimage as the fixture graph holds it ([`out_items`]).
+    fn outs(ids: &[&str]) -> Vec<EvidenceItem> {
+        out_items(ids)
     }
 
     fn read_set(genesis: &str, proposals: Vec<ProposalLinks>) -> ReadSet {
@@ -861,7 +909,7 @@ mod tests {
         .expect("a settled run into a terminal state mints");
         assert_eq!(receipt.terminal_state, "done");
         assert_eq!(receipt.flow_uri, "coasys://DeliveryFlow");
-        assert_eq!(receipt.outputs, vec![OUTPUT.to_string()]);
+        assert_eq!(receipt.outputs, outs(&[OUTPUT]));
     }
 
     /// A receipt is a completion claim, not a per-edge event. `open → doing`
@@ -991,7 +1039,7 @@ mod tests {
     }
 
     /// `mint` writes the outputs sorted and deduplicated, whatever order the
-    /// caller listed them in, so two mints of one run name one node.
+    /// caller listed them in, so two mints of one run carry one list.
     ///
     /// Red if `mint` stores `outputs` as passed.
     #[test]
@@ -1044,6 +1092,52 @@ mod tests {
                 hash_of(&[OUTPUT])
             )),
             "the error must name the commitment, got: {err:#}"
+        );
+    }
+
+    /// The quorum committed to d1 as it stood. A mint carrying d1 with other
+    /// content (edited since completion, or made up) is refused, although it
+    /// names the same output.
+    ///
+    /// Red if `mint` hashes the refs instead of the carried content.
+    #[test]
+    fn mint_refuses_an_output_whose_content_is_not_what_was_committed() {
+        let mut edited = out_item(OUTPUT);
+        edited.content = serde_json::json!({ "id": OUTPUT, "title": "edited" }).to_string();
+        let err = FlowReceipt::mint(
+            &two_state_flow(),
+            completed(),
+            vec![edited],
+            vec![delivered()],
+        )
+        .expect_err("edited content must not mint");
+        assert!(
+            format!("{err:#}").contains(&format!(
+                "but the final edge's quorum committed to `{}`",
+                hash_of(&[OUTPUT])
+            )),
+            "the error must name the commitment, got: {err:#}"
+        );
+    }
+
+    /// One output given twice with two contents is ambiguous: `mint` refuses
+    /// rather than picking one, before it compares anything.
+    ///
+    /// Red if `mint` deduplicates by `(class, id)` and keeps either content.
+    #[test]
+    fn mint_refuses_one_output_given_twice_with_different_content() {
+        let mut edited = out_item(OUTPUT);
+        edited.content = serde_json::json!({ "id": OUTPUT, "title": "edited" }).to_string();
+        let err = FlowReceipt::mint(
+            &two_state_flow(),
+            completed(),
+            vec![out_item(OUTPUT), edited],
+            vec![delivered()],
+        )
+        .expect_err("two contents for one output must not mint");
+        assert!(
+            format!("{err:#}").contains("is given twice with different content"),
+            "got: {err:#}"
         );
     }
 

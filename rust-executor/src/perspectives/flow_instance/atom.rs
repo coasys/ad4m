@@ -33,6 +33,7 @@
 
 use super::time::parse_link_timestamp;
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
+use crate::perspectives::flow_evaluator::EvidenceItem;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
@@ -53,16 +54,25 @@ pub const TO_STATE_PREDICATE: &str = "ad4m://flow/to_state";
 pub const PROPOSER_PREDICATE: &str = "ad4m://flow/proposer";
 /// Proposal → the evidence seal computed at mint. `literal:string:`-encoded.
 pub const EVIDENCE_HASHES_PREDICATE: &str = "ad4m://flow/evidence_hashes";
-/// Proposal → [`outputs_hash`] over the nodes the proposer names as the run's
-/// outputs. Written only on a proposal **into a terminal state**, next to the
-/// evidence seal. `literal:string:`-encoded. Every voter recomputes it from
-/// the [`OUTPUT_PREDICATE`] links before co-signing (`super::accept`), and a
-/// receipt's `outputs` must hash to it (`super::verify`, #1104).
+/// Proposal → [`outputs_hash`] over the **content** of the instances the
+/// proposer names as the run's outputs. Written only on a proposal **into a
+/// terminal state**, next to the evidence seal. `literal:string:`-encoded.
+/// Every voter loads each named instance on its own replica and recomputes it
+/// before co-signing (`super::accept`), and a receipt's output preimages must
+/// hash to it (`super::verify`, #1104).
 pub const OUTPUTS_HASH_PREDICATE: &str = "ad4m://flow/outputs_hash";
-/// Proposal → one node the proposer names as an output of the run. One link
-/// per node. Only the proposer's own signed links count, like every other
-/// field of an atom.
+/// Proposal → one instance the proposer names as an output of the run, as an
+/// [`OutputRef`]. One link per output. The target is a `literal:string:` whose
+/// text is the canonical JSON `{"className":"…","id":"…"}`
+/// ([`OutputRef::encode`]); a pair, not a bare id, because an output is an
+/// instance **of a class** and its content is read through that class's
+/// shape. Only the proposer's own signed links count, like every other field
+/// of an atom, and one that does not parse rejects the atom
+/// ([`AtomRejection::MalformedOutput`]).
 pub const OUTPUT_PREDICATE: &str = "ad4m://flow/output";
+/// Domain tag of [`outputs_hash`]. Versioned: v1 hashed ids only (#1108 v2),
+/// v2 hashes instance content.
+pub const OUTPUTS_HASH_TAG: &str = "ad4m-flow-outputs/v2";
 /// Proposal → a voting DID. A vote counts only when the link's author IS the
 /// DID it names, with a valid signature (see [`valid_votes`]).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
@@ -120,39 +130,74 @@ pub struct TransitionAtom {
     /// non-terminal state and a refusal reason for one into a terminal state
     /// ([`check_outputs_commitment`]).
     pub outputs_hash: Option<String>,
-    /// The nodes the proposer named with [`OUTPUT_PREDICATE`], sorted and
-    /// deduplicated. What a voter re-hashes and checks against
+    /// The instances the proposer named with [`OUTPUT_PREDICATE`], sorted and
+    /// deduplicated. What a voter loads, re-hashes and checks against
     /// `outputs_hash`; not read by the fold or by `verify_receipt`.
-    pub outputs: Vec<String>,
+    pub outputs: Vec<OutputRef>,
     /// The proposer's own vote plus every self-authored `acceptedBy`,
     /// one per DID, earliest first.
     pub votes: Vec<Vote>,
 }
 
-/// The one definition of a run's outputs commitment: SHA-256, hex, over the
-/// sorted and deduplicated node ids, **ids only** (a node's content is not
-/// hashed; the evidence seal covers content). Order and duplicates in `ids`
-/// do not change the result.
+/// One output of a run: an instance, and the class it is an instance of.
 ///
-/// The ids are framed as a JSON array behind a version tag, so no two
-/// distinct id lists share an encoding, and no evidence seal can be read as
-/// an outputs hash.
-pub fn outputs_hash(ids: &[String]) -> String {
-    use sha2::{Digest, Sha256};
-    let ids = normalised_outputs(ids);
-    let framed = serde_json::to_string(&ids).expect("a list of strings serialises");
-    hex::encode(Sha256::digest(
-        format!("ad4m-flow-outputs/v1\n{framed}").as_bytes(),
-    ))
+/// The class is part of the name because an output's content is what
+/// `model_query` returns for that class's shape, and the same node read
+/// through another class is other content. Serialised camelCase
+/// (`{"className", "id"}`), the shape the TS client sends.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OutputRef {
+    pub class_name: String,
+    pub id: String,
 }
 
-/// `ids` sorted and deduplicated: the form a receipt carries and
-/// [`outputs_hash`] hashes.
-pub fn normalised_outputs(ids: &[String]) -> Vec<String> {
-    let mut ids = ids.to_vec();
-    ids.sort();
-    ids.dedup();
-    ids
+impl OutputRef {
+    /// The text an [`OUTPUT_PREDICATE`] link carries: canonical JSON, keys
+    /// sorted, so one ref has one encoding.
+    pub fn encode(&self) -> String {
+        crate::perspectives::flow_evaluator::canonical_json(&serde_json::json!({
+            "className": self.class_name,
+            "id": self.id,
+        }))
+    }
+
+    /// Inverse of [`encode`](Self::encode). A JSON object with exactly these
+    /// two string fields parses; nothing else does.
+    pub fn decode(text: &str) -> Option<Self> {
+        serde_json::from_str(text).ok()
+    }
+
+    /// The ref an output preimage names.
+    pub fn of(item: &EvidenceItem) -> Self {
+        Self {
+            class_name: item.class_name.clone(),
+            id: item.id.clone(),
+        }
+    }
+}
+
+/// The one definition of a run's outputs commitment: the
+/// [`evidence_hash`](crate::perspectives::flow_evaluator::evidence_hash)
+/// framing over each output's `(class, id, canonical content)`, under
+/// [`OUTPUTS_HASH_TAG`] so it can never be read as an evidence seal
+/// ([`tagged_items_hash`](crate::perspectives::flow_evaluator::tagged_items_hash)).
+///
+/// `items` are what `model_query` returns for each named output, the same
+/// shape the evidence seal hashes, so **editing an output changes the hash**.
+/// Order does not change the result. Duplicates do: every writer hashes one
+/// item per [`normalised_outputs`] ref, and a receipt carrying a duplicate is
+/// refused rather than normalised.
+pub fn outputs_hash(items: &[EvidenceItem]) -> String {
+    crate::perspectives::flow_evaluator::tagged_items_hash(OUTPUTS_HASH_TAG, items)
+}
+
+/// `refs` sorted and deduplicated: the form a proposal names.
+pub fn normalised_outputs(refs: &[OutputRef]) -> Vec<OutputRef> {
+    let mut refs = refs.to_vec();
+    refs.sort();
+    refs.dedup();
+    refs
 }
 
 /// Why a voter refuses to co-sign a proposal into a terminal state. Each
@@ -161,21 +206,22 @@ pub fn normalised_outputs(ids: &[String]) -> Vec<String> {
 pub enum OutputsRefusal {
     /// The proposal enters a terminal state but its proposer signed no
     /// [`OUTPUTS_HASH_PREDICATE`]. Nothing would bind a receipt for the run
-    /// to any node, so co-signing it would complete a run no receipt can
+    /// to any output, so co-signing it would complete a run no receipt can
     /// speak for.
     Uncommitted,
-    /// The proposer's signed `outputs_hash` is not the hash of the output
-    /// ids the proposer named.
+    /// A named output is not an instance of the class it is named as, on
+    /// this replica.
+    OutputNotInstance { output: OutputRef },
+    /// The proposer's signed `outputs_hash` is not the hash of the named
+    /// outputs' content as this replica reads it: an output was edited since
+    /// the proposal, this replica has not synced an edit yet, or the proposer
+    /// committed to something else.
     HashMismatch {
-        /// The ids named by the proposer's [`OUTPUT_PREDICATE`] links.
-        named: Vec<String>,
         /// `outputs_hash` as the proposer signed it.
         committed: String,
-        /// [`outputs_hash`] of `named`, as this replica computes it.
+        /// [`outputs_hash`] of the named outputs' content on this replica.
         recomputed: String,
     },
-    /// A named output is not a node in this replica's graph.
-    OutputNotInGraph { id: String },
 }
 
 impl std::fmt::Display for OutputsRefusal {
@@ -186,18 +232,20 @@ impl std::fmt::Display for OutputsRefusal {
                 "it enters a terminal state but carries no `{OUTPUTS_HASH_PREDICATE}`, so no \
                  receipt could bind the run to any output"
             ),
+            Self::OutputNotInstance { output } => write!(
+                f,
+                "it names `{}` as an output of class `{}`, and this replica has no such \
+                 instance of that class",
+                output.id, output.class_name
+            ),
             Self::HashMismatch {
-                named,
                 committed,
                 recomputed,
             } => write!(
                 f,
-                "its `{OUTPUTS_HASH_PREDICATE}` is `{committed}`, but the outputs it names \
-                 {named:?} hash to `{recomputed}`"
-            ),
-            Self::OutputNotInGraph { id } => write!(
-                f,
-                "it names `{id}` as an output, and that node is not in this replica's graph"
+                "its `{OUTPUTS_HASH_PREDICATE}` is `{committed}`, but the outputs it names hash \
+                 to `{recomputed}` on this replica: their content is not what the proposer \
+                 committed to"
             ),
         }
     }
@@ -208,13 +256,15 @@ impl std::fmt::Display for OutputsRefusal {
 /// vote apply one rule.
 ///
 /// Only a proposal into a terminal state is checked (`terminal`); anywhere
-/// else a run does not end and there is nothing to bind. `in_graph` answers
-/// whether a node exists on this replica. Checks in order: a commitment is
-/// present, it hashes the named ids, and every named id exists.
+/// else a run does not end and there is nothing to bind. `content` answers
+/// what this replica's `model_query` returns for a named output, `None` when
+/// it is not an instance of that class. Checks in order: a commitment is
+/// present, every named output is an instance of its class, and the
+/// commitment is the hash of their content.
 pub fn check_outputs_commitment(
     atom: &TransitionAtom,
     terminal: bool,
-    in_graph: impl Fn(&str) -> bool,
+    content: impl Fn(&OutputRef) -> Option<EvidenceItem>,
 ) -> Result<(), OutputsRefusal> {
     if !terminal {
         return Ok(());
@@ -222,16 +272,23 @@ pub fn check_outputs_commitment(
     let Some(committed) = &atom.outputs_hash else {
         return Err(OutputsRefusal::Uncommitted);
     };
-    let recomputed = outputs_hash(&atom.outputs);
+    let mut items = Vec::with_capacity(atom.outputs.len());
+    for output in &atom.outputs {
+        match content(output) {
+            Some(item) => items.push(item),
+            None => {
+                return Err(OutputsRefusal::OutputNotInstance {
+                    output: output.clone(),
+                })
+            }
+        }
+    }
+    let recomputed = outputs_hash(&items);
     if &recomputed != committed {
         return Err(OutputsRefusal::HashMismatch {
-            named: atom.outputs.clone(),
             committed: committed.clone(),
             recomputed,
         });
-    }
-    if let Some(id) = atom.outputs.iter().find(|id| !in_graph(id)) {
-        return Err(OutputsRefusal::OutputNotInGraph { id: id.clone() });
     }
     Ok(())
 }
@@ -257,6 +314,10 @@ pub enum AtomRejection {
     /// timestamp, so the proposal cannot be placed in time (#1000). Fail
     /// closed: a proposal that cannot be dated must not sort anywhere.
     NoParseableTimestamp,
+    /// One of the proposer's own [`OUTPUT_PREDICATE`] links is not an
+    /// encoded [`OutputRef`]. Rejecting the atom, rather than skipping the
+    /// link, keeps a voter from co-signing outputs it could not read.
+    MalformedOutput(String),
 }
 
 impl std::fmt::Display for AtomRejection {
@@ -277,6 +338,11 @@ impl std::fmt::Display for AtomRejection {
             Self::NoParseableTimestamp => write!(
                 f,
                 "none of the proposer's own links carries an RFC 3339-parseable timestamp"
+            ),
+            Self::MalformedOutput(text) => write!(
+                f,
+                "the proposer's `{OUTPUT_PREDICATE}` value `{text}` is not a \
+                 {{\"className\", \"id\"}} pair"
             ),
         }
     }
@@ -468,7 +534,7 @@ impl TransitionAtom {
             from_state: unique_field(links, FROM_STATE_PREDICATE, &proposer)?,
             to_state: unique_field(links, TO_STATE_PREDICATE, &proposer)?,
             votes: valid_votes(links, &proposer, &proposed_at),
-            outputs: named_outputs(links, &proposer),
+            outputs: named_outputs(links, &proposer)?,
             outputs_hash,
             proposed_at,
             proposer,
@@ -477,16 +543,23 @@ impl TransitionAtom {
     }
 }
 
-/// The nodes `proposer` named with [`OUTPUT_PREDICATE`], sorted and
+/// The outputs `proposer` named with [`OUTPUT_PREDICATE`], sorted and
 /// deduplicated. A third party's `output` link is invisible here, exactly as
 /// in [`unique_field`], so nobody can add an output to someone else's
-/// proposal.
-fn named_outputs(links: &[DecoratedLinkExpression], proposer: &str) -> Vec<String> {
-    let ids: Vec<String> = links_on(links, OUTPUT_PREDICATE)
+/// proposal. One of the proposer's own links that does not decode rejects
+/// the atom ([`AtomRejection::MalformedOutput`]).
+fn named_outputs(
+    links: &[DecoratedLinkExpression],
+    proposer: &str,
+) -> Result<Vec<OutputRef>, AtomRejection> {
+    let refs = links_on(links, OUTPUT_PREDICATE)
         .filter(|l| signed_by(l, proposer))
-        .map(|l| field_value(&l.data.target))
-        .collect();
-    normalised_outputs(&ids)
+        .map(|l| {
+            let text = field_value(&l.data.target);
+            OutputRef::decode(&text).ok_or(AtomRejection::MalformedOutput(text))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(normalised_outputs(&refs))
 }
 
 /// Earliest timestamp among the proposer's own signed links, by parsed
@@ -786,10 +859,10 @@ pub(super) mod fixtures {
     }
 
     /// [`signed_proposal`] into a terminal state: the five links plus one
-    /// signed `output` link per node in `outputs` and a signed
-    /// `outputs_hash` equal to `committed`. Pass
-    /// `&outputs_hash(outputs)` for an honest proposal; anything else builds
-    /// a proposal whose commitment does not match its named outputs.
+    /// signed `output` link per id in `outputs` (as [`out_ref`]) and a signed
+    /// `outputs_hash` equal to `committed`. Pass [`hash_of`]`(outputs)` for
+    /// an honest proposal; anything else builds a proposal whose commitment
+    /// does not match its named outputs.
     #[allow(clippy::too_many_arguments)]
     pub fn signed_terminal_proposal(
         proposal_uri: &str,
@@ -813,14 +886,45 @@ pub(super) mod fixtures {
                 at,
             )
         };
-        links.extend(outputs.iter().map(|id| signed(OUTPUT_PREDICATE, id)));
+        links.extend(
+            outputs
+                .iter()
+                .map(|id| signed(OUTPUT_PREDICATE, &literal(&out_ref(id).encode()))),
+        );
         links.push(signed(OUTPUTS_HASH_PREDICATE, &literal(committed)));
         links
     }
 
-    /// [`outputs_hash`] over `&str` ids, for fixtures.
+    /// The class every fixture output is an instance of.
+    pub const OUT_CLASS: &str = "coasys://Deliverable";
+
+    /// `id` as an output of [`OUT_CLASS`].
+    pub fn out_ref(id: &str) -> OutputRef {
+        OutputRef {
+            class_name: OUT_CLASS.to_string(),
+            id: id.to_string(),
+        }
+    }
+
+    /// `id`'s content as the fixture graph holds it: a function of the id, so
+    /// a proposer and a receipt built apart agree on it.
+    pub fn out_item(id: &str) -> EvidenceItem {
+        EvidenceItem {
+            id: id.to_string(),
+            class_name: OUT_CLASS.to_string(),
+            content: serde_json::json!({ "id": id, "title": format!("the content of {id}") })
+                .to_string(),
+        }
+    }
+
+    /// [`out_item`] for each id.
+    pub fn out_items(ids: &[&str]) -> Vec<EvidenceItem> {
+        ids.iter().map(|id| out_item(id)).collect()
+    }
+
+    /// [`outputs_hash`] over [`out_items`], for fixtures.
     pub fn hash_of(ids: &[&str]) -> String {
-        outputs_hash(&ids.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        outputs_hash(&out_items(ids))
     }
 
     /// A genuinely signed `proposal --acceptedBy--> voter` co-signature.
@@ -1086,11 +1190,15 @@ mod tests {
 
     fn with_outputs(outputs: &[&str], committed: &str) -> Vec<DecoratedLinkExpression> {
         let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        links.extend(
-            outputs
-                .iter()
-                .map(|id| link(OUTPUT_PREDICATE, id, ALICE, true, T1)),
-        );
+        links.extend(outputs.iter().map(|id| {
+            link(
+                OUTPUT_PREDICATE,
+                &literal(&out_ref(id).encode()),
+                ALICE,
+                true,
+                T1,
+            )
+        }));
         links.push(link(
             OUTPUTS_HASH_PREDICATE,
             &literal(committed),
@@ -1101,41 +1209,107 @@ mod tests {
         links
     }
 
-    /// The hash is over the id **set**: a proposer and a receipt that list the
-    /// same nodes in another order, or repeat one, commit to the same thing.
-    /// Different sets never share a hash, and neither does the empty set with
-    /// a set of one.
+    /// What this replica's `model_query` returns for a ref: the fixture
+    /// content, for the ids in `present` only.
+    fn graph_with<'a>(present: &'a [&'a str]) -> impl Fn(&OutputRef) -> Option<EvidenceItem> + 'a {
+        move |r: &OutputRef| {
+            (r.class_name == OUT_CLASS && present.contains(&r.id.as_str())).then(|| out_item(&r.id))
+        }
+    }
+
+    /// The hash is over each output's `(class, id, content)`, in any order.
+    /// Editing an output's content changes it, so does reading the same id
+    /// as another class, and so does the item set. It is never the evidence
+    /// seal over the same items.
     ///
-    /// Red if `outputs_hash` drops the sort or the dedup, or hashes only the
-    /// first id.
+    /// Red if `outputs_hash` hashes ids only, drops the class or the
+    /// content, is order-sensitive, or loses its domain tag.
     #[test]
-    fn outputs_hash_is_over_the_sorted_deduplicated_ids() {
-        assert_eq!(hash_of(&[D2, D1]), hash_of(&[D1, D2]));
-        assert_eq!(hash_of(&[D1, D1, D2]), hash_of(&[D1, D2]));
+    fn outputs_hash_is_over_class_id_and_content() {
+        assert_eq!(hash_of(&[D2, D1]), hash_of(&[D1, D2]), "order-independent");
         assert_ne!(hash_of(&[D1]), hash_of(&[D1, D2]));
         assert_ne!(hash_of(&[D1]), hash_of(&[ATTACKER]));
         assert_ne!(hash_of(&[]), hash_of(&[D1]));
+
+        let mut edited = out_item(D1);
+        edited.content = serde_json::json!({ "id": D1, "title": "edited" }).to_string();
+        assert_ne!(outputs_hash(&[edited]), hash_of(&[D1]), "content-sensitive");
+
+        let mut other_class = out_item(D1);
+        other_class.class_name = "coasys://Other".to_string();
+        assert_ne!(
+            outputs_hash(&[other_class]),
+            hash_of(&[D1]),
+            "class-sensitive"
+        );
+
+        let mut reordered_keys = out_item(D1);
+        reordered_keys.content = format!(r#"{{"title":"the content of {D1}","id":"{D1}"}}"#);
+        assert_eq!(
+            outputs_hash(&[reordered_keys]),
+            hash_of(&[D1]),
+            "canonical: key order is not content"
+        );
+
+        assert_ne!(
+            hash_of(&[D1]),
+            crate::perspectives::flow_evaluator::evidence_hash(&[], &out_items(&[D1])),
+            "an outputs hash is never an evidence seal over the same items"
+        );
+    }
+
+    /// An [`OutputRef`] round-trips through its link encoding, and the
+    /// encoding is canonical. Anything that is not exactly a
+    /// `{className, id}` object does not decode.
+    #[test]
+    fn an_output_ref_encodes_canonically_and_decodes_strictly() {
+        let r = out_ref(D1);
+        assert_eq!(
+            r.encode(),
+            format!(r#"{{"className":"{OUT_CLASS}","id":"{D1}"}}"#)
+        );
+        assert_eq!(OutputRef::decode(&r.encode()), Some(r));
+        assert_eq!(OutputRef::decode(D1), None, "a bare id is not a ref");
+        assert_eq!(OutputRef::decode(r#"{"id":"x"}"#), None);
+        assert_eq!(
+            OutputRef::decode(r#"{"className":"c","id":"x","extra":1}"#),
+            None
+        );
     }
 
     /// The atom reads the proposer's named outputs and commitment, and only
     /// the proposer's: Mallory's `output` link on Alice's proposal names
     /// nothing. Two distinct commitments by Alice reject the atom, the same
-    /// way two `to_state` values do.
+    /// way two `to_state` values do, and so does an `output` link of hers
+    /// that is not a ref.
     ///
     /// Red if `named_outputs` drops its `signed_by` filter (Mallory's node
-    /// becomes an output), or if an ambiguous `outputs_hash` is read as
-    /// `None` rather than rejected.
+    /// becomes an output), skips an undecodable link instead of rejecting,
+    /// or if an ambiguous `outputs_hash` is read as `None`.
     #[test]
     fn an_atom_reads_only_the_proposers_named_outputs_and_commitment() {
         let mut links = with_outputs(&[D2, D1], &hash_of(&[D1, D2]));
-        links.push(link(OUTPUT_PREDICATE, ATTACKER, MALLORY, true, T2));
+        links.push(link(
+            OUTPUT_PREDICATE,
+            &literal(&out_ref(ATTACKER).encode()),
+            MALLORY,
+            true,
+            T2,
+        ));
         let atom = atom_of(&links).expect("atom");
-        assert_eq!(atom.outputs, vec![D1.to_string(), D2.to_string()]);
+        assert_eq!(atom.outputs, vec![out_ref(D1), out_ref(D2)]);
         assert_eq!(atom.outputs_hash, Some(hash_of(&[D1, D2])));
 
         let plain = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1)).expect("atom");
         assert_eq!(plain.outputs_hash, None, "no commitment is not a rejection");
         assert!(plain.outputs.is_empty());
+
+        let mut bare = with_outputs(&[D1], &hash_of(&[D1]));
+        bare.push(link(OUTPUT_PREDICATE, D2, ALICE, true, T1));
+        assert_eq!(
+            atom_of(&bare),
+            Err(AtomRejection::MalformedOutput(D2.to_string()))
+        );
 
         links.push(link(
             OUTPUTS_HASH_PREDICATE,
@@ -1151,8 +1325,7 @@ mod tests {
     }
 
     /// **Required test (b).** The proposer names d1 and signs a hash over d1
-    /// and the attacker's node. A voter recomputes the hash from the named
-    /// ids and refuses.
+    /// and the attacker's node. A voter loads d1, recomputes, and refuses.
     ///
     /// Red if `check_outputs_commitment` skips the recompute, or compares the
     /// commitment against itself.
@@ -1160,31 +1333,54 @@ mod tests {
     fn a_voter_refuses_an_outputs_hash_that_does_not_match_the_named_outputs() {
         let atom = atom_of(&with_outputs(&[D1], &hash_of(&[D1, ATTACKER]))).expect("atom");
         assert_eq!(
-            check_outputs_commitment(&atom, true, |_| true),
+            check_outputs_commitment(&atom, true, graph_with(&[D1, ATTACKER])),
             Err(OutputsRefusal::HashMismatch {
-                named: vec![D1.to_string()],
                 committed: hash_of(&[D1, ATTACKER]),
                 recomputed: hash_of(&[D1]),
             })
         );
         let honest = atom_of(&with_outputs(&[D1], &hash_of(&[D1]))).expect("atom");
         assert_eq!(
-            check_outputs_commitment(&honest, true, |_| true),
+            check_outputs_commitment(&honest, true, graph_with(&[D1])),
             Ok(()),
             "control: the matching commitment passes"
         );
     }
 
-    /// **Required test (c).** The commitment matches, but one named output is
-    /// not a node on this replica. The voter refuses and names it.
+    /// The ids and the commitment match, but this replica reads d1 with other
+    /// content than the proposer hashed: edited since the proposal. Refused
+    /// as a hash mismatch, not as a missing instance.
     ///
-    /// Red if `check_outputs_commitment` skips the `in_graph` check.
+    /// Red if the hash is recomputed from the named refs instead of the
+    /// content this replica loaded.
     #[test]
-    fn a_voter_refuses_a_named_output_that_is_not_in_the_graph() {
+    fn a_voter_refuses_an_output_whose_content_changed_since_the_proposal() {
+        let atom = atom_of(&with_outputs(&[D1], &hash_of(&[D1]))).expect("atom");
+        let mut edited = out_item(D1);
+        edited.content = serde_json::json!({ "id": D1, "title": "edited" }).to_string();
+        let edited_graph = |r: &OutputRef| (r == &out_ref(D1)).then(|| edited.clone());
+        assert_eq!(
+            check_outputs_commitment(&atom, true, edited_graph),
+            Err(OutputsRefusal::HashMismatch {
+                committed: hash_of(&[D1]),
+                recomputed: outputs_hash(&[edited.clone()]),
+            })
+        );
+    }
+
+    /// **Required test (c).** The commitment matches, but one named output is
+    /// not an instance of its class on this replica. The voter refuses and
+    /// names it, before any hash is compared.
+    ///
+    /// Red if `check_outputs_commitment` skips the instance check.
+    #[test]
+    fn a_voter_refuses_a_named_output_that_is_not_an_instance() {
         let atom = atom_of(&with_outputs(&[D1, D2], &hash_of(&[D1, D2]))).expect("atom");
         assert_eq!(
-            check_outputs_commitment(&atom, true, |id| id == D1),
-            Err(OutputsRefusal::OutputNotInGraph { id: D2.to_string() })
+            check_outputs_commitment(&atom, true, graph_with(&[D1])),
+            Err(OutputsRefusal::OutputNotInstance {
+                output: out_ref(D2)
+            })
         );
     }
 
@@ -1198,10 +1394,14 @@ mod tests {
     fn only_a_terminal_proposal_must_commit_to_its_outputs() {
         let plain = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1)).expect("atom");
         assert_eq!(
-            check_outputs_commitment(&plain, true, |_| true),
+            check_outputs_commitment(&plain, true, graph_with(&[])),
             Err(OutputsRefusal::Uncommitted)
         );
-        assert_eq!(check_outputs_commitment(&plain, false, |_| false), Ok(()));
+        let unloaded = atom_of(&with_outputs(&[D1], &hash_of(&[D2]))).expect("atom");
+        assert_eq!(
+            check_outputs_commitment(&unloaded, false, graph_with(&[])),
+            Ok(())
+        );
     }
 
     /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped

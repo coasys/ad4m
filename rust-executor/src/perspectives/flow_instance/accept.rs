@@ -15,11 +15,14 @@
 //!
 //! A proposal into a **terminal** state is checked for one more thing before
 //! we sign: its outputs commitment (#1104). The proposer names the run's
-//! output nodes and signs `outputs_hash` over their ids next to the seal. We
-//! recompute that hash from the named ids and require every named node to
-//! exist on our graph ([`check_outputs_commitment`]). A receipt for the run
-//! is later bound to exactly that hash, so this is the check that makes a
-//! receipt's `outputs` something the quorum agreed to.
+//! outputs as `(class, id)` pairs and signs `outputs_hash` over their content
+//! next to the seal. We load each named output through its class on our own
+//! graph ([`load_outputs`]), refuse one that is not an instance of that
+//! class, and recompute the hash over what we read
+//! ([`check_outputs_commitment`]). An output edited since the proposal no
+//! longer hashes the same, so we decline, exactly as for a stale seal. A
+//! receipt for the run is later bound to that hash, so this is the check
+//! that makes a receipt's outputs something the quorum agreed to.
 //!
 //! At `{n: 1}` the proposer's own mint is the only vote, and the seal was
 //! computed by that replica at mint time. A dishonest solo proposer could
@@ -28,8 +31,8 @@
 //! and it is the one that runs here.
 
 use super::atom::{
-    check_outputs_commitment, signed_by, TransitionAtom, ACCEPTED_BY_PREDICATE,
-    FLOW_INSTANCE_PREDICATE, OUTPUT_PREDICATE,
+    check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
+    FLOW_INSTANCE_PREDICATE,
 };
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
@@ -38,9 +41,12 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_shacl_flows, FlowInstanceRecord,
 };
-use crate::perspectives::flow_evaluator::recompute_evidence_hash;
+use crate::perspectives::flow_evaluator::{
+    recompute_evidence_hash, run_query, EvidenceItem, RequiresQueryable,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
+use std::collections::HashMap;
 
 /// Vote for a proposal as the acting DID, then sweep its instance.
 ///
@@ -120,8 +126,12 @@ pub async fn accept_flow_proposal(
 
     // Into a terminal state the vote also agrees to the run's outputs.
     let terminal = is_terminal_state(flow, &atom.to_state);
-    let present = nodes_in_graph(perspective, &atom.outputs).await?;
-    check_outputs_commitment(&atom, terminal, |id| present.contains(id)).map_err(|refusal| {
+    let loaded = if terminal {
+        load_outputs(&*perspective, &atom.outputs).await?
+    } else {
+        HashMap::new()
+    };
+    check_outputs_commitment(&atom, terminal, |r| loaded.get(r).cloned()).map_err(|refusal| {
         anyhow::anyhow!(
             "proposal {proposal_uri} is refused: {refusal} — refusing to co-sign; the proposal is left untouched"
         )
@@ -214,52 +224,38 @@ pub async fn reject_flow_proposal(
     Ok(retracted)
 }
 
-/// Which of `ids` are nodes on this replica: the source of at least one
-/// link, or the target of one that is not an [`OUTPUT_PREDICATE`] link. The
-/// existence half of [`check_outputs_commitment`], shared by the co-sign here
-/// and the proposer's own vote in [`super::propose`].
+/// What this replica's `model_query` returns for each named output, keyed by
+/// ref. A ref that is not an instance of its class is absent. The content half
+/// of [`check_outputs_commitment`], shared by the co-sign here and the
+/// proposer's own vote in [`super::propose`].
 ///
-/// `output` links do not count because the proposal being checked is one:
-/// naming a node would otherwise be enough to make it exist.
-pub(super) async fn nodes_in_graph(
-    perspective: &PerspectiveInstance,
-    ids: &[String],
-) -> anyhow::Result<std::collections::HashSet<String>> {
-    let lookup = |query: LinkQuery, id: &str| {
-        let id = id.to_string();
-        async move {
-            perspective
-                .get_links(&query)
-                .await
-                .map_err(|e| anyhow::anyhow!("looking up output node {id} failed: {e:#}"))
-        }
-    };
-    let mut present = std::collections::HashSet::new();
-    for id in ids {
-        let as_source = lookup(
-            LinkQuery {
-                source: Some(id.clone()),
-                ..Default::default()
-            },
-            id,
-        )
-        .await?;
-        let exists = !as_source.is_empty()
-            || lookup(
-                LinkQuery {
-                    target: Some(id.clone()),
-                    ..Default::default()
-                },
-                id,
-            )
-            .await?
-            .iter()
-            .any(|l| l.data.predicate.as_deref() != Some(OUTPUT_PREDICATE));
-        if exists {
-            present.insert(id.clone());
+/// Each output is read with `where: { id }` through its class and no other
+/// options, the same hydration a `requires` guard reads evidence with
+/// (`flow_evaluator::run_query`), so an output the engine names out of a
+/// guard hashes the same here as it did there. A class this replica has no
+/// shape for is a query error, not an absence: the caller refuses either
+/// way, and the error says why.
+pub(crate) async fn load_outputs<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    refs: &[OutputRef],
+) -> anyhow::Result<HashMap<OutputRef, EvidenceItem>> {
+    let mut loaded = HashMap::new();
+    for output in refs {
+        let input = serde_json::json!({ "where": { "id": output.id } });
+        let matched = run_query(perspective, &output.class_name, &input)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "loading output {} as `{}` failed: {e:#}",
+                    output.id,
+                    output.class_name
+                )
+            })?;
+        if let Some(item) = matched.into_iter().find(|i| i.id == output.id) {
+            loaded.insert(output.clone(), item);
         }
     }
-    Ok(present)
+    Ok(loaded)
 }
 
 /// Every source-link of a proposal. `Err` when the URI carries none —

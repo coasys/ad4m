@@ -19,10 +19,10 @@ use super::flow_evaluator::recompute_evidence_hash;
 use super::flow_evaluator_e2e::{
     literal, second_agent, seed_flow, seed_satisfied_fixture, Fixture,
 };
-use super::flow_instance::accept::{accept_flow_proposal, reject_flow_proposal};
+use super::flow_instance::accept::{accept_flow_proposal, load_outputs, reject_flow_proposal};
 use super::flow_instance::atom::{
-    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE,
-    TO_STATE_PREDICATE,
+    outputs_hash, OutputRef, OutputsRefusal, TransitionAtom, ACCEPTED_BY_PREDICATE, FIRED_MARK,
+    RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
@@ -145,7 +145,7 @@ async fn sync_proposal_from(
     // An empty outputs commitment: every fixture flow's target here is
     // terminal, and a co-signer refuses a terminal proposal with none
     // (#1104). Harmless on a non-terminal target, where nobody reads it.
-    let empty = super::flow_instance::atom::outputs_hash(&[]);
+    let empty = outputs_hash(&[]);
     sync_committed_proposal_from(f, signer, id, from, to, seal, &[], Some(&empty)).await
 }
 
@@ -161,7 +161,7 @@ async fn sync_committed_proposal_from(
     from: &str,
     to: &str,
     seal: &str,
-    outputs: &[&str],
+    outputs: &[OutputRef],
     committed: Option<&str>,
 ) -> String {
     use super::flow_instance::atom::{
@@ -177,7 +177,11 @@ async fn sync_committed_proposal_from(
         (TO_STATE_PREDICATE, literal(to)),
         (EVIDENCE_HASHES_PREDICATE, literal(seal)),
     ];
-    links.extend(outputs.iter().map(|id| (OUTPUT_PREDICATE, id.to_string())));
+    links.extend(
+        outputs
+            .iter()
+            .map(|r| (OUTPUT_PREDICATE, literal(&r.encode()))),
+    );
     if let Some(committed) = committed {
         links.push((OUTPUTS_HASH_PREDICATE, literal(committed)));
     }
@@ -1979,8 +1983,57 @@ async fn we_voted_on(f: &Fixture, proposal: &str) -> bool {
         .is_some_and(|targets| targets.iter().any(|t| *t == me))
 }
 
+/// `id` as an output of the fixture's `ns://Task` class.
+fn task_ref(id: &str) -> OutputRef {
+    OutputRef {
+        class_name: "ns://Task".to_string(),
+        id: id.to_string(),
+    }
+}
+
+/// The commitment an honest proposer signs over `refs`: their content as
+/// this replica reads it now, through the loader every voter uses.
+async fn honest_commitment(f: &Fixture, refs: &[OutputRef]) -> String {
+    let loaded = load_outputs(&f.perspective, refs)
+        .await
+        .expect("load outputs");
+    let items: Vec<_> = refs
+        .iter()
+        .map(|r| {
+            loaded
+                .get(r)
+                .cloned()
+                .unwrap_or_else(|| panic!("{r:?} is not an instance on this replica"))
+        })
+        .collect();
+    outputs_hash(&items)
+}
+
+/// Delivery with an **unguarded** terminal `scoped`: its seal is over the
+/// empty bag, so editing a Task cannot move it, and only the outputs check
+/// can tell an edit apart. One Task is seeded.
+async fn seed_unguarded_fixture() -> Fixture {
+    let mut f = seed_flow(
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                { "name": "scoped", "value": 1.0 }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+        }),
+        "identified",
+    )
+    .await;
+    f.seed_task(TASK, "Onboard Ana").await;
+    f
+}
+
 /// Required test (b) through the production co-sign path: Bob names the
-/// Task as the output but signs a hash over the Task and another node. The
+/// Task as the output but signs a hash over the Task and another Task. The
 /// seal reproduces, so only the outputs check can refuse, and it does,
 /// writing nothing.
 ///
@@ -1988,12 +2041,13 @@ async fn we_voted_on(f: &Fixture, proposal: &str) -> bool {
 /// `accept_flow_proposal`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_co_signer_refuses_an_outputs_hash_that_does_not_match_the_named_outputs() {
-    use super::flow_instance::atom::{outputs_hash, OutputsRefusal};
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    const OTHER: &str = "ad4m://task/other";
+    f.seed_task(OTHER, "Not an output").await;
     let bob = TestSigner::generate();
     let seal = seal_for(&f, "scoped").await;
-    let widened = outputs_hash(&[TASK.to_string(), "ad4m://attacker/node".to_string()]);
+    let widened = honest_commitment(&f, &[task_ref(TASK), task_ref(OTHER)]).await;
     let proposal = sync_committed_proposal_from(
         &mut f,
         &bob,
@@ -2001,7 +2055,7 @@ async fn a_co_signer_refuses_an_outputs_hash_that_does_not_match_the_named_outpu
         "identified",
         "scoped",
         &seal,
-        &[TASK],
+        &[task_ref(TASK)],
         Some(&widened),
     )
     .await;
@@ -2010,9 +2064,8 @@ async fn a_co_signer_refuses_an_outputs_hash_that_does_not_match_the_named_outpu
         .await
         .expect_err("a mismatched outputs commitment must not be co-signed");
     let expected = OutputsRefusal::HashMismatch {
-        named: vec![TASK.to_string()],
         committed: widened,
-        recomputed: outputs_hash(&[TASK.to_string()]),
+        recomputed: honest_commitment(&f, &[task_ref(TASK)]).await,
     };
     assert!(
         format!("{err:#}").contains(&expected.to_string()),
@@ -2025,22 +2078,22 @@ async fn a_co_signer_refuses_an_outputs_hash_that_does_not_match_the_named_outpu
     assert_eq!(f.derived().await.state, "identified");
 }
 
-/// Required test (c) through the production co-sign path: the commitment
-/// matches, but the named output is not a node on this replica.
+/// **Required test: a content edit after the proposal.** Bob commits to the
+/// Task as it stands. The Task's title is then edited on this replica, and
+/// the co-sign is refused as a hash mismatch: the id is the same, the
+/// content is not. The seal cannot answer instead, because `scoped` is
+/// unguarded. Control: a proposal committing to the edited content is
+/// co-signed and settles.
 ///
-/// Red if `nodes_in_graph` counts the proposal's own `output` link as
-/// evidence the node exists (which is how this test first failed: naming a
-/// node made it "present"), or if the existence check is dropped from
-/// `check_outputs_commitment`.
+/// Red if the voter hashes ids (or refs) instead of loaded content, or if
+/// `load_outputs` reads something other than the current instance.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_co_signer_refuses_a_named_output_that_is_not_in_the_graph() {
-    use super::flow_instance::atom::{outputs_hash, OutputsRefusal};
-    let mut f = seed_satisfied_fixture(None).await;
+async fn a_co_signer_refuses_an_output_edited_since_the_proposal() {
+    let mut f = seed_unguarded_fixture().await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
     let bob = TestSigner::generate();
     let seal = seal_for(&f, "scoped").await;
-    const NOWHERE: &str = "ad4m://deliverable/never-written";
-    let named = [TASK, NOWHERE];
+    let as_proposed = honest_commitment(&f, &[task_ref(TASK)]).await;
     let proposal = sync_committed_proposal_from(
         &mut f,
         &bob,
@@ -2048,27 +2101,106 @@ async fn a_co_signer_refuses_a_named_output_that_is_not_in_the_graph() {
         "identified",
         "scoped",
         &seal,
-        &named,
-        Some(&outputs_hash(
-            &named.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-        )),
+        &[task_ref(TASK)],
+        Some(&as_proposed),
     )
     .await;
 
+    f.link(
+        TASK,
+        "ns://title",
+        &literal("Onboard Ana, renamed"),
+        LinkStatus::Shared,
+    )
+    .await;
+    let as_edited = honest_commitment(&f, &[task_ref(TASK)]).await;
+    assert_ne!(as_edited, as_proposed, "precondition: the edit is content");
+    assert_eq!(
+        seal_for(&f, "scoped").await,
+        seal,
+        "precondition: the seal did not move"
+    );
+
     let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
         .await
-        .expect_err("an output this replica cannot see must not be co-signed");
-    let expected = OutputsRefusal::OutputNotInGraph {
-        id: NOWHERE.to_string(),
+        .expect_err("an output edited since the proposal must not be co-signed");
+    let expected = OutputsRefusal::HashMismatch {
+        committed: as_proposed,
+        recomputed: as_edited.clone(),
     };
     assert!(
         format!("{err:#}").contains(&expected.to_string()),
-        "the refusal must name the missing node, got: {err:#}"
+        "the refusal must be the hash mismatch, got: {err:#}"
     );
     assert!(
         !we_voted_on(&f, &proposal).await,
         "a refusal writes nothing"
     );
+
+    let current = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-2",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&as_edited),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &current, &f.ctx)
+        .await
+        .expect("a commitment to the current content is co-signed");
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// Required test (c) through the production co-sign path: one named output
+/// does not exist at all, and one exists but is not an instance of the
+/// class it is named as. Both are refused as `OutputNotInstance`, naming
+/// the output, before any hash is compared.
+///
+/// Red if `load_outputs` ignores the class (the Task read as a
+/// `FlowInstance` would pass), or if the instance check is dropped from
+/// `check_outputs_commitment` (the refusal becomes a hash mismatch).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_signer_refuses_a_named_output_that_is_not_an_instance_of_its_class() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let missing = task_ref("ad4m://task/never-written");
+    let wrong_class = OutputRef {
+        class_name: super::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
+        id: TASK.to_string(),
+    };
+    // Whatever these hash to, the instance check must answer first.
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+
+    for (n, bad) in [missing, wrong_class].into_iter().enumerate() {
+        let proposal = sync_committed_proposal_from(
+            &mut f,
+            &bob,
+            &format!("bob-bad-{n}"),
+            "identified",
+            "scoped",
+            &seal,
+            &[task_ref(TASK), bad.clone()],
+            Some(&committed),
+        )
+        .await;
+        let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+            .await
+            .expect_err("an output that is not an instance must not be co-signed");
+        let expected = OutputsRefusal::OutputNotInstance { output: bad };
+        assert!(
+            format!("{err:#}").contains(&expected.to_string()),
+            "the refusal must name the output, got: {err:#}"
+        );
+        assert!(
+            !we_voted_on(&f, &proposal).await,
+            "a refusal writes nothing"
+        );
+    }
 
     // Control: the same proposal naming only the Task is co-signed.
     let honest = sync_committed_proposal_from(
@@ -2078,13 +2210,13 @@ async fn a_co_signer_refuses_a_named_output_that_is_not_in_the_graph() {
         "identified",
         "scoped",
         &seal,
-        &[TASK],
-        Some(&outputs_hash(&[TASK.to_string()])),
+        &[task_ref(TASK)],
+        Some(&committed),
     )
     .await;
     accept_flow_proposal(&mut f.perspective, &honest, &f.ctx)
         .await
-        .expect("an honest commitment to an existing node is co-signed");
+        .expect("an honest commitment to an existing instance is co-signed");
     assert_eq!(f.derived().await.state, "scoped");
 }
 
@@ -2094,7 +2226,6 @@ async fn a_co_signer_refuses_a_named_output_that_is_not_in_the_graph() {
 /// Red if a missing commitment is read as the empty set.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_co_signer_refuses_a_terminal_proposal_with_no_outputs_commitment() {
-    use super::flow_instance::atom::OutputsRefusal;
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
     let bob = TestSigner::generate();
@@ -2122,43 +2253,53 @@ async fn a_co_signer_refuses_a_terminal_proposal_with_no_outputs_commitment() {
 }
 
 /// The proposer's side. `propose` into a terminal state writes the named
-/// outputs and their hash, sorted and deduplicated, and a voter reading the
-/// atom back finds a matching commitment. Naming a node that is not in the
-/// graph is refused before anything is written.
+/// outputs, sorted and deduplicated, and a hash over their content, and a
+/// voter reading the atom back finds a commitment it can recompute. Naming
+/// something that is not an instance of its class is refused before
+/// anything is written.
 ///
 /// Red if `propose` does not pass `outputs` to the writer (the atom reads
-/// `outputs_hash: None`), or skips its existence check.
+/// `outputs_hash: None`), skips its instance check, or hashes something
+/// other than what `load_outputs` reads.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
-    use super::flow_instance::atom::{outputs_hash, TransitionAtom};
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
     let instance = f.instance_uri.clone();
     f.seed_task("ad4m://task/2", "Ship it").await;
 
-    let err = propose_flow_transition(
-        &mut f.perspective,
-        &instance,
-        "scoped",
-        &["ad4m://deliverable/never-written".to_string()],
-        None,
-        &f.ctx,
-    )
-    .await
-    .expect_err("a proposer must not name an output it cannot see");
-    assert!(
-        format!("{err:#}").contains("is not in this replica's graph"),
-        "got: {err:#}"
-    );
-    assert!(
-        f.read_set().await.proposals.is_empty(),
-        "nothing is written on refusal"
-    );
+    for bad in [
+        task_ref("ad4m://deliverable/never-written"),
+        OutputRef {
+            class_name: super::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
+            id: TASK.to_string(),
+        },
+    ] {
+        let err = propose_flow_transition(
+            &mut f.perspective,
+            &instance,
+            "scoped",
+            std::slice::from_ref(&bad),
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect_err("a proposer must not name an output that is not an instance");
+        assert!(
+            format!("{err:#}")
+                .contains(&OutputsRefusal::OutputNotInstance { output: bad }.to_string()),
+            "got: {err:#}"
+        );
+        assert!(
+            f.read_set().await.proposals.is_empty(),
+            "nothing is written on refusal"
+        );
+    }
 
     let named = vec![
-        "ad4m://task/2".to_string(),
-        TASK.to_string(),
-        "ad4m://task/2".to_string(),
+        task_ref("ad4m://task/2"),
+        task_ref(TASK),
+        task_ref("ad4m://task/2"),
     ];
     let out = propose_flow_transition(
         &mut f.perspective,
@@ -2180,9 +2321,12 @@ async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
         .await
         .expect("links");
     let atom = TransitionAtom::from_links(&instance, &out.proposal_uri, &links).expect("an atom");
-    let expected = vec![TASK.to_string(), "ad4m://task/2".to_string()];
+    let expected = vec![task_ref(TASK), task_ref("ad4m://task/2")];
     assert_eq!(atom.outputs, expected, "written sorted and deduplicated");
-    assert_eq!(atom.outputs_hash, Some(outputs_hash(&expected)));
+    assert_eq!(
+        atom.outputs_hash,
+        Some(honest_commitment(&f, &expected).await)
+    );
 }
 
 /// A run does not end in a non-terminal state, so `propose` refuses to name
@@ -2194,7 +2338,6 @@ async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
 /// proposal with no commitment and reports `minted: true`.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_refuses_outputs_on_a_non_terminal_state() {
-    use super::flow_instance::atom::TransitionAtom;
     let mut f = seed_review_flow().await;
     let instance = f.instance_uri.clone();
 
@@ -2202,7 +2345,7 @@ async fn propose_refuses_outputs_on_a_non_terminal_state() {
         &mut f.perspective,
         &instance,
         "changes_requested",
-        &[TASK.to_string()],
+        &[task_ref(TASK)],
         None,
         &f.ctx,
     )
@@ -2253,12 +2396,12 @@ async fn propose_refuses_outputs_on_a_non_terminal_state() {
 /// Bob's proposal and reports `minted: false`.
 #[tokio::test(flavor = "multi_thread")]
 async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
-    use super::flow_instance::atom::outputs_hash;
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
     let instance = f.instance_uri.clone();
     let bob = TestSigner::generate();
     let seal = seal_for(&f, "scoped").await;
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
     let bobs = sync_committed_proposal_from(
         &mut f,
         &bob,
@@ -2266,8 +2409,8 @@ async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
         "identified",
         "scoped",
         &seal,
-        &[TASK],
-        Some(&outputs_hash(&[TASK.to_string()])),
+        &[task_ref(TASK)],
+        Some(&committed),
     )
     .await;
 
@@ -2286,7 +2429,7 @@ async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
         &mut f.perspective,
         &instance,
         "scoped",
-        &[TASK.to_string()],
+        &[task_ref(TASK)],
         None,
         &f.ctx,
     )

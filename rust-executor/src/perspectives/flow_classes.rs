@@ -181,11 +181,13 @@ pub(crate) async fn mint_flow_instance(
 /// written; engine-emitted proposals do not track back to a run today.
 ///
 /// `outputs` is `Some` exactly for a proposal into a terminal state: the
-/// nodes the proposer names as the run's outputs. The writer stores each id
+/// instances the proposer names as the run's outputs, with their content.
+/// The writer stores each one's
+/// [`OutputRef::encode`](crate::perspectives::flow_instance::atom::OutputRef::encode)
 /// as an `outputs` link and signs `outputsHash` =
 /// [`outputs_hash`](crate::perspectives::flow_instance::atom::outputs_hash)
-/// over them, so the id list and its hash cannot disagree on an honest
-/// write. `Some(&[])` commits to "no outputs"; `None` writes neither.
+/// over the content, so the named refs and the hash come from one list on an
+/// honest write. `Some(&[])` commits to "no outputs"; `None` writes neither.
 ///
 /// Property names must match the SDNA `name` fields exactly. A mismatched
 /// key is silently dropped by `create_subject`; the alignment test below
@@ -200,7 +202,7 @@ pub(crate) async fn write_flow_transition_proposal(
     to_state: &str,
     evidence_ids: &[String],
     evidence_hash: &str,
-    outputs: Option<&[String]>,
+    outputs: Option<&[crate::perspectives::flow_evaluator::EvidenceItem]>,
     rationale: Option<&str>,
     batch_id: Option<String>,
     context: &AgentContext,
@@ -226,12 +228,18 @@ pub(crate) async fn write_flow_transition_proposal(
         values["evidence"] = serde_json::json!(evidence_ids);
     }
 
-    if let Some(outputs) = outputs {
-        let outputs = crate::perspectives::flow_instance::atom::normalised_outputs(outputs);
-        values["outputsHash"] =
-            crate::perspectives::flow_instance::atom::outputs_hash(&outputs).into();
-        if !outputs.is_empty() {
-            values["outputs"] = serde_json::json!(outputs);
+    if let Some(items) = outputs {
+        use crate::perspectives::flow_instance::atom::{
+            normalised_outputs, outputs_hash, OutputRef,
+        };
+        values["outputsHash"] = outputs_hash(items).into();
+        let refs: Vec<OutputRef> = items.iter().map(OutputRef::of).collect();
+        let encoded: Vec<String> = normalised_outputs(&refs)
+            .iter()
+            .map(OutputRef::encode)
+            .collect();
+        if !encoded.is_empty() {
+            values["outputs"] = serde_json::json!(encoded);
         }
     }
 
@@ -561,7 +569,7 @@ mod tests {
         // (which would type-check) breaks this test instead of silently
         // changing the on-graph representation at runtime. For `outputs`
         // that would also break the atom reader, which reads one
-        // `ad4m://flow/output` link per named node.
+        // `ad4m://flow/output` link per named output.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         for name in ["evidence", "outputs"] {
             let property = v["properties"]

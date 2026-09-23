@@ -1,5 +1,5 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
-import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
+import type { FlowFireOutcome, FlowOutputRef, FlowProposeResult } from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -870,12 +870,13 @@ export class PerspectiveProxy {
     }
 
     /**
-     * `outputs` names the nodes a run produces, for a transition into a
-     * terminal state. The proposal signs a hash over them, and a receipt for
-     * the run can only speak for exactly these nodes. Naming outputs for a
-     * non-terminal state is refused.
+     * `outputs` names the instances a run produces, as `{ className, id }`
+     * pairs, for a transition into a terminal state. The proposal signs a
+     * hash over their content, and a receipt for the run can only speak for
+     * exactly these instances, as they stood at completion. Naming outputs
+     * for a non-terminal state is refused.
      */
-    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: string[]): Promise<FlowProposeResult> {
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
         return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
     }
 

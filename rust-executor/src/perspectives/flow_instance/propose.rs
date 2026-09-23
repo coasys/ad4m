@@ -26,10 +26,11 @@
 //!    pressing the same button would otherwise never reach quorum. Re-pressing
 //!    it as the *same* agent stays a no-op — the acting DID is already among
 //!    the proposal's votes, and nothing is written.
-//! 5. **Into a terminal state, the caller names the run's outputs** and the
-//!    proposal signs `outputs_hash` over their ids next to the seal (#1104).
-//!    Every named node must exist on this replica — the same check a voter
-//!    runs before co-signing (`atom::check_outputs_commitment`). Naming
+//! 5. **Into a terminal state, the caller names the run's outputs** as
+//!    `(class, id)` pairs, and the proposal signs `outputs_hash` over their
+//!    content next to the seal (#1104). Every named output must be an
+//!    instance of its class on this replica, checked by the same rule a
+//!    voter runs before co-signing (`atom::check_outputs_commitment`). Naming
 //!    outputs for a non-terminal state is refused: a run does not end there.
 //!    An open proposal on this edge that names *different* outputs is
 //!    neither joined nor twinned: joining would sign outputs the caller did
@@ -60,8 +61,8 @@
 //! behaviour-preserving. Left for the change that owns the engine pass. See
 //! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
-use super::accept::{accept_flow_proposal, nodes_in_graph};
-use super::atom::{normalised_outputs, outputs_hash, OutputsRefusal, TransitionAtom};
+use super::accept::{accept_flow_proposal, load_outputs};
+use super::atom::{normalised_outputs, outputs_hash, OutputRef, OutputsRefusal, TransitionAtom};
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
@@ -119,18 +120,19 @@ pub struct ProposeOutcome {
 ///   on this replica (an untranslatable guard collapses into the same
 ///   refusal — it is the disposition a voter would reach too),
 /// - `outputs` is non-empty and `to_state` is not terminal,
-/// - `to_state` is terminal and a node in `outputs` is not in this
-///   replica's graph,
+/// - `to_state` is terminal and an entry of `outputs` is not an instance of
+///   its class on this replica,
 /// - an open proposal on this edge names different outputs,
 /// - a store lookup fails.
 ///
-/// `outputs` is ignored in order and duplicates: the proposal carries the
-/// sorted, deduplicated ids.
+/// `outputs` is ignored in order and duplicates: the proposal names the
+/// sorted, deduplicated refs and commits to their content as this replica
+/// reads it now.
 pub async fn propose_flow_transition(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,
     to_state: &str,
-    outputs: &[String],
+    outputs: &[OutputRef],
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<ProposeOutcome> {
@@ -167,18 +169,23 @@ pub async fn propose_flow_transition(
         })?;
 
     // The outputs commitment (#1104): only a run that ends here produces
-    // anything, and the proposer's own vote passes the same existence check
-    // a co-signer runs.
+    // anything, and the proposer's own vote passes the same instance check a
+    // co-signer runs.
     let outputs = if is_terminal_state(flow, to_state) {
         let named = normalised_outputs(outputs);
-        let present = nodes_in_graph(perspective, &named).await?;
-        if let Some(id) = named.iter().find(|id| !present.contains(*id)) {
+        let loaded = load_outputs(&*perspective, &named).await?;
+        if let Some(missing) = named.iter().find(|r| !loaded.contains_key(*r)) {
             return Err(anyhow::anyhow!(
                 "a voter would refuse this proposal: {} — no proposal written",
-                OutputsRefusal::OutputNotInGraph { id: id.clone() }
+                OutputsRefusal::OutputNotInstance {
+                    output: missing.clone()
+                }
             ));
         }
-        Some(named)
+        // Hashed over exactly what a co-signer's `load_outputs` reads, so the
+        // commitment is the one `check_outputs_commitment` recomputes.
+        let items: Vec<_> = named.iter().map(|r| loaded[r].clone()).collect();
+        Some(items)
     } else if !outputs.is_empty() {
         return Err(anyhow::anyhow!(
             "`{to_state}` is not terminal, so a run does not end there and has no outputs to \

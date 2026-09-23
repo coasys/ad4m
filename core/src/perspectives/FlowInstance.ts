@@ -86,6 +86,17 @@ export interface FlowFireOutcome {
  *  | `[]` | `false` | `false` | you had already voted; nothing was written |
  *  | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
  */
+/**
+ *  One output of a run, named when proposing a transition into a terminal
+ *  state: an instance, and the class it is an instance of. Every co-signer
+ *  loads it through that class and hashes its content, so the proposal
+ *  commits to the instance as it is now, not just to its id.
+ */
+export interface FlowOutputRef {
+  className: string;
+  id: string;
+}
+
 export interface FlowProposeResult {
   /** The live proposal this call minted or joined — always the one for the
    *  edge, whether this call wrote it or found it open. Hand it to another
@@ -455,17 +466,20 @@ export class FlowInstance {
    * How to read the result — fired vs. queued vs. no-op vs. stalled — is
    * documented on {@link FlowProposeResult} itself.
    *
-   * `outputs` names the nodes the run produces, for a transition into a
-   * terminal state: the proposal signs a hash over them, every co-signer
-   * checks it, and a receipt for the run speaks for exactly these nodes.
+   * `outputs` names the instances the run produces, as `{ className, id }`
+   * pairs, for a transition into a terminal state. The proposal signs a hash
+   * over their content, every co-signer recomputes it on its own replica,
+   * and a receipt for the run speaks for exactly these instances as they
+   * stood at completion.
    *
    * Throws when `toState` is not reachable from the derived state, when the
    * target state carries a `requires` guard that is not currently satisfied
    * on this replica, when the instance is already contested, when `outputs`
-   * is given for a non-terminal state or names a node not in the graph, or
+   * is given for a non-terminal state or names something that is not an
+   * instance of its class, or
    * when an open proposal on the same edge names different outputs.
    */
-  async proposeTransition(toState: string, rationale?: string, outputs?: string[]): Promise<FlowProposeResult> {
+  async proposeTransition(toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
     return this.perspective.proposeFlowTransition(this.uri, toState, rationale, outputs);
   }
 

@@ -16,7 +16,7 @@ import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbour
 // `proposeTransition()` API they describe. `import type` keeps this out of the
 // runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
 // would otherwise be a cycle).
-import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
+import type { FlowFireOutcome, FlowOutputRef, FlowProposeResult } from "./FlowInstance";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -405,7 +405,7 @@ export class PerspectiveClient {
         instanceUri: string,
         toState: string,
         rationale?: string,
-        outputs?: string[],
+        outputs?: FlowOutputRef[],
     ): Promise<FlowProposeResult> {
         return this.#apiClient.call<FlowProposeResult>(
             'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
