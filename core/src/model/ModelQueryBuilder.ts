@@ -735,9 +735,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       } finally {
         fetching = false;
         if (pending) {
-          console.debug(`[ModelQueryBuilder.paginateSubscribe] ${coalesced} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
+          const dispatches = coalesced;
           pending = false;
           coalesced = 0;
+          // Whether a trailing fetch actually starts is decided by the entry
+          // guard at the top of processResults, which returns when disposed.
+          // Log only what that guard will let through, or the dispose path
+          // announces a fetch it then drops.
+          if (!disposed) {
+            console.debug(`[ModelQueryBuilder.paginateSubscribe] ${dispatches} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
+          }
           // Detached from the caller's promise: needs its own handler, or a
           // rejection here is unhandled.
           processResults().catch(e => console.error('Paginate subscription error:', e));
