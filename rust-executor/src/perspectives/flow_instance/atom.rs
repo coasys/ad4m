@@ -18,7 +18,7 @@
 //! and that is by design: keeping the two concerns separate is what lets the
 //! fold be pure.
 //!
-//! Two rules do all the work:
+//! Three rules do all the work:
 //!
 //! - **Identity is a signature check.** [`signed_by`] is the only place in
 //!   the flow engine that compares authors, and it requires the stored
@@ -30,6 +30,12 @@
 //!   published two different values. Anyone else's link on that predicate is
 //!   invisible, so a peer cannot re-point someone else's proposal by
 //!   appending a later value — the trick model hydration would fall for.
+//! - **The URI is the fields.** A vote signs nothing but the proposal URI,
+//!   so the URI is the content address of every field above
+//!   ([`proposal_uri`], recomputed in [`TransitionAtom::from_links`],
+//!   #1108). Without it the *proposer* could do what the second rule stops
+//!   a peer from doing: retract and re-sign `outputs_hash` or the seal
+//!   under the voted URI after the co-signs landed.
 
 use super::time::parse_link_timestamp;
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
@@ -599,12 +605,36 @@ impl TransitionAtom {
             Err(AtomRejection::MissingField(_)) => None,
             Err(other) => return Err(other),
         };
+        let from_state = unique_field(links, FROM_STATE_PREDICATE, &proposer)?;
+        let to_state = unique_field(links, TO_STATE_PREDICATE, &proposer)?;
+        // The vote-covers-fields invariant (#1108). A vote is
+        // `uri --acceptedBy--> did` and signs nothing but the URI, so the
+        // URI must be the content address of every field read above — or
+        // the proposer could re-sign `outputs_hash` (or the seal) under the
+        // voted URI after the co-signs landed, and the swapped value would
+        // read as quorum-agreed. Recomputed here, on every read, from the
+        // proposer's own signed fields; a mismatch — including every
+        // pre-#1108 random-UUID proposal — is not an atom, so no vote on it
+        // is ever counted.
+        let nonce = unique_field(links, PROPOSAL_NONCE_PREDICATE, &proposer)?;
+        let expected = proposal_uri(
+            instance_uri,
+            &from_state,
+            &to_state,
+            &evidence_hash,
+            outputs_hash.as_deref(),
+            &proposer,
+            &nonce,
+        );
+        if uri != expected {
+            return Err(AtomRejection::UriMismatch { expected });
+        }
         let proposed_at = earliest_proposer_timestamp(links, &proposer)
             .ok_or(AtomRejection::NoParseableTimestamp)?;
         Ok(TransitionAtom {
             uri: uri.to_string(),
-            from_state: unique_field(links, FROM_STATE_PREDICATE, &proposer)?,
-            to_state: unique_field(links, TO_STATE_PREDICATE, &proposer)?,
+            from_state,
+            to_state,
             votes: valid_votes(links, &proposer, &proposed_at),
             outputs: named_outputs(links, &proposer)?,
             outputs_hash,

@@ -7,17 +7,25 @@
 //!
 //! # What a verified receipt says
 //!
-//! > *n distinct eligible DIDs each signed a vote on an atom carrying this
-//! > seal and this outputs commitment, and here is the material the seal was
-//! > taken over and the outputs the commitment hashes.*
+//! > *n distinct eligible DIDs each signed a vote naming a proposal URI that
+//! > is the content address of this seal and this outputs commitment (and
+//! > the instance, the edge and the proposer), and here is the material the
+//! > seal was taken over and the outputs the commitment hashes.*
 //!
-//! Every word of that is cryptographic or re-derivable: n distinct DIDs
-//! signed `acceptedBy` links on an atom carrying seal S ([`atom::signed_by`],
-//! over verdicts this replica recomputed); each was eligible under the
-//! carried role evidence **as of its own vote's timestamp**; S rehashes
+//! Every word of that is cryptographic or re-derivable. A vote is
+//! `uri --acceptedBy--> did` and its signature covers nothing but that URI —
+//! which is why the URI must cover everything else: it is recomputed from
+//! the proposer-signed fields on every read
+//! ([`atom::proposal_uri`](super::atom::proposal_uri), checked in
+//! `TransitionAtom::from_links`, #1108), so a proposal whose seal or
+//! outputs commitment is not what its URI addresses is not an atom and none
+//! of its votes count. So: n distinct DIDs signed `acceptedBy` links
+//! ([`atom::signed_by`], over verdicts this replica recomputed) on an atom
+//! whose URI commits to seal S and outputs hash H; each was eligible under
+//! the carried role evidence **as of its own vote's timestamp**; S rehashes
 //! from the carried preimage; and the receipt's output preimages (class,
-//! id, content) hash to the `outputs_hash` every counted atom on the final
-//! edge carries (#1104), checked here, never read on trust.
+//! id, content) hash to H, the one commitment every counted atom on the
+//! final edge carries (#1104), checked here, never read on trust.
 //!
 //! The protocol *requires* each of those voters to have recomputed the seal
 //! and the outputs commitment against their own graph and refused to sign on
@@ -523,7 +531,12 @@ impl FlowReceipt {
     /// exactly this `(class, id)` as an output and every counted voter signed
     /// a commitment to its content at completion.
     pub fn speaks_for(&self, output: &OutputRef) -> bool {
-        self.outputs.iter().any(|o| o.id == output.id)
+        // The whole ref, never the id alone: the same node read through
+        // another class is other content, and the quorum committed to the
+        // content as read through THIS class (#1108 review). An id-only
+        // answer would let a #1076 grant check accept a receipt whose
+        // voters saw the node through a class that shows almost nothing.
+        self.outputs.iter().any(|o| &OutputRef::of(o) == output)
     }
 }
 
@@ -1522,21 +1535,33 @@ mod tests {
     /// have refused to co-sign it (`OutputsRefusal::Uncommitted`); a receipt
     /// is checked as if one did not.
     ///
+    /// The uncommitted proposal is honest about being uncommitted — its URI
+    /// addresses the field's absence. Stripping the `outputs_hash` links off
+    /// a committed proposal stopped being this test's shape with #1108: that
+    /// no longer un-commits the proposal, it un-atoms it (`UriMismatch`).
+    ///
     /// Red if `final_edge_commitment` skips an atom with no `outputs_hash`
     /// instead of reporting it.
     #[test]
     fn a_final_edge_that_committed_to_no_outputs_is_refused() {
         let flow = two_state_flow();
         let mut receipt = mint(&flow, completed());
-        let proposal_uri = receipt.read_set.proposals[0].uri.clone();
-        receipt.read_set.proposals[0].links.retain(|l| {
-            l.data.predicate.as_deref()
-                != Some(crate::perspectives::flow_instance::atom::OUTPUTS_HASH_PREDICATE)
-        });
+        let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+            "p-uncommitted",
+            ALICE,
+            "open",
+            "done",
+            &seal(),
+            T1,
+        );
+        receipt.read_set.proposals[0] = ProposalLinks {
+            uri: uri.clone(),
+            links,
+        };
 
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt),
-            ReceiptVerdict::OutputsUncommitted { proposal_uri }
+            ReceiptVerdict::OutputsUncommitted { proposal_uri: uri }
         );
     }
 
