@@ -652,4 +652,167 @@ mod tests {
             "fresh perspective must return empty FlowInstance list"
         );
     }
+
+    fn assert_reserved<T: std::fmt::Debug>(
+        path: &str,
+        result: Result<T, deno_core::anyhow::Error>,
+    ) {
+        let err = result.expect_err(&format!(
+            "{path}: a user write of currentState must be refused"
+        ));
+        assert!(
+            format!("{err:#}").contains("reserved for the executor's flow engine"),
+            "{path}: refusal must say why, got: {err:#}"
+        );
+    }
+
+    /// `currentState` is engine-reserved: every user-facing write path refuses
+    /// it, and only the engine's own writer (`write_local_current_state`) can
+    /// add it. Co-owners can read any author's cache, so without this refusal
+    /// a second user on the executor could plant a state everyone would see.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn user_facing_writes_of_the_current_state_cache_are_refused() {
+        use crate::types::{LinkExpression, LinkInput, LinkMutations};
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        ensure_flow_model_classes(&mut perspective, &ctx)
+            .await
+            .expect("register flow classes");
+        let uri = "ad4m://flow/instance/guard-test";
+        let cache = Link {
+            source: uri.to_string(),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            target: "literal:string:Done".to_string(),
+        };
+
+        for status in [LinkStatus::Local, LinkStatus::Shared] {
+            assert_reserved(
+                "add_link",
+                perspective
+                    .add_link(cache.clone(), status, None, &ctx)
+                    .await,
+            );
+        }
+        assert_reserved(
+            "add_links",
+            perspective
+                .add_links(vec![cache.clone()], LinkStatus::Local, None, &ctx)
+                .await,
+        );
+        assert_reserved(
+            "link_mutations",
+            perspective
+                .link_mutations(
+                    LinkMutations {
+                        additions: vec![LinkInput {
+                            source: cache.source.clone(),
+                            predicate: cache.predicate.clone(),
+                            target: cache.target.clone(),
+                        }],
+                        removals: vec![],
+                    },
+                    LinkStatus::Local,
+                    &ctx,
+                )
+                .await,
+        );
+        let signed: LinkExpression = crate::agent::create_signed_expression(cache.clone(), &ctx)
+            .expect("sign")
+            .into();
+        assert_reserved(
+            "add_link_expression",
+            perspective
+                .add_link_expression(signed, LinkStatus::Local, None)
+                .await,
+        );
+        let batch = perspective.create_batch().await;
+        assert_reserved(
+            "add_link in a batch",
+            perspective
+                .add_link(cache.clone(), LinkStatus::Local, Some(batch.clone()), &ctx)
+                .await,
+        );
+        perspective.discard_batch(&batch).await;
+
+        // update_link: turn an ordinary link into a cache link.
+        let ordinary = perspective
+            .add_link(
+                Link {
+                    source: uri.to_string(),
+                    predicate: Some("test://note".to_string()),
+                    target: "literal:string:hello".to_string(),
+                },
+                LinkStatus::Local,
+                None,
+                &ctx,
+            )
+            .await
+            .expect("a non-reserved Local link is still accepted");
+        assert_reserved(
+            "update_link",
+            perspective
+                .update_link(ordinary.into(), cache.clone(), None, &ctx)
+                .await,
+        );
+
+        // The model paths: the FlowInstance SDNA has a `currentState` setter,
+        // and it reaches the store through the same methods.
+        let class = || SubjectClassOption {
+            class_name: Some(FLOW_INSTANCE_CLASS.to_string()),
+            query: None,
+        };
+        assert_reserved(
+            "create_subject",
+            perspective
+                .create_subject(
+                    class(),
+                    uri.to_string(),
+                    Some(serde_json::json!({
+                        "flowUri": "delivery://DeliveryFlow",
+                        "subject": "ad4m://task/1",
+                        "currentState": "Done",
+                    })),
+                    None,
+                    &ctx,
+                )
+                .await,
+        );
+        assert_reserved(
+            "update_subject",
+            perspective
+                .update_subject(
+                    class(),
+                    uri.to_string(),
+                    serde_json::json!({ "currentState": "Done" }),
+                    None,
+                    &ctx,
+                )
+                .await,
+        );
+
+        let cache_query = LinkQuery {
+            source: Some(uri.to_string()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        };
+        assert!(
+            perspective
+                .get_links(&cache_query)
+                .await
+                .expect("get_links")
+                .is_empty(),
+            "no refused write may leave a cache link behind"
+        );
+
+        // The engine's writer is the one path that may write it.
+        advance_flow_instance_state(&mut perspective, uri, "InReview", None, &ctx)
+            .await
+            .expect("the engine writes its own cache");
+        let written = perspective
+            .get_links(&cache_query)
+            .await
+            .expect("get_links");
+        assert_eq!(written.len(), 1, "got {written:?}");
+        assert_eq!(written[0].status, Some(LinkStatus::Local));
+    }
 }
