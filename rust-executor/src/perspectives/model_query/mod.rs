@@ -78,6 +78,7 @@
 //! | [`getters`] | Evaluating `ASK`/`SELECT` getter expressions in batched queries |
 //! | [`relations`] | Resolving reverse relations and recursive `include` eager-loading |
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
+//! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 
 mod eval_transform;
@@ -86,6 +87,7 @@ mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
+mod links;
 mod projection;
 mod query;
 mod relations;
