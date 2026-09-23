@@ -18,7 +18,8 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 use super::link_author::{
-    has_link_leaf, link_author_condition, link_author_join, link_leaves, LinkAuthorScope,
+    instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
+    side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
@@ -134,6 +135,22 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     )
 }
 
+/// The predicates of the links hydration reads for an instance, deduplicated
+/// and sorted. Empty means every predicate.
+///
+/// The instance's `author` and `timestamp` come from the earliest of these
+/// links, so [`super::link_author::instance_author_filter`] reads the same set.
+pub(super) fn instance_link_predicates(shape: &ModelShape) -> Vec<&str> {
+    let unique: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty())
+        .filter(|p| !(p.is_collection && p.getter.is_some()))
+        .map(|p| p.predicate.as_str())
+        .collect();
+    unique.into_iter().collect()
+}
+
 /// Build the SPARQL query (or two-phase plan) that retrieves instance rows.
 ///
 /// Returns an [`InstanceQueryPlan`]:
@@ -149,19 +166,12 @@ pub(super) fn build_instance_sparql(
 ) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
 
-    let needed: Vec<&str> = shape
-        .properties
-        .iter()
-        .filter(|p| !p.predicate.is_empty())
-        .filter(|p| !(p.is_collection && p.getter.is_some()))
-        .map(|p| p.predicate.as_str())
-        .collect();
+    let needed = instance_link_predicates(shape);
 
     let predicate_filter = if needed.is_empty() {
         String::new()
     } else {
-        let unique: std::collections::BTreeSet<&str> = needed.into_iter().collect();
-        let values: String = unique
+        let values: String = needed
             .iter()
             .map(|p| format!("<{p}>"))
             .collect::<Vec<_>>()
@@ -318,6 +328,19 @@ pub(super) fn build_instance_sparql(
 /// Returns an empty string when the shape declares no local properties, leaving the
 /// query byte-identical to before.
 pub(super) fn local_status_filter(shape: &ModelShape) -> String {
+    let preds = local_predicates(shape);
+    if preds.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
+        preds.join(", ")
+    )
+}
+
+/// The `local: true` predicates, as `<iri>` terms, sorted and deduplicated.
+pub(super) fn local_predicates(shape: &ModelShape) -> Vec<String> {
     let mut preds: Vec<String> = shape
         .properties
         .iter()
@@ -327,15 +350,7 @@ pub(super) fn local_status_filter(shape: &ModelShape) -> String {
         .collect();
     preds.sort();
     preds.dedup();
-
-    if preds.is_empty() {
-        return String::new();
-    }
-
-    format!(
-        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
-        preds.join(", ")
-    )
+    preds
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
@@ -717,12 +732,16 @@ pub(super) struct CompiledWhere {
     /// rows, silently. This flag is the single source of that answer; deriving it
     /// separately from the emission is what let the two disagree.
     pub(super) complete: bool,
-    /// Whether an `author` condition was compiled as a condition on the links
-    /// its clause matches (see [`super::link_author`]).
+    /// Whether a per-link `author` condition was compiled anywhere in the
+    /// clause, including a relation quantifier's nested clause (see
+    /// [`super::link_author`]).
     ///
     /// Such a condition cannot be re-checked after hydration, so a clause that
     /// sets this and is not `complete` is refused rather than run.
     pub(super) link_author_scoped: bool,
+    /// A malformed `author` or `eq` condition, with the reason. The query is
+    /// refused with it.
+    pub(super) link_author_error: Option<String>,
 }
 
 /// `None` when a condition produced no patterns at all.
@@ -779,7 +798,14 @@ pub(super) fn compile_where_clause(
     resolver: Option<&dyn ShapeResolver>,
 ) -> CompiledWhere {
     let mut seq = 0usize;
-    compile_where_clause_seq(wc, shape, resolver, &mut seq, &LinkAuthorScope::default())
+    let mut la = LinkAuthorState::default();
+    let (patterns, complete) = compile_where_clause_seq(wc, shape, resolver, &mut seq, &mut la);
+    CompiledWhere {
+        patterns,
+        complete,
+        link_author_scoped: la.per_link,
+        link_author_error: la.error,
+    }
 }
 
 /// The recursive body, threading a counter that makes every generated variable
@@ -795,62 +821,50 @@ pub(super) fn compile_where_clause(
 /// The counter advances once per leaf, so variables *within* a leaf still share a
 /// suffix and correlate as they must.
 ///
-/// `scope` carries the link-author scope inherited from enclosing clauses (see
-/// [`super::link_author`]). Every link-backed leaf compiled here is restricted
-/// to links whose author meets `scope.authors`, plus this clause's own
-/// `author` when it has something to scope.
-fn compile_where_clause_seq<'a>(
-    wc: &'a BTreeMap<String, WhereCondition>,
+/// `la` collects what [`super::link_author`] needs to know about `author`:
+/// whether a per-link one was compiled, and any malformed one. A top-level
+/// `author` is side-by-side when this object has a link-backed sibling: it then
+/// adds its instance-level filter here and scopes those siblings' links. It
+/// never reaches into a sub-clause, and a sub-clause's never reaches out.
+fn compile_where_clause_seq(
+    wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
     seq: &mut usize,
-    scope: &LinkAuthorScope<'a>,
-) -> CompiledWhere {
+    la: &mut LinkAuthorState,
+) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
     let mut complete = true;
-    let mut link_author_scoped = false;
 
-    // This clause's `author` scopes links when there is a link-backed condition
-    // in reach: here, in a sub-clause, or in an enclosing clause. Otherwise it
-    // is bare and keeps its instance-level meaning, matched after hydration.
-    let own_leaves = link_leaves(wc, shape);
-    let own_author = link_author_condition(wc, shape)
-        .filter(|_| has_link_leaf(wc, shape) || !scope.enclosing_leaves.is_empty());
-    let mut authors = scope.authors.clone();
-    if let Some(author) = own_author {
-        authors.push(author);
-        link_author_scoped = true;
-        // The enclosing clauses' conditions hold for this branch too, and this
-        // is the first place that knows which author their links need. Emit
-        // them again, scoped. The unscoped copies outside still apply, so this
-        // only narrows.
-        for (name, condition) in &scope.enclosing_leaves {
-            match compile_leaf_condition(name, condition, shape, resolver, seq, &authors) {
-                Some(p) => patterns.extend(p),
-                None => complete = false,
+    // Side-by-side: sugar for the bare instance-level `author` plus the same
+    // `author` nested under every link-backed sibling. Both halves are pushed,
+    // because the per-link half forbids the post-hydration fallback.
+    let side_author = side_by_side_author(wc, shape);
+    if let Some(author) = side_author {
+        la.per_link = true;
+        let tag = *seq;
+        *seq += 1;
+        match instance_author_filter(shape, author, &tag.to_string()) {
+            Some(p) => patterns.push(p),
+            None => {
+                la.fail(
+                    "`author` must be a DID, an array of DIDs, `{ not: did | [dids] }` or \
+                     `{ contains: text }`"
+                        .to_string(),
+                );
+                complete = false;
             }
         }
     }
-    let child_scope = LinkAuthorScope {
-        authors: authors.clone(),
-        enclosing_leaves: scope
-            .enclosing_leaves
-            .iter()
-            .copied()
-            .chain(own_leaves.iter().copied())
-            .collect(),
-    };
 
     for (prop_name, condition) in wc {
         match prop_name.as_str() {
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let compiled =
-                            compile_where_clause_seq(branch, shape, resolver, seq, &child_scope);
-                        patterns.extend(compiled.patterns);
-                        complete &= compiled.complete;
-                        link_author_scoped |= compiled.link_author_scoped;
+                        let (p, c) = compile_where_clause_seq(branch, shape, resolver, seq, la);
+                        patterns.extend(p);
+                        complete &= c;
                     }
                 }
                 _ => complete = false,
@@ -859,18 +873,17 @@ fn compile_where_clause_seq<'a>(
                 WhereCondition::SubClauses(branches) if !branches.is_empty() => {
                     let mut arms = Vec::with_capacity(branches.len());
                     let mut ok = true;
-                    // Every arm is compiled even after one fails: whether any of
-                    // them scoped an author decides whether the declined `OR`
-                    // may fall back to post-hydration at all.
+                    // Every arm is compiled even after one fails, so that `la`
+                    // hears about a per-link `author` in any of them: that is
+                    // what decides whether the declined `OR` may fall back to
+                    // post-hydration at all.
                     for branch in branches {
-                        let compiled =
-                            compile_where_clause_seq(branch, shape, resolver, seq, &child_scope);
-                        link_author_scoped |= compiled.link_author_scoped;
-                        if !compiled.complete || !binds_source(&compiled.patterns) {
+                        let (p, c) = compile_where_clause_seq(branch, shape, resolver, seq, la);
+                        if !c || !binds_source(&p) {
                             ok = false;
                             continue;
                         }
-                        arms.push(format!("{{\n{}\n    }}", compiled.patterns.join("\n")));
+                        arms.push(format!("{{\n{}\n    }}", p.join("\n")));
                     }
                     if ok {
                         patterns.push(format!("    {}", arms.join(" UNION ")));
@@ -880,34 +893,37 @@ fn compile_where_clause_seq<'a>(
                 }
                 _ => complete = false,
             },
-            "NOT" => match condition {
-                WhereCondition::SubClause(branch) => {
-                    let compiled =
-                        compile_where_clause_seq(branch, shape, resolver, seq, &child_scope);
-                    link_author_scoped |= compiled.link_author_scoped;
-                    if compiled.complete && !compiled.patterns.is_empty() {
+            "NOT" => match condition.as_not_clause() {
+                Some(branch) => {
+                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, seq, la);
+                    if c && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
-                            compiled.patterns.join("\n")
+                            p.join("\n")
                         ));
                     } else {
                         complete = false;
                     }
                 }
-                _ => complete = false,
+                None => complete = false,
             },
-            // A scoping `author` is carried by the leaves' reifier joins and
-            // emits nothing of its own. A bare one falls through to the leaf
+            // A side-by-side `author` was emitted above and rides on the
+            // siblings' reifier joins. A bare one falls through to the leaf
             // compiler, which declines it, so it is matched after hydration.
-            "author" if own_author.is_some() => {}
+            "author" if side_author.is_some() => {}
             _ => {
+                let scoping: Vec<&WhereCondition> = side_author
+                    .filter(|_| side_by_side_scopes(prop_name, condition, shape))
+                    .into_iter()
+                    .collect();
                 match compile_leaf_condition(
                     prop_name.as_str(),
                     condition,
                     shape,
                     resolver,
                     seq,
-                    &authors,
+                    &scoping,
+                    la,
                 ) {
                     Some(p) => patterns.extend(p),
                     None => complete = false,
@@ -916,11 +932,7 @@ fn compile_where_clause_seq<'a>(
         }
     }
 
-    CompiledWhere {
-        patterns,
-        complete,
-        link_author_scoped,
-    }
+    (patterns, complete)
 }
 
 /// Compile one `(property, condition)` pair into SPARQL patterns.
@@ -930,13 +942,19 @@ fn compile_where_clause_seq<'a>(
 /// condition shape no arm handles. The caller turns that into
 /// `CompiledWhere::complete = false`, which is what routes the condition to the
 /// post-hydration filter instead of dropping it.
+///
+/// The condition's own nested `author` (`{ eq: X, author: A }`) and the
+/// `scoping` authors of a side-by-side `author` restrict the link that
+/// satisfies the value condition; see [`super::link_author`]. A per-link author
+/// sets `la.per_link`, and a malformed one is recorded in `la.error`.
 fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
     seq: &mut usize,
-    authors: &[&WhereCondition],
+    scoping: &[&WhereCondition],
+    la: &mut LinkAuthorState,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     // One id per leaf: variables inside a leaf share it, because they are meant
@@ -944,13 +962,37 @@ fn compile_leaf_condition(
     let leaf_id = *seq;
     *seq += 1;
 
+    // `value` is `None` for `{ author: A }` alone: some link, any value.
+    let (value, nested_author) = match split_leaf(condition) {
+        Ok(parts) => parts,
+        Err(reason) => {
+            la.fail(format!("`{prop_name}`: {reason}"));
+            return None;
+        }
+    };
+    if nested_author.is_some() && !is_link_leaf(prop_name, shape) {
+        la.fail(format!(
+            "`{prop_name}` has a nested `author`, but it is not a property stored as a link \
+             (a getter property, `timestamp`, `id` or an unknown name), so there is no link \
+             whose author could be checked"
+        ));
+        return None;
+    }
+    let authors: Vec<&WhereCondition> = nested_author
+        .into_iter()
+        .chain(scoping.iter().copied())
+        .collect();
+    if !authors.is_empty() {
+        la.per_link = true;
+    }
+
     // The link-author join for a triple this leaf emits (see
     // `super::link_author`): empty when no `author` scopes the leaf, `None`
     // when one does and cannot be rendered, which declines the leaf. `tag`
     // tells apart two triples of one leaf, the arms of a UNION.
     let author_join = |subject: &str, predicate: &str, object: &str, tag: &str| {
         link_author_join(
-            authors,
+            &authors,
             subject,
             predicate,
             object,
@@ -960,8 +1002,11 @@ fn compile_leaf_condition(
         .map(|join| join.map(|j| format!("\n{j}")).unwrap_or_default())
     };
 
+    // Past the split, `condition` is the value condition alone.
+    let condition: Option<&WhereCondition> = value.as_deref();
+
     if prop_name == "base" || prop_name == "id" {
-        match condition {
+        match condition? {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
                     // `VALUES` rather than `FILTER(?source = <val>)`:
@@ -1030,6 +1075,18 @@ fn compile_leaf_condition(
         }
         let safe_pred = validate_iri(&prop.predicate).ok()?;
         let direction = prop.direction.as_deref().unwrap_or("forward");
+        // `{ author: A }` alone: A wrote some link on the relation.
+        let Some(condition) = condition else {
+            let far = format!("?_ex_{leaf_id}");
+            let (subject, object) = if direction == "reverse" {
+                (far.as_str(), "?source")
+            } else {
+                ("?source", far.as_str())
+            };
+            let join = author_join(subject, safe_pred, object, "")?;
+            out.push(format!("    {subject} <{safe_pred}> {object} .{join}"));
+            return finish(out);
+        };
         match condition {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
@@ -1107,17 +1164,6 @@ fn compile_leaf_condition(
                 }
             }
             WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
-                // A quantifier asks about the linked record, and which link's
-                // author an `author` beside it should constrain has no single
-                // reading. Declined, so the query is refused (see
-                // `super::link_author::refuse_unanswerable_link_author`).
-                if !authors.is_empty() {
-                    log::warn!(
-                        "where: `{prop_name}` is a relation quantifier under an `author` \
-                         condition, which has no per-link reading. The query is refused."
-                    );
-                    return None;
-                }
                 // Every decline below ends the same way for the caller: the
                 // clause is incomplete, the post-hydration filter rejects every
                 // row, and the query returns nothing. That is the sound answer
@@ -1159,7 +1205,7 @@ fn compile_leaf_condition(
                     }
                 };
                 let quantified = compile_relation_quantifier(
-                    shape, prop, safe_pred, inner, negate, resolver, leaf_id,
+                    shape, prop, safe_pred, inner, negate, resolver, leaf_id, &authors, la,
                 )?;
                 out.push(quantified);
             }
@@ -1182,6 +1228,16 @@ fn compile_leaf_condition(
             prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
         );
         let is_literal_prop = prop.is_deterministic_literal();
+        // `{ author: A }` alone: A wrote some link on the property.
+        let Some(condition) = condition else {
+            let var = format!("?_pw_{safe_name}");
+            out.push(format!(
+                "    ?source <{}> {var} .{}",
+                prop.predicate,
+                author_join("?source", &prop.predicate, &var, "")?
+            ));
+            return finish(out);
+        };
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
@@ -2034,6 +2090,8 @@ fn compile_relation_quantifier(
     negate: bool,
     resolver: Option<&dyn ShapeResolver>,
     leaf_id: usize,
+    authors: &[&WhereCondition],
+    la: &mut LinkAuthorState,
 ) -> Option<String> {
     // The caller found `prop` *by* this name, so the two cannot disagree.
     let prop_name = prop.name.as_str();
@@ -2048,11 +2106,20 @@ fn compile_relation_quantifier(
 
     // A reverse relation is `target → source`, so the linked record is the
     // subject of the triple rather than its object.
-    let link = if prop.direction.as_deref() == Some("reverse") {
-        format!("        {target_var} <{safe_pred}> ?source .")
+    //
+    // A nested `author` restricts this link, inside the EXISTS: `some` is "A
+    // wrote a link to a record satisfying the clause", `none` is "A wrote no
+    // such link".
+    let (subject, object) = if prop.direction.as_deref() == Some("reverse") {
+        (target_var.as_str(), "?source")
     } else {
-        format!("        ?source <{safe_pred}> {target_var} .")
+        ("?source", target_var.as_str())
     };
+    let join = link_author_join(authors, subject, safe_pred, object, &format!("q{leaf_id}"))
+        .ok()?
+        .map(|j| format!("\n    {j}"))
+        .unwrap_or_default();
+    let link = format!("        {subject} <{safe_pred}> {object} .{join}");
 
     let mut body = vec![link];
 
@@ -2109,10 +2176,22 @@ fn compile_relation_quantifier(
                  the query was compiled without a shape resolver. The query will return no \
                  rows."
             );
+            // Uncompiled, the clause can still hold a per-link `author`, and
+            // the refusal must hear of it from its syntax.
+            la.per_link |= may_hold_link_author(inner);
             return None;
         };
 
         let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
+        // Carried up before the clause can be declined below: a per-link
+        // `author` in a nested clause the store cannot answer in full must
+        // reach `refuse_unanswerable_link_author`. The post-hydration filter
+        // happens to fail closed on every quantifier too, but that is not what
+        // this refusal may rest on.
+        la.merge(
+            compiled.link_author_scoped,
+            compiled.link_author_error.clone(),
+        );
         if !compiled.complete || compiled.patterns.is_empty() {
             log::warn!(
                 "where: the nested clause on relation `{prop_name}` could not be compiled to \
