@@ -14,6 +14,9 @@
  *      error, not `[]`; "asked, none found" is `[]`, "not asked" is absent.
  *   4. The same option through the fluent builder, an `include` sub-query and
  *      the raw `perspective.modelQuery` RPC.
+ *   5. A live subscription re-fires when a link it asks for lands, even on a
+ *      predicate the model does not declare (a subscribed revocation check
+ *      must not keep reporting `[]` after the tombstone is written).
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-links.test.ts
@@ -26,7 +29,7 @@ import {
   LinkQuery,
   PerspectiveProxy,
 } from "@coasys/ad4m";
-import { startAgent } from "../../helpers/index.js";
+import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
 import { wipePerspective, sleep } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag, TestReaction } from "./models.js";
@@ -265,5 +268,77 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     expect(inst.__links[TOMBSTONE]).to.have.length(1);
     expect(inst.__links.title).to.have.length(1);
     expect(inst.__links.title[0].data.predicate).to.equal("test://title");
+  });
+
+  // ── 5. subscriptions re-fire on a requested link ──────────────────────────
+
+  it("subscribe() re-fires when a link on an undeclared links IRI is added", async () => {
+    const post = await TestPost.create(perspective, { title: "watched" });
+    // Let the executor's 250 ms subscription batch drain first. Otherwise the
+    // setup links above land in the same batch as the tombstone and re-run the
+    // subscription on their own, which would hide a missing trigger predicate.
+    await sleep(1000);
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective)
+      .where({ id: post.id } as any)
+      .links([TOMBSTONE]);
+    const initial = await builder.subscribe((r) => all.push(r));
+    try {
+      expect(initial).to.have.length(1);
+      expect(initial[0].__links![TOMBSTONE]).to.deep.equal([]);
+
+      await perspective.add(
+        new Link({ source: post.id, predicate: TOMBSTONE, target: "literal://string:revoked" }),
+      );
+
+      await waitUntil(
+        () => all.some((batch) => batch[0]?.__links?.[TOMBSTONE]?.length === 1),
+        15_000,
+        "subscription re-fires with the tombstone row",
+      );
+      const row = all.find((b) => b[0]?.__links?.[TOMBSTONE]?.length === 1)![0].__links![TOMBSTONE][0];
+      expect(row.data).to.deep.equal({
+        source: post.id,
+        predicate: TOMBSTONE,
+        target: "literal://string:revoked",
+      });
+    } finally {
+      builder.dispose();
+    }
+  });
+
+  it("subscribe() re-fires when a link on a links IRI inside an include lands", async () => {
+    const post = await TestPost.create(perspective, { title: "outer" });
+    const c = await TestComment.create(perspective, { body: "inner" });
+    await post.addComments(c.id);
+    // Let the executor's 250 ms subscription batch drain first. Otherwise the
+    // setup links above land in the same batch as the tombstone and re-run the
+    // subscription on their own, which would hide a missing trigger predicate.
+    await sleep(1000);
+
+    const all: TestPost[][] = [];
+    const builder = TestPost.query(perspective)
+      .where({ id: post.id } as any)
+      .include({ comments: { links: [TOMBSTONE] } } as any);
+    const initial = await builder.subscribe((r) => all.push(r));
+    try {
+      expect(initial[0].comments[0].__links![TOMBSTONE]).to.deep.equal([]);
+
+      await perspective.add(
+        new Link({ source: c.id, predicate: TOMBSTONE, target: "literal://string:hidden" }),
+      );
+
+      await waitUntil(
+        () =>
+          all.some(
+            (batch) => (batch[0]?.comments?.[0] as any)?.__links?.[TOMBSTONE]?.length === 1,
+          ),
+        15_000,
+        "subscription re-fires with the included tombstone row",
+      );
+    } finally {
+      builder.dispose();
+    }
   });
 });
