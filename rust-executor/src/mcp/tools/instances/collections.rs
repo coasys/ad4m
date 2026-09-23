@@ -185,12 +185,17 @@ impl Ad4mMcpHandler {
         // item is already in it.
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
+        // Only the members this agent can see: another user's Local
+        // membership link must not answer "already a member" (#1024).
         let existing = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
+            .get_links_for_viewer(
+                &LinkQuery {
+                    source: Some(base_uri.clone()),
+                    predicate: Some(predicate.clone()),
+                    ..Default::default()
+                },
+                viewer.as_deref(),
+            )
             .await
         {
             Ok(links) => links,
@@ -320,12 +325,17 @@ impl Ad4mMcpHandler {
 
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
+        // Only the membership links this agent can see. Another user's
+        // Local membership link is private to them and is not removed (#1024).
         let links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
+            .get_links_for_viewer(
+                &LinkQuery {
+                    source: Some(base_uri.clone()),
+                    predicate: Some(predicate),
+                    ..Default::default()
+                },
+                viewer.as_deref(),
+            )
             .await
         {
             Ok(links) => links,

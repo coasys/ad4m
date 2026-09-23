@@ -579,8 +579,11 @@ pub(crate) struct CascadeFailure {
     pub error: String,
 }
 
-/// Remove every link touching `uri` (as source or target). Same cascade as
-/// `delete_subject` / `{class}_delete`.
+/// Remove every link touching `uri` (as source or target) that `viewer_did`
+/// may see. Same cascade as `delete_subject` / `{class}_delete`.
+///
+/// Another user's Local links on `uri` are not visible to the caller, so
+/// they are not removed: they are private to that user (#1024).
 ///
 /// Stops at the first `get_links` / `remove_link` error and reports it
 /// together with the number of links already removed. `Ok` means the two
@@ -588,6 +591,7 @@ pub(crate) struct CascadeFailure {
 pub(crate) async fn remove_all_links_of(
     perspective: &mut PerspectiveInstance,
     uri: &str,
+    viewer_did: Option<&str>,
 ) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
     for query in [
@@ -600,7 +604,7 @@ pub(crate) async fn remove_all_links_of(
             ..Default::default()
         },
     ] {
-        let links = match perspective.get_links(&query).await {
+        let links = match perspective.get_links_for_viewer(&query, viewer_did).await {
             Ok(links) => links,
             Err(e) => {
                 return Err(CascadeFailure {

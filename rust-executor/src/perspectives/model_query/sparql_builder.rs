@@ -13,7 +13,7 @@
 //! [`build_count_sparql`] (lightweight `COUNT`).  Both delegate to
 //! [`build_query_patterns`] for the shared conformance + where logic.
 
-use crate::perspectives::link_visibility::{viewer_author_filter, viewer_triple_filter};
+use crate::perspectives::link_visibility::{viewer_author_filter, viewer_edge_filter};
 use serde_json::Value;
 
 use std::collections::BTreeMap;
@@ -58,6 +58,27 @@ pub(super) fn level_limits(query: &ModelQueryInput) -> Option<&Vec<usize>> {
         Some(Scope::Traverse { levels, .. }) => levels.as_ref(),
         _ => None,
     }
+}
+
+/// The `(anchor, node)` pairs a transitive [`Scope::Traverse`] reaches for one
+/// viewer, found by the executor one hop at a time over edges that viewer may
+/// see. See [`build_query_patterns`].
+pub(super) type VisibleReach = [(String, String)];
+
+/// Restrict a transitive traversal's `(?_anchor, ?source)` to `pairs`.
+///
+/// Compares strings, because a node id need not be writable as `<…>` (see
+/// `emittable_iri`) and `VALUES` over two variables has no string fallback.
+/// The key is the anchor, `>`, then the node. An anchor passed
+/// `validate_iri`, which rejects `>`, so the first `>` ends it and two
+/// different pairs cannot give the same key.
+fn reach_filter(pairs: &VisibleReach) -> String {
+    let keys = pairs
+        .iter()
+        .map(|(anchor, node)| format!("\"{}\"", escape_sparql_string(&format!("{anchor}>{node}"))))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("    FILTER(CONCAT(STR(?{ANCHOR_VAR}), \">\", STR(?source)) IN ({keys}))")
 }
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -145,28 +166,12 @@ pub(super) fn build_instance_sparql(
     sparql_pagination: Option<&SparqlPagination>,
     resolver: Option<&dyn ShapeResolver>,
     viewer_did: Option<&str>,
+    reach: Option<&VisibleReach>,
 ) -> InstanceQueryPlan {
-    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let (conformance, where_extra) =
+        build_query_patterns(shape, query, resolver, viewer_did, reach);
 
-    let needed: Vec<&str> = shape
-        .properties
-        .iter()
-        .filter(|p| !p.predicate.is_empty())
-        .filter(|p| !(p.is_collection && p.getter.is_some()))
-        .map(|p| p.predicate.as_str())
-        .collect();
-
-    let predicate_filter = if needed.is_empty() {
-        String::new()
-    } else {
-        let unique: std::collections::BTreeSet<&str> = needed.into_iter().collect();
-        let values: String = unique
-            .iter()
-            .map(|p| format!("<{p}>"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("    VALUES ?predicate {{ {values} }}\n")
-    };
+    let predicate_filter = hydrated_predicates_values(shape, "predicate");
 
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();
@@ -308,6 +313,31 @@ pub(super) fn build_instance_sparql(
     }
 }
 
+/// `VALUES ?{var} { … }` over the predicates that hydration reads for `shape`,
+/// or an empty string when the shape names none (hydration then reads every
+/// predicate).
+///
+/// A getter-backed collection is left out: its value is computed, not read
+/// from a link on its predicate.
+fn hydrated_predicates_values(shape: &ModelShape, var: &str) -> String {
+    let unique: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty())
+        .filter(|p| !(p.is_collection && p.getter.is_some()))
+        .map(|p| p.predicate.as_str())
+        .collect();
+    if unique.is_empty() {
+        return String::new();
+    }
+    let values: String = unique
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("    VALUES ?{var} {{ {values} }}\n")
+}
+
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
 ///
 /// A peer can gossip a Shared link on a predicate the class declared local; without
@@ -323,6 +353,17 @@ pub(super) fn build_instance_sparql(
 /// Returns an empty string when the shape declares no local properties, leaving the
 /// query byte-identical to before.
 pub(super) fn local_status_filter(shape: &ModelShape) -> String {
+    local_status_filter_on(shape, "_reifier", "predicate", "_status")
+}
+
+/// [`local_status_filter`] over caller-chosen variable names (given without
+/// the leading `?`), for a query that binds its own reifier and predicate.
+fn local_status_filter_on(
+    shape: &ModelShape,
+    reifier_var: &str,
+    predicate_var: &str,
+    status_var: &str,
+) -> String {
     let mut preds: Vec<String> = shape
         .properties
         .iter()
@@ -338,7 +379,7 @@ pub(super) fn local_status_filter(shape: &ModelShape) -> String {
     }
 
     format!(
-        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
+        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!(?{predicate_var} IN ({})) || ?{status_var} = \"Local\")\n",
         preds.join(", ")
     )
 }
@@ -349,14 +390,16 @@ pub(super) fn build_count_sparql(
     query: &ModelQueryInput,
     resolver: Option<&dyn ShapeResolver>,
     viewer_did: Option<&str>,
+    reach: Option<&VisibleReach>,
 ) -> Option<String> {
-    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let (conformance, where_extra) =
+        build_query_patterns(shape, query, resolver, viewer_did, reach);
 
     if conformance.trim().is_empty() && where_extra.trim().is_empty() {
         return None;
     }
 
-    let visibility = count_visibility_guard(viewer_did);
+    let visibility = count_visibility_guard(shape, viewer_did);
 
     Some(format!(
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
@@ -368,19 +411,33 @@ pub(super) fn build_count_sparql(
 
 /// Keep `total_count` in step with what the viewer can actually hydrate.
 ///
-/// Conformance patterns match raw triples, which carry no author — so without
-/// this, an instance built entirely out of another user's `Local` links would
-/// be counted but never returned, leaking its existence through the count.
-/// The guard requires at least one link on the instance that the viewer may
-/// see, which is the same condition under which hydration emits it.
+/// Conformance patterns match raw triples, which carry no author. Hydration
+/// then emits a matched source only if it has at least one row that passes
+/// three checks: its predicate is one the shape hydrates, it satisfies
+/// [`local_status_filter`], and it is visible to the viewer. A source with no
+/// such row is dropped from the results. This guard applies the same three
+/// checks, so a source that hydration drops is also not counted. Without it,
+/// the count shows that an instance exists whose links the viewer may not
+/// read.
+///
+/// The predicate restriction is necessary. Any visible link on the source,
+/// for example a Shared link on a predicate the shape does not declare, would
+/// otherwise satisfy the guard while hydration drops the source.
+///
+/// Conformance and where patterns still match raw triples, so this guard is
+/// what keeps the count equal to the rows the viewer gets back.
 ///
 /// Empty in executor scope, leaving the generated query byte-identical.
-fn count_visibility_guard(viewer_did: Option<&str>) -> String {
-    let viewer = viewer_triple_filter(viewer_did, "?source ?_cnt_pred ?_cnt_obj");
+fn count_visibility_guard(shape: &ModelShape, viewer_did: Option<&str>) -> String {
+    let viewer = viewer_author_filter(viewer_did, "_cnt_reifier", "_cnt_author");
     if viewer.is_empty() {
         return String::new();
     }
-    format!("    ?source ?_cnt_pred ?_cnt_obj .\n{viewer}")
+    let predicates = hydrated_predicates_values(shape, "_cnt_pred");
+    let local_status = local_status_filter_on(shape, "_cnt_reifier", "_cnt_pred", "_cnt_status");
+    format!(
+        "    FILTER EXISTS {{\n{predicates}    ?source ?_cnt_pred ?_cnt_obj .\n    ?_cnt_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source ?_cnt_pred ?_cnt_obj )>> .\n    ?_cnt_reifier <ad4m://ontology/author> ?_cnt_author .\n{local_status}{viewer}    }}\n"
+    )
 }
 
 /// Check whether **all** where-clause conditions can be pushed into SPARQL.
@@ -421,12 +478,28 @@ pub(super) fn all_where_pushable(
 ///
 /// **Where patterns** translate the query's `where` clause into SPARQL
 /// `FILTER`/`VALUES` expressions for server-side evaluation.
+///
+/// **Scope edges** follow the viewer. The link that puts `?source` under its
+/// parent, or one step further along a traversal, must be one `viewer_did`
+/// may see. Otherwise a node reachable only through another user's `Local`
+/// link is returned, and its own Shared links hydrate it (#1024). A
+/// transitive traversal cannot filter the hops of a `+` path, so for a viewer
+/// it needs `reach`: the (anchor, node) pairs the executor found by walking
+/// visible edges ([`VisibleReach`]). Without `reach` it matches nothing.
+///
+/// Conformance and where patterns still match raw triples.
 pub(super) fn build_query_patterns(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
+    reach: Option<&VisibleReach>,
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
+    // `None` in executor scope, which leaves the query text unchanged.
+    let scope_edge = |triple: &str| {
+        Some(viewer_edge_filter(viewer_did, triple, "scope")).filter(|f| !f.is_empty())
+    };
 
     /// A scope the builder cannot express, as patterns that match nothing.
     ///
@@ -469,8 +542,10 @@ pub(super) fn build_query_patterns(
             Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} <{safe_pred}> ?source ."));
+                    let edge = format!("{subj} <{safe_pred}> ?source");
+                    conformance_patterns.push(format!("    {edge} ."));
                     conformance_patterns.extend(filter);
+                    conformance_patterns.extend(scope_edge(&edge));
                 } else {
                     log::warn!(
                         "Parent scope matches nothing: invalid IRI in id='{}' or predicate='{}'",
@@ -491,8 +566,10 @@ pub(super) fn build_query_patterns(
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
                         let (subj, filter) = parent_subject(safe_id);
-                        conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
+                        let edge = format!("{subj} <{safe_f}> ?source");
+                        conformance_patterns.push(format!("    {edge} ."));
                         conformance_patterns.extend(filter);
+                        conformance_patterns.extend(scope_edge(&edge));
                     } else {
                         log::warn!("Parent scope matches nothing: invalid IRI in field='{}'", f);
                         return matches_nothing();
@@ -501,11 +578,13 @@ pub(super) fn build_query_patterns(
                     let safe_model = escape_sparql_string(model);
                     let hash_model = format!("#{safe_model}");
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} ?_parentPred ?source ."));
+                    let edge = format!("{subj} ?_parentPred ?source");
+                    conformance_patterns.push(format!("    {edge} ."));
                     conformance_patterns.extend(filter);
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
+                    conformance_patterns.extend(scope_edge(&edge));
                 }
             }
             Scope::Traverse {
@@ -549,15 +628,32 @@ pub(super) fn build_query_patterns(
                 // descendant. The exclusion the doc promises is stated below
                 // rather than inferred from the path operator.
                 let path = if *transitive { "+" } else { "" };
-                let pattern = match direction {
-                    ScopeDirection::Out => {
-                        format!("    ?{ANCHOR_VAR} <{safe_pred}>{path} ?source .")
-                    }
-                    ScopeDirection::In => {
-                        format!("    ?source <{safe_pred}>{path} ?{ANCHOR_VAR} .")
-                    }
+                let edge = match direction {
+                    ScopeDirection::Out => format!("?{ANCHOR_VAR} <{safe_pred}>{path} ?source"),
+                    ScopeDirection::In => format!("?source <{safe_pred}>{path} ?{ANCHOR_VAR}"),
                 };
-                conformance_patterns.push(pattern);
+                conformance_patterns.push(format!("    {edge} ."));
+                if !*transitive {
+                    conformance_patterns.extend(scope_edge(&edge));
+                } else if viewer_did.is_some() {
+                    // The `+` path above still matches raw triples, so it
+                    // binds every pair reachable through anyone's links. Keep
+                    // only the pairs the executor reached through links this
+                    // viewer may see.
+                    match reach {
+                        Some(pairs) if !pairs.is_empty() => {
+                            conformance_patterns.push(reach_filter(pairs));
+                        }
+                        Some(_) => return matches_nothing(),
+                        None => {
+                            log::warn!(
+                                "Traverse scope matches nothing: a transitive read in agent \
+                                 scope was not resolved to the edges the viewer may see"
+                            );
+                            return matches_nothing();
+                        }
+                    }
+                }
                 // An empty anchor list yields an empty VALUES, which is legal
                 // and answers with nothing — the right answer for "the replies
                 // to none of these", and much better than an unbound `?_anchor`
@@ -1362,7 +1458,14 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, None) {
+        match build_instance_sparql(
+            shape,
+            &ModelQueryInput::default(),
+            Some(pg),
+            None,
+            None,
+            None,
+        ) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -1486,7 +1589,7 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -1501,7 +1604,7 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -2602,7 +2705,7 @@ mod traverse_scope_tests {
             ScopeDirection::Out,
             None,
         ));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None, None);
 
         assert!(
             conformance.contains("?_anchor <test://comment> ?source ."),
@@ -2621,7 +2724,7 @@ mod traverse_scope_tests {
     #[test]
     fn traverse_scope_transitive_emits_a_one_or_more_path() {
         let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None, None);
 
         assert!(
             conformance.contains("?_anchor <test://comment>+ ?source ."),
@@ -2632,7 +2735,7 @@ mod traverse_scope_tests {
     #[test]
     fn traverse_scope_inward_swaps_the_terms() {
         let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::In, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None, None);
 
         assert!(
             conformance.contains("?source <test://comment> ?_anchor ."),
@@ -2646,7 +2749,7 @@ mod traverse_scope_tests {
     #[test]
     fn traverse_scope_with_no_valid_anchors_matches_nothing() {
         let q = traverse_query(traverse(vec![], false, ScopeDirection::Out, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None, None);
 
         assert!(
             conformance.contains("VALUES ?_anchor {  }"),
@@ -2666,7 +2769,8 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None, None)
+        {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -2693,7 +2797,8 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None, None)
+        {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..

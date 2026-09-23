@@ -51,6 +51,7 @@
 //! query-time predicates over data that is already stored per link.
 
 use crate::agent::{did_for_context, AgentContext};
+use crate::perspectives::model_query::utils::escape_sparql_string;
 use crate::types::{DecoratedLinkExpression, LinkStatus};
 use deno_core::anyhow::Error as AnyError;
 
@@ -61,18 +62,16 @@ const STATUS_LOCAL_LITERAL: &str = "Local";
 /// to — the translation from "who is calling" to the `Option<&str>` the rest
 /// of this module speaks.
 ///
-/// Fails closed: a request that carries a user identity whose DID cannot be
-/// resolved is returned as an error rather than silently promoted to executor
-/// scope, because executor scope would show that user everyone else's Local
-/// links. The main agent is the one case where an unresolvable DID is not an
-/// error: before the agent is initialised or unlocked there is no DID to
-/// resolve and no other agent on the executor to hide anything from.
+/// Always agent scope: a request is never promoted to executor scope (`None`).
+///
+/// Fails closed: a request whose DID cannot be resolved is returned as an
+/// error, because executor scope would show it every other user's Local links.
+/// This includes the main agent. `is_main_agent` is true for every token that
+/// carries no user email, not only on a fresh executor. An executor that has
+/// managed users but no main-agent DID must not answer that request with
+/// everyone's Local links.
 pub fn viewer_did_for_context(context: &AgentContext) -> Result<Option<String>, AnyError> {
-    match did_for_context(context) {
-        Ok(did) => Ok(Some(did)),
-        Err(_) if context.is_main_agent => Ok(None),
-        Err(e) => Err(e),
-    }
+    did_for_context(context).map(Some)
 }
 
 /// Is a link with this `author` / `status` visible to `viewer_did`?
@@ -145,6 +144,16 @@ pub fn viewer_author_filter(
     reifier_var: &str,
     author_var: &str,
 ) -> String {
+    author_filter(viewer_did, reifier_var, author_var, "_viewer_status")
+}
+
+/// [`viewer_author_filter`] with a caller-chosen status variable.
+fn author_filter(
+    viewer_did: Option<&str>,
+    reifier_var: &str,
+    author_var: &str,
+    status_var: &str,
+) -> String {
     let Some(did) = viewer_did else {
         return String::new();
     };
@@ -153,10 +162,35 @@ pub fn viewer_author_filter(
     // could otherwise terminate it. DIDs are not attacker-chosen here (they come
     // from the wallet / agent store, not from request parameters), but a read
     // filter is the wrong place to rely on that.
-    let escaped = escape_sparql_literal(did);
+    let escaped = escape_sparql_string(did);
 
     format!(
-        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?_viewer_status . }}\n    FILTER(!BOUND(?_viewer_status) || ?_viewer_status != \"{STATUS_LOCAL_LITERAL}\" || ?{author_var} = \"{escaped}\")\n"
+        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!BOUND(?{status_var}) || ?{status_var} != \"{STATUS_LOCAL_LITERAL}\" || ?{author_var} = \"{escaped}\")\n"
+    )
+}
+
+/// Keep a row only if the viewer may see at least one link that asserts
+/// `triple_pattern`, whose variables the surrounding query has already bound.
+///
+/// For the edge a query walks to reach `?source` (a parent scope, a traversal
+/// step). The edge itself is not read back, so the check is a
+/// `FILTER EXISTS`: a join would repeat the row once per visible link on the
+/// same triple.
+///
+/// The variables inside are named `?_{tag}_reifier`, `?_{tag}_author` and
+/// `?_{tag}_status`. An outer variable with the same name would constrain
+/// them, so each caller picks a tag no other filter in the query uses.
+///
+/// Returns an empty string in executor scope.
+pub fn viewer_edge_filter(viewer_did: Option<&str>, triple_pattern: &str, tag: &str) -> String {
+    let reifier = format!("_{tag}_reifier");
+    let author = format!("_{tag}_author");
+    let filter = author_filter(viewer_did, &reifier, &author, &format!("_{tag}_status"));
+    if filter.is_empty() {
+        return String::new();
+    }
+    format!(
+        "    FILTER EXISTS {{\n    ?{reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {triple_pattern} )>> .\n    ?{reifier} <ad4m://ontology/author> ?{author} .\n{filter}    }}\n"
     )
 }
 
@@ -179,22 +213,6 @@ pub fn viewer_triple_filter(viewer_did: Option<&str>, triple_pattern: &str) -> S
     format!(
         "    ?_vis_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {triple_pattern} )>> .\n    ?_vis_reifier <ad4m://ontology/author> ?_vis_author .\n{filter}"
     )
-}
-
-/// Escape a value for inclusion in a double-quoted SPARQL string literal.
-fn escape_sparql_literal(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            _ => out.push(ch),
-        }
-    }
-    out
 }
 
 #[cfg(test)]
@@ -254,6 +272,39 @@ mod tests {
         assert!(filter.contains("<<( ?parent <ad4m://p> ?t )>>"));
         assert!(filter.contains("?_vis_reifier <ad4m://ontology/author> ?_vis_author"));
         assert!(filter.contains(ALICE));
+    }
+
+    /// A main-agent request with no resolvable DID must be refused. Before this
+    /// change it resolved to `Ok(None)`, which is executor scope, so the request
+    /// saw every managed user's Local links. `is_main_agent` is true for any
+    /// token without a user email, so this is not only the fresh-executor case.
+    #[test]
+    fn main_agent_without_a_did_fails_closed() {
+        use crate::agent::AgentService;
+        crate::test_utils::setup_wallet();
+        AgentService::init_global_test_instance();
+
+        let saved = AgentService::with_mutable_global_instance(|a| a.did.take());
+        let result = viewer_did_for_context(&AgentContext::main_agent());
+        AgentService::with_mutable_global_instance(|a| a.did = saved);
+
+        assert!(
+            result.is_err(),
+            "an unresolvable main-agent DID must not become executor scope, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn main_agent_with_a_did_is_agent_scope() {
+        use crate::agent::AgentService;
+        crate::test_utils::setup_wallet();
+        AgentService::init_global_test_instance();
+
+        let did = AgentService::with_global_instance(|a| a.did.clone()).expect("test agent DID");
+        assert_eq!(
+            viewer_did_for_context(&AgentContext::main_agent()).unwrap(),
+            Some(did)
+        );
     }
 
     #[test]

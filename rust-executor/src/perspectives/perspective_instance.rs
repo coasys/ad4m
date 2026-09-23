@@ -32,7 +32,6 @@ use crate::types::{
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
-use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
@@ -76,7 +75,7 @@ static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// that spent most of its budget waiting still has headroom to
 /// execute the query itself before the outer WS timeout fires.
 /// Local-only perspectives never enter the wait path.
-const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
+pub(super) const MODEL_QUERY_SHAPE_WAIT: Duration = Duration::from_secs(20);
 
 fn notification_pool_name(uuid: &str) -> String {
     format!("notification_{}", uuid)
@@ -524,7 +523,7 @@ pub struct PerspectiveInstance {
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
 /// lifetime of a single query.  On miss it parses SHACL from the perspective's
 /// store and memoizes the result.
-struct PerspectiveShapeResolver<'a> {
+pub(super) struct PerspectiveShapeResolver<'a> {
     cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
     store: &'a crate::perspectives::sparql_store::SparqlStore,
 }
@@ -654,7 +653,7 @@ impl PerspectiveInstance {
 
     /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
     /// query.  Used by `execute_model_query` for include recursion.
-    fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
+    pub(super) fn shape_resolver(&self) -> PerspectiveShapeResolver<'_> {
         PerspectiveShapeResolver {
             cache: &self.shape_cache,
             store: &self.sparql_store,
@@ -2353,34 +2352,6 @@ impl PerspectiveInstance {
         self.get_links_local_decorated_for_viewer(query, None)
     }
 
-    /// [`Self::get_links_local_decorated`] in the visibility scope of
-    /// `viewer_did` — see
-    /// [`link_visibility`](crate::perspectives::link_visibility).
-    fn get_links_local_decorated_for_viewer(
-        &self,
-        query: &LinkQuery,
-        viewer_did: Option<&str>,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let from_date = query.from_date.as_ref().map(|d| {
-            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-            dt.to_rfc3339()
-        });
-        let until_date = query.until_date.as_ref().map(|d| {
-            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-            dt.to_rfc3339()
-        });
-
-        Ok(self.sparql_store.query_links_for_viewer(
-            query.source.as_deref(),
-            query.predicate.as_deref(),
-            query.target.as_deref(),
-            from_date.as_deref(),
-            until_date.as_deref(),
-            None, // limit is applied after sorting in get_links()
-            viewer_did,
-        )?)
-    }
-
     fn get_links_local(
         &self,
         query: &LinkQuery,
@@ -2418,86 +2389,6 @@ impl PerspectiveInstance {
     /// [`link_visibility`](crate::perspectives::link_visibility).
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         self.get_links_for_viewer(q, None).await
-    }
-
-    /// [`Self::get_links`] in the visibility scope of `viewer_did`:
-    /// `Local` links authored by someone else are not returned.
-    pub async fn get_links_for_viewer(
-        &self,
-        q: &LinkQuery,
-        viewer_did: Option<&str>,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        let mut reverse = false;
-        let mut query = q.clone();
-
-        if let Some(until_date) = query.until_date.as_ref() {
-            if let Some(from_date) = query.from_date.as_ref() {
-                let chrono_from_date: chrono::DateTime<chrono::Utc> = from_date.clone().into();
-                let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into();
-                if chrono_from_date > chrono_until_date {
-                    reverse = true;
-                    query.from_date.clone_from(&q.until_date);
-                    query.until_date.clone_from(&q.from_date);
-                }
-            }
-        }
-
-        // When the caller supplies a `limit`, push it down into the store via
-        // a bounded top-N heap. This keeps memory at O(limit) regardless of
-        // how many links match — the previous materialise-sort-truncate path
-        // allocated the full Vec even for a 10-item page, which on large
-        // perspectives was a substantial regression in the same hot path this
-        // PR is trying to shrink.
-        //
-        // Otherwise (no limit) fall back to the in-memory sort path. We still
-        // pull the decorated form directly from the store so we don't pay the
-        // triple-materialisation tax described below.
-        if let Some(limit) = query.limit {
-            let from_date = query.from_date.as_ref().map(|d| {
-                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-                dt.to_rfc3339()
-            });
-            let until_date = query.until_date.as_ref().map(|d| {
-                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
-                dt.to_rfc3339()
-            });
-            return Ok(self
-                .sparql_store
-                .query_links_top_n_by_timestamp_for_viewer(
-                    query.source.as_deref(),
-                    query.predicate.as_deref(),
-                    query.target.as_deref(),
-                    from_date.as_deref(),
-                    until_date.as_deref(),
-                    limit as usize,
-                    reverse,
-                    viewer_did,
-                )?);
-        }
-
-        // No limit: pull the already-decorated form from the SPARQL store and
-        // sort in-place. Previously this path materialised Vec<...> three
-        // times: once as DecoratedLinkExpression in get_links_local_decorated,
-        // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
-        // (unwrap), and a third time after sort by re-wrapping each pair via
-        // `DecoratedLinkExpression::from((link, status))` — which re-runs
-        // Ed25519 signature verification per link. For a 10K-link result
-        // that's ~30K extra small allocations + 10K crypto ops every call.
-        // The wind-tunnel S9 query path was the dominant remaining source of
-        // RSS growth; this collapses it to a single Vec.
-        let mut links = self.get_links_local_decorated_for_viewer(&query, viewer_did)?;
-
-        links.sort_by(|a, b| {
-            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
-            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
-            if reverse {
-                b_time.cmp(&a_time)
-            } else {
-                a_time.cmp(&b_time)
-            }
-        });
-
-        Ok(links)
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -3828,46 +3719,6 @@ impl PerspectiveInstance {
             .await
     }
 
-    /// [`Self::model_query`] in the visibility scope of `viewer_did`: instance
-    /// properties, relations and projections built from another user's `Local`
-    /// links are not hydrated, so an instance that exists only in those links
-    /// does not appear at all.
-    pub async fn model_query_for_viewer(
-        &self,
-        class_name: &str,
-        query_json: &str,
-        viewer_did: Option<&str>,
-    ) -> Result<String, deno_core::anyhow::Error> {
-        let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
-            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
-
-        // Cross-peer safety: on a shared perspective we may be asked about
-        // a class whose SHACL hasn't synced yet. Poll briefly rather than
-        // fail immediately. The subsequent recursive resolves inside
-        // `execute_model_query` use the plain (non-waiting) resolver
-        // because at that point the top-level shape has been resolved so
-        // referenced target-classes are extremely likely to also be
-        // present already — a nested wait per relation would multiply
-        // latency for a case we haven't seen bite in practice.
-        let _ = self
-            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
-            .await?;
-        let resolver = self.shape_resolver();
-        let shape = resolver.get_shape(class_name)?;
-        let result = super::model_query::execute_model_query(
-            &self.sparql_store,
-            shape.as_ref(),
-            &query_input,
-            &resolver,
-            viewer_did,
-        )
-        .await?;
-
-        serde_json::to_string(&result).map_err(|e| {
-            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
-        })
-    }
-
     /// Evaluate property getters for a batch of instances in-process.
     ///
     /// Returns a JSON string of `{ instanceId: { prop: value, ... } }`.
@@ -4777,15 +4628,21 @@ impl PerspectiveInstance {
                     let remove_source = source.clone();
                     let remove_predicate = predicate.clone();
                     let remove_target = if target == "*" { None } else { Some(target) };
+                    // Only the links this agent can see: another user's
+                    // Local link on the same triple is not ours to remove
+                    // (#1024).
                     let link_expressions = self
-                        .get_links(&LinkQuery {
-                            source: Some(remove_source.clone()),
-                            predicate: remove_predicate.clone(),
-                            target: remove_target.clone(),
-                            from_date: None,
-                            until_date: None,
-                            limit: None,
-                        })
+                        .get_links_for_context(
+                            &LinkQuery {
+                                source: Some(remove_source.clone()),
+                                predicate: remove_predicate.clone(),
+                                target: remove_target.clone(),
+                                from_date: None,
+                                until_date: None,
+                                limit: None,
+                            },
+                            context,
+                        )
                         .await?;
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
@@ -4814,16 +4671,21 @@ impl PerspectiveInstance {
                         );
                         continue;
                     }
-                    // Remove matching persisted links
+                    // Remove the matching persisted links this agent can
+                    // see. Another user's Local link on this predicate is
+                    // private to them and stays (#1024).
                     let link_expressions = self
-                        .get_links(&LinkQuery {
-                            source: Some(source.clone()),
-                            predicate: predicate.clone(),
-                            target: None,
-                            from_date: None,
-                            until_date: None,
-                            limit: None,
-                        })
+                        .get_links_for_context(
+                            &LinkQuery {
+                                source: Some(source.clone()),
+                                predicate: predicate.clone(),
+                                target: None,
+                                from_date: None,
+                                until_date: None,
+                                limit: None,
+                            },
+                            context,
+                        )
                         .await?;
                     for link_expression in link_expressions {
                         self.remove_link(link_expression.into(), batch_id.clone())
@@ -4863,15 +4725,21 @@ impl PerspectiveInstance {
                     // the diff and the ordering below have to arrive together or
                     // every existing ordered collection scrambles on its next
                     // save.
+                    // Membership as this agent sees it. Another user's Local
+                    // member is not in the diff, so it is never removed
+                    // (#1024).
                     let persisted = self
-                        .get_links(&LinkQuery {
-                            source: Some(source.clone()),
-                            predicate: predicate.clone(),
-                            target: None,
-                            from_date: None,
-                            until_date: None,
-                            limit: None,
-                        })
+                        .get_links_for_context(
+                            &LinkQuery {
+                                source: Some(source.clone()),
+                                predicate: predicate.clone(),
+                                target: None,
+                                from_date: None,
+                                until_date: None,
+                                limit: None,
+                            },
+                            context,
+                        )
                         .await?;
 
                     let desired: Vec<String> = parameters
@@ -7744,6 +7612,173 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    // `execute_commands` must not remove another user's Local link (#1024).
+    //
+    // `RemoveLink`, `SetSingleTarget` and `CollectionSetter` first look up the
+    // links they replace. That lookup was in executor scope, so a co-owner's
+    // write on a shared predicate deleted another user's private Local link on
+    // the same predicate. The lookup now runs in the scope of the acting
+    // agent, which cannot see that link and so cannot remove it. One test per
+    // action, so each one is shown to fail without its fix.
+
+    const OTHER_USER: &str = "did:key:z6MkOtherManagedUser";
+    const WRITE_SOURCE: &str = "test://subject";
+
+    /// Another managed user's Local link, written straight into the shared
+    /// store as co-owning users do on a multi-user executor.
+    fn other_users_local(predicate: &str, target: &str) -> DecoratedLinkExpression {
+        DecoratedLinkExpression {
+            author: OTHER_USER.to_string(),
+            timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+            data: Link {
+                source: WRITE_SOURCE.to_string(),
+                predicate: Some(predicate.to_string()),
+                target: target.to_string(),
+            },
+            proof: DecoratedExpressionProof {
+                key: "key".to_string(),
+                signature: "sig".to_string(),
+                valid: Some(true),
+                invalid: Some(false),
+            },
+            status: Some(LinkStatus::Local),
+        }
+    }
+
+    /// Executor scope, so the assertion sees the store as it really is.
+    async fn links_on(p: &PerspectiveInstance, predicate: &str) -> Vec<DecoratedLinkExpression> {
+        p.get_links(&LinkQuery {
+            source: Some(WRITE_SOURCE.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+    }
+
+    async fn other_users_targets(p: &PerspectiveInstance, predicate: &str) -> Vec<String> {
+        links_on(p, predicate)
+            .await
+            .into_iter()
+            .filter(|l| l.author == OTHER_USER)
+            .map(|l| l.data.target)
+            .collect()
+    }
+
+    fn this_command(action: Action, predicate: &str, target: &str) -> Command {
+        Command {
+            source: Some("this".to_string()),
+            predicate: Some(predicate.to_string()),
+            target: Some(target.to_string()),
+            local: None,
+            action,
+        }
+    }
+
+    async fn run_as_main(
+        p: &mut PerspectiveInstance,
+        command: Command,
+        parameters: Vec<Parameter>,
+    ) {
+        p.execute_commands(
+            vec![command],
+            WRITE_SOURCE.to_string(),
+            parameters,
+            None,
+            &AgentContext::main_agent(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_single_target_leaves_other_users_local_link() {
+        let mut perspective = setup().await;
+        perspective
+            .sparql_store
+            .add_link(&other_users_local("test://single", "test://other-value"))
+            .unwrap();
+
+        run_as_main(
+            &mut perspective,
+            this_command(
+                Action::SetSingleTarget,
+                "test://single",
+                "test://main-value",
+            ),
+            vec![],
+        )
+        .await;
+
+        assert_eq!(
+            other_users_targets(&perspective, "test://single").await,
+            vec!["test://other-value".to_string()],
+            "SetSingleTarget must not delete another user's Local link"
+        );
+        assert_eq!(links_on(&perspective, "test://single").await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn remove_link_leaves_other_users_local_link() {
+        let mut perspective = setup().await;
+        perspective
+            .sparql_store
+            .add_link(&other_users_local("test://single", "test://other-value"))
+            .unwrap();
+        run_as_main(
+            &mut perspective,
+            this_command(Action::AddLink, "test://single", "test://main-value"),
+            vec![],
+        )
+        .await;
+
+        // A wildcard target removes only what this agent sees.
+        run_as_main(
+            &mut perspective,
+            this_command(Action::RemoveLink, "test://single", "*"),
+            vec![],
+        )
+        .await;
+
+        assert_eq!(
+            other_users_targets(&perspective, "test://single").await,
+            vec!["test://other-value".to_string()],
+            "RemoveLink must not delete another user's Local link"
+        );
+        assert_eq!(
+            links_on(&perspective, "test://single").await.len(),
+            1,
+            "RemoveLink must still remove the acting agent's own link"
+        );
+    }
+
+    #[tokio::test]
+    async fn collection_setter_leaves_other_users_local_member() {
+        let mut perspective = setup().await;
+        perspective
+            .sparql_store
+            .add_link(&other_users_local("test://members", "test://other-member"))
+            .unwrap();
+
+        // The setter diffs against the members this agent can see.
+        run_as_main(
+            &mut perspective,
+            this_command(Action::CollectionSetter, "test://members", "value"),
+            vec![Parameter {
+                name: "value".to_string(),
+                value: serde_json::json!("test://main-member"),
+            }],
+        )
+        .await;
+
+        assert_eq!(
+            other_users_targets(&perspective, "test://members").await,
+            vec!["test://other-member".to_string()],
+            "CollectionSetter must not delete another user's Local member"
+        );
+        assert_eq!(links_on(&perspective, "test://members").await.len(), 2);
     }
 
     /// The collection-expansion gate in `create_subject` / `update_subject`:

@@ -1016,13 +1016,17 @@ impl Ad4mMcpHandler {
             // causing the property to appear as "uninitialized" temporarily.
             let batch_id = perspective.create_batch().await;
 
-            // Remove old values
+            // Remove the old values this agent can see. Another user's
+            // Local value is private to them and stays (#1024).
             if let Ok(links) = perspective
-                .get_links(&LinkQuery {
-                    source: Some(expression_address.clone()),
-                    predicate: Some(predicate.clone()),
-                    ..Default::default()
-                })
+                .get_links_for_context(
+                    &LinkQuery {
+                        source: Some(expression_address.clone()),
+                        predicate: Some(predicate.clone()),
+                        ..Default::default()
+                    },
+                    &agent_context,
+                )
                 .await
             {
                 for link in links {
@@ -1090,7 +1094,7 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let _agent_context = match self.get_agent_context().await {
+        let agent_context = match self.get_agent_context().await {
             Ok(ctx) => ctx,
             Err(e) => return format!("Authentication error: {}", e),
         };
@@ -1101,12 +1105,17 @@ impl Ad4mMcpHandler {
                 Err(e) => return e,
             };
 
+        // Only the links this agent can see. Another user's Local links on
+        // the expression are private to them and are not removed (#1024).
         let mut removed = 0;
         if let Ok(links) = perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                ..Default::default()
-            })
+            .get_links_for_context(
+                &LinkQuery {
+                    source: Some(expression_address.clone()),
+                    ..Default::default()
+                },
+                &agent_context,
+            )
             .await
         {
             for link in links {
@@ -1117,10 +1126,13 @@ impl Ad4mMcpHandler {
         }
 
         if let Ok(links) = perspective
-            .get_links(&LinkQuery {
-                target: Some(expression_address.clone()),
-                ..Default::default()
-            })
+            .get_links_for_context(
+                &LinkQuery {
+                    target: Some(expression_address.clone()),
+                    ..Default::default()
+                },
+                &agent_context,
+            )
             .await
         {
             for link in links {
@@ -1189,13 +1201,17 @@ impl Ad4mMcpHandler {
         // causing the property to appear as "uninitialized" temporarily.
         let batch_id = perspective.create_batch().await;
 
-        // Remove existing links with this predicate
+        // Remove the existing links with this predicate that this agent can
+        // see. Another user's Local value is private to them and stays (#1024).
         let existing = perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
+            .get_links_for_context(
+                &LinkQuery {
+                    source: Some(expression_address.clone()),
+                    predicate: Some(predicate.clone()),
+                    ..Default::default()
+                },
+                &agent_context,
+            )
             .await;
 
         if let Ok(links) = existing {
@@ -1395,11 +1411,11 @@ impl Ad4mMcpHandler {
             Err(e) => return e,
         };
 
-        let (mut perspective, _agent_ctx) =
-            match self.get_writable_perspective(perspective_id).await {
-                Ok(p) => p,
-                Err(e) => return e,
-            };
+        let (mut perspective, agent_ctx) = match self.get_writable_perspective(perspective_id).await
+        {
+            Ok(p) => p,
+            Err(e) => return e,
+        };
 
         // Resolve collection predicate via SHACL
         let predicate = match self
@@ -1413,13 +1429,17 @@ impl Ad4mMcpHandler {
         // Find and remove the link with matching target
         let target = Self::wrap_bare_as_literal(&value);
 
+        // Only the membership links this agent can see (#1024).
         match perspective
-            .get_links(&LinkQuery {
-                source: Some(expression_address.clone()),
-                predicate: Some(predicate),
-                target: Some(target),
-                ..Default::default()
-            })
+            .get_links_for_context(
+                &LinkQuery {
+                    source: Some(expression_address.clone()),
+                    predicate: Some(predicate),
+                    target: Some(target),
+                    ..Default::default()
+                },
+                &agent_ctx,
+            )
             .await
         {
             Ok(links) => {

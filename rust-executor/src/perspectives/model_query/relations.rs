@@ -574,9 +574,14 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
-    let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint} }}"
-    );
+    // Only edges the viewer may see. Otherwise a source that points here
+    // only through another user's Local link is included, hydrated from its
+    // own Shared links (#1024).
+    let edge = format!("?source <{safe_pred}> ?target");
+    let visible =
+        crate::perspectives::link_visibility::viewer_edge_filter(viewer_did, &edge, "rev");
+    let sparql =
+        format!("SELECT ?source ?target WHERE {{ {edge} . {target_constraint}\n{visible}}}");
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
