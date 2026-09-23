@@ -6,7 +6,7 @@
 
 use super::shape::parse_shape_from_json;
 use super::test_helpers::{execute_model_query_from_json, StaticShapeResolver};
-use super::types::{ModelQueryInput, WhereCondition};
+use super::types::{ModelQueryInput, OrderDirection, WhereCondition};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::sparql_store::SparqlStore;
 use crate::types::{Link, LinkExpression};
@@ -279,4 +279,176 @@ async fn proof_valid_where_does_not_select_on_a_forged_value() {
     .await
     .unwrap();
     assert_eq!(count.total_count, 0, "counted by a forged value");
+}
+
+/// Genuine recipes `a`, `b`, `c` (typed at :10, :11, :12) with every order key
+/// the two-phase plan sorts on: `a` is named "banana" and has two comments,
+/// `b` is named "cherry" and has one, `c` has neither. Comment bodies sort
+/// `a` before `b`.
+fn pv_seed_page(store: &SparqlStore, signer: &TestSigner) {
+    for l in [
+        pv_signed(signer, "pv://r/a", "ad4m://type", "pv://Recipe", 10),
+        pv_signed(signer, "pv://r/b", "ad4m://type", "pv://Recipe", 11),
+        pv_signed(signer, "pv://r/c", "ad4m://type", "pv://Recipe", 12),
+        pv_signed(signer, "pv://r/a", "pv://name", "literal:string:banana", 13),
+        pv_signed(signer, "pv://r/b", "pv://name", "literal:string:cherry", 13),
+        pv_signed(signer, "pv://r/a", "pv://comment", "pv://c/a1", 14),
+        pv_signed(signer, "pv://r/a", "pv://comment", "pv://c/a2", 14),
+        pv_signed(signer, "pv://r/b", "pv://comment", "pv://c/b1", 14),
+        pv_signed(signer, "pv://c/a1", "pv://body", "literal:string:m1", 15),
+        pv_signed(signer, "pv://c/a2", "pv://body", "literal:string:m2", 15),
+        pv_signed(signer, "pv://c/b1", "pv://body", "literal:string:n1", 15),
+        // Comments nobody attached to a recipe, with bodies that sort first.
+        pv_signed(signer, "pv://c/x1", "pv://body", "literal:string:a1", 15),
+        pv_signed(signer, "pv://c/x2", "pv://body", "literal:string:a2", 15),
+        pv_signed(signer, "pv://c/x3", "pv://body", "literal:string:a3", 15),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+}
+
+/// Unverified links on `c` that would move it to the front under every order
+/// key: an earlier type link, a name sorting first, three comments (more than
+/// `a` has) whose bodies sort first.
+fn pv_forge_page(store: &SparqlStore, signer: &TestSigner) {
+    for l in [
+        pv_forged(signer, "pv://r/c", "ad4m://type", "pv://Recipe", 1),
+        pv_forged(signer, "pv://r/c", "pv://name", "literal:string:aaa", 20),
+        pv_forged(signer, "pv://r/c", "pv://comment", "pv://c/x1", 20),
+        pv_forged(signer, "pv://r/c", "pv://comment", "pv://c/x2", 20),
+        pv_forged(signer, "pv://r/c", "pv://comment", "pv://c/x3", 20),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+}
+
+async fn pv_page(
+    store: &SparqlStore,
+    shape: &super::types::ModelShape,
+    resolver: &StaticShapeResolver,
+    query: ModelQueryInput,
+) -> super::types::ModelQueryResult {
+    super::query::execute_model_query(store, shape, &query, resolver)
+        .await
+        .unwrap()
+}
+
+/// #1113 in the two-phase plan's pagination subquery: an unverified link on
+/// one instance must not change which instances land on a page, or in which
+/// order, under any order key the subquery sorts on — the default timestamp,
+/// a property, a `$` projection count, and a relation's property. Page 1
+/// (`limit: 2`) and page 2 (`offset: 2`) are compared against the same
+/// perspective without the unverified links. `totalCount` must agree with the
+/// unpaginated row count, and a `$` count shown on the page with the one it
+/// was sorted by.
+///
+/// Each order key is also run with `include_unverified`, which must see the
+/// reordering, so the comparison cannot pass because the unverified links
+/// never mattered.
+#[tokio::test]
+async fn proof_valid_unverified_links_do_not_reorder_a_page() {
+    let signer = TestSigner::generate();
+    let clean = SparqlStore::new(None).unwrap();
+    let dirty = SparqlStore::new(None).unwrap();
+    pv_seed_page(&clean, &signer);
+    pv_seed_page(&dirty, &signer);
+    pv_forge_page(&dirty, &signer);
+
+    let (resolver, shape) = StaticShapeResolver::from_json("Recipe", PV_SHAPE_JSON).unwrap();
+    resolver.register(
+        "Comment",
+        parse_shape_from_json(PV_COMMENT_SHAPE_JSON, "Comment").unwrap(),
+    );
+    let projections = HashMap::from([(
+        "$n".to_string(),
+        super::types::ProjectionInput {
+            from: "comments".to_string(),
+            count: true,
+            transitive: false,
+            target_class_name: None,
+            where_clause: None,
+            limit: None,
+            order: None,
+        },
+    )]);
+    let query = |order: Option<(&str, OrderDirection)>,
+                 limit: Option<usize>,
+                 offset: Option<usize>,
+                 include_unverified: Option<bool>| ModelQueryInput {
+        order: order.map(|(k, d)| vec![(k.to_string(), d)]),
+        limit,
+        offset,
+        include_unverified,
+        projections: Some(projections.clone()),
+        ..Default::default()
+    };
+    let ids = |r: &super::types::ModelQueryResult| -> Vec<String> {
+        r.instances
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let counts = |r: &super::types::ModelQueryResult| -> Vec<serde_json::Value> {
+        r.instances.iter().map(|i| i["$n"].clone()).collect()
+    };
+
+    for order in [
+        None,
+        Some(("name", OrderDirection::ASC)),
+        Some(("$n", OrderDirection::DESC)),
+        Some(("comments.body", OrderDirection::ASC)),
+    ] {
+        let expected_first =
+            pv_page(&clean, &shape, &resolver, query(order, Some(2), None, None)).await;
+        assert_eq!(
+            ids(&expected_first),
+            vec!["pv://r/a", "pv://r/b"],
+            "order {order:?}: fixture"
+        );
+
+        let first = pv_page(&dirty, &shape, &resolver, query(order, Some(2), None, None)).await;
+        assert_eq!(
+            ids(&first),
+            ids(&expected_first),
+            "order {order:?}: an unverified link changed page 1"
+        );
+        assert_eq!(
+            counts(&first),
+            counts(&expected_first),
+            "order {order:?}: `$n` on page 1"
+        );
+        let second = pv_page(
+            &dirty,
+            &shape,
+            &resolver,
+            query(order, Some(2), Some(2), None),
+        )
+        .await;
+        assert_eq!(
+            ids(&second),
+            vec!["pv://r/c"],
+            "order {order:?}: an unverified link changed page 2"
+        );
+
+        let all = pv_page(&dirty, &shape, &resolver, query(order, None, None, None)).await;
+        assert_eq!(all.instances.len(), 3, "order {order:?}");
+        assert_eq!(
+            first.total_count,
+            all.instances.len(),
+            "order {order:?}: totalCount disagrees with the rows"
+        );
+
+        let opted_in = pv_page(
+            &dirty,
+            &shape,
+            &resolver,
+            query(order, Some(2), None, Some(true)),
+        )
+        .await;
+        assert_eq!(
+            ids(&opted_in)[0],
+            "pv://r/c",
+            "order {order:?}: the opt-in sees the unverified links"
+        );
+    }
 }
