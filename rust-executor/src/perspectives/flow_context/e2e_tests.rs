@@ -29,7 +29,7 @@
 //! AIService, which none of the code paths under test touch.
 
 use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
-use crate::perspectives::flow_classes::mint_flow_instance;
+use crate::perspectives::flow_classes::{advance_flow_instance_state, mint_flow_instance};
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
 };
@@ -206,7 +206,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();
     let transcript = vec![TranscriptTurn::from_speaker_text("A", "irrelevant")];
-    let prompt = build_interpretation_input(&[], &transcript, &existing, &contexts);
+    let prompt =
+        build_interpretation_input(&[], &transcript, &existing, &contexts, &Default::default());
     let parsed: serde_json::Value = serde_json::from_str(&prompt).expect("prompt is valid JSON");
     let flows_in_prompt = parsed
         .get("active_flows")
@@ -242,4 +243,53 @@ async fn load_flow_instances_absent_class_returns_empty() {
         .await
         .expect("absent class must not error");
     assert!(all.is_empty());
+}
+
+/// `gather_active_flow_contexts` must use the `Local` `currentState` cache
+/// rather than deriving.  Observable: set the cache to "scoped" WITHOUT any
+/// transition proposals in the graph.  The fold, seeing no quorum, returns
+/// "identified" (genesis state).  Only cache-first can return "scoped".
+#[tokio::test(flavor = "multi_thread")]
+async fn gather_active_flow_contexts_cache_first_skips_derive() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+    let flow_links =
+        parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links");
+    for link in flow_links {
+        perspective
+            .add_link(link, LinkStatus::Local, None, &ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
+
+    let base_uri = "ad4m://task/cache-first-test";
+    let inst_uri = mint_flow_instance(
+        &mut perspective,
+        "delivery://DeliveryFlow",
+        base_uri,
+        "identified",
+        "cache-first-inst-1",
+        None,
+        &ctx,
+    )
+    .await
+    .expect("mint_flow_instance");
+
+    // Advance the Local cache to "scoped" WITHOUT any proposals.
+    // The fold sees no quorum and would return "identified".
+    // Only a cache-first reader can produce "scoped".
+    advance_flow_instance_state(&mut perspective, &inst_uri, "scoped", None, &ctx)
+        .await
+        .expect("advance_flow_instance_state to scoped");
+
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    assert_eq!(
+        contexts.len(),
+        1,
+        "one instance ⇒ one context, got {contexts:?}"
+    );
+    assert_eq!(
+        contexts[0].current_state, "scoped",
+        "Local cache at 'scoped' must be returned (fold would give 'identified' — no proposals)"
+    );
 }

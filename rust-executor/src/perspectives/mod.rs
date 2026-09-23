@@ -4,6 +4,9 @@ pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;
 #[cfg(test)]
 mod flow_evaluator_e2e;
+pub(crate) mod flow_instance;
+#[cfg(test)]
+mod flow_instance_e2e;
 pub(crate) mod flow_semantic_check;
 pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
@@ -128,18 +131,13 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
             }
 
-            // Run named-graph → reifier migration (idempotent)
-            match p.sparql_store.migrate_named_graphs_to_reifiers() {
-                Ok(count) if count > 0 => {
-                    log::info!(
-                        "🔄 Reifier migration for {}: {} links migrated",
-                        handle_clone.uuid,
-                        count
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
-            }
+            // No named-graph → reifier migration. The named-graph storage model
+            // never shipped: `git tag --contains` on the commit that replaced it
+            // (`7aeeb8982`) is empty, and the last release tag carrying
+            // `perspectives/` has no `sparql_store.rs` at all. Carrying a
+            // migration for a format nobody holds meant carrying a third
+            // `proofValid` read path, and with it the "never evaluated" verdict
+            // it decoded (#1046).
 
             // No literal-encoding migration on boot. A scalar rides the API as a
             // `literal:*` wire target and is stored as a native typed RDF literal
@@ -312,6 +310,14 @@ pub fn all_perspectives() -> Vec<PerspectiveInstance> {
 pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) {
     let mut perspectives = PERSPECTIVES.write().unwrap();
     perspectives.insert(uuid, RwLock::new(instance));
+}
+
+/// Remove an instance from the global map without touching the persistence
+/// backend. Test-only: lets fixtures that used `register_perspective` leave
+/// global state clean for tests that assert on it.
+#[cfg(test)]
+pub(crate) fn unregister_perspective(uuid: &str) {
+    PERSPECTIVES.write().unwrap().remove(uuid);
 }
 
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {

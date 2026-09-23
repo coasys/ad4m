@@ -87,7 +87,7 @@ impl ToolSchema {
     /// Cheap constructor for zero-arg READ tools — the empty-object schema
     /// is verbose enough that inlining it everywhere hurts readability.
     /// Read is the safer default and the shape most zero-arg tools take
-    /// (`list_perspectives`, `get_models`, ...). Use
+    /// (`list_perspectives`, `auth_status`, ...). Use
     /// [`ToolSchema::zero_arg_write`] for mutators.
     pub fn zero_arg(name: impl Into<String>, description: impl Into<String>) -> Self {
         Self {
