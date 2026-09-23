@@ -437,7 +437,7 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
 /// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
 /// by a margin for the gap between requests; otherwise an active user ages out
 /// right before their `last_seen` is refreshed and their loop flaps (#1070).
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 600;
+pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.

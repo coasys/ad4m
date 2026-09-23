@@ -130,7 +130,7 @@ pub fn user_email_from_token(token: String) -> Option<String> {
 }
 
 /// Update last_seen timestamp for the user from the auth token
-/// This is throttled to only update once every 5 minutes to reduce database writes
+/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
 pub async fn track_last_seen_from_token(token: String) {
     use crate::db::Ad4mDb;
