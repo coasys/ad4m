@@ -628,13 +628,25 @@ impl SparqlStore {
             }
         "#;
 
+        self.query_decorated_links(query)
+    }
+
+    /// Run a SELECT that binds the link variables `?source ?predicate ?target
+    /// ?author ?timestamp` (and optionally `?proofKey ?proofSig ?proofValid
+    /// ?status`) and decode each solution into a link, the same way
+    /// [`Self::get_all_links`] does. Solutions that do not decode to a link
+    /// (non-IRI source, blank-node target, ...) are skipped.
+    pub(crate) fn query_decorated_links(
+        &self,
+        query: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let results = self
             .sparql_evaluator()
             .parse_query(query)
-            .map_err(|e| anyhow!("Failed to parse get_all_links query: {}", e))?
+            .map_err(|e| anyhow!("Failed to parse link query: {}", e))?
             .on_store(&self.store)
             .execute()
-            .map_err(|e| anyhow!("get_all_links query failed: {}", e))?;
+            .map_err(|e| anyhow!("link query failed: {}", e))?;
 
         match results {
             QueryResults::Solutions(solutions) => {

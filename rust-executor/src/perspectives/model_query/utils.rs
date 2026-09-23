@@ -124,7 +124,7 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
 /// NamedNode, as do all subjects.  Do not "fix" such ids by routing them
 /// through the XSD translator — an XSD literal cannot be a subject, and the
 /// `STR()` fallback below would stop matching the wire id.
-pub(super) fn emittable_iri(s: &str) -> bool {
+pub(crate) fn emittable_iri(s: &str) -> bool {
     validate_iri(s).is_ok() && oxigraph::model::NamedNode::new(s).is_ok()
 }
 
@@ -133,7 +133,7 @@ pub(super) fn emittable_iri(s: &str) -> bool {
 /// `FILTER(STR(…) IN (…))` test (a scan, but the only correct form for
 /// `new_unchecked` store terms).  In the filter case `?{var}` must already be
 /// bound by a triple pattern in the surrounding group.
-pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
+pub(crate) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     if ids.iter().all(|id| emittable_iri(id)) {
         let iris = ids
             .iter()

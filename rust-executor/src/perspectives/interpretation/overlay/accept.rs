@@ -20,9 +20,12 @@
 use super::{INFERRED_PREFIX, OVERLAY_KIND_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
-use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::model_query::utils::{
+    emittable_iri, parse_literal_value, values_or_str_filter,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
+use std::collections::BTreeMap;
 
 const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 
@@ -47,12 +50,17 @@ pub(crate) async fn overlay_of(
     base: &str,
 ) -> anyhow::Result<Option<OverlayView>> {
     let all = links_from(perspective, base).await?;
-    let kind = match first_target(&all, OVERLAY_KIND_PRED) {
-        Some(k) => k,
-        None => return Ok(None),
-    };
-    let run = first_target(&all, OVERLAY_RUN_PRED);
-    let inferred = all
+    Ok(view_from_links(base, &all))
+}
+
+/// Build the view for `base` from its links, in `get_links` order (timestamp
+/// ascending). `None` when no `kind` link is among them. Links with other
+/// predicates are ignored, so this accepts either every link of the base or
+/// only its overlay links.
+fn view_from_links(base: &str, links: &[DecoratedLinkExpression]) -> Option<OverlayView> {
+    let kind = first_target(links, OVERLAY_KIND_PRED)?;
+    let run = first_target(links, OVERLAY_RUN_PRED);
+    let inferred = links
         .iter()
         .filter_map(|l| {
             let pred = l.data.predicate.as_deref()?;
@@ -60,16 +68,38 @@ pub(crate) async fn overlay_of(
             Some((real.to_string(), parse_literal_value(&l.data.target)))
         })
         .collect();
-    Ok(Some(OverlayView {
+    Some(OverlayView {
         base: base.to_string(),
         kind,
         run,
         inferred,
-    }))
+    })
 }
 
 /// Every base in the perspective that currently carries an overlay — the
-/// pending-suggestions list a UI renders.
+/// pending-suggestions list a UI renders — sorted by base.
+///
+/// Two reads, whatever the number of overlays:
+///
+/// 1. `get_links` on the `kind` predicate gives the bases.
+/// 2. One SPARQL query over all those bases returns only their overlay links
+///    (`kind`, `run`, `inferred/<p>`). The predicate filter runs in the store,
+///    so a base's normal data is never decoded or returned.
+///
+/// The previous version ran step 1 and then one `get_links` per base, each
+/// returning *every* link of the base: 1+N reads that grew with the number of
+/// pending overlays and with the size of each base.
+///
+/// `model_query` does not fit here: it reads instances of one SHACL class,
+/// while an overlay can sit on a base of any class (or none), and its
+/// `inferred/<p>` predicates are not known in advance. `LinkQuery` matches
+/// exact predicates only, hence the SPARQL filter.
+///
+/// The result is the same as calling [`overlay_of`] on each base: step 2
+/// decodes rows the way `get_links` does, each base's links are sorted by
+/// timestamp like `get_links`, and [`view_from_links`] builds both views.
+/// Like `get_links`, it applies no per-user filter; access is checked per
+/// perspective by the caller.
 pub(crate) async fn list_overlays(
     perspective: &PerspectiveInstance,
 ) -> anyhow::Result<Vec<OverlayView>> {
@@ -82,13 +112,63 @@ pub(crate) async fn list_overlays(
     let mut bases: Vec<String> = kind_links.into_iter().map(|l| l.data.source).collect();
     bases.sort();
     bases.dedup();
-    let mut out = Vec::with_capacity(bases.len());
-    for base in bases {
-        if let Some(v) = overlay_of(perspective, &base).await? {
-            out.push(v);
+    if bases.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Bases that parse as IRIs go into a seekable `VALUES` block. The store
+    // also holds `new_unchecked` subjects that do not (Flux's
+    // `literal://string:…` ids); those need a `STR()` filter, which scans, so
+    // they get their own query and only when there are any.
+    let (iri_bases, other_bases): (Vec<String>, Vec<String>) =
+        bases.into_iter().partition(|b| emittable_iri(b));
+    let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
+    for group in [iri_bases, other_bases] {
+        if group.is_empty() {
+            continue;
+        }
+        let rows = perspective
+            .sparql_store
+            .query_decorated_links(&overlay_links_query(&group))?;
+        for l in rows {
+            by_base.entry(l.data.source.clone()).or_default().push(l);
         }
     }
-    Ok(out)
+
+    Ok(by_base
+        .into_iter()
+        .filter_map(|(base, mut links)| {
+            // Same stable sort as `PerspectiveInstance::get_links`.
+            links.sort_by_key(|l| {
+                chrono::DateTime::parse_from_rfc3339(&l.timestamp).unwrap_or_default()
+            });
+            view_from_links(&base, &links)
+        })
+        .collect())
+}
+
+/// The batched read behind [`list_overlays`]: every overlay link whose
+/// source is one of `bases`, in the row shape `get_links` decodes.
+fn overlay_links_query(bases: &[String]) -> String {
+    format!(
+        r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {{
+    {bases}
+    ?source ?predicate ?target .
+    FILTER(isIRI(?source) && (?predicate = <{kind}> || ?predicate = <{run}> || STRSTARTS(STR(?predicate), "{inferred}")))
+    ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+    ?reifier <ad4m://ontology/author> ?author .
+    ?reifier <ad4m://ontology/timestamp> ?timestamp .
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofKey> ?proofKey . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofValid> ?proofValid . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
+}}"#,
+        bases = values_or_str_filter("source", bases),
+        kind = OVERLAY_KIND_PRED,
+        run = OVERLAY_RUN_PRED,
+        inferred = INFERRED_PREFIX,
+    )
 }
 
 /// Accept the overlay's suggestion(s) on `base`: materialize the staged value(s)
@@ -492,5 +572,418 @@ mod tests {
             overlay_of(&p, base).await.unwrap().is_none(),
             "overlay gone"
         );
+    }
+
+    // ── list_overlays: single query vs the old per-base algorithm ──────────
+
+    /// The previous `list_overlays`, kept as the parity and timing reference:
+    /// one `get_links` for the `kind` links, then `overlay_of` (a `get_links`
+    /// of every link of the base) once per base.
+    async fn list_overlays_per_base(p: &PerspectiveInstance) -> Vec<OverlayView> {
+        let kind_links = p
+            .get_links(&LinkQuery {
+                predicate: Some(OVERLAY_KIND_PRED.to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut bases: Vec<String> = kind_links.into_iter().map(|l| l.data.source).collect();
+        bases.sort();
+        bases.dedup();
+        let mut out = Vec::new();
+        for base in bases {
+            if let Some(v) = overlay_of(p, &base).await.unwrap() {
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// Write a link straight into the store with a chosen author and
+    /// timestamp, to force timestamp ties and out-of-order inserts.
+    fn put(p: &PerspectiveInstance, base: &str, pred: &str, target: &str, author: &str, ts: &str) {
+        p.sparql_store
+            .add_link(&DecoratedLinkExpression {
+                author: author.into(),
+                timestamp: ts.into(),
+                data: Link {
+                    source: base.into(),
+                    predicate: Some(pred.into()),
+                    target: target.into(),
+                },
+                proof: crate::types::DecoratedExpressionProof {
+                    key: "k".into(),
+                    signature: "s".into(),
+                    valid: Some(true),
+                    invalid: Some(false),
+                },
+                status: Some(LinkStatus::Shared),
+            })
+            .unwrap();
+    }
+
+    fn json(v: &[OverlayView]) -> String {
+        serde_json::to_string(v).unwrap()
+    }
+
+    fn inferred_of<'a>(v: &'a [OverlayView], base: &str) -> Vec<&'a str> {
+        v.iter()
+            .find(|o| o.base == base)
+            .unwrap()
+            .inferred
+            .iter()
+            .map(|(p, _)| p.as_str())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn list_overlays_matches_per_base_reference() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let inf = |real: &str| format!("{INFERRED_PREFIX}{real}");
+
+        // A: create overlay, three inferred props with different literal
+        // types, plus real values and unrelated links on the same base.
+        let a = "soa://ext/Task/a";
+        add(&mut p, a, "soa://title", "literal:string:Fix", &ctx).await;
+        add(&mut p, a, "soa://tag", "soa://tag/urgent", &ctx).await;
+        add(&mut p, a, OVERLAY_KIND_PRED, "literal:string:create", &ctx).await;
+        add(&mut p, a, OVERLAY_RUN_PRED, "ad4m://interp/run/r1", &ctx).await;
+        add(&mut p, a, &inf("soa://title"), "literal:string:Fix", &ctx).await;
+        add(&mut p, a, &inf("soa://done"), "literal:boolean:true", &ctx).await;
+        add(&mut p, a, &inf("soa://points"), "literal:number:3", &ctx).await;
+        // Look-alike predicates in the interp namespace that are NOT overlay
+        // links: they must not become `run` or an `inferred` entry.
+        add(&mut p, a, "ad4m://interp/running", "soa://x", &ctx).await;
+        add(&mut p, a, "ad4m://interp/inferred", "soa://x", &ctx).await;
+
+        // B: update overlay without a run; its inferred links share one
+        // timestamp and were inserted newest-first.
+        let b = "soa://ext/Task/b";
+        add(&mut p, b, "soa://summary", "literal:string:Human", &ctx).await;
+        let ts = "2030-01-01T00:00:00.000Z";
+        put(
+            &p,
+            b,
+            &inf("soa://summary"),
+            "literal:string:LLM",
+            "did:key:zA",
+            "2030-01-01T00:00:01.000Z",
+        );
+        put(&p, b, OVERLAY_KIND_PRED, "update", "did:key:zA", ts);
+        put(
+            &p,
+            b,
+            &inf("soa://zeta"),
+            "literal:string:z",
+            "did:key:zA",
+            ts,
+        );
+        put(
+            &p,
+            b,
+            &inf("soa://alpha"),
+            "literal:string:a",
+            "did:key:zA",
+            ts,
+        );
+        put(
+            &p,
+            b,
+            &inf("soa://mid"),
+            "literal:string:m",
+            "did:key:zA",
+            ts,
+        );
+
+        // C: two agents wrote different `kind` and `run` values at the same
+        // time (peer sync), and one of them wrote the same inferred value.
+        let c = "soa://ext/Task/c";
+        put(&p, c, OVERLAY_KIND_PRED, "update", "did:key:zB", ts);
+        put(&p, c, OVERLAY_KIND_PRED, "create", "did:key:zA", ts);
+        put(
+            &p,
+            c,
+            OVERLAY_RUN_PRED,
+            "ad4m://interp/run/r9",
+            "did:key:zB",
+            ts,
+        );
+        put(
+            &p,
+            c,
+            OVERLAY_RUN_PRED,
+            "ad4m://interp/run/r3",
+            "did:key:zA",
+            ts,
+        );
+        put(
+            &p,
+            c,
+            &inf("soa://title"),
+            "literal:string:Same",
+            "did:key:zA",
+            ts,
+        );
+        put(
+            &p,
+            c,
+            &inf("soa://title"),
+            "literal:string:Same",
+            "did:key:zB",
+            ts,
+        );
+
+        // D: inferred links but no `kind` — not an overlay.
+        let d = "soa://ext/Task/d";
+        add(
+            &mut p,
+            d,
+            &inf("soa://title"),
+            "literal:string:Orphan",
+            &ctx,
+        )
+        .await;
+        add(&mut p, d, OVERLAY_RUN_PRED, "ad4m://interp/run/r1", &ctx).await;
+
+        // Other nodes: the run node's own metadata, links that point AT an
+        // overlay base, and a `kind` IRI used as a target.
+        add(
+            &mut p,
+            "ad4m://interp/run/r1",
+            "ad4m://interp/model",
+            "literal:string:m",
+            &ctx,
+        )
+        .await;
+        add(&mut p, "soa://ext/Project/1", "soa://has_task", a, &ctx).await;
+        add(
+            &mut p,
+            "soa://ext/Other/1",
+            "soa://refers",
+            OVERLAY_KIND_PRED,
+            &ctx,
+        )
+        .await;
+        add(
+            &mut p,
+            "soa://ext/Other/1",
+            &inf("soa://title"),
+            "literal:string:X",
+            &ctx,
+        )
+        .await;
+
+        // E: a `new_unchecked` base that is not a parseable IRI (Flux's
+        // `literal://string:` ids), read through the `STR()` fallback.
+        let e = "literal://string:taskE";
+        add(&mut p, e, OVERLAY_KIND_PRED, "literal:string:create", &ctx).await;
+        add(&mut p, e, &inf("soa://title"), "literal:string:E", &ctx).await;
+        add(&mut p, e, "soa://title", "literal:string:E", &ctx).await;
+        assert!(!emittable_iri(e), "E must take the STR() path");
+
+        // F: eight inferred links written in an order unrelated to their
+        // timestamps, and a second, later `kind` written last. Rows come out
+        // of the store in neither timestamp nor predicate order, so both the
+        // inferred order and which `kind` wins depend on the per-base sort.
+        let f = "soa://ext/Task/f";
+        put(&p, f, OVERLAY_KIND_PRED, "update", "did:key:zA", ts);
+        let second = [3, 7, 0, 5, 1, 6, 2, 4];
+        for (i, sec) in second.iter().enumerate() {
+            put(
+                &p,
+                f,
+                &inf(&format!("soa://f{i}")),
+                "literal:string:x",
+                "did:key:zA",
+                &format!("2030-01-01T00:00:0{}.000Z", sec + 1),
+            );
+        }
+        put(
+            &p,
+            f,
+            OVERLAY_KIND_PRED,
+            "create",
+            "did:key:zA",
+            "2030-01-01T00:00:10.000Z",
+        );
+
+        let reference = list_overlays_per_base(&p).await;
+        let new = list_overlays(&p).await.unwrap();
+        assert_eq!(
+            json(&new),
+            json(&reference),
+            "same output as the per-base algorithm"
+        );
+
+        // Hand-checked expectations, so the test does not rest on the
+        // reference alone.
+        let bases: Vec<&str> = new.iter().map(|o| o.base.as_str()).collect();
+        assert_eq!(
+            bases,
+            vec![e, a, b, c, f],
+            "sorted, deduplicated, no kind-less base"
+        );
+        // `add` stamps milliseconds, so A's links may tie: check A as a set.
+        let mut ia = inferred_of(&new, a);
+        ia.sort();
+        assert_eq!(ia, vec!["soa://done", "soa://points", "soa://title"]);
+        let va = new.iter().find(|o| o.base == a).unwrap();
+        assert_eq!(va.run.as_deref(), Some("ad4m://interp/run/r1"));
+        let value = |pred: &str| {
+            va.inferred
+                .iter()
+                .find(|(p, _)| p == pred)
+                .unwrap()
+                .1
+                .clone()
+        };
+        assert_eq!(value("soa://done"), serde_json::json!(true));
+        assert_eq!(value("soa://points"), serde_json::json!(3));
+        let vb = new.iter().find(|o| o.base == b).unwrap();
+        assert_eq!(vb.kind, "update");
+        assert_eq!(vb.run, None);
+        assert_eq!(inferred_of(&new, b).len(), 4);
+        assert_eq!(
+            *inferred_of(&new, b).last().unwrap(),
+            "soa://summary",
+            "newest last"
+        );
+        assert_eq!(
+            inferred_of(&new, c),
+            vec!["soa://title", "soa://title"],
+            "one row per author"
+        );
+        assert_eq!(inferred_of(&new, e), vec!["soa://title"]);
+        assert_eq!(
+            inferred_of(&new, f),
+            vec![
+                "soa://f2", "soa://f4", "soa://f6", "soa://f0", "soa://f7", "soa://f3", "soa://f5",
+                "soa://f1",
+            ],
+            "oldest first, as get_links sorts"
+        );
+        let vf = new.iter().find(|o| o.base == f).unwrap();
+        assert_eq!(vf.kind, "update", "the oldest `kind` wins");
+    }
+
+    /// `n` overlay bases, each with `extra` normal links, a `kind`, a `run`
+    /// and three `inferred/<p>` links.
+    async fn seed_overlays(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        n: usize,
+        extra: usize,
+    ) {
+        let mut links = Vec::new();
+        for i in 0..n {
+            let base = format!("soa://ext/Scale/{i}");
+            let mut l = |pred: String, target: String| {
+                links.push(Link {
+                    source: base.clone(),
+                    predicate: Some(pred),
+                    target,
+                })
+            };
+            for f in 0..extra {
+                l(
+                    format!("soa://field{f}"),
+                    format!("literal:string:v{i}_{f}"),
+                );
+            }
+            l(OVERLAY_KIND_PRED.into(), "literal:string:create".into());
+            l(OVERLAY_RUN_PRED.into(), "ad4m://interp/run/r1".into());
+            for f in 0..3 {
+                l(
+                    format!("{INFERRED_PREFIX}soa://field{f}"),
+                    format!("literal:string:v{i}_{f}"),
+                );
+            }
+        }
+        p.add_links(links, LinkStatus::Local, None, ctx)
+            .await
+            .unwrap();
+    }
+
+    /// Check that both algorithms give the same `n` views, then return the
+    /// mean wall time of each in ms, as `(per-base, batched)`.
+    async fn time_both(p: &PerspectiveInstance, n: usize, reps: u32) -> (f64, f64) {
+        // The first calls also warm the store's caches for both paths.
+        let old = list_overlays_per_base(p).await;
+        let new = list_overlays(p).await.unwrap();
+        assert_eq!(
+            json(&new),
+            json(&old),
+            "same output as the per-base algorithm"
+        );
+        assert_eq!(new.len(), n);
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            list_overlays_per_base(p).await;
+        }
+        let old_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            list_overlays(p).await.unwrap();
+        }
+        let new_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
+        (old_ms, new_ms)
+    }
+
+    /// #1017: with 300 pending overlays, each on a base with 20 normal links,
+    /// the list must equal the per-base result and take at most half the
+    /// time. Runs on RocksDB, the store a running executor uses. Measured
+    /// locally at about 5x; the 2x bound leaves room for a loaded CI machine,
+    /// and still fails when `list_overlays` goes back to one read per base
+    /// (both sides then take the same time).
+    #[tokio::test]
+    async fn list_overlays_300_overlays_same_result_and_faster() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let dir = tempfile::tempdir().unwrap();
+        p.sparql_store = std::sync::Arc::new(
+            crate::perspectives::sparql_store::SparqlStore::new(Some(dir.path().to_str().unwrap()))
+                .unwrap(),
+        );
+        seed_overlays(&mut p, &ctx, 300, 20).await;
+        let (old_ms, new_ms) = time_both(&p, 300, 3).await;
+        println!("300 overlays, RocksDB: per-base {old_ms:.1} ms, batched {new_ms:.1} ms");
+        assert!(
+            new_ms * 2.0 < old_ms,
+            "batched list_overlays ({new_ms:.1} ms) is not at least 2x faster than per-base ({old_ms:.1} ms)"
+        );
+    }
+
+    /// The timing table for the PR: both algorithms on the in-memory store
+    /// and on RocksDB (what a running executor uses). Not run in CI, as wall
+    /// time is machine-dependent; run with
+    /// `cargo test --release -p ad4m-executor --lib list_overlays_scaling -- --ignored --nocapture`.
+    #[tokio::test]
+    #[ignore]
+    async fn list_overlays_scaling() {
+        use crate::perspectives::sparql_store::SparqlStore;
+        // (overlays, normal links per base)
+        let cases = [
+            (100usize, 8usize),
+            (300, 8),
+            (1000, 8),
+            (300, 20),
+            (300, 50),
+        ];
+        for rocks in [false, true] {
+            for (n, extra) in cases {
+                let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+                let dir = tempfile::tempdir().unwrap();
+                if rocks {
+                    p.sparql_store = std::sync::Arc::new(
+                        SparqlStore::new(Some(dir.path().to_str().unwrap())).unwrap(),
+                    );
+                }
+                seed_overlays(&mut p, &ctx, n, extra).await;
+                let (old_ms, new_ms) = time_both(&p, n, 5).await;
+                println!(
+                    "SCALING store={} overlays={n} normal_links_per_base={extra}: per-base {old_ms:.1} ms, batched {new_ms:.1} ms",
+                    if rocks { "rocksdb" } else { "memory" },
+                );
+            }
+        }
     }
 }
