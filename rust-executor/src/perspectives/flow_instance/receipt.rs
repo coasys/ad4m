@@ -19,7 +19,7 @@
 //!   │                         a hash cannot reconstruct a definition, so
 //!   │                         nothing here can be replayed against old rules.
 //!   ├── terminal_state      derived by the fold at mint, never asserted
-//!   ├── outputs             the binding: which nodes this receipt speaks for
+//!   ├── outputs             derived from the final edge's seal, never asserted
 //!   ├── read_set            the proof body — signed links, carried raw
 //!   └── evidence_preimage   what each counted atom's seal was taken over
 //! ```
@@ -38,16 +38,36 @@
 //! under the definition it holds. Making the hash quorum-signed (inside the
 //! proposal seal) is named, deferred hardening.
 //!
-//! **`outputs` is minter-asserted too, and there the argument does NOT
-//! hold** (r4077689151, tracked in
-//! <https://github.com/coasys/ad4m/issues/1104>). What voters sign never
-//! covers the output list — the seal is taken over guard evidence — and
-//! minting is permissionless, so anyone holding a run's public signed
-//! read-set can re-mint it naming *their own* node and the result verifies.
-//! Until outputs are committed into quorum-signed material, a `Verified`
-//! verdict authenticates the run, **not** the binding: a consumer that pays
-//! out on [`FlowReceipt::speaks_for`] must independently trust the outputs
-//! it honours. See [`FlowReceipt::outputs`] and `speaks_for`.
+//! # Outputs are what the quorum sealed
+//!
+//! `outputs` is the one field where "a false value cannot manufacture a
+//! verification" would NOT hold: it is exactly what a downstream consumer pays
+//! out on. So it is not carried as a claim at all
+//! (<https://github.com/coasys/ad4m/issues/1104>). **A run's outputs are the
+//! instances its terminal state's `requires` guard matched**, and those are
+//! already quorum-signed: the proposal atom for the final edge carries the
+//! guard's seal, and every voter recomputed that seal before co-signing
+//! (`super::accept`).
+//!
+//! [`sealed_outputs`] is the one definition. It takes the fold's last settled
+//! edge (the one into the terminal state), looks up the carried
+//! [`EvidencePreimage`] for the seal on each atom the fold counted there, and
+//! returns the evidence item ids every one of those preimages covers, sorted
+//! and deduplicated. `mint` writes that result and takes no output list from
+//! its caller. `verify_receipt` re-derives it and refuses a receipt whose
+//! `outputs` differ in any way (`ReceiptVerdict::OutputsNotSealed`). A
+//! re-mint of somebody else's run can therefore only name what that run's
+//! quorum sealed.
+//!
+//! Two consequences a flow author has to know:
+//!
+//! - **A terminal state with no `requires` has no outputs**, and its runs get
+//!   no receipt. Nothing a quorum signed names a node there. That includes the
+//!   instance's own `subject`, which is `read_set.subject` and so
+//!   minter-asserted. A flow whose completion should grant something has to
+//!   say *what* in its terminal state's guard.
+//! - **A guard that matched no instance has no outputs either.** A negative
+//!   guard (`count: { max: 0 }`) seals a class name and no item.
 //!
 //! # What is NOT here
 //!
@@ -89,12 +109,14 @@
 //! that the receipt names the node whose edge it followed. The edges have
 //! exactly the status `resolved_as` marks have — an index, never an input.
 
+use super::fold::DerivedState;
 use super::{fold_read_set, ReadSet};
 use crate::perspectives::flow_evaluator::{canonical_json, evidence_hash, EvidenceItem};
 use crate::perspectives::shacl_parser::SHACLFlow;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 /// `instance --> receipt`. Discovery only; see the module header.
 pub const FLOW_RECEIPT_PREDICATE: &str = "ad4m://flow/receipt";
@@ -179,12 +201,13 @@ pub struct FlowReceipt {
     /// claim, not a per-edge event.
     pub terminal_state: String,
     /// The nodes this receipt speaks for — the binding a verifier checks
-    /// before honouring a `granted_by` edge. Never empty.
+    /// before honouring a `granted_by` edge. Never empty, sorted, no
+    /// duplicates.
     ///
-    /// **Minter-asserted.** Nothing the quorum signed covers this list, so
-    /// verification re-derives everything else and carries this through
-    /// unchecked — see the module header and
-    /// <https://github.com/coasys/ad4m/issues/1104>.
+    /// **Derived, never asserted.** `mint` sets it to [`sealed_outputs`]: the
+    /// evidence ids the final edge's quorum sealed. `verify_receipt` derives
+    /// it again from the carried material and refuses any difference. See
+    /// the module header, § *Outputs are what the quorum sealed*.
     pub outputs: Vec<String>,
     /// The proof body: signed links, carried raw, exactly as the fold
     /// received them.
@@ -256,9 +279,11 @@ impl FlowReceipt {
     /// store, no clock; the caller collects the preimages (the one step that
     /// needs a perspective) and writes the result.
     ///
-    /// The terminal state is a *return* of this function, not a parameter:
-    /// `mint` folds the read-set itself under `flow`, so no caller can claim
-    /// a state the carried material does not reach.
+    /// The terminal state and the outputs are *returns* of this function, not
+    /// parameters: `mint` folds the read-set itself under `flow` and reads the
+    /// outputs off the final edge's seal ([`sealed_outputs`]), so no caller
+    /// can claim a state the carried material does not reach, or a node its
+    /// quorum did not seal.
     ///
     /// Refuses, rather than minting something that would fail its own
     /// verification:
@@ -268,23 +293,18 @@ impl FlowReceipt {
     /// - the fold is **contested** — two edges out of the same state both
     ///   carry quorum, and anything that pays out on a completed flow must
     ///   refuse a contested derivation;
-    /// - `outputs` is empty — a receipt with no binding speaks for nothing,
+    /// - the final edge's seal has no carried preimage, so its outputs cannot
+    ///   be read;
+    /// - the sealed outputs are empty (the terminal state has no `requires`,
+    ///   or its guard matched no instance). Such a receipt speaks for nothing,
     ///   and the `granted_by` check a verifier runs could never pass;
     /// - a preimage does not re-hash to the seal it claims;
     /// - the serialised receipt exceeds [`MAX_RECEIPT_BYTES`].
     pub fn mint(
         flow: &SHACLFlow,
         read_set: ReadSet,
-        outputs: Vec<String>,
         evidence_preimage: Vec<EvidencePreimage>,
     ) -> anyhow::Result<FlowReceipt> {
-        if outputs.is_empty() {
-            anyhow::bail!(
-                "FlowReceipt::mint: {} has no outputs to speak for; a receipt with no binding \
-                 could never be honoured",
-                read_set.instance_uri
-            );
-        }
         if let Some(bad) = evidence_preimage.iter().find(|p| !p.rehashes_to_seal()) {
             anyhow::bail!(
                 "FlowReceipt::mint: {}: the carried preimage for seal `{}` does not re-hash to \
@@ -297,7 +317,8 @@ impl FlowReceipt {
         // Through the ingest seam, exactly as `verify_receipt` does. Minting
         // on the raw value and verifying on the re-verified one would fold
         // different inputs by construction — see `ReadSet::reverified`.
-        let derived = fold_read_set(flow, &read_set.reverified())?;
+        let ingested = read_set.reverified();
+        let derived = fold_read_set(flow, &ingested)?;
         if let Some(contested) = derived.contested {
             anyhow::bail!(
                 "FlowReceipt::mint: {} is contested in `{}` ({} settled edges out of it), so it \
@@ -316,6 +337,20 @@ impl FlowReceipt {
                 flow.flow_uri()
             );
         }
+        let outputs = match sealed_outputs(flow, &derived, &ingested, &evidence_preimage) {
+            SealedOutputs::Outputs(outputs) => outputs,
+            SealedOutputs::NoOutputs => anyhow::bail!(
+                "FlowReceipt::mint: {} settled into `{}`, whose guard seals no instance, so it \
+                 has no outputs to speak for; a receipt with no binding could never be honoured",
+                read_set.instance_uri,
+                derived.state
+            ),
+            SealedOutputs::PreimageMissing { seal } => anyhow::bail!(
+                "FlowReceipt::mint: {}: no carried preimage re-hashes to the final edge's seal \
+                 `{seal}`, so its outputs cannot be read; collect it via `counted_seals`",
+                read_set.instance_uri
+            ),
+        };
 
         let receipt = FlowReceipt {
             flow_uri: flow.flow_uri(),
@@ -430,6 +465,97 @@ pub struct CountedAtom {
     pub seal: String,
 }
 
+/// What the final edge's seal says a run produced. See [`sealed_outputs`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealedOutputs {
+    /// The evidence ids every counted final-edge atom's seal covers. Never
+    /// empty, sorted, no duplicates.
+    Outputs(Vec<String>),
+    /// The quorum sealed no instance. Either the terminal state has no
+    /// `requires`, or its guard was satisfied by zero matches.
+    NoOutputs,
+    /// A seal on a counted final-edge atom has no carried preimage that
+    /// re-hashes to it, so what it covers cannot be read.
+    PreimageMissing { seal: String },
+}
+
+/// **The one definition of a run's outputs.** `mint` writes its result and
+/// `verify_receipt` requires `receipt.outputs` to equal it, so the two sides
+/// cannot disagree on what a receipt speaks for.
+///
+/// `derived` must be the fold of `ingested`, the re-verified read-set, and
+/// the fold must have settled uncontested into a terminal state. Both callers
+/// check that first.
+///
+/// 1. The terminal state has no `requires` in `flow` (the reader's own
+///    definition), or the walk settled no edge: [`SealedOutputs::NoOutputs`].
+///    An unguarded state's seal is the hash of an empty bag and covers
+///    nothing.
+/// 2. Take the last settled edge (the one into the terminal state) and the
+///    seal on each atom the fold counted there.
+/// 3. Each such seal needs a carried preimage that re-hashes to it, or the
+///    answer is [`SealedOutputs::PreimageMissing`]. The re-hash is checked
+///    here as well as by both callers, so this function does not depend on
+///    their ordering.
+/// 4. The outputs are the evidence item ids that **every** one of those
+///    preimages covers.
+///
+/// # Why the intersection
+///
+/// Quorum belongs to an edge, not to a proposal (see [`super::fold`]). So the
+/// counted votes on one edge can sit on twin atoms whose seals differ, for
+/// example when a cited instance was edited between the two mints. A voter
+/// signed only the seal of the atom they voted on. An id in every counted
+/// seal is covered by every counted voter. An id in only some of them was
+/// not sealed by the whole quorum, so it is not an output. In the ordinary
+/// case (one seal) the intersection is just that seal's ids.
+pub fn sealed_outputs(
+    flow: &SHACLFlow,
+    derived: &DerivedState,
+    ingested: &ReadSet,
+    evidence_preimage: &[EvidencePreimage],
+) -> SealedOutputs {
+    let guarded = flow
+        .states
+        .iter()
+        .find(|s| s.name == derived.state)
+        .and_then(|s| s.requires.as_deref())
+        .is_some_and(|requires| !requires.is_empty());
+    if !guarded {
+        return SealedOutputs::NoOutputs;
+    }
+    let Some(final_edge) = derived.settled.last() else {
+        return SealedOutputs::NoOutputs;
+    };
+
+    let mut seals: Vec<String> = Vec::new();
+    for atom in ingested.atoms() {
+        if final_edge.atom_uris.contains(&atom.uri) && !seals.contains(&atom.evidence_hash) {
+            seals.push(atom.evidence_hash);
+        }
+    }
+
+    let mut covered: Option<BTreeSet<String>> = None;
+    for seal in seals {
+        let Some(preimage) = evidence_preimage
+            .iter()
+            .find(|p| p.seal == seal && p.rehashes_to_seal())
+        else {
+            return SealedOutputs::PreimageMissing { seal };
+        };
+        let ids: BTreeSet<String> = preimage.items.iter().map(|i| i.id.clone()).collect();
+        covered = Some(match covered {
+            None => ids,
+            Some(so_far) => so_far.intersection(&ids).cloned().collect(),
+        });
+    }
+
+    match covered {
+        Some(ids) if !ids.is_empty() => SealedOutputs::Outputs(ids.into_iter().collect()),
+        _ => SealedOutputs::NoOutputs,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -445,6 +571,10 @@ mod tests {
 
     const INSTANCE: &str = "ad4m://flow/instance/i1";
     const BASE: &str = "ad4m://task/t1";
+    const DELIVERABLE: &str = "coasys://Deliverable";
+    /// The instance `done`'s guard matched, and so the honest receipt's
+    /// output.
+    const OUTPUT: &str = "ad4m://deliverable/d1";
 
     /// `open → done`, `done` terminal. `extra` is spliced into the states and
     /// transitions so one fixture covers the branch and multi-hop shapes.
@@ -458,11 +588,13 @@ mod tests {
         .expect("fixture flow parses")
     }
 
+    /// `done` is guarded, so a run into it seals the deliverable it matched
+    /// and that deliverable is the receipt's output.
     fn two_state_flow() -> SHACLFlow {
         flow_json(
             serde_json::json!([
                 { "name": "open", "value": 0.0 },
-                { "name": "done", "value": 1.0 },
+                { "name": "done", "value": 1.0, "requires": [{ "className": DELIVERABLE }] },
             ]),
             serde_json::json!([
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
@@ -500,7 +632,28 @@ mod tests {
     fn completed() -> ReadSet {
         read_set(
             "open",
-            vec![proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1)],
+            vec![proposal(
+                "ad4m://p/1",
+                ALICE,
+                "open",
+                "done",
+                &delivered().seal,
+                T1,
+            )],
+        )
+    }
+
+    /// What `done`'s guard matched on the honest run: one deliverable.
+    fn delivered() -> EvidencePreimage {
+        deliverables(&[OUTPUT])
+    }
+
+    fn deliverables(ids: &[&str]) -> EvidencePreimage {
+        preimage(
+            &[DELIVERABLE],
+            ids.iter()
+                .map(|id| item(id, DELIVERABLE, &format!("{{\"id\":\"{id}\"}}")))
+                .collect(),
         )
     }
 
@@ -638,12 +791,7 @@ mod tests {
         );
         tampered.items[0].content = "{\"id\":\"a1\",\"approved\":false}".to_string();
 
-        let err = FlowReceipt::mint(
-            &two_state_flow(),
-            completed(),
-            vec![BASE.to_string()],
-            vec![tampered],
-        )
+        let err = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered(), tampered])
         .expect_err("a preimage that does not re-hash to its seal must not mint");
         assert!(
             format!("{err:#}").contains("does not re-hash"),
@@ -661,16 +809,11 @@ mod tests {
     /// `derived.state`.
     #[test]
     fn mint_derives_the_terminal_state_from_the_carried_material() {
-        let receipt = FlowReceipt::mint(
-            &two_state_flow(),
-            completed(),
-            vec![BASE.to_string()],
-            Vec::new(),
-        )
-        .expect("a settled run into a terminal state mints");
+        let receipt = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered()])
+            .expect("a settled run into a terminal state mints");
         assert_eq!(receipt.terminal_state, "done");
         assert_eq!(receipt.flow_uri, "coasys://DeliveryFlow");
-        assert_eq!(receipt.outputs, vec![BASE.to_string()]);
+        assert_eq!(receipt.outputs, vec![OUTPUT.to_string()]);
     }
 
     /// A receipt is a completion claim, not a per-edge event. `open → doing`
@@ -695,7 +838,7 @@ mod tests {
             vec![proposal("ad4m://p/1", ALICE, "open", "doing", "seal-1", T1)],
         );
 
-        let err = FlowReceipt::mint(&flow, half_way, vec![BASE.to_string()], Vec::new())
+        let err = FlowReceipt::mint(&flow, half_way, Vec::new())
             .expect_err("an intermediate state is not a completion");
         assert!(
             format!("{err:#}").contains("can still transition out"),
@@ -728,7 +871,7 @@ mod tests {
             ],
         );
 
-        let err = FlowReceipt::mint(&flow, both, vec![BASE.to_string()], Vec::new())
+        let err = FlowReceipt::mint(&flow, both, Vec::new())
             .expect_err("a contested derivation has not completed");
         assert!(
             format!("{err:#}").contains("contested"),
@@ -737,16 +880,110 @@ mod tests {
     }
 
     /// The `granted_by` edge is untrusted; the binding a verifier honours is
-    /// the receipt's own output list. An empty one can never be honoured.
+    /// the receipt's own output list, and that list is what the final edge's
+    /// quorum sealed. A terminal state with no `requires` seals nothing, so a
+    /// run into it has nothing to speak for and gets no receipt.
     ///
-    /// Red without the `outputs.is_empty()` guard in `mint`.
+    /// Red without the `NoOutputs` arm in `mint` (e.g. minting with an empty
+    /// `outputs`).
     #[test]
-    fn mint_refuses_a_receipt_that_binds_to_nothing() {
-        let err = FlowReceipt::mint(&two_state_flow(), completed(), Vec::new(), Vec::new())
+    fn mint_refuses_a_run_whose_terminal_state_seals_nothing() {
+        let unguarded = flow_json(
+            serde_json::json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            serde_json::json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let err = FlowReceipt::mint(&unguarded, completed(), vec![delivered()])
             .expect_err("a receipt with no outputs speaks for nothing");
         assert!(
             format!("{err:#}").contains("no outputs"),
             "the error must name the missing binding, got: {err:#}"
+        );
+    }
+
+    /// The outputs are **every** instance the terminal guard matched, sorted
+    /// and deduplicated, whatever order the guard's query returned them in.
+    /// `mint` has no output parameter, so this is the only way a list gets in.
+    ///
+    /// Red if `sealed_outputs` keeps only the first item (`.take(1)` on the
+    /// ids) or returns them in preimage order rather than sorted.
+    #[test]
+    fn mint_reads_every_guard_matched_instance_as_an_output() {
+        let matched = deliverables(&["ad4m://deliverable/d2", OUTPUT, "ad4m://deliverable/d3"]);
+        let rs = read_set(
+            "open",
+            vec![proposal(
+                "ad4m://p/1",
+                ALICE,
+                "open",
+                "done",
+                &matched.seal,
+                T1,
+            )],
+        );
+        let receipt = FlowReceipt::mint(&two_state_flow(), rs, vec![matched]).expect("mints");
+        assert_eq!(
+            receipt.outputs,
+            vec![
+                OUTPUT.to_string(),
+                "ad4m://deliverable/d2".to_string(),
+                "ad4m://deliverable/d3".to_string(),
+            ]
+        );
+    }
+
+    /// The outputs are read off the final edge's preimage, so without it
+    /// there is nothing to mint. Before #1104 this minted: an empty
+    /// `evidence_preimage` was accepted and the outputs came from the caller.
+    ///
+    /// Red without the `PreimageMissing` arm in `sealed_outputs` (e.g. a
+    /// missing preimage skipped instead of refused, which leaves no ids and
+    /// fails as "no outputs" rather than naming the missing seal).
+    #[test]
+    fn mint_refuses_when_the_final_edges_preimage_is_not_carried() {
+        let err = FlowReceipt::mint(&two_state_flow(), completed(), Vec::new())
+            .expect_err("outputs that cannot be read cannot be minted");
+        assert!(
+            format!("{err:#}").contains(&format!(
+                "no carried preimage re-hashes to the final edge's seal `{}`",
+                delivered().seal
+            )),
+            "the error must name the missing seal, got: {err:#}"
+        );
+    }
+
+    /// `sealed_outputs` checks the re-hash itself rather than trusting its
+    /// callers to have run it first (both do, today). A preimage that names
+    /// the right seal over different items does not count as that seal's
+    /// preimage.
+    ///
+    /// Red with `.find(|p| p.seal == seal)` in `sealed_outputs` (the
+    /// `rehashes_to_seal()` conjunct dropped): the forged item would be read
+    /// as an output. Not reachable through `mint` or `verify_receipt`, whose
+    /// own earlier re-hash check refuses first, which is why this calls the
+    /// function directly.
+    #[test]
+    fn sealed_outputs_ignores_a_preimage_that_only_claims_the_seal() {
+        let flow = two_state_flow();
+        let ingested = completed().reverified();
+        let derived = fold_read_set(&flow, &ingested).expect("folds");
+        let mut forged = deliverables(&["ad4m://attacker/node"]);
+        forged.seal = delivered().seal;
+
+        assert_eq!(
+            sealed_outputs(&flow, &derived, &ingested, &[forged]),
+            SealedOutputs::PreimageMissing {
+                seal: delivered().seal
+            }
+        );
+        assert_eq!(
+            sealed_outputs(&flow, &derived, &ingested, &[delivered()]),
+            SealedOutputs::Outputs(vec![OUTPUT.to_string()]),
+            "control: the genuine preimage is read"
         );
     }
 
@@ -760,8 +997,7 @@ mod tests {
         let err = FlowReceipt::mint(
             &two_state_flow(),
             read_set("done", Vec::new()),
-            vec![BASE.to_string()],
-            Vec::new(),
+            vec![delivered()],
         )
         .expect_err("a walk that starts at the finish line is not a completion");
         assert!(
@@ -784,12 +1020,7 @@ mod tests {
                 &"x".repeat(MAX_RECEIPT_BYTES + 1),
             )],
         );
-        let err = FlowReceipt::mint(
-            &two_state_flow(),
-            completed(),
-            vec![BASE.to_string()],
-            vec![bulky],
-        )
+        let err = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered(), bulky])
         .expect_err("a receipt over the cap is not minted");
         assert!(
             format!("{err:#}").contains("byte cap"),
@@ -808,7 +1039,7 @@ mod tests {
     fn the_receipt_uri_is_derived_from_its_content() {
         let flow = two_state_flow();
         let mint = |rs: ReadSet| {
-            FlowReceipt::mint(&flow, rs, vec![BASE.to_string()], Vec::new())
+            FlowReceipt::mint(&flow, rs, vec![delivered()])
                 .expect("mints")
                 .uri()
                 .expect("uri")
@@ -817,7 +1048,14 @@ mod tests {
         let same = mint(completed());
         let later = mint(read_set(
             "open",
-            vec![proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T2)],
+            vec![proposal(
+                "ad4m://p/1",
+                ALICE,
+                "open",
+                "done",
+                &delivered().seal,
+                T2,
+            )],
         ));
 
         assert_eq!(twin, same, "the same material must collapse onto one node");
@@ -839,16 +1077,8 @@ mod tests {
     /// `EvidenceItem`.
     #[test]
     fn a_receipt_round_trips_through_its_stored_body() {
-        let receipt = FlowReceipt::mint(
-            &two_state_flow(),
-            completed(),
-            vec![BASE.to_string()],
-            vec![preimage(
-                &["coasys://Agreement"],
-                vec![item("a1", "coasys://Agreement", "{\"id\":\"a1\"}")],
-            )],
-        )
-        .expect("mints");
+        let receipt = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered()])
+            .expect("mints");
 
         let read_back: FlowReceipt =
             serde_json::from_str(&receipt.body().expect("body")).expect("a stored receipt parses");
