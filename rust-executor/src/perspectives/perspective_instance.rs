@@ -701,8 +701,8 @@ impl PerspectiveInstance {
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
     /// re-computes the set of managed users whose `last_seen` falls inside
-    /// `MANAGED_USER_ONLINE_WINDOW_S` (the same freshness window
-    /// `capabilities::track_last_seen_from_token` uses), spawns a per-user
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
+    /// so active users do not flap — #1070), spawns a per-user
     /// `auto_processor_watch_loop` for any newly-online user, and aborts the
     /// loop of any user who has aged out. Users that go offline are cheap to
     /// re-spawn on next activity, so the transient churn is bounded.
