@@ -78,6 +78,7 @@
 //! | [`getters`] | Evaluating `ASK`/`SELECT` getter expressions in batched queries |
 //! | [`relations`] | Resolving reverse relations and recursive `include` eager-loading |
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
+//! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 
 mod eval_transform;
@@ -86,6 +87,7 @@ mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
+mod links;
 mod projection;
 #[cfg(test)]
 mod proof_valid_tests;
@@ -105,6 +107,7 @@ pub(crate) mod utils;
 /// applied to a grant row here or to a revocation tombstone there.
 pub(crate) use filtering::matches_condition;
 pub use getters::evaluate_getters_batch;
+pub(crate) use links::links_trigger_predicates;
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::load_shape_from_store;

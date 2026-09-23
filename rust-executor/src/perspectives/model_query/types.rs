@@ -460,6 +460,13 @@ pub struct ModelQueryInput {
     /// counter, a role check) must leave it off.
     #[serde(default)]
     pub include_unverified: Option<bool>,
+    /// Return the individual links behind these properties, relations or
+    /// predicate IRIs under the additive `__links` key — see
+    /// [`super::links`]. Reaches predicates the shape does not declare
+    /// (annotation links such as revocation tombstones), and dates and
+    /// attributes each link separately rather than the instance as a whole.
+    #[serde(default)]
+    pub links: Option<Vec<String>>,
 }
 
 /// Result returned by the model query endpoint.

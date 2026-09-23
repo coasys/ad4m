@@ -322,7 +322,40 @@ export type Query = {
    * links, see https://github.com/coasys/ad4m/issues/1120.
    */
   includeUnverified?: boolean;
+   * Return the individual links behind each instance, with their own author,
+   * timestamp and signature, under `instance.__links`.
+   *
+   * Each entry is a property or relation name the model declares, or an
+   * absolute predicate IRI — including one the model does **not** declare
+   * (an annotation such as a revocation tombstone). A name wins over the IRI
+   * reading. Every requested entry is present on every instance, as `[]` when
+   * it has no such link. An entry that is neither a declared name nor an IRI,
+   * or that names a reverse relation (`@BelongsToOne` / `@BelongsToMany`),
+   * makes the query fail rather than answer `[]`.
+   *
+   * The rows are read by a second query after the instances are hydrated, so
+   * asking for them never changes `createdAt`, `updatedAt` or any property.
+   * See {@link LinkRow}.
+   */
+  links?: string[];
 };
+
+/**
+ * One stored link as returned under `__links` — the same shape as a
+ * `LinkExpression`, so `proof` can be verified by the consumer.
+ *
+ * A link stored without a proof arrives with `key` and `signature` set to
+ * `""`; that is an unverifiable link, not a valid unsigned one.
+ */
+export interface LinkRow {
+  author: string;
+  timestamp: string;
+  data: { source: string; predicate: string; target: string };
+  proof: { key: string; signature: string };
+}
+
+/** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
+export type LinksMap = Record<string, LinkRow[]>;
 
 /**
  * Sub-query options for a specific relation inside an `IncludeMap`.
@@ -465,6 +498,7 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   offset?: number;
   /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
   includeUnverified?: boolean;
+  links?: string[];
 };
 
 /** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
@@ -528,6 +562,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   deepQuery?: boolean;
   /** See {@link Query.includeUnverified}. */
   includeUnverified?: boolean;
+  links?: string[];
 };
 
 export type TypedQuery<T extends Ad4mModel> =

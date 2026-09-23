@@ -1275,13 +1275,17 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 /// depending on which instance you ask. See issue #974: a `hasOne` relation
 /// named `author` read back the creating agent's DID instead of the linked
 /// instance.
-const RESERVED_PROPERTY_NAMES: [&str; 6] = [
+///
+/// `__links` is written only when a query asks for `links` (#1046 §3/§4), after
+/// every property — the same silent-overwrite direction as the second group.
+const RESERVED_PROPERTY_NAMES: [&str; 7] = [
     "id",
     "baseExpression",
     "createdAt",
     "updatedAt",
     "author",
     "timestamp",
+    "__links",
 ];
 
 /// Make the property-shape-level `local: true` authoritative by pushing it
@@ -1381,8 +1385,9 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             "Property name(s) {:?} collide with synthetic fields every hydrated instance \
              already carries ({}). `id`/`baseExpression` would be silently overwritten by \
              this property; `createdAt`/`updatedAt`/`author`/`timestamp` would silently \
-             overwrite it instead, and only on instances where a value is derivable — pick \
-             a different property name.",
+             overwrite it instead, and only on instances where a value is derivable; \
+             `__links` would overwrite it whenever a query asks for `links` — pick a \
+             different property name.",
             reserved_collisions,
             RESERVED_PROPERTY_NAMES.join(", "),
         ));
