@@ -15,6 +15,7 @@
 
 use serde_json::Value;
 
+use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
 use super::types::{
@@ -286,6 +287,7 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        let link_status = link_status_filter(query.link_status.as_ref());
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -295,8 +297,61 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{link_status}{local_status}}}"#
         ))
+    }
+}
+
+/// The stored spelling of a [`LinkStatus`] on a link's reifier, as
+/// `sparql_store.rs` writes it.
+fn stored_status(status: &LinkStatus) -> &'static str {
+    match status {
+        LinkStatus::Shared => "Shared",
+        LinkStatus::Local => "Local",
+    }
+}
+
+/// SPARQL fragment restricting the rows that hydrate an instance to links of
+/// one [`LinkStatus`], for every predicate: the `linkStatus` query option
+/// (#1046 §7, #1116).
+///
+/// Each row of the instance query is one link joined through its own reifier,
+/// so requiring `?_reifier <ad4m://ontology/status> "Shared"` keeps exactly the
+/// Shared links. The pattern is required, not `OPTIONAL`: a link with no status
+/// annotation is dropped, the same fail-closed rule as [`local_status_filter`].
+/// The two compose. Under `Shared` a `local: true` property hydrates nothing,
+/// because its links are Local by declaration. That is the answer to "this
+/// instance as it exists in Shared links".
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// and [`status_triple_filter`] does the same for the reverse-relation reads.
+/// Instance *selection* (conformance, `where`, `COUNT`, projections) matches the
+/// bare triple and is not restricted, the same limit as #1120.
+///
+/// Empty when no status is requested.
+pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
+    match status {
+        None => String::new(),
+        Some(s) => format!(
+            "    ?_reifier <ad4m://ontology/status> \"{}\" .\n",
+            stored_status(s)
+        ),
+    }
+}
+
+/// [`link_status_filter`] for reads that match the bare triple
+/// `?source <predicate> ?target` instead of joining one reifier per row: the
+/// reverse-relation reads in `relations.rs`. The row is kept when at least one
+/// link asserting the triple has the status. `FILTER EXISTS` rather than a join,
+/// so two such links over one triple do not return the source twice.
+pub(super) fn status_triple_filter(predicate: &str, status: Option<&LinkStatus>) -> String {
+    match status {
+        None => String::new(),
+        Some(s) => format!(
+            " FILTER EXISTS {{ ?_ls <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( ?source <{predicate}> ?target )>> . ?_ls <ad4m://ontology/status> \"{}\" . }}",
+            stored_status(s)
+        ),
     }
 }
 

@@ -848,9 +848,17 @@ async fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -895,9 +903,17 @@ async fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -941,9 +957,17 @@ async fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -979,9 +1003,17 @@ async fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -1047,9 +1079,17 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -1112,9 +1152,17 @@ async fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -4378,9 +4426,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4404,9 +4460,17 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+        None,
+    )
+    .await
+    .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(

@@ -14,7 +14,7 @@ use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    local_status_filter, per_anchor_limit, ANCHOR_VAR,
+    link_status_filter, local_status_filter, per_anchor_limit, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -573,6 +573,7 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
+                    let link_status = link_status_filter(query_input.link_status.as_ref());
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -581,7 +582,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{link_status}{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -624,7 +625,12 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .collect();
     if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
+        resolve_reverse_relations(
+            store,
+            &mut instances,
+            &reverse_rels,
+            query_input.link_status.as_ref(),
+        )?;
     }
 
     // Apply post-hydration where-clause filters
@@ -729,8 +735,16 @@ pub(super) async fn execute_model_query_inner(
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
-                .await?;
+            resolve_includes_recursive(
+                store,
+                &mut paginated,
+                include,
+                shape,
+                resolver,
+                depth,
+                query_input.link_status.as_ref(),
+            )
+            .await?;
         }
     }
 
@@ -761,6 +775,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            query_input.link_status.as_ref(),
         )
         .await?;
     }

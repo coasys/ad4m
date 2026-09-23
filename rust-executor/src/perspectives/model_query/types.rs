@@ -450,6 +450,17 @@ pub struct ModelQueryInput {
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
     pub prefer_classes: Option<Vec<String>>,
+    /// Read the instance as it exists in links of this status only (#1116).
+    ///
+    /// `Some(Shared)` hydrates from Shared links only, which is what a
+    /// multi-user read needs (#1024): a Local link is executor-private and must
+    /// not reach another user. `Some(Local)` is the converse. The restriction
+    /// applies to every predicate, not only those a class declares `local`.
+    /// `None` (the default) reads both, subject to the class's `local` flags.
+    ///
+    /// See [`link_status_filter`](super::sparql_builder::link_status_filter).
+    #[serde(default)]
+    pub link_status: Option<crate::types::LinkStatus>,
 }
 
 /// Result returned by the model query endpoint.

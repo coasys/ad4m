@@ -42,6 +42,7 @@ fn typed_number_literal(n: f64) -> Option<String> {
     Some(format!("\"{s}\"^^<{dt}>"))
 }
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Resolve all projections for a set of parent instances.
 ///
@@ -51,7 +52,8 @@ use crate::perspectives::sparql_store::SparqlStore;
 ///
 /// When `proj.target_shape` is set, raw target IRIs are replaced with fully
 /// hydrated model instances via a recursive `execute_model_query_inner` call
-/// (one batch per projection key, eliminating TS-side round-trips).
+/// (one batch per projection key, eliminating TS-side round-trips). That call
+/// inherits the parent query's `link_status`.
 pub(super) async fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
@@ -59,6 +61,7 @@ pub(super) async fn resolve_projections(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    link_status: Option<&LinkStatus>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -263,6 +266,7 @@ pub(super) async fn resolve_projections(
                             let sub_query = ModelQueryInput {
                                 where_clause: Some(sub_where),
                                 deep_query: Some(true),
+                                link_status: link_status.cloned(),
                                 ..ModelQueryInput::default()
                             };
 

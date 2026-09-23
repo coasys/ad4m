@@ -86,6 +86,8 @@ mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod link_status_tests;
 mod projection;
 mod query;
 mod relations;
