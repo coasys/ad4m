@@ -296,6 +296,9 @@ Each user's data is fully isolated within the shared executor:
 - **Perspectives are user-scoped**: A user can only see and modify their own perspectives. Attempting to access another user's perspective is denied.
 - **Capability tokens are user-specific**: Each JWT contains the user's DID, ensuring all operations are scoped to the correct identity.
 - **Neighbourhoods work as usual**: Users can still create, publish, and join Neighbourhoods for collaboration—the multi-user boundary is about local data, not shared spaces.
+- **Local links stay private inside a shared Neighbourhood**: when several users on the same host join one Neighbourhood, they share one perspective. A link added with status `local` (for example through a model property declared `local: true`) is visible only to the user who wrote it. Other users on the host do not get it back from `queryLinks`, snapshots or model queries, and their writes cannot remove it: replacing a property value or deleting an instance removes only the links the writing user can see. Shared links are visible to every member, as before.
+
+  Two reads are not filtered yet: raw `querySparql` / `queryProlog` results, and SPARQL `getter` properties, which run their query over every link in the perspective. Do not rely on them to hide another user's local links.
 
 ## For App Developers: No Changes Required
 

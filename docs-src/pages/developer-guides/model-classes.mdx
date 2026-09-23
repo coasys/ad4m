@@ -244,7 +244,7 @@ class Recipe extends Ad4mModel {
 | `readOnly` | `boolean` | `false` | Prevents updates after creation |
 | `resolveLanguage` | `string` | `"literal"` | Language used to resolve the stored value. Use `"literal"` for simple values, or a Language address for richer content |
 | `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal:string:uninitialized"`) |
-| `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
+| `local` | `boolean` | `false` | Store locally only — not synced to the network. On a multi-user host the value is also private to the user who wrote it (see [Multi-User Mode](/multi-user#data-isolation)). Useful for user preferences or draft state |
 | `getter` | `string` | — | SPARQL SELECT expression for computed values. `<Base>` is replaced with the instance's URI at query time. Mutually exclusive with regular storage |
 | `transform` | `NodeExpression` | — | Declarative post-retrieval transform expressed as a SHACL-AF Node Expression. Evaluated in the Rust model query engine, not in JavaScript. See [Transforms](#the-transform-option) |
 
