@@ -325,3 +325,65 @@ async fn link_status_shared_does_not_select_on_a_local_value() {
     .unwrap();
     assert_eq!(count.total_count, 0, "counted by a Local value");
 }
+
+/// Merge guard for #1123 (the default invalid-proof filter), which adds its own
+/// `FILTER EXISTS` to the reverse-relation reads next to this PR's.
+///
+/// Two `FILTER EXISTS` clauses over two reifier variables mean "a Shared link
+/// exists and a verified link exists", not "one link is both". Here the mark
+/// has a valid Local link and a forged Shared link on the same triple, so
+/// together they would pass a Shared (and, after #1123, verified) read, and a
+/// Local value would reach the Shared-only caller.
+///
+/// On this branch alone the forged Shared link is read because nothing checks
+/// signatures yet, so this test is red by design. Whichever of #1123 / #1116
+/// lands second folds the two clauses into one `FILTER EXISTS` over a single
+/// reifier and removes the `#[ignore]`.
+#[tokio::test]
+#[ignore = "needs #1123: fold the proofValid and status FILTER EXISTS into one reifier"]
+async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_one() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = ls_seed(&store);
+    let valid_local = ls_link(
+        &signer,
+        "ls://m/secret",
+        "ls://marks",
+        "ls://c/1",
+        8,
+        LinkStatus::Local,
+    );
+    // The same triple, Shared, carrying a signature over a different target.
+    let mut forged_shared = ls_link(
+        &signer,
+        "ls://m/secret",
+        "ls://marks",
+        "ls://c/other",
+        9,
+        LinkStatus::Shared,
+    );
+    forged_shared.data.target = "ls://c/1".to_string();
+    assert!(
+        !forged_shared.compute_proof_valid(),
+        "the fixture must not verify"
+    );
+    store.add_link(&valid_local).unwrap();
+    store.add_link(&forged_shared).unwrap();
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Card",
+        &ModelQueryInput {
+            link_status: Some(LinkStatus::Shared),
+            ..Default::default()
+        },
+        LS_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let marks = &result.instances[0]["markedBy"];
+    assert!(
+        marks.is_null() || marks == &json!([]),
+        "no single link is both Shared and verified: {}",
+        result.instances[0]
+    );
+}

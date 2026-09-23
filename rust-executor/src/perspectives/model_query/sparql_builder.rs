@@ -15,6 +15,7 @@
 
 use serde_json::Value;
 
+use crate::perspectives::sparql_store::status_str;
 use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
@@ -302,15 +303,6 @@ pub(super) fn build_instance_sparql(
     }
 }
 
-/// The stored spelling of a [`LinkStatus`] on a link's reifier, as
-/// `sparql_store.rs` writes it.
-fn stored_status(status: &LinkStatus) -> &'static str {
-    match status {
-        LinkStatus::Shared => "Shared",
-        LinkStatus::Local => "Local",
-    }
-}
-
 /// SPARQL fragment restricting the rows that hydrate an instance to links of
 /// one [`LinkStatus`], for every predicate: the `linkStatus` query option
 /// (#1046 §7, #1116).
@@ -319,6 +311,9 @@ fn stored_status(status: &LinkStatus) -> &'static str {
 /// so requiring `?_reifier <ad4m://ontology/status> "Shared"` keeps exactly the
 /// Shared links. The pattern is required, not `OPTIONAL`: a link with no status
 /// annotation is dropped, the same fail-closed rule as [`local_status_filter`].
+/// So a link written by a binary that stored no status is invisible under
+/// either value, and an old store can answer "no Shared links" without
+/// anything being wrong. Only callers that opt in are affected.
 /// The two compose. Under `Shared` a `local: true` property hydrates nothing,
 /// because its links are Local by declaration. That is the answer to "this
 /// instance as it exists in Shared links".
@@ -334,7 +329,7 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
         None => String::new(),
         Some(s) => format!(
             "    ?_reifier <ad4m://ontology/status> \"{}\" .\n",
-            stored_status(s)
+            status_str(s)
         ),
     }
 }
@@ -350,7 +345,7 @@ pub(super) fn status_triple_filter(predicate: &str, status: Option<&LinkStatus>)
         Some(s) => format!(
             " FILTER EXISTS {{ ?_ls <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
              <<( ?source <{predicate}> ?target )>> . ?_ls <ad4m://ontology/status> \"{}\" . }}",
-            stored_status(s)
+            status_str(s)
         ),
     }
 }
