@@ -124,6 +124,18 @@ export function buildSHACL(
 
         if (!propMeta.through) continue; // Skip properties without predicates
 
+        // `@BelongsToOne`/`@BelongsToMany` register in both maps: the relation
+        // registry describes the edge, and `applyPropertyMetadata` marks the
+        // accessor read-only so the non-owning side gets no setter. Both loops
+        // then emitted a shape for it, so an inverse relation appeared twice in
+        // the generated SHACL — once thinly, from here, and once with its target
+        // class, polymorphism and ordering, from the relation loop below.
+        //
+        // The relation loop is the complete description, so this one stands
+        // aside. Skipping by presence in the relation map rather than by kind
+        // keeps it right for any future decorator that registers in both.
+        if (allRelationsMeta[propName]) continue;
+
         const propShape: SHACLPropertyShape = {
             name: propName,
             path: propMeta.through,
