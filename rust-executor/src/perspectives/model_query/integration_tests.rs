@@ -14,12 +14,12 @@ use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProp
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{ExpressionProof, Link, LinkExpression};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
+fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    LinkExpression {
         author: "did:key:test123".to_string(),
         timestamp: ts.to_string(),
         data: Link {
@@ -27,13 +27,13 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         },
-        proof: DecoratedExpressionProof {
+        proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
         },
-        status: None,
+        // The store refuses status-less inserts; Shared is the plain case,
+        // `make_link_with_status` overrides for the local-property tests.
+        status: Some(crate::types::LinkStatus::Shared),
     }
 }
 
@@ -44,7 +44,7 @@ fn make_link_with_status(
     target: &str,
     ts: &str,
     status: crate::types::LinkStatus,
-) -> DecoratedLinkExpression {
+) -> LinkExpression {
     let mut link = make_link(source, predicate, target, ts);
     link.status = Some(status);
     link
