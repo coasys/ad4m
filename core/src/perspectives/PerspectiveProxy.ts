@@ -1,5 +1,8 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
-import type { FlowFireOutcome, FlowOutputRef, FlowProposeResult } from "./FlowInstance";
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -887,6 +890,33 @@ export class PerspectiveProxy {
     /** Withdraw our own links from a proposal; resolves to how many went. */
     async rejectFlowProposal(proposalUri: string): Promise<number> {
         return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /**
+     * Re-decide a flow receipt under this perspective's own flow catalogue.
+     * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
+     * `outcome`, never on a boolean you derive from it.
+     */
+    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+        return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
+    }
+
+    /**
+     * Which instances are, as they stand, valid outputs of `flow`?
+     *
+     * Backed by receipt verification executor-side (see
+     * {@link FlowValidOutput}); an instance without a verifying receipt, or
+     * edited since its run completed, is not listed. The same predicate is
+     * available as a model-query filter:
+     * `where: { producedByFlow: { flow, state? } }`.
+     */
+    async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /** Mint and store the receipt for a completed flow run. */
+    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
+        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */
