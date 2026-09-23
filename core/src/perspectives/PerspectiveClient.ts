@@ -12,16 +12,11 @@ import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
-
-/** One fired flow transition, as returned by `perspective.acceptFlowProposal`
- *  (and, engine-side, by every consensus pass). */
-export interface FlowFireOutcome {
-    instanceUri: string;
-    fromState: string;
-    toState: string;
-    voters: string[];
-    contributingProposalUris: string[];
-}
+// FlowInstance.ts owns the flow-proposal result types so they sit next to the
+// `proposeTransition()` API they describe. `import type` keeps this out of the
+// runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
+// would otherwise be a cycle).
+import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -402,6 +397,17 @@ export class PerspectiveClient {
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.rejectInterpretation', { uuid, base, property },
+        )
+    }
+
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+    ): Promise<FlowProposeResult> {
+        return this.#apiClient.call<FlowProposeResult>(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
         )
     }
 
