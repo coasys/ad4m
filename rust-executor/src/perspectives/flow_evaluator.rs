@@ -277,7 +277,7 @@ pub(crate) fn requires_query_input(
     record: &FlowInstanceRecord,
     acting_did: &str,
 ) -> Result<Value> {
-    let where_clause = requires_where(query, record, acting_did, false)?;
+    let where_clause = requires_where(query, record, acting_did, None, false)?;
     let mut out = Map::new();
     if !where_clause.is_empty() {
         out.insert("where".into(), Value::Object(where_clause));
@@ -301,48 +301,141 @@ pub(crate) fn requires_query_input(
     Ok(out)
 }
 
+/// Translate one level of a `ModelQuery` (the top, or an `or` branch).
+///
+/// `author` is a per-link condition here: a role rule `{ didProperty: agent,
+/// where: { author: A } }` means "A wrote the `agent -> did` link", so it is
+/// emitted **nested** under the DID property, `{ agent: { eq: did, author: A } }`
+/// (see `model_query::link_author`). The DID property is the level's own
+/// `didProperty`, or for an `or` branch without one, the enclosing level's.
+/// `or` branches that each name only a granter (`where: { author: X }`) with
+/// plain DIDs collapse into one author list on the outer DID property:
+/// `{ agent: { eq: did, author: [A, B] } }`. Branches that say more keep their
+/// own `OR` arm, each with the author nested under the DID property.
+///
+/// With no DID property in reach, an `author` stays top level, where
+/// `model_query` reads it as the instance's author (and, beside property
+/// conditions, also as theirs).
 fn requires_where(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
+    inherited_did_property: Option<&str>,
     nested: bool,
 ) -> Result<Map<String, Value>> {
     if nested && query.linked_to.is_some() {
         bail!("`linkedTo` on an `or` branch is not supported by model_query");
     }
+    let did_property = query.did_property.as_deref().or(inherited_did_property);
     let mut out = Map::new();
+    let mut author = None;
     for (field, cond) in query.r#where.iter().flatten() {
-        out.insert(
-            field.clone(),
-            where_condition(field, cond, record, acting_did)?,
-        );
+        let value = where_condition(field, cond, record, acting_did)?;
+        // A DID property named `author` is a (hand-built) property, and the
+        // `where.author` beside it collides with it below.
+        if field == "author" && did_property.is_some_and(|p| p != "author") {
+            author = Some(value);
+        } else {
+            out.insert(field.clone(), value);
+        }
     }
-    if let Some(prop) = &query.did_property {
+
+    let alts = query.or.as_ref().filter(|a| !a.is_empty());
+    if let Some(alts) = alts {
+        for alt in alts {
+            if alt.class_name != query.class_name {
+                bail!(
+                    "`or` branch class `{}` must match the outer class `{}`",
+                    alt.class_name,
+                    query.class_name
+                );
+            }
+            if alt.count.is_some() {
+                bail!("`count` on an `or` branch is not supported");
+            }
+        }
+    }
+
+    // `or` branches that only name a granter fold into one author list.
+    let granters = match (did_property, &author, alts) {
+        (Some(_), None, Some(alts)) if query.did_property.is_some() => {
+            granter_only_branches(alts, record, acting_did)?
+        }
+        _ => None,
+    };
+    let collapsed = granters.is_some();
+    if collapsed {
+        author = granters;
+    }
+
+    if let Some(prop) = query.did_property.as_deref() {
         if out.contains_key(prop) {
             bail!("`didProperty` `{prop}` collides with an existing `where` field");
         }
-        out.insert(prop.clone(), Value::String(acting_did.to_string()));
+        out.insert(prop.to_string(), did_condition(acting_did, author.take()));
+    } else if let (Some(prop), Some(author)) = (did_property, author.take()) {
+        // An `or` branch granter, nested under the enclosing DID property.
+        if out.contains_key(prop) {
+            bail!("`didProperty` `{prop}` collides with an existing `where` field");
+        }
+        out.insert(prop.to_string(), did_condition(acting_did, Some(author)));
     }
-    if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
+
+    if let Some(alts) = alts.filter(|_| !collapsed) {
         let branches = alts
             .iter()
             .map(|alt| {
-                if alt.class_name != query.class_name {
-                    bail!(
-                        "`or` branch class `{}` must match the outer class `{}`",
-                        alt.class_name,
-                        query.class_name
-                    );
-                }
-                if alt.count.is_some() {
-                    bail!("`count` on an `or` branch is not supported");
-                }
-                requires_where(alt, record, acting_did, true).map(Value::Object)
+                requires_where(alt, record, acting_did, did_property, true).map(Value::Object)
             })
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
     Ok(out)
+}
+
+/// `{ eq: did, author: A }`, or the bare DID when there is no author.
+fn did_condition(acting_did: &str, author: Option<Value>) -> Value {
+    match author {
+        Some(author) => json!({ "eq": acting_did, "author": author }),
+        None => Value::String(acting_did.to_string()),
+    }
+}
+
+/// The union of the granters when every `or` branch is only
+/// `{ className, where: { author: <DID or DIDs> } }`, else `None`.
+fn granter_only_branches(
+    alts: &[ModelQuery],
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Option<Value>> {
+    let mut dids: Vec<Value> = Vec::new();
+    for alt in alts {
+        let only_author = alt.did_property.is_none()
+            && alt.linked_to.is_none()
+            && alt.or.as_ref().is_none_or(|o| o.is_empty())
+            && alt
+                .r#where
+                .as_ref()
+                .is_some_and(|w| w.len() == 1 && w.contains_key("author"));
+        if !only_author {
+            return Ok(None);
+        }
+        let cond = &alt.r#where.as_ref().expect("checked above")["author"];
+        let found = match where_condition("author", cond, record, acting_did)? {
+            did @ Value::String(_) => vec![did],
+            Value::Array(items) if items.iter().all(Value::is_string) => items,
+            _ => return Ok(None),
+        };
+        for did in found {
+            if !dids.contains(&did) {
+                dids.push(did);
+            }
+        }
+    }
+    Ok(Some(match dids.len() {
+        1 => dids.remove(0),
+        _ => Value::Array(dids),
+    }))
 }
 
 fn where_condition(
@@ -1678,6 +1771,56 @@ mod tests {
         let mut empty_or = mq("ns://M");
         empty_or.or = Some(vec![]);
         assert_eq!(qin(&empty_or, "did:key:x"), json!({}));
+    }
+
+    /// A role rule's `author` is the author of the grant link, so it is nested
+    /// under the DID property (`model_query` reads that per link, #1114), and
+    /// `or` branches that only name a granter collapse into one author list.
+    #[test]
+    fn role_author_is_nested_under_the_did_property() {
+        let did = "did:key:cand";
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        for (rule, expected) in [
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" } }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "author": { "in": ["did:key:admin", "did:key:lead"] } } }),
+                json!({ "agent": { "eq": did, "author": ["did:key:admin", "did:key:lead"] } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "$did" } }),
+                json!({ "agent": { "eq": did, "author": did } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "or": [ { "className": "ns://R", "where": { "author": "did:key:admin" } },
+                                { "className": "ns://R", "where": { "author": { "in": ["did:key:lead", "did:key:admin"] } } } ] }),
+                json!({ "agent": { "eq": did, "author": ["did:key:admin", "did:key:lead"] } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "or": [ { "className": "ns://R", "where": { "role": "lead", "author": "did:key:admin" } },
+                                { "className": "ns://R", "where": { "author": "did:key:lead" } } ] }),
+                json!({ "agent": did, "OR": [
+                    { "role": "lead", "agent": { "eq": did, "author": "did:key:admin" } },
+                    { "agent": { "eq": did, "author": "did:key:lead" } },
+                ] }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "role": "lead" } }),
+                json!({ "role": "lead", "agent": did }),
+            ),
+            (
+                json!({ "className": "ns://R", "where": { "reviewer": "$did", "author": "did:key:admin" } }),
+                json!({ "reviewer": did, "author": "did:key:admin" }),
+            ),
+        ] {
+            let q = role(rule.clone());
+            assert_eq!(qin(&q, did), json!({ "where": expected }), "{rule}");
+        }
     }
 
     #[test]

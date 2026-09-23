@@ -78,7 +78,10 @@
 //! is one the grant's own rule would accept as a granter: the role query's
 //! `author` condition (top level, and any `or` branch) is applied to the
 //! tombstone's author through `model_query`'s own condition evaluator
-//! ([`revocation_authorised`]). The condition is read from the *translated*
+//! ([`revocation_authorised`]). The translator nests that condition under the
+//! DID property, `{ agent: { eq: did, author: A } }`, so a grant counts only
+//! when A wrote the `agent` link itself (#1114), and a revocation only when A
+//! wrote the tombstone. The condition is read from the *translated*
 //! query — `$did` is already substituted to the candidate whose membership
 //! is being tested, and never stands for anyone's author — so
 //! `where: { author: "did:…admin" }` makes grants *and* revocations
@@ -437,10 +440,15 @@ impl RoleGrantEvidence {
 /// Whether `author` could have written a grant the translated role query
 /// accepts — and may therefore revoke one.
 ///
-/// Reads only the `author` conditions of the translated `where` (the top
-/// level, and each `OR` branch, of which at least one must accept), and
-/// evaluates each with `model_query`'s own [`matches_condition`], so the
-/// condition means exactly what it means for the instances. No author condition
+/// Reads only the `author` conditions of the translated `where`, level by
+/// level (the top, and each `OR` branch, of which at least one must accept),
+/// and evaluates each with `model_query`'s own [`matches_condition`], so the
+/// condition means exactly what it means for the instances. At a level, every
+/// author condition must accept: the one the translator nests under the DID
+/// property (`{ agent: { eq: did, author: A } }`, the grant link's author), any
+/// other property's nested one, and a top-level `author` (emitted when the rule
+/// has no DID property). These are the conditions the grant query itself
+/// requires, so grants and revocations stay symmetric. No author condition
 /// anywhere accepts everyone, as the query itself does. A condition that
 /// cannot be read is a refusal, never a pass.
 ///
@@ -452,12 +460,18 @@ impl RoleGrantEvidence {
 /// translator cannot produce them.
 pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
     fn accepted(where_clause: &Map<String, Value>, author: &str) -> bool {
-        let own = match where_clause.get("author") {
-            None => true,
-            Some(cond) => serde_json::from_value::<WhereCondition>(cond.clone())
+        let conditions = where_clause
+            .iter()
+            .filter_map(|(key, value)| match key.as_str() {
+                "OR" | "AND" | "NOT" => None,
+                "author" => Some(value),
+                _ => value.as_object().and_then(|ops| ops.get("author")),
+            });
+        let own = conditions.into_iter().all(|cond| {
+            serde_json::from_value::<WhereCondition>(cond.clone())
                 .map(|c| matches_condition(&Value::String(author.to_string()), &c))
-                .unwrap_or(false),
-        };
+                .unwrap_or(false)
+        });
         let branches = match where_clause.get("OR") {
             None => true,
             Some(Value::Array(alts)) => alts
@@ -1141,6 +1155,30 @@ mod tests {
             assert_eq!(grants[0].eligible_at(T3, None), accepted.is_empty(), "{name}: revoked iff someone authorised did it");
             assert!(grants[0].eligible_at(T1, None), "{name}: the vote before any tombstone still counts");
         }
+    }
+
+    /// The authority rule reads the author where the translator now puts it,
+    /// nested under the DID property, and still ignores a revocation by
+    /// anyone the grant rule would not accept as a granter (#1114).
+    #[test]
+    fn a_revocation_by_a_non_admin_is_ignored_under_the_nested_translation() {
+        let role = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } }),
+        );
+        let translated = requires_query_input(&role, &record(), ALICE()).unwrap();
+        assert_eq!(
+            translated["where"]["agent"],
+            json!({ "eq": ALICE(), "author": ADMIN() }),
+            "the grant is admin's `agent` link, per link"
+        );
+        assert!(revocation_authorised(&translated, ADMIN()));
+        for revoker in [MALLORY(), ALICE(), LEAD()] {
+            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
+        }
+        // Every author condition at a level must accept, whichever key holds it.
+        let both = json!({ "where": { "agent": { "eq": ALICE(), "author": [ADMIN(), LEAD()] }, "author": LEAD() } });
+        assert!(revocation_authorised(&both, LEAD()));
+        assert!(!revocation_authorised(&both, ADMIN()));
     }
 
     /// The window is derived from the carried links, in a deterministic order:
