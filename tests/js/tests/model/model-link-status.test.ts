@@ -74,6 +74,13 @@ describe("Ad4mModel — linkStatus reads", function () {
     await card.save();
     cardId = card.id;
 
+    // `save()` writes the empty default `note` as a Shared link. Drop it, so the
+    // note's only link is the Local one below.
+    const savedNotes = await perspective.get(
+      new LinkQuery({ source: cardId, predicate: "lsc://note" })
+    );
+    if (savedNotes.length) await perspective.removeLinks(savedNotes);
+
     await perspective.add(
       new Link({
         source: cardId,
