@@ -306,7 +306,9 @@ export type Query = {
   deepQuery?: boolean;
   /**
    * Return the individual links behind each instance, with their own author,
-   * timestamp and signature, under `instance.__links`.
+   * timestamp, signature and signature verdict, under `instance.__links`. For
+   * a collection this is per-item provenance: who added each member, when, and
+   * whether their signature holds.
    *
    * Each entry is a property or relation name the model declares, or an
    * absolute predicate IRI — including one the model does **not** declare
@@ -324,17 +326,21 @@ export type Query = {
 };
 
 /**
- * One stored link as returned under `__links` — the same shape as a
- * `LinkExpression`, so `proof` can be verified by the consumer.
+ * One stored link as returned under `__links` — the same shape as the
+ * `LinkExpression` `perspective.get()` returns, including the signature
+ * verdict the executor recorded when the link was stored.
  *
+ * `proof.valid` is `true` only when the signature verifies against `author`.
  * A link stored without a proof arrives with `key` and `signature` set to
- * `""`; that is an unverifiable link, not a valid unsigned one.
+ * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
+ * one. Anything that acts on a row (counting a vote, granting a role) should
+ * require `proof.valid`.
  */
 export interface LinkRow {
   author: string;
   timestamp: string;
   data: { source: string; predicate: string; target: string };
-  proof: { key: string; signature: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
