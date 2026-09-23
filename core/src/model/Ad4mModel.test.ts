@@ -3421,3 +3421,83 @@ describe("Ordered relations", () => {
     expect(tasks!.ordering).toBe("linkedList");
   });
 });
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});

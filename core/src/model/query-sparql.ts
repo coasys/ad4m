@@ -15,6 +15,7 @@ import { Literal } from "../Literal";
 import { resolveParentPredicate } from "./query-common";
 import type { RelationMetadataEntry } from "./decorators";
 import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
+import { isTraverseScope } from "./types";
 
 /**
  * Check whether a `where` clause contains filters that cannot be pushed down
@@ -272,8 +273,41 @@ export function buildSPARQLQuery(
   // Parent filter — direct triple pattern
   if (query.parent) {
     const parentPredicate = resolveParentPredicate(query.parent, modelClass);
-    joinPatterns.push(`
+    if (isTraverseScope(query.parent)) {
+      const { ids, transitive, direction, limitPerAnchor, levels } = query.parent;
+      // `limitPerAnchor` and `levels` are applied by the executor between
+      // selecting ids and hydrating them, which is a shape this path does not
+      // have — it builds one query and reads the rows. Refused rather than
+      // ignored: quietly returning every reply where five per parent were
+      // asked for — or one unbounded level where a walk was asked for — is a
+      // wrong answer that looks like a right one.
+      if (limitPerAnchor !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: limitPerAnchor is applied by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for per-anchor limits.',
+        );
+      }
+      if (levels !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: levels is walked by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for level walks.',
+        );
+      }
+      const anchors = (Array.isArray(ids) ? ids : [ids]).map(iri).join(' ');
+      const path = transitive ? '+' : '';
+      joinPatterns.push(`
+      VALUES ?_anchor { ${anchors} }`);
+      joinPatterns.push(
+        direction === 'in'
+          ? `
+      ?source ${iri(parentPredicate)}${path} ?_anchor .`
+          : `
+      ?_anchor ${iri(parentPredicate)}${path} ?source .`,
+      );
+    } else {
+      joinPatterns.push(`
       ${iri(query.parent.id)} ${iri(parentPredicate)} ?source .`);
+    }
   }
 
   // Required property JOIN patterns — direct triple patterns
