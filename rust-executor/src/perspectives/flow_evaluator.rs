@@ -46,7 +46,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::LinkQuery;
+use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,16 @@ pub struct SatisfiedTransition {
 /// matched, carried with its full `model_query` JSON so downstream LLM
 /// passes can evaluate content ("was this agreed?") rather than rubber-stamp
 /// a URI list.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Serialize` on purpose: the preimage behind a proposal's `evidence_hash`
+/// is what turns "this hash matches nothing I can see" into an inspectable
+/// object a reader can re-hash with [`evidence_hash`] and compare against the
+/// seal every voter verified before co-signing.
+///
+/// `Deserialize` for the other end of that trip: a receipt that arrived from
+/// elsewhere is read back before it is verified
+/// (`flow_instance::receipt::EvidencePreimage`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceItem {
     pub id: String,
     /// SHACL class the matching guard queried for.
@@ -96,7 +105,7 @@ pub struct EvidenceItem {
 /// Serialize a JSON value with recursively-sorted object keys — a stable
 /// form independent of the key order `model_query` happens to produce.
 /// Non-JSON content is hashed verbatim rather than dropped.
-fn canonical_json(v: &Value) -> String {
+pub(crate) fn canonical_json(v: &Value) -> String {
     match v {
         Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
@@ -122,9 +131,29 @@ fn canonical_json(v: &Value) -> String {
 }
 
 /// Order-independent seal over a satisfied guard's evidence: SHA256 over the
-/// class names followed by each evidence item's `(class, id,
-/// canonical-content)` triple, sorted. Every field is length-prefixed before
-/// hashing, so no field's *content* can shift bytes across a boundary.
+/// *number* of class names, then the class names, then each evidence item's
+/// `(class, id, canonical-content)` triple, sorted. Every field is
+/// length-prefixed before hashing, so no field's *content* can shift bytes
+/// across a boundary.
+///
+/// # Why the class-name count is framed too
+///
+/// Framing every field makes the digest input decode to a unique flat
+/// sequence of strings. That is not enough: fields cannot shift, but
+/// **sections can**. With no count, nothing marks where the class names end
+/// and the items begin, so any `k` with `(total - k) % 3 == 0` reads back as
+/// a valid `(class_names, items)` split and distinct preimages share a seal.
+///
+/// The dangerous direction is unfolding class names *into* an item. A
+/// negative guard (`count: { max: 0 }`) contributes a class name with zero
+/// items, so a re-partition can move names into the `class` / `id` /
+/// `content` slots of a fabricated item. Before the count was framed,
+/// `["Reviewer", "Blocker", "task://99", "{…}"] + []` and
+/// `["Reviewer"] + [("Blocker", "task://99", "{…}")]` hashed identically —
+/// and the second asserts a cited instance that never existed while still
+/// satisfying `EvidencePreimage::rehashes_to_seal` against a seal the real
+/// voters computed. Framing the count pins the boundary, so one digest has
+/// one preimage partition.
 ///
 /// Two evaluations of the same guard against the same graph produce the same
 /// hash regardless of result order; **editing a cited instance changes the
@@ -145,6 +174,7 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         .collect();
     items.sort();
     let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
     for name in class_names {
         frame(&mut hasher, name);
     }
@@ -377,9 +407,10 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
 
 /// One signed revocation tombstone: who wrote it and when.
 ///
-/// Rides in the read-set (see `flow_instance::roles::RoleGrantWindow`), so a
-/// verdict names the tombstones it honoured, not merely that "a revocation
-/// existed".
+/// A **computed view** over a carried tombstone link, not a carried value:
+/// `RoleGrantEvidence::resolve` derives it from the link's own author and
+/// timestamp after applying the authority rule. Nothing serialises it into a
+/// read-set, so nobody can assert a revocation that no link witnesses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoleRevocation {
     /// The tombstone's author — the DID that signed it.
@@ -388,23 +419,111 @@ pub struct RoleRevocation {
     pub at: String,
 }
 
-/// What the store knows about one role instance's history for one DID: when the
-/// instance's `didProperty` link naming the DID was written, and every
-/// **signed** tombstone on the instance naming the DID.
+/// The links behind one role instance's history for one DID: the
+/// `instance --didProperty--> did` grant links, and the tombstones on the
+/// instance naming the DID — **as links, not as conclusions**.
 ///
-/// Signature is checked here, at the store boundary — the same rule
-/// `flow_instance::atom::signed_by` applies to votes: a link whose stored
-/// verdict is not `valid` is invisible. **Authority is not checked here**:
-/// whether the tombstone's author may revoke depends on the role query, so
-/// `resolve_role_grants` applies that filter. `granted_at` is `None` when
-/// the role query has no `didProperty` or no such link exists; the caller
-/// then falls back to the instance's own timestamp and never to "always".
-#[derive(Debug, Clone, Default)]
-pub struct RoleGrantTimestamps {
-    /// Earliest timestamp of an `instance --didProperty--> did` link, if any.
-    pub granted_at: Option<String>,
-    /// Every signed tombstone on this instance naming this DID, any author.
-    pub revocations: Vec<RoleRevocation>,
+/// The store returns the material; nothing here is collapsed into
+/// `granted_at` / `revoked_at`. That derivation is
+/// [`RoleGrantEvidence::resolve`](crate::perspectives::flow_instance::roles::RoleGrantEvidence::resolve),
+/// which is pure and therefore re-runnable by a reader holding only a
+/// serialised read-set. Carrying links rather than verdicts is what lets that
+/// reader check the chronology instead of believing the minter's summary.
+///
+/// Carried as plain [`LinkExpression`], not `DecoratedLinkExpression`: the
+/// decorated form's `proof.valid` / `status` are one executor's read-model
+/// flags for its own clients, and on material that travels they would be
+/// claims. Every signature check on these links —
+/// [`revocation_link_counts_for_did`], here and in the pure reader — computes
+/// the verdict from the signature itself, so there is deliberately no carried
+/// verdict to read (review r4076927995).
+///
+/// What is carried differs by kind, and the asymmetry is on purpose *for now*:
+///
+/// - **Tombstones** must be signed ([`revocation_link_counts_for_did`]),
+///   exactly as `flow_instance::atom::signed_by` requires it for votes: a
+///   link whose verdict is not `valid` is not a link anyone wrote. This is
+///   the rule the pre-#1027 code already applied, carried over unchanged.
+/// - **Grant links** are carried on target match alone
+///   ([`grant_link_names_did`]), also unchanged from pre-#1027.
+///
+/// Signature-filtering grant links too is the obvious next step and is
+/// deliberately **not** taken here: `granted_at` falls back to the instance's
+/// own timestamp when no grant link qualifies, and that fallback is normally
+/// *earlier* than the assignment link — so dropping links can land the window
+/// wider than leaving them in. Closing that hole needs the fallback, the
+/// `proof.valid` tri-state (#1046, which conflates never-evaluated with
+/// evaluated-and-failed) and the missing author filter to move together.
+/// Tracked as <https://github.com/coasys/ad4m/issues/1063>.
+///
+/// **Authority is deliberately not checked here** — whether a tombstone's
+/// author may revoke depends on the role query, so the reader applies
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// itself against the definition it holds, and cannot be handed a
+/// pre-filtered set to trust.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RoleGrantLinks {
+    /// Every `instance --didProperty--> did` link, earliest first.
+    /// Empty when the role query has no `didProperty` or no such link exists;
+    /// the reader then dates the grant from the instance itself, never from
+    /// "always".
+    pub grant_links: Vec<LinkExpression>,
+    /// Every signed tombstone on this instance naming this DID, any author,
+    /// **before** the authority filter. Never truncated: dropping a tombstone
+    /// can only widen a window.
+    pub revocation_links: Vec<LinkExpression>,
+}
+
+/// At most this many grant links are carried per `(instance, DID)`, earliest
+/// first. Only the earliest ever dates a grant, so the rest are redundancy;
+/// a cap can therefore only move `granted_at` later — fail-closed — while
+/// bounding what a receipt has to carry.
+///
+/// The cap is applied **after every collection-side filter** and to a
+/// signature-preferred ordering, so that a reader-side filter added later
+/// (#1063) cannot be inverted by forged links evicting a genuine one at
+/// collection time — see the comment at the truncation site.
+pub(crate) const MAX_GRANT_LINKS: usize = 8;
+
+/// Whether a **grant** link speaks about this DID's membership: its target
+/// names the DID. No signature check — see [`RoleGrantLinks`] and #1063.
+///
+/// Shared by the store boundary above and by the pure reader in
+/// `roles::RoleGrantEvidence::resolve`, on purpose. An asymmetric filter is
+/// not a style problem: a link the minter counts and the verifier drops
+/// mints receipts that fail their own verification, and — the direction that
+/// actually costs — a link the verifier counts and the minter dropped lets
+/// forged material widen a window. One predicate per kind, both sites.
+pub(crate) fn grant_link_names_did(link: &LinkExpression, did: &str, did_literal: &str) -> bool {
+    target_names_did(&link.data.target, did, did_literal)
+}
+
+/// Whether a **revocation** tombstone counts for this DID: its signature
+/// verifies, and its target names the DID. Same both-sites rule as
+/// [`grant_link_names_did`], plus the vote-layer signature check.
+///
+/// The verdict is **computed here from the signature**
+/// ([`LinkExpression::compute_proof_valid`]), never read from a carried flag
+/// — the carried form has none. That makes the both-sites symmetry exact:
+/// collection boundary and pure reader run the same crypto on the same
+/// material, so a verdict cannot differ between them and cannot be forged
+/// into either.
+pub(crate) fn revocation_link_counts_for_did(
+    link: &LinkExpression,
+    did: &str,
+    did_literal: &str,
+) -> bool {
+    link.compute_proof_valid() && grant_link_names_did(link, did, did_literal)
+}
+
+/// `literal:string:`-encode a DID for target matching — the form the SDNA
+/// setters write. Shared with the pure reader for the same reason
+/// [`grant_link_names_did`] is.
+pub(crate) fn did_literal_url(did: &str) -> anyhow::Result<String> {
+    use ad4m_client::literal::Literal;
+    Literal::from_string(did.to_string())
+        .to_url()
+        .map_err(|e| anyhow::anyhow!("literal encode DID `{did}`: {e}"))
 }
 
 /// The one perspective call the evaluator needs, behind a trait so the
@@ -413,25 +532,29 @@ pub struct RoleGrantTimestamps {
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
 
-    /// The store's history of one matched role instance for one DID — see
-    /// [`RoleGrantTimestamps`].
+    /// The store's links for one matched role instance and one DID — see
+    /// [`RoleGrantLinks`].
     ///
+    /// `role_class` — the role query's class, needed because `did_property`
+    ///   is a **property name** and only that class's shape says which RDF
+    ///   predicate carries it (see [`did_property_predicate`]).
     /// `instance_id` — the instance URI `model_query` returned.
-    /// `grant_predicate` — the role query's `didProperty`, if any; `None`
+    /// `did_property` — the role query's `didProperty`, if any; `None`
     ///   for `$did`-style queries, where no single property carries the DID.
     /// `did` — the candidate's plain DID.
     ///
-    /// The default knows nothing (no grant link, no tombstones). A caller
-    /// that gets `granted_at: None` must date the grant from the instance itself
+    /// The default knows nothing (no grant links, no tombstones). A caller
+    /// that gets no grant link must date the grant from the instance itself
     /// — `resolve_role_grants` does — so a stub that stays on this default
     /// never turns into "granted since forever".
-    async fn role_grant_timestamps(
+    async fn role_grant_links(
         &self,
+        _role_class: &str,
         _instance_id: &str,
-        _grant_predicate: Option<&str>,
+        _did_property: Option<&str>,
         _did: &str,
-    ) -> anyhow::Result<RoleGrantTimestamps> {
-        Ok(RoleGrantTimestamps::default())
+    ) -> anyhow::Result<RoleGrantLinks> {
+        Ok(RoleGrantLinks::default())
     }
 }
 
@@ -448,33 +571,115 @@ fn target_names_did(target: &str, did: &str, did_literal: &str) -> bool {
     target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
+impl PerspectiveInstance {
+    /// Resolve a role query's `didProperty` — a **property name** — to the RDF
+    /// predicate the assignment links in the graph actually carry.
+    ///
+    /// This is the asymmetry that made every `didProperty` role's grant links
+    /// come back empty before #1065. `model_query` resolves names through the
+    /// SDNA (`compile_leaf_condition` matches `p.name` and emits
+    /// `p.predicate`), so a `where.owner = <did>` condition matches. But
+    /// `get_links` forwards its `predicate` string verbatim
+    /// (`perspective_instance::get_links`), so querying `predicate: "owner"`
+    /// against a graph holding `ns://owner` matched nothing. `granted_at` then
+    /// silently fell back to `asserted_instance_timestamp` — the instance's
+    /// *earliest* link, earlier than the assignment — so the window meant to
+    /// be narrow was the widest possible one. Revocations were never affected
+    /// because their query uses the literal constant
+    /// `ad4m://flow/role_grant_revoked`, not a property name; that asymmetry
+    /// was the tell.
+    ///
+    /// Both spellings resolve: the property name (`owner`, the SDNA form) and
+    /// the predicate itself (`ns://owner`), because a hand-written SDNA may
+    /// name either and a role rule that used to be inert must not start
+    /// gating differently depending on which one its author picked.
+    ///
+    /// Unresolvable is an **`Err`**, not an empty predicate: a role rule
+    /// naming a property this class does not declare cannot be evaluated, and
+    /// per [`resolve_role_grants`](super::flow_instance::roles::resolve_role_grants)
+    /// a translation failure fails closed rather than degrading to "granted
+    /// since forever".
+    fn did_property_predicate(
+        &self,
+        role_class: &str,
+        did_property: &str,
+    ) -> anyhow::Result<String> {
+        let shape = self.get_shape(role_class).map_err(|e| {
+            anyhow::anyhow!(
+                "role_grant_links: cannot load shape for role class `{role_class}` to resolve \
+                 didProperty `{did_property}`: {e}"
+            )
+        })?;
+        let by_name = shape
+            .properties
+            .iter()
+            .find(|p| p.name == did_property && !p.predicate.is_empty())
+            .map(|p| p.predicate.clone())
+            .or_else(|| {
+                shape
+                    .include_relations
+                    .iter()
+                    .find(|r| r.name == did_property && !r.predicate.is_empty())
+                    .map(|r| r.predicate.clone())
+            });
+        if let Some(predicate) = by_name {
+            return Ok(predicate);
+        }
+        let declares_predicate = shape.predicates().iter().any(|p| p == did_property);
+        if declares_predicate {
+            return Ok(did_property.to_string());
+        }
+        anyhow::bail!(
+            "role_grant_links: role class `{role_class}` declares no property or relation named \
+             `{did_property}` (and no predicate spelled that way), so the assignment links for \
+             this role cannot be found; refusing to gate (fail-closed)"
+        )
+    }
+}
+
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
     }
 
-    async fn role_grant_timestamps(
+    async fn role_grant_links(
         &self,
+        role_class: &str,
         instance_id: &str,
-        grant_predicate: Option<&str>,
+        did_property: Option<&str>,
         did: &str,
-    ) -> anyhow::Result<RoleGrantTimestamps> {
-        use ad4m_client::literal::Literal;
-        let did_literal = Literal::from_string(did.to_string())
-            .to_url()
-            .map_err(|e| {
-                anyhow::anyhow!("role_grant_timestamps: literal encode DID `{did}`: {e}")
-            })?;
-        let names_did = |target: &str| target_names_did(target, did, &did_literal);
+    ) -> anyhow::Result<RoleGrantLinks> {
+        // `did_property` is a property NAME; the graph holds the predicate.
+        // Resolving it here is what makes grant links travel at all — see
+        // `did_property_predicate`.
+        let grant_predicate = match did_property {
+            Some(prop) => Some(self.did_property_predicate(role_class, prop)?),
+            None => None,
+        };
+        let grant_predicate = grant_predicate.as_deref();
+        let did_literal = did_literal_url(did)
+            .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
+        let grant_counts = |l: &LinkExpression| grant_link_names_did(l, did, &did_literal);
+        let revocation_counts =
+            |l: &LinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+        // Decorated → plain at the boundary: `proof.valid` and `status` are
+        // this executor's read-model flags, not link material — carrying them
+        // would carry claims, and every consumer computes the verdict from
+        // the signature itself (see `RoleGrantLinks`).
+        let as_carried = |l: DecoratedLinkExpression| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        };
 
-        // Earliest by parsed instant, not by string — grant links are
+        // Sorted by parsed instant, not by string — grant links are
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
-        // A link whose timestamp does not parse cannot date the grant; if
-        // none parses this stays `None`, so the caller falls back to the
-        // instance's own timestamp or fails closed.
+        // A link whose timestamp does not parse can never date a grant, so it
+        // is not worth carrying; when none parses this stays empty and the
+        // reader falls back to the instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        let granted_at = match grant_predicate {
+        let raw_grant_links: Vec<LinkExpression> = match grant_predicate {
             Some(pred) => self
                 .get_links(&LinkQuery {
                     source: Some(instance_id.to_string()),
@@ -483,14 +688,71 @@ impl RequiresQueryable for PerspectiveInstance {
                 })
                 .await?
                 .into_iter()
-                .filter(|l| names_did(&l.data.target))
-                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, l.timestamp)))
-                .min()
-                .map(|(_, ts)| ts),
-            None => None,
+                .map(as_carried)
+                .collect(),
+            None => Vec::new(),
         };
+        let mut grant_links: Vec<LinkExpression> = raw_grant_links
+            .iter()
+            .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
+            .cloned()
+            .collect();
+        // A `didProperty` role whose assignment links cannot be found is not a
+        // neutral outcome: `granted_at` falls back to
+        // `asserted_instance_timestamp`, which is the instance's *earliest*
+        // link and therefore normally EARLIER than the assignment — the
+        // widest possible window, not the narrow one the rule asked for. That
+        // is exactly the shape of the #1027 hole this commit's parent fixed,
+        // and what made it survive a fully green suite was that nothing
+        // distinguished "this query names no didProperty" from "this
+        // didProperty resolves to nothing". Warn so the next spelling drift
+        // announces itself instead of silently widening eligibility.
+        if let Some(pred) = grant_predicate {
+            if grant_links.is_empty() {
+                log::warn!(
+                    "role_grant_links: role class `{role_class}` instance `{instance_id}`: \
+                     didProperty `{}` resolved to predicate `{pred}` but no assignment link for \
+                     `{did}` survived (store returned {} link(s) on that predicate). \
+                     `granted_at` will fall back to the instance's own timestamp, which is \
+                     normally EARLIER than the assignment — a WIDER eligibility window than the \
+                     rule intends. Check that the didProperty spelling matches the class shape \
+                     and that the assignment link carries a parseable RFC 3339 timestamp.",
+                    did_property.unwrap_or(pred),
+                    raw_grant_links.len(),
+                );
+            }
+        }
+        grant_links.sort_by(|a, b| {
+            (parse_link_timestamp(&a.timestamp), &a.timestamp)
+                .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
+        });
+        // Every filter runs before the cap, and the cap runs last. That order
+        // is load-bearing, not tidiness: the cap keeps the EARLIEST links, and
+        // a reader-side filter that only ever removes links (#1063 adds a
+        // signature one) then sees whatever survived collection. Cap first and
+        // the two invert — N forged early links evict the genuine later one
+        // here, the reader drops all N, `resolve` finds no grant link at all
+        // and falls back to `asserted_instance_timestamp`, which is *earlier*
+        // than the grant the filter existed to protect. Fail-open, from a
+        // filter meant to fail closed.
+        //
+        // So the cap is applied to a signature-preferred ordering: links whose
+        // signature verifies claim slots first — computed from the signature
+        // here, since the carried form deliberately has no verdict flag to
+        // read. This is a *preference*, never a filter — an unverified link
+        // is still carried while there is room, which is what keeps #1064 and
+        // #1063 out of this PR. Under the cap nothing changes; at the cap a
+        // forger cannot evict a genuine link, and dropping an unverified
+        // *earlier* link can only move `granted_at` later, which is the
+        // fail-closed direction.
+        grant_links.sort_by_cached_key(|l| !l.compute_proof_valid());
+        grant_links.truncate(MAX_GRANT_LINKS);
+        grant_links.sort_by(|a, b| {
+            (parse_link_timestamp(&a.timestamp), &a.timestamp)
+                .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
+        });
 
-        let revocations: Vec<RoleRevocation> = self
+        let revocation_links: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
                 source: Some(instance_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
@@ -498,26 +760,51 @@ impl RequiresQueryable for PerspectiveInstance {
             })
             .await?
             .into_iter()
-            // The vote rule (`atom::signed_by`): a link whose signature does
-            // not verify is not a link anyone wrote.
-            .filter(|l| l.proof.valid == Some(true) && names_did(&l.data.target))
-            .map(|l| RoleRevocation {
-                by: l.author,
-                at: l.timestamp,
-            })
+            .map(as_carried)
+            .filter(revocation_counts)
             .collect();
 
-        Ok(RoleGrantTimestamps {
-            granted_at,
-            revocations,
+        Ok(RoleGrantLinks {
+            grant_links,
+            revocation_links,
         })
+    }
+}
+
+/// Tri-state seal result for one target state's guard, used by the manual
+/// proposal path and by `accept.rs` when re-verifying a co-sign.
+///
+/// - `Sealed(hash)` — guard is present and currently satisfied; hash is
+///   the SHA256 over the evidence, exactly as [`evidence_hash`] produces.
+/// - `NoGuard` — the target state carries no `requires` guard; the seal is
+///   defined as `evidence_hash(&[], &[])` (the hash of an empty bag), so
+///   proposer and voter always agree on it by construction.
+/// - `Unmet` — the guard exists but is not currently satisfied, or the flow
+///   / state definition changed since the proposal was minted.  The caller
+///   must refuse its own action and write nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EvidenceSeal {
+    Sealed(String),
+    NoGuard,
+    Unmet,
+}
+
+impl EvidenceSeal {
+    /// Canonical hash string: `Sealed(h) → h`, `NoGuard → hash of empty bag`.
+    /// Returns `None` for `Unmet` so callers can treat it as "unverifiable".
+    pub(crate) fn hash(&self) -> Option<String> {
+        match self {
+            EvidenceSeal::Sealed(h) => Some(h.clone()),
+            EvidenceSeal::NoGuard => Some(evidence_hash(&[], &[])),
+            EvidenceSeal::Unmet => None,
+        }
     }
 }
 
 /// Outcome of AND-ing a state's `requires`. Translation failures are
 /// split from query failures so the composer can `warn!` the former
 /// (persistent misconfig) and `debug!` the latter (transient).
-enum RequiresResult {
+pub(crate) enum RequiresResult {
     Satisfied(Vec<String>, Vec<EvidenceItem>),
     Unmet,
     Untranslatable(anyhow::Error),
@@ -556,7 +843,7 @@ pub(crate) async fn run_query<Q: RequiresQueryable + ?Sized>(
 /// AND across a state's `requires`. Unmet as soon as one guard misses;
 /// `Satisfied` (class names and hydrated evidence, both deduplicated in
 /// first-seen order, evidence by instance ID) when every guard holds.
-async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
+pub(crate) async fn evaluate_requires<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     requires: &[ModelQuery],
     record: &FlowInstanceRecord,
@@ -641,16 +928,26 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
     out
 }
 
-/// Re-run one target state's `requires` against the CURRENT graph and return
-/// the freshly-computed evidence hash. Used at **vote time**: a replica
-/// re-checks a proposal's seal on its own graph before co-signing it
-/// (`flow_instance::accept`).
+/// A recomputed [`EvidenceSeal`] together with the evidence it was computed
+/// over, for the one caller that has to *write* that evidence (the mint).
 ///
-/// - `Ok(Some(hash))` — guard still satisfied; the caller compares it with
-///   the proposal's sealed hash.
-/// - `Ok(None)` — nothing verifiable remains: the guard no longer holds, or
-///   the flow/state/guard definition changed out from under the proposal.
-/// - `Err` — transient query/store failure.
+/// `evidence` is empty for `NoGuard` (the canonical seal is over an empty
+/// bag, by definition) and for `Unmet` (there is nothing to cite).
+pub(crate) struct SealedEvidence {
+    pub seal: EvidenceSeal,
+    pub evidence: Vec<EvidenceItem>,
+}
+
+/// Re-run one target state's `requires` against the CURRENT graph and return
+/// an [`EvidenceSeal`] that a voter can compare with the proposal's stored
+/// hash before co-signing.
+///
+/// - `Ok(Sealed(hash))` — guard satisfied; compare with `atom.evidence_hash`.
+/// - `Ok(NoGuard)` — the target state carries no guard; the canonical seal
+///   is `evidence_hash(&[], &[])` (see [`EvidenceSeal::hash`]).
+/// - `Ok(Unmet)` — guard exists but is not currently satisfied, or the
+///   flow / state definition changed.  The caller must refuse its own action.
+/// - `Err` — transient query / store failure.
 ///
 /// A caller may only ever refuse its own action on any of these; none of
 /// them is grounds for touching somebody else's proposal.
@@ -658,42 +955,64 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// `acting_did` must be the PROPOSER's DID: `$did`-substituted guards
 /// resolved against the proposer at mint time, so re-verification must
 /// substitute the same identity or the hash could never match.
+///
+/// **This is the one definition of "the seal for state S".** Both places a
+/// vote comes into existence go through it — the co-sign in
+/// `flow_instance::accept` via [`recompute_evidence_hash`], and the mint in
+/// `flow_instance::propose` via this function — so the proposer's own vote is
+/// sealed by exactly the code every other replica re-runs against it.
+pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    flow: &SHACLFlow,
+    record: &FlowInstanceRecord,
+    to_state: &str,
+    acting_did: &str,
+) -> Result<SealedEvidence> {
+    let unmet = |seal| SealedEvidence {
+        seal,
+        evidence: Vec::new(),
+    };
+    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
+        log::warn!(
+            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
+            flow.name
+        );
+        return Ok(unmet(EvidenceSeal::Unmet));
+    };
+    let requires = state.requires.as_deref().unwrap_or_default();
+    if requires.is_empty() {
+        return Ok(unmet(EvidenceSeal::NoGuard));
+    }
+    match evaluate_requires(perspective, requires, record, acting_did).await {
+        RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
+            seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            evidence,
+        }),
+        RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
+        RequiresResult::Untranslatable(e) => {
+            log::warn!(
+                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
+                flow.name
+            );
+            Ok(unmet(EvidenceSeal::Unmet))
+        }
+        RequiresResult::QueryFailed(e) => Err(e),
+    }
+}
+
+/// [`recompute_evidence_seal`] without the evidence — what a voter needs.
 pub(crate) async fn recompute_evidence_hash<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     flow: &SHACLFlow,
     record: &FlowInstanceRecord,
     to_state: &str,
     acting_did: &str,
-) -> Result<Option<String>> {
-    let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
-        log::warn!(
-            "recompute_evidence_hash: state `{to_state}` no longer exists on flow `{}`",
-            flow.name
-        );
-        return Ok(None);
-    };
-    let requires = state.requires.as_deref().unwrap_or_default();
-    if requires.is_empty() {
-        log::warn!(
-            "recompute_evidence_hash: `{}.{to_state}` no longer carries a `requires` guard",
-            flow.name
-        );
-        return Ok(None);
-    }
-    match evaluate_requires(perspective, requires, record, acting_did).await {
-        RequiresResult::Satisfied(class_names, evidence) => {
-            Ok(Some(evidence_hash(&class_names, &evidence)))
-        }
-        RequiresResult::Unmet => Ok(None),
-        RequiresResult::Untranslatable(e) => {
-            log::warn!(
-                "recompute_evidence_hash: `{}.{to_state}` became untranslatable: {e:#}",
-                flow.name
-            );
-            Ok(None)
-        }
-        RequiresResult::QueryFailed(e) => Err(e),
-    }
+) -> Result<EvidenceSeal> {
+    Ok(
+        recompute_evidence_seal(perspective, flow, record, to_state, acting_did)
+            .await?
+            .seal,
+    )
 }
 
 /// Load → evaluate → (confirm) → write, called by the extraction pass once
@@ -833,41 +1152,61 @@ pub async fn run_engine_proposal_pass(
     minted
 }
 
-/// Check whether a proposal with the same evidence hash already exists for
-/// the same flow instance AND target state. Keeps the pass idempotent:
-/// minting does not advance `currentState`, so without this check every
-/// later pass re-proposes each satisfied-unconsumed transition — and a
-/// consensus rule counting proposals rather than distinct DIDs could then
-/// be gamed by one agent re-running its own pass. The `to_state` check
-/// matters because two distinct transitions can share identical `requires`
+/// **Every** live proposal carrying this transition's dedup key —
+/// `(evidence_hash, instance_uri, to_state)` — sorted by URI; empty when
+/// there is none.
+///
+/// *Live* excludes any proposal carrying `resolved_as`: that is the recorded
+/// history of a consensus event, not an open proposal, and it must not
+/// suppress a re-mint. Without the exclusion a cyclic flow wedges — same
+/// graph → same seal → the already-settled proposal matches the whole key,
+/// so the mint is skipped and the edge can never fire on the next visit.
+///
+/// The key deliberately carries **no proposer**. That is what lets a second
+/// agent find the one open proposal for an edge and co-sign it instead of
+/// minting an unreachable twin (`flow_instance::propose`). `to_state` is in
+/// the key because two distinct transitions can share identical `requires`
 /// guards and therefore identical evidence hashes.
-async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+///
+/// **All matches, not the first.** The key carries no `from_state` either, so
+/// in a flow with two transitions into one state under identical guards a
+/// proposal on the *other* edge shares the key. Nothing orders these links,
+/// so a first-match lookup is a coin flip: the manual path would classify a
+/// foreign candidate, miss the joinable one sitting behind it, and mint — and
+/// mint *again* on the next press, splitting the vote it exists to gather and
+/// breaking invariant 4 (`flow_instance::propose`). Returning the whole set
+/// lets that caller prefer its own edge. The engine pass only asks whether the
+/// set is non-empty, which is what it asked before.
+///
+/// **Sorted by URI**, because the store's own iteration order is arbitrary —
+/// `query_links` walks matched quads and never orders them, so the same graph
+/// can hand back the same two candidates in either order on two runs. Two
+/// things need that not to be true. The manual path picks the first
+/// `Joinable` among twins, and unordered input makes that pick vary run to
+/// run and replica to replica for no reason (harmless to quorum, since
+/// `fold::settle_edge` pools across twins, but it scatters co-signs). And the
+/// ordering-dependent bug above cannot be tested through the store at all
+/// unless the order is fixed. A total order over URIs is enough for both.
+///
+/// Every store failure is an `Err`, with no disposition chosen here: the two
+/// callers need opposite ones. The engine pass fails closed
+/// ([`proposal_already_exists`]) because it retries on the next pass; the
+/// manual path surfaces the error, because a user's click has no next pass.
+pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
-) -> bool {
+) -> Result<Vec<String>> {
     use crate::types::LinkQuery;
+    let mut found = Vec::new();
     let literal = |s: &str| format!("literal:string:{}", urlencoding::encode(s));
-    // Every lookup below fails CLOSED (treat as already-proposed): a missed
-    // mint on a transient store error is recovered on the next pass, while a
-    // duplicate mint is exactly what this function exists to prevent — see
-    // the invariant above.
-    let hash_links = match store
+    let hash_links = store
         .get_proposal_links(&LinkQuery {
             predicate: Some("ad4m://flow/evidence_hashes".into()),
             target: Some(literal(&transition.evidence_hash)),
             ..Default::default()
         })
         .await
-    {
-        Ok(links) => links,
-        Err(e) => {
-            log::warn!(
-                "proposal_already_exists: evidence-hash lookup failed ({e:#}); \
-                 treating as already-proposed (fail-closed, skipping mint)"
-            );
-            return true;
-        }
-    };
+        .map_err(|e| anyhow!("evidence-hash lookup failed ({e:#})"))?;
     for link in &hash_links {
         let proposal_uri = &link.data.source;
         let links_to = |predicate: &'static str, want: String| async move {
@@ -879,19 +1218,9 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 })
                 .await
                 .map(|links| links.iter().any(|l| l.data.target == want))
+                .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))
         };
-        let fail_closed = |e: anyhow::Error| {
-            log::warn!(
-                "proposal_already_exists: candidate lookup on {proposal_uri} failed \
-                 ({e:#}); treating as already-proposed (fail-closed, skipping mint)"
-            );
-        };
-        // A proposal carrying `resolved_as` is the recorded history of a
-        // consensus event, not a live proposal, and must not suppress a re-mint.
-        // Without this a cyclic flow wedges: same graph → same seal → the
-        // already-settled proposal matches the whole dedup key, so the mint
-        // is skipped and the edge can never fire on the next visit.
-        match store
+        let resolved = store
             .get_proposal_links(&LinkQuery {
                 source: Some(proposal_uri.clone()),
                 predicate: Some(
@@ -900,32 +1229,61 @@ async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
                 ..Default::default()
             })
             .await
-        {
-            Ok(links) if !links.is_empty() => continue,
-            Ok(_) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+            .map_err(|e| anyhow!("candidate lookup on {proposal_uri} failed ({e:#})"))?;
+        if !resolved.is_empty() {
+            continue;
         }
-        match links_to("ad4m://flow/instance", transition.instance_uri.clone()).await {
-            Ok(false) => continue,
-            Ok(true) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if !links_to("ad4m://flow/instance", transition.instance_uri.clone()).await? {
+            continue;
         }
-        match links_to("ad4m://flow/to_state", literal(&transition.to_state)).await {
-            Ok(true) => return true,
-            Ok(false) => {}
-            Err(e) => {
-                fail_closed(e);
-                return true;
-            }
+        if links_to("ad4m://flow/to_state", literal(&transition.to_state)).await? {
+            found.push(proposal_uri.clone());
         }
     }
-    false
+    found.sort();
+    Ok(found)
+}
+
+/// Idempotency for the **engine pass**: has a proposal with this transition's
+/// evidence hash already been minted for the same instance AND target state?
+///
+/// Minting does not advance `currentState`, so without this check every later
+/// pass re-proposes each satisfied-unconsumed transition — and a consensus
+/// rule counting proposals rather than distinct DIDs could then be gamed by
+/// one agent re-running its own pass.
+///
+/// **Both guarantees are about the engine pass**, and the fail-closed
+/// disposition below is too: it assumes a caller that runs again shortly and
+/// whose acting DID is this replica's. A caller that runs once, on a human's
+/// click, satisfies neither — it must call [`find_live_proposals`] and choose
+/// its own disposition. `flow_instance::propose` does exactly that; this
+/// wrapper exists so the engine's behaviour is unchanged by that split.
+///
+/// **The `from_state`-free key bites here, and only here.** Asking whether the
+/// set is non-empty cannot tell an `A→C` proposal from a `B→C` one, so a
+/// stranded proposal on one edge suppresses the engine ever proposing the
+/// other, silently, for as long as it stays open. The manual path discriminates
+/// and recovers; this one has nowhere to put the distinction — skipping is its
+/// whole contract — so it does not. Narrow (it needs two guard-identical edges
+/// into one state) and pre-existing, but real: prefer widening the key here
+/// over re-flattening the manual path onto it.
+pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
+    store: &S,
+    transition: &SatisfiedTransition,
+) -> bool {
+    match find_live_proposals(store, transition).await {
+        Ok(found) => !found.is_empty(),
+        // Fail CLOSED: a missed mint on a transient store error is recovered
+        // on the next pass, while a duplicate mint is exactly what this
+        // function exists to prevent — see the invariant above.
+        Err(e) => {
+            log::warn!(
+                "proposal_already_exists: {e:#}; treating as already-proposed \
+                 (fail-closed, skipping mint)"
+            );
+            true
+        }
+    }
 }
 
 /// The one perspective call the idempotency check needs, behind a trait so
@@ -950,7 +1308,7 @@ impl ProposalLookup for PerspectiveInstance {
 
 /// Write one proposal inside its own batch, so readers never see a
 /// half-written proposal and one failed write does not roll back the rest.
-async fn write_proposal(
+pub(crate) async fn write_proposal(
     perspective: &mut PerspectiveInstance,
     transition: &SatisfiedTransition,
     proposer_did: &str,
@@ -1098,6 +1456,62 @@ mod tests {
         assert_eq!(a, evidence_hash(&classes, &reordered), "key order ignored");
     }
 
+    /// Framing every *field* stops a field's content from shifting bytes
+    /// across a boundary. It does not stop a *section* from shifting: without
+    /// the `class_names` count in the digest, the hash input decodes to a
+    /// unique flat sequence of strings but not to a unique
+    /// `(class_names, items)` split — any `k` with `(total - k) % 3 == 0`
+    /// reads back as a valid partition.
+    ///
+    /// The second pair is the direction that matters. A negative guard
+    /// contributes a class name with zero items, so re-partitioning is
+    /// *productive*: `["Reviewer"] + [("Blocker", "task://99", …)]` asserts a
+    /// cited instance that never existed, while still satisfying
+    /// `EvidencePreimage::rehashes_to_seal` against a seal the real voters
+    /// computed.
+    ///
+    /// Red if the `class_names.len()` framing is removed from
+    /// `evidence_hash`: the pairs then collide on `de92f359…` and
+    /// `e34627f9…` respectively.
+    #[test]
+    fn evidence_hash_pins_where_the_class_names_end_and_the_items_begin() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+        let item = |class: &str, id: &str, content: &str| EvidenceItem {
+            id: id.into(),
+            class_name: class.into(),
+            content: content.into(),
+        };
+
+        // An item folded forward into the class-name list.
+        assert_ne!(
+            evidence_hash(
+                &names(&["Task"]),
+                &[item("Task", "task://1", r#"{"title":"x"}"#)],
+            ),
+            evidence_hash(
+                &names(&["Task", "Task", "task://1", r#"{"title":"x"}"#]),
+                &[]
+            ),
+            "a guard over one matched Task must not share a seal with a guard \
+             whose class list swallowed that match"
+        );
+
+        // Class names unfolded backwards into an item: the preimage that
+        // invents cited evidence under a seal real voters signed.
+        assert_ne!(
+            evidence_hash(
+                &names(&["Reviewer", "Blocker", "task://99", r#"{"approved":true}"#]),
+                &[],
+            ),
+            evidence_hash(
+                &names(&["Reviewer"]),
+                &[item("Blocker", "task://99", r#"{"approved":true}"#)],
+            ),
+            "satisfied negative guards must not share a seal with a guard that \
+             cites an instance"
+        );
+    }
+
     #[test]
     fn canonical_json_sorts_keys_recursively() {
         let v: Value = serde_json::from_str(r#"{"b":{"y":2,"x":[{"q":1,"p":0}]},"a":1}"#).unwrap();
@@ -1105,6 +1519,82 @@ mod tests {
             canonical_json(&v),
             r#"{"a":1,"b":{"x":[{"p":0,"q":1}],"y":2}}"#
         );
+    }
+
+    /// The two predicates both sides of the wire share, pinned together so a
+    /// change to one that should have touched the other is visible here.
+    ///
+    /// Target matching is identical for both and must accept every spelling
+    /// the graph uses for a DID target — an unrecognised *tombstone* spelling
+    /// would fail open (#1014).
+    ///
+    /// They differ on signatures, and that difference is the tested contract,
+    /// not an accident: a tombstone needs a signature that verifies, a grant
+    /// link does not (yet — #1063). The verdict is **computed** from the
+    /// signature — the carried form has no verdict flag a fixture could set —
+    /// so a fixture that wants a tombstone to count has to sign it for real,
+    /// and a forged one is one signed by a key that is not its stated
+    /// author's.
+    #[test]
+    fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
+        use crate::agent::signatures::TestSigner;
+        use ad4m_client::literal::Literal;
+        let did = "did:key:alice";
+        let did_literal = did_literal_url(did).unwrap();
+        let other = Literal::from_string("did:key:bob".to_string())
+            .to_url()
+            .unwrap();
+        let legacy = did_literal.replace("literal:string:", "literal://string:");
+        let admin = TestSigner::generate();
+        let forger = TestSigner::generate();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // A valid link is signed by its stated author's own key; a forged one
+        // states the same author but carries somebody else's signature.
+        let signed = |target: &str, valid: bool| -> LinkExpression {
+            let signing_key = if valid { &admin } else { &forger };
+            let mut expr = signing_key.sign_at(
+                crate::types::Link {
+                    source: "r0".into(),
+                    predicate: Some("agent".into()),
+                    target: target.into(),
+                }
+                .normalize(),
+                at,
+            );
+            expr.author = admin.did.clone();
+            expr.proof.key = admin.key_id.clone();
+            LinkExpression::from(expr)
+        };
+
+        for target in [did, did_literal.as_str(), legacy.as_str()] {
+            assert!(
+                revocation_link_counts_for_did(&signed(target, true), did, &did_literal),
+                "a signed tombstone naming the DID as `{target}` counts"
+            );
+            assert!(
+                !revocation_link_counts_for_did(&signed(target, false), did, &did_literal),
+                "a tombstone whose signature does not verify never counts, whatever it names"
+            );
+            for valid in [true, false] {
+                assert!(
+                    grant_link_names_did(&signed(target, valid), did, &did_literal),
+                    "a grant link is carried on target match alone (valid={valid}); \
+                     signature-filtering it is #1063, not this PR"
+                );
+            }
+        }
+        for valid in [true, false] {
+            assert!(
+                !revocation_link_counts_for_did(&signed(&other, valid), did, &did_literal),
+                "a tombstone naming another DID is not this DID's history"
+            );
+            assert!(
+                !grant_link_names_did(&signed(&other, valid), did, &did_literal),
+                "a grant link naming another DID is not this DID's history"
+            );
+        }
     }
 
     #[test]
@@ -1427,7 +1917,7 @@ mod tests {
     }
 
     impl StubPerspective {
-        fn with_instances(mut self, class: &str, ids: &[&str]) -> Self {
+        fn with_instances(self, class: &str, ids: &[&str]) -> Self {
             self.with_instance_objects(class, ids.iter().map(|id| json!({ "id": id })).collect())
         }
         fn with_instance_objects(mut self, class: &str, objects: Vec<Value>) -> Self {
@@ -1476,6 +1966,7 @@ mod tests {
             requires,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -1497,6 +1988,7 @@ mod tests {
             creation_hint: None,
             context: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -1545,22 +2037,28 @@ mod tests {
         let same = recompute_evidence_hash(&stub, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap();
-        assert_eq!(same.as_deref(), Some(minted[0].evidence_hash.as_str()));
+        assert_eq!(
+            same.hash().as_deref(),
+            Some(minted[0].evidence_hash.as_str()),
+            "unchanged graph reproduces the minted hash"
+        );
 
         let edited = StubPerspective::default()
             .with_instance_objects("ns://Vote", vec![json!({"id": "v1", "value": "no"})]);
         let changed = recompute_evidence_hash(&edited, f, &inst(), "scoped", "did:key:me")
             .await
             .unwrap()
-            .expect("guard still satisfied");
+            .hash()
+            .expect("guard still satisfied even after edit — different hash, not Unmet");
         assert_ne!(changed, minted[0].evidence_hash);
     }
 
-    /// The two dispositions a voter must tell apart: "nothing verifiable
-    /// remains" (refuse to co-sign) and "the store failed" (try again later).
-    /// Neither is ever grounds for touching the proposal.
+    /// `Unmet` for an unsatisfied/missing guard, `NoGuard` for a guard-less
+    /// target state, and `Err` for a transient store failure. The voter uses
+    /// `EvidenceSeal::hash()` which returns `None` for `Unmet` and `Some` for
+    /// both `Sealed` and `NoGuard`, so the accept check catches only `Unmet`.
     #[tokio::test]
-    async fn recompute_is_none_when_unverifiable_and_err_on_store_failure() {
+    async fn recompute_returns_unmet_or_noguard_and_err_on_store_failure() {
         let f = flow(
             "Delivery",
             "identified",
@@ -1569,21 +2067,34 @@ mod tests {
         );
         let empty = StubPerspective::default().with_instances("ns://Vote", &[]);
         let unguarded = flow("Delivery", "identified", "scoped", None);
-        #[rustfmt::skip]
-        let unverifiable = [
+
+        // Unmet cases: guard exists but is not satisfied, or state is gone.
+        for (name, store, flow, to_state) in [
             ("guard no longer satisfied", &empty, &f, "scoped"),
-            ("target state vanished from the flow definition", &empty, &f, "shipped"),
-            ("guard-less state: nothing to verify", &empty, &unguarded, "scoped"),
-        ];
-        for (name, store, flow, to_state) in unverifiable {
+            (
+                "target state vanished from the flow definition",
+                &empty,
+                &f,
+                "shipped",
+            ),
+        ] {
             assert_eq!(
                 recompute_evidence_hash(store, flow, &inst(), to_state, "did:key:me")
                     .await
                     .unwrap(),
-                None,
+                EvidenceSeal::Unmet,
                 "{name}"
             );
         }
+
+        // Guard-less state: commit A's fix — returns NoGuard, not Unmet.
+        assert_eq!(
+            recompute_evidence_hash(&empty, &unguarded, &inst(), "scoped", "did:key:me")
+                .await
+                .unwrap(),
+            EvidenceSeal::NoGuard,
+            "guard-less state must return NoGuard so co-signing can succeed"
+        );
 
         let broken = StubPerspective::default().with_error("ns://Vote", "store down");
         assert!(
@@ -1882,6 +2393,182 @@ mod tests {
                 by_predicate: HashMap::new(),
             };
             assert!(!proposal_already_exists(&store, &transition()).await);
+        }
+
+        /// The split the manual path needed. Both callers run the same lookup
+        /// over the same failing store and must reach OPPOSITE dispositions:
+        /// the engine pass fails closed because it retries on the next pass,
+        /// and the manual path surfaces the error because a user's click has
+        /// no next pass — silence there reports a lost vote as success.
+        #[tokio::test]
+        async fn a_store_failure_is_an_error_for_the_manual_path_and_fail_closed_for_the_pass() {
+            let hash_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([("ad4m://flow/evidence_hashes".to_string(), None)]),
+            };
+            let err = find_live_proposals(&hash_lookup_fails, &transition())
+                .await
+                .expect_err("a failed evidence-hash lookup must be an Err, not Ok(None)");
+            assert!(
+                format!("{err:#}").contains("evidence-hash lookup failed"),
+                "the error must name what failed: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&hash_lookup_fails, &transition()).await,
+                "the engine pass still fails closed on the very same store"
+            );
+
+            let candidate_lookup_fails = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    ("ad4m://flow/instance".to_string(), None),
+                ]),
+            };
+            let err = find_live_proposals(&candidate_lookup_fails, &transition())
+                .await
+                .expect_err("a failed candidate lookup must be an Err too");
+            assert!(
+                format!("{err:#}").contains("candidate lookup on proposal://1 failed"),
+                "the error must name the candidate: {err:#}"
+            );
+            assert!(
+                proposal_already_exists(&candidate_lookup_fails, &transition()).await,
+                "the engine pass still fails closed here as well"
+            );
+        }
+
+        /// The other half of the same split: on a clean store the two agree,
+        /// and `find_live_proposals` hands back the URIs rather than a bool —
+        /// which is what lets the manual path co-sign what it found.
+        #[tokio::test]
+        async fn a_live_match_yields_the_proposal_uri_and_a_settled_one_yields_none() {
+            let matching = |extra: Vec<(String, Option<Vec<DecoratedLinkExpression>>)>| {
+                let mut by_predicate = HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/evidence_hashes",
+                            "literal:string:hash",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/instance",
+                            "ad4m://flow/instance/1",
+                        )]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![link(
+                            "proposal://1",
+                            "ad4m://flow/to_state",
+                            "literal:string:scoped",
+                        )]),
+                    ),
+                ]);
+                by_predicate.extend(extra);
+                ScriptedStore { by_predicate }
+            };
+
+            let live = matching(vec![]);
+            assert_eq!(
+                find_live_proposals(&live, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                vec!["proposal://1".to_string()],
+                "the URI, not a bool — the manual path co-signs what it finds"
+            );
+            assert!(proposal_already_exists(&live, &transition()).await);
+
+            // A `resolved_as` mark makes it history, not a live proposal: it
+            // must not suppress a re-mint, or a cyclic flow wedges.
+            let settled = matching(vec![(
+                crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE.to_string(),
+                Some(vec![link(
+                    "proposal://1",
+                    crate::perspectives::flow_instance::atom::RESOLVED_AS_PREDICATE,
+                    "literal:string:fired",
+                )]),
+            )]);
+            assert_eq!(
+                find_live_proposals(&settled, &transition())
+                    .await
+                    .expect("no error"),
+                Vec::<String>::new(),
+                "a settled proposal is history and must not be found as live"
+            );
+            assert!(!proposal_already_exists(&settled, &transition()).await);
+        }
+
+        /// Two live proposals share the dedup key, because it carries no
+        /// `from_state` and the flow has two guard-identical edges into one
+        /// state. The lookup must hand back BOTH.
+        ///
+        /// Returning only the first is a coin flip on link order, and losing
+        /// that flip is not cosmetic: `flow_instance::propose` would classify
+        /// the foreign proposal, never see the joinable one behind it, and
+        /// mint — then mint again on the next press, splitting the very vote
+        /// the dedup key exists to gather. Only this caller can tell the two
+        /// apart (it knows the acting DID and the derived `from_state`), so
+        /// the lookup's whole job is to not decide for it.
+        ///
+        /// It does decide the ORDER, though: sorted by URI, not however the
+        /// store happened to iterate. Two runs over one graph must classify
+        /// the same candidate first.
+        #[tokio::test]
+        async fn every_proposal_sharing_the_dedup_key_is_returned_not_just_the_first() {
+            let both = |uri: &str| {
+                (
+                    uri.to_string(),
+                    link(uri, "ad4m://flow/instance", "ad4m://flow/instance/1"),
+                )
+            };
+            let (a, link_a) = both("proposal://aaa");
+            let (b, link_b) = both("proposal://bbb");
+            // Fed to the store in DESCENDING order, which the real store is
+            // free to do: `query_links` never orders its matches.
+            let store = ScriptedStore {
+                by_predicate: HashMap::from([
+                    (
+                        "ad4m://flow/evidence_hashes".to_string(),
+                        Some(vec![
+                            link(&b, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                            link(&a, "ad4m://flow/evidence_hashes", "literal:string:hash"),
+                        ]),
+                    ),
+                    (
+                        "ad4m://flow/instance".to_string(),
+                        Some(vec![link_b, link_a]),
+                    ),
+                    (
+                        "ad4m://flow/to_state".to_string(),
+                        Some(vec![
+                            link(&b, "ad4m://flow/to_state", "literal:string:scoped"),
+                            link(&a, "ad4m://flow/to_state", "literal:string:scoped"),
+                        ]),
+                    ),
+                ]),
+            };
+
+            assert_eq!(
+                find_live_proposals(&store, &transition())
+                    .await
+                    .expect("a clean store must not error"),
+                vec![a, b],
+                "both matches, sorted by URI rather than left in the store's arbitrary \
+                 order — the caller picks its own edge, and it must pick the same one twice"
+            );
+            // The engine pass asked "is there one?" before and still does.
+            assert!(proposal_already_exists(&store, &transition()).await);
         }
     }
 }

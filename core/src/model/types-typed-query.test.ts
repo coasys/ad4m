@@ -245,6 +245,22 @@ expectAssignable<TypedIncludeMap<Post>>({
   void _bad1;
 }
 
+// A transitive projection: the whole conversation under each row rather than
+// its direct replies. `IncludeProjection` has always accepted this; the typed
+// form rejected it at compile time, so the option was unreachable from a typed
+// query — the documented spelling for "42 replies" on a collapsed branch.
+expectAssignable<TypedIncludeMap<Post>>({
+  $descendantCount: { from: "comments", count: true, transitive: true },
+});
+
+// And on the list-shaped variants, which the executor also walks transitively.
+expectAssignable<TypedIncludeMap<Post>>({
+  $firstDescendant: { from: "comments", transitive: true, limit: 1 },
+});
+expectAssignable<TypedIncludeMap<Post>>({
+  $descendants: { from: "comments", transitive: true, limit: 10, where: { likes: { gt: 1 } } },
+});
+
 // Projection's nested where uses the *target's* property keys
 expectAssignable<TypedIncludeMap<Post>>({
   $popular: { from: "comments", where: { likes: { gt: 100 } }, limit: 10 },

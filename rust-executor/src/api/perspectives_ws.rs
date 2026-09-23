@@ -2091,6 +2091,40 @@ async fn reject_flow_proposal_handler(
     Ok(serde_json::json!({ "retractedLinks": retracted }))
 }
 
+async fn propose_flow_transition_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let instance_uri = params.require_str("instanceUri")?;
+    let to_state = params.require_str("toState")?;
+    let rationale = params
+        .get("rationale")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
+    // whether the click queued a live proposal, re-pressed one this agent had
+    // already voted on, or landed on a stalled instance — and those want
+    // different UI. See `flow_instance::propose`.
+    let outcome = crate::perspectives::flow_instance::propose::propose_flow_transition(
+        &mut perspective,
+        &instance_uri,
+        &to_state,
+        rationale.as_deref(),
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
 // ── SHACL resolution endpoints ──
 //
 // These handlers move SHACL shape resolution from the TypeScript SDK (which paid
@@ -2511,6 +2545,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register(
         "perspective.rejectFlowProposal",
         reject_flow_proposal_handler,
+    );
+    map.register(
+        "perspective.proposeFlowTransition",
+        propose_flow_transition_handler,
     );
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);

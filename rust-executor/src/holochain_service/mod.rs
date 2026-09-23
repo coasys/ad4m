@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
 use holochain::conductor::config::{ConductorConfig, NetworkConfig, SpaceNetworkOverride};
+use holochain::conductor::error::ConductorError;
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
@@ -30,12 +31,14 @@ use url2::Url2;
 
 use tokio_stream::StreamExt;
 
+pub mod conductor_startup;
 pub mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
-    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
-    HolochainServiceRequest, HolochainServiceResponse,
+    get_holochain_service, holochain_service_once_started, maybe_get_holochain_service,
+    ConductorStarting, HolochainServiceInterface, HolochainServiceRequest,
+    HolochainServiceResponse, SERVICE_WAIT,
 };
 
 use self::interface::set_holochain_service;
@@ -618,18 +621,65 @@ impl HolochainService {
             return Err(anyhow!("App id is required"));
         }
 
-        let app_id = install_app_payload.installed_app_id.clone().unwrap();
+        let mut app_id = install_app_payload.installed_app_id.clone().unwrap();
 
         //Check if app_id already exists
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         match app_info {
             None => {
-                self.conductor
+                if let Err(e) = self
+                    .conductor
                     .clone()
                     .install_app_bundle(install_app_payload)
                     .await
-                    .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
+                {
+                    // Same DNA hash + same agent key = the same cell. The conductor
+                    // refuses to create a cell that an already-installed app owns
+                    // (CellAlreadyExists), which happens when a language is published
+                    // or templated without changing the network seed: the new language
+                    // address yields a new app_id, but its cell is identical to the one
+                    // backing the original language. The "new" app would be backed by
+                    // exactly that cell anyway, so reuse the owning app instead of
+                    // failing. All other install errors stay hard failures.
+                    let ConductorError::CellAlreadyExists(cell_id) = &e else {
+                        return Err(anyhow!("Could not install app: {:?}", e));
+                    };
+                    let owns_cell = |app: &AppInfo| {
+                        app.cell_info.values().flatten().any(|ci| match ci {
+                            CellInfo::Provisioned(c) => &c.cell_id == cell_id,
+                            CellInfo::Cloned(c) => &c.cell_id == cell_id,
+                            CellInfo::Stem(_) => false,
+                        })
+                    };
+                    let owner = self
+                        .conductor
+                        .list_apps(None)
+                        .await?
+                        .into_iter()
+                        .find(owns_cell);
+                    match owner {
+                        Some(owner) => {
+                            info!(
+                                "Could not install app '{}': cell {:?} already installed under app '{}'; reusing that app",
+                                app_id, cell_id, owner.installed_app_id
+                            );
+                            app_id = owner.installed_app_id;
+                        }
+                        None => {
+                            // The conductor's duplicate check compares against cells of
+                            // installed apps, so this should be unreachable — but if the
+                            // cell really has no owning app, there is nothing usable to
+                            // recover to.
+                            return Err(anyhow!(
+                                "Could not install app '{}': cell {:?} already exists but no installed app owns it: {:?}",
+                                app_id,
+                                cell_id,
+                                e
+                            ));
+                        }
+                    }
+                }
             }
             Some(_) => {
                 info!("App already installed with id: {:?}", app_id);
