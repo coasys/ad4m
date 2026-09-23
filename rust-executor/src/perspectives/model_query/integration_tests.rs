@@ -8817,3 +8817,63 @@ async fn a_count_only_walk_totals_the_walk_too() {
         "the count is the walk's own union, exactly as the full query reports it"
     );
 }
+
+/// A node reachable from two anchors on the same level — a diamond, which needs
+/// no cycle and is ordinary in a graph.
+///
+/// ```text
+/// root ─┬─ c1 ─── x
+///       └─ c2 ─┬─ x     (the same x)
+///              └─ z
+/// ```
+///
+/// The dedup ran *after* the per-anchor slice, so c2's one slot was spent on an
+/// `x` that was then dropped for having been seen, and `z` — the reply c2 had
+/// left to give — was never reported at all.
+#[tokio::test]
+async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (parent, child) in [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://c1", "we://x"),
+        ("we://c2", "we://x"),
+        ("we://c2", "we://z"),
+    ] {
+        t += 1;
+        let ts = format!("2026-01-01T00:00:{t:04}Z");
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![2, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1", "we://c2", "we://x", "we://z"],
+        "c2's one slot goes to the reply it still had, not to an x already spoken for"
+    );
+}

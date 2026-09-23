@@ -138,9 +138,19 @@ async fn walk_levels(
         };
 
         let json = store.query_async(&pagination_subquery).await?;
-        let mut rows: Vec<Value> = serde_json::from_str(&json)?;
-        slice_per_anchor(&mut rows, *limit);
+        let rows: Vec<Value> = serde_json::from_str(&json)?;
 
+        // Slicing and de-duplication are one pass, not two, because a node that is not going to be
+        // reported must not spend one of its anchor's places on the way to being dropped. Sliced
+        // first, an anchor whose top-ranked child was already reached — through a cycle, through
+        // another anchor, or simply because two parents share a reply, which needs no cycle at all
+        // — came away with nothing, and the reply it still had to give was never reported by
+        // anybody. So the check runs first and the quota counts only what survives it.
+        //
+        // The node itself is reported once, under whichever anchor the ordering reaches first; the
+        // others spend their places on replies of their own. The result is a flat union, and
+        // filling it with duplicates would return fewer distinct records than the caller asked for.
+        let mut kept: HashMap<String, usize> = HashMap::new();
         let mut next = Vec::new();
         for row in &rows {
             let Some(id) = row["source"].as_str() else {
@@ -148,11 +158,29 @@ async fn walk_levels(
             };
             // A node reachable by two routes is one node. Walking it twice would duplicate its
             // subtree and, in a cycle, never finish.
-            if seen.insert(id.to_string()) {
-                ordered.push(id.to_string());
-                next.push(id.to_string());
+            if seen.contains(id) {
+                continue;
             }
+            // A row with no anchor cannot be attributed to one, so it is kept rather than dropped:
+            // losing rows silently is worse than a slice that is occasionally too generous. (Same
+            // reading as `slice_per_anchor`, which the non-walking path still uses.)
+            if let Some(anchor) = row[ANCHOR_VAR].as_str() {
+                let used = kept.entry(anchor.to_string()).or_insert(0);
+                if *used >= *limit {
+                    continue;
+                }
+                *used += 1;
+            }
+            seen.insert(id.to_string());
+            ordered.push(id.to_string());
+            next.push(id.to_string());
         }
+        log::debug!(
+            "Walk depth {depth}: kept {} of {} rows across {} anchors at a breadth of {limit}",
+            next.len(),
+            rows.len(),
+            kept.len()
+        );
         frontier = next;
     }
 

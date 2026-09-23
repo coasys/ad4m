@@ -140,6 +140,11 @@ export interface TraverseScope {
    * with `transitive` — a walk that reaches an anchor again, through a cycle or because one anchor
    * was named below another, reports it at neither place.
    *
+   * Each record appears once, under whichever anchor the ordering reaches first — a reply to two
+   * of the anchors is one reply, not two. It does not spend a place in the other anchors' breadth
+   * either: they fill theirs with replies of their own, so a breadth of five means five distinct
+   * records wherever five exist.
+   *
    * A global `limit`/`offset` applies to that flat union once, after every level has been cut to
    * its own breadth — not to each level.
    *
