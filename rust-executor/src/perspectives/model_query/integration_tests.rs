@@ -8782,3 +8782,38 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
         "the total is the walk's own union, not root's three direct replies"
     );
 }
+
+/// The same walk asked as a count. `count()` in TypeScript is `limit: 0`, which
+/// takes the COUNT-only fast path — and that path builds its query from the
+/// scope as written, so it answers for one step from the anchors however many
+/// levels were walked. The full query above reports two; this reported three.
+///
+/// Two numbers for one question, from the same query written two ways.
+#[tokio::test]
+async fn a_count_only_walk_totals_the_walk_too() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(0),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("count-only walk should execute");
+    assert!(
+        result.instances.is_empty(),
+        "a count-only query returns no rows"
+    );
+    assert_eq!(
+        result.total_count, 2,
+        "the count is the walk's own union, exactly as the full query reports it"
+    );
+}

@@ -232,8 +232,25 @@ pub(super) async fn execute_model_query_inner(
     }
 
     // Fast path: COUNT-only
+    //
+    // A walk cannot take it. The COUNT query is built from the scope as written, and the scope says
+    // nothing about depth — `levels` is walked below, not in SPARQL — so this would answer for one
+    // step from the anchors however many levels were asked for. That is the number the total in the
+    // full pipeline was just taught not to report; leaving it here would mean the same walk answers
+    // two different figures depending on whether the caller asked for rows alongside it, and
+    // `count()` in TypeScript is exactly `limit: 0`. A walk has to be walked to be counted.
     let is_count_only = query_input.limit == Some(0);
-    if is_count_only && all_where_pushable(query_input, shape, Some(resolver)) {
+    let count_only_can_skip_the_walk = !matches!(
+        query_input.parent,
+        Some(Scope::Traverse {
+            levels: Some(_),
+            ..
+        })
+    );
+    if is_count_only
+        && count_only_can_skip_the_walk
+        && all_where_pushable(query_input, shape, Some(resolver))
+    {
         if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
