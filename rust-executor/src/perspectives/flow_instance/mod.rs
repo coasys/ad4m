@@ -93,6 +93,7 @@ pub mod fold;
 #[cfg(test)]
 mod ordering_tests;
 pub mod pass;
+pub mod produced;
 pub mod propose;
 pub mod receipt;
 pub mod roles;
