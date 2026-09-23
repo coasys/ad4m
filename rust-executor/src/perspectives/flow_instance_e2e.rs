@@ -2444,7 +2444,9 @@ async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
 /// `reject_flow_proposal` only retracts the caller's own links — telling the
 /// caller to "co-sign one or reject it" would let one peer block the manual
 /// path into the terminal state for everyone. An honest propose mints its
-/// own proposal instead, does not sign Bob's, and the run completes.
+/// own proposal instead, does not sign Bob's, and the run completes once a
+/// second voter co-signs it (Bob's vote does not pool with ours: its
+/// commitment is a different group, #1108/#1118).
 ///
 /// Red if `live_proposal_role` compares commitments without first validating
 /// the live atom the way a co-signer would.
@@ -2484,16 +2486,23 @@ async fn propose_mints_past_a_foreign_terminal_proposal_with_a_bad_commitment() 
         !we_voted_on(&f, &bobs).await,
         "the invalid proposal was not co-signed"
     );
-    // Bob's proposer vote still pools with ours on this edge (`settle_edge`
-    // counts votes, not commitments), so `{n: 2}` is reached: the run
-    // completes instead of wedging.
-    assert_eq!(out.derived_state, "scoped");
+    // Since #1108/#1118 a terminal edge pools votes per commitment, so Bob's
+    // proposer vote on a commitment nobody can sign does not count toward
+    // ours: one vote, short of `{n: 2}`. It used to pool — which is what let
+    // an early foreign proposal land in the settled edge and make the run
+    // unreceiptable.
+    assert_eq!(out.derived_state, "identified");
+    // The run is not wedged: a second voter co-signing our proposal settles
+    // the edge.
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
 }
 
 /// As above, with the other invalid shape: Bob names an output that does not
 /// load on this replica (never written), under a commitment that matches
 /// nothing. No voter could sign it, so it must not block; the honest propose
-/// mints and the run completes.
+/// mints and, once co-signed, the run completes.
 ///
 /// Red if `live_proposal_role` reads the commitment mismatch before asking
 /// whether the proposal is signable at all.
@@ -2531,7 +2540,12 @@ async fn propose_mints_past_a_foreign_terminal_proposal_whose_output_does_not_lo
         !we_voted_on(&f, &bobs).await,
         "the unloadable proposal was not co-signed"
     );
-    assert_eq!(out.derived_state, "scoped");
+    // Bob's vote sits in its own commitment group (#1108/#1118): ours alone
+    // is short of `{n: 2}` until a second voter co-signs it.
+    assert_eq!(out.derived_state, "identified");
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
 }
 
 /// Outputs are a terminal-edge concern: a co-signer ignores them anywhere

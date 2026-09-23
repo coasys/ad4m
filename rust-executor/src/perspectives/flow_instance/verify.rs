@@ -1454,13 +1454,20 @@ mod tests {
 
     /// **Required test (e).** Quorum belongs to an edge, so the counted votes
     /// into `done` can sit on twin atoms. Here Alice's atom commits to d1 and
-    /// Bob's to d1 and d2, and `{n: 2}` counts both. No set of outputs was
-    /// agreed by the whole quorum, so the receipt is refused whichever set it
-    /// names. Strict: there is no intersection (d1 alone does not verify).
+    /// Bob's to d1 and d2. No set of outputs was agreed by the whole quorum,
+    /// so the receipt is refused whichever set it names. Strict: there is no
+    /// intersection (d1 alone does not verify).
     ///
-    /// Red if `final_edge_commitment` reads only the first counted atom's
-    /// hash (the receipt naming d1 then verifies), or if it takes the
-    /// intersection or union of the named outputs.
+    /// Since #1108/#1118 the refusal is the fold's: a terminal edge pools
+    /// votes per commitment, each commitment here has one voter, `{n: 2}` is
+    /// met in neither group, and the run derives `open` — a `StateMismatch`
+    /// before any commitment is read. The `OutputsCommitmentConflict` arm
+    /// is pinned directly in `receipt::tests` against a hand-built settled
+    /// edge.
+    ///
+    /// Red if the fold pools terminal votes across commitments and
+    /// `final_edge_commitment` then reads only the first counted atom's hash
+    /// (the receipt naming d1 verifies), or takes the intersection or union.
     #[test]
     fn twin_final_edge_atoms_with_different_outputs_hashes_are_refused() {
         let n2 = || {
@@ -1504,17 +1511,16 @@ mod tests {
             uri: rival_uri,
             links: rival_links,
         };
-        let mut expected = vec![hash_of(&[OUTPUT]), hash_of(&[OUTPUT, D2])];
-        expected.sort();
         for named in [outs(&[OUTPUT]), outs(&[OUTPUT, D2])] {
             let mut arrived = conflicting.clone();
             arrived.outputs = named.clone();
             assert_eq!(
                 verify_receipt(&reader, &arrived),
-                ReceiptVerdict::OutputsCommitmentConflict {
-                    hashes: expected.clone()
+                ReceiptVerdict::StateMismatch {
+                    claimed: "done".into(),
+                    derived: "open".into(),
                 },
-                "naming {named:?}"
+                "one voter per commitment settles nothing; naming {named:?}"
             );
         }
         let err = FlowReceipt::mint(
@@ -1525,7 +1531,7 @@ mod tests {
         )
         .expect_err("mint refuses what verify refuses");
         assert!(
-            format!("{err:#}").contains("commit to different outputs"),
+            format!("{err:#}").contains("can still transition out"),
             "got: {err:#}"
         );
     }
@@ -1540,8 +1546,13 @@ mod tests {
     /// a committed proposal stopped being this test's shape with #1108: that
     /// no longer un-commits the proposal, it un-atoms it (`UriMismatch`).
     ///
-    /// Red if `final_edge_commitment` skips an atom with no `outputs_hash`
-    /// instead of reporting it.
+    /// Since #1108/#1118 an uncommitted terminal atom contributes no votes,
+    /// so the run derives `open` and the verdict is a `StateMismatch` before
+    /// any commitment is read. The `OutputsUncommitted` arm is pinned
+    /// directly in `receipt::tests` against a hand-built settled edge.
+    ///
+    /// Red if the fold counts an uncommitted terminal atom again and
+    /// `final_edge_commitment` then skips it instead of reporting it.
     #[test]
     fn a_final_edge_that_committed_to_no_outputs_is_refused() {
         let flow = two_state_flow();
@@ -1554,14 +1565,14 @@ mod tests {
             &seal(),
             T1,
         );
-        receipt.read_set.proposals[0] = ProposalLinks {
-            uri: uri.clone(),
-            links,
-        };
+        receipt.read_set.proposals[0] = ProposalLinks { uri, links };
 
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt),
-            ReceiptVerdict::OutputsUncommitted { proposal_uri: uri }
+            ReceiptVerdict::StateMismatch {
+                claimed: "done".into(),
+                derived: "open".into(),
+            }
         );
     }
 

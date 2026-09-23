@@ -569,17 +569,20 @@ impl std::fmt::Display for OutputsCommitment {
 /// # Strict across twins
 ///
 /// Quorum belongs to an edge, not to a proposal (see [`super::fold`]), so the
-/// counted votes into the terminal state can sit on twin atoms. When those
-/// twins commit to different outputs, each voter agreed only to their own
-/// atom's set, and no set was agreed by the whole quorum. That is
+/// counted votes into the terminal state can sit on twin atoms. When twins
+/// commit to different outputs, each voter agreed only to their own atom's
+/// set, and no set was agreed by the whole quorum. That is
 /// [`OutputsCommitment::Conflicting`] and a receipt is refused; there is no
-/// intersection or union.
+/// intersection or union. An atom with no commitment on the final edge is
+/// [`OutputsCommitment::Uncommitted`].
 ///
-/// `propose` refuses to join or twin an open proposal **with the same seal**
-/// that names different outputs. It cannot see a twin under a different seal
-/// (the cited evidence changed between the two mints, so the dedup key
-/// differs), and neither can the engine pass. So a run can still end with
-/// conflicting commitments on its final edge, and then it gets no receipt.
+/// Since #1108/#1118 the fold pools terminal-edge votes per commitment and
+/// counts no uncommitted atom there, so a settled final edge's atoms all
+/// share one hash and neither refusal is reachable through
+/// [`super::fold_read_set`]: twins with rival commitments each settle or
+/// fall short on their own votes. Both arms stay as defence in depth
+/// against a fold regression; the tests pin each against a hand-built
+/// `DerivedState`.
 pub fn final_edge_commitment(derived: &DerivedState, ingested: &ReadSet) -> OutputsCommitment {
     let Some(final_edge) = derived.settled.last() else {
         return OutputsCommitment::NoFinalEdge;
@@ -617,6 +620,7 @@ mod tests {
         did_of, hash_of, out_item, out_items, signed_proposal, signed_terminal_proposal,
         signed_vote, T1, T2, T3,
     };
+    use crate::perspectives::flow_instance::fold::SettledEdge;
     use crate::perspectives::flow_instance::ProposalLinks;
 
     /// Persona names rather than DIDs: every proposal below is now signed for
@@ -959,11 +963,32 @@ mod tests {
                 { "action_name": "Reject", "from_state": "open", "to_state": "rejected", "actions": [] },
             ]),
         );
+        // Both rival edges lead into terminal states, so both proposals
+        // carry commitments — an uncommitted terminal proposal settles
+        // nothing since #1108/#1118 and could not contend.
         let both = read_set(
             "open",
             vec![
-                proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1),
-                proposal("ad4m://p/2", BOB, "open", "rejected", "seal-2", T2),
+                committing(
+                    "ad4m://p/1",
+                    ALICE,
+                    "open",
+                    "done",
+                    "seal-1",
+                    &[OUTPUT],
+                    &hash_of(&[OUTPUT]),
+                    T1,
+                ),
+                committing(
+                    "ad4m://p/2",
+                    BOB,
+                    "open",
+                    "rejected",
+                    "seal-2",
+                    &[OUTPUT],
+                    &hash_of(&[OUTPUT]),
+                    T2,
+                ),
             ],
         );
 
@@ -1180,39 +1205,66 @@ mod tests {
         assert_eq!(receipt.outputs, outs(&[OUTPUT]));
     }
 
-    /// A final-edge proposal with no commitment binds nothing, so a receipt
-    /// for its run cannot be minted. Its voters agreed to no outputs.
+    /// A final-edge proposal with no commitment binds nothing — and since
+    /// #1108/#1118 it does not even settle: the fold pools terminal-edge
+    /// votes per commitment and an uncommitted atom contributes nothing, so
+    /// the run stays short of the terminal state and `mint` refuses it as
+    /// incomplete rather than as uncommitted.
     ///
-    /// Red if `final_edge_commitment` skips an atom with no `outputs_hash`
-    /// instead of reporting it.
+    /// [`OutputsCommitment::Uncommitted`] is thereby unreachable through the
+    /// fold and stays as defence in depth; the second half pins it directly
+    /// against a hand-built settled edge naming the uncommitted atom, so the
+    /// arm cannot rot into "skip the atom" unnoticed.
     #[test]
     fn mint_refuses_a_final_edge_that_committed_to_no_outputs() {
         let uncommitted = proposal("ad4m://p/1", ALICE, "open", "done", &delivered().seal, T1);
         let uncommitted_uri = uncommitted.uri.clone();
         let rs = read_set("open", vec![uncommitted]);
+
+        let derived = fold_read_set(&two_state_flow(), &rs.reverified()).expect("folds");
         assert_eq!(
-            final_edge_commitment(
-                &fold_read_set(&two_state_flow(), &rs.reverified()).expect("folds"),
-                &rs.reverified()
-            ),
+            derived.state, "open",
+            "an uncommitted terminal proposal settles nothing (#1108/#1118)"
+        );
+        let err = FlowReceipt::mint(&two_state_flow(), rs.clone(), outs(&[OUTPUT]), vec![delivered()])
+            .expect_err("no commitment, no settle, no receipt");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "got: {err:#}"
+        );
+
+        // Defence in depth: were an uncommitted atom ever counted on a
+        // settled final edge again, the commitment must name it, not skip it.
+        let planted = DerivedState {
+            state: "done".to_string(),
+            settled: vec![SettledEdge {
+                from_state: "open".to_string(),
+                to_state: "done".to_string(),
+                settled_at: T1.to_string(),
+                atom_uris: vec![uncommitted_uri.clone()],
+                voters: vec![did_of(ALICE).to_string()],
+            }],
+            contested: None,
+        };
+        assert_eq!(
+            final_edge_commitment(&planted, &rs.reverified()),
             OutputsCommitment::Uncommitted {
                 proposal_uri: uncommitted_uri
             }
         );
-        let err = FlowReceipt::mint(&two_state_flow(), rs, outs(&[OUTPUT]), vec![delivered()])
-            .expect_err("no commitment, no receipt");
-        assert!(
-            format!("{err:#}").contains("carries no `ad4m://flow/outputs_hash`"),
-            "got: {err:#}"
-        );
     }
 
     /// Twin atoms on the final edge that commit to different outputs: no one
-    /// set was agreed by the whole quorum, and `mint` refuses whichever set
-    /// the caller names.
+    /// set was agreed by the whole quorum, so `mint` refuses whichever set
+    /// the caller names. Since #1108/#1118 the refusal comes one layer
+    /// earlier — each commitment is its own vote pool, neither reaches
+    /// `{n: 2}`, the run never settles — instead of a settled-then-
+    /// `Conflicting` dead end.
     ///
-    /// Red if `final_edge_commitment` reads only the first counted atom's
-    /// hash.
+    /// [`OutputsCommitment::Conflicting`] is thereby unreachable through the
+    /// fold and stays as defence in depth; the second half pins it directly
+    /// against a hand-built settled edge naming both atoms, so the arm
+    /// cannot rot into "read the first counted atom's hash" unnoticed.
     #[test]
     fn mint_refuses_twin_final_edge_atoms_with_different_commitments() {
         let flow = flow_json(
@@ -1225,39 +1277,62 @@ mod tests {
             ]),
         );
         let seal = evidence_hash(&[], &[]);
-        let rs = read_set(
+        let alice = committing(
+            "ad4m://p/1",
+            ALICE,
             "open",
-            vec![
-                committing(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &seal,
-                    &[OUTPUT],
-                    &hash_of(&[OUTPUT]),
-                    T1,
-                ),
-                committing(
-                    "ad4m://p/2",
-                    BOB,
-                    "open",
-                    "done",
-                    &seal,
-                    &[ATTACKER],
-                    &hash_of(&[ATTACKER]),
-                    T2,
-                ),
-            ],
+            "done",
+            &seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
         );
+        let bob = committing(
+            "ad4m://p/2",
+            BOB,
+            "open",
+            "done",
+            &seal,
+            &[ATTACKER],
+            &hash_of(&[ATTACKER]),
+            T2,
+        );
+        let atom_uris = {
+            let mut uris = vec![alice.uri.clone(), bob.uri.clone()];
+            uris.sort();
+            uris
+        };
+        let rs = read_set("open", vec![alice, bob]);
+
         for named in [[OUTPUT], [ATTACKER]] {
             let err = FlowReceipt::mint(&flow, rs.clone(), outs(&named), Vec::new())
                 .expect_err("conflicting commitments bind nothing");
             assert!(
-                format!("{err:#}").contains("commit to different outputs"),
-                "naming {named:?}, got: {err:#}"
+                format!("{err:#}").contains("can still transition out"),
+                "one vote per commitment is short of `{{n: 2}}` in every group, \
+                 so the run must not settle; naming {named:?}, got: {err:#}"
             );
         }
+
+        // Defence in depth: were atoms with different commitments ever
+        // counted on one settled final edge again, no hash may be picked.
+        let planted = DerivedState {
+            state: "done".to_string(),
+            settled: vec![SettledEdge {
+                from_state: "open".to_string(),
+                to_state: "done".to_string(),
+                settled_at: T2.to_string(),
+                atom_uris,
+                voters: vec![did_of(ALICE).to_string(), did_of(BOB).to_string()],
+            }],
+            contested: None,
+        };
+        let mut hashes = vec![hash_of(&[OUTPUT]), hash_of(&[ATTACKER])];
+        hashes.sort();
+        assert_eq!(
+            final_edge_commitment(&planted, &rs.reverified()),
+            OutputsCommitment::Conflicting { hashes }
+        );
     }
 
     /// A caller can hand `mint` a read-set whose `genesis` points anywhere,
@@ -1386,12 +1461,26 @@ mod tests {
             ]),
         );
         // Twin proposals on one edge: `{n: 2}` counts distinct voters across
-        // them, so both are counted and they share one seal.
+        // them, so both are counted and they share one seal. Both commit to
+        // the same outputs — `done` is terminal, and only atoms inside the
+        // quorate commitment group are counted there (#1108/#1118).
+        let committed = |nonce, proposer, at| {
+            committing(
+                nonce,
+                proposer,
+                "open",
+                "done",
+                "seal-1",
+                &[OUTPUT],
+                &hash_of(&[OUTPUT]),
+                at,
+            )
+        };
         let rs = read_set(
             "open",
             vec![
-                proposal("ad4m://p/1", ALICE, "open", "done", "seal-1", T1),
-                proposal("ad4m://p/2", BOB, "open", "done", "seal-1", T2),
+                committed("ad4m://p/1", ALICE, T1),
+                committed("ad4m://p/2", BOB, T2),
                 proposal("ad4m://p/3", ALICE, "open", "rejected", "seal-never", T2),
             ],
         );

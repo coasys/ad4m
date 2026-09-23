@@ -466,8 +466,9 @@ async fn live_proposal_role(
             // hand that proposer the same everyone-is-blocked shape this
             // classification exists to avoid. Worst case of misreading a
             // transient store error here is a twin commitment on the final
-            // edge, which the receipt refuses as `Conflicting` — recoverable,
-            // unlike the block.
+            // edge; the fold pools terminal votes per commitment
+            // (#1108/#1118), so the twin only splits the votes between two
+            // groups — recoverable, unlike the block.
             Err(e) => {
                 return Ok(LiveProposalRole::OtherEdge(format!(
                     "a voter could not load its outputs ({e:#})"
