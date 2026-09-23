@@ -822,6 +822,44 @@ const recipes = await Recipe.query(perspective)
 // Only name and category are hydrated; other fields stay at defaults
 ```
 
+### Per-Link Rows with `links`
+
+Hydration folds an instance's links into one object: one value per property, one array of ids per relation, and `author` / `createdAt` / `updatedAt` computed across *all* links. Two questions don't survive that fold:
+
+- **When was this member added, and by whom?** `createdAt` is the instance's earliest link. A comment attached to a post a week later has its own link with its own timestamp and author.
+- **Links on predicates the model doesn't declare.** Annotations such as a revocation tombstone sit on the instance but are not fetched by the model at all.
+
+`links` returns the stored links behind each requested entry under `instance.__links`:
+
+```typescript
+const [post] = await Post.findAll(perspective, {
+  where: { id: postId },
+  links: ["comments", "app://revoked"],
+});
+
+post.__links.comments;
+// [
+//   { author: "did:key:z6Mk…", timestamp: "2026-09-23T10:00:00.000Z",
+//     data: { source: postId, predicate: "app://has_comment", target: "…" },
+//     proof: { key: "…", signature: "…" } },
+//   …
+// ]
+post.__links["app://revoked"]; // [] when there is no such link
+
+// Fluent form
+const posts = await Post.query(perspective).links(["comments"]).get();
+```
+
+- **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
+- **Rows** have the shape of a `LinkExpression` (`LinkRow` in the SDK), so you can verify `proof` yourself. A link stored without a proof arrives with an empty `key` and `signature`. Treat that as unverifiable, not as valid. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
+- **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
+- **Additive:** the rows are read by a separate query over the returned page. Asking for them never changes `createdAt`, `updatedAt` or any property value. `links` works with `where`, `order`, pagination, `properties` and inside an `include` sub-query (`include: { comments: { links: ["app://flag"] } }`).
+- **Local properties:** for a property declared `local: true`, only the agent's own local links are returned, the same rule hydration applies.
+- **Not one snapshot:** the rows come from a second read. A member added or removed between the two reads can appear in the relation but not in `__links`, or the other way round. If you date members by their own link, treat a member with no row as an error. Don't fall back to `createdAt`, which is earlier and so would widen any "since" window.
+
+The option is also accepted by the raw RPC: `perspective.modelQuery("Post", JSON.stringify({ links: ["comments"] }))`.
+
 ### Parent-Scoped Queries
 
 Query instances that are linked from a specific parent:
