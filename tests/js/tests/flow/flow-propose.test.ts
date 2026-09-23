@@ -6,7 +6,7 @@
  *
  * Run standalone (from tests/js, with a built executor):
  *   pnpm ts-mocha -p tsconfig.json --timeout 900000 --exit \
- *     tests/model/flow-propose.test.ts
+ *     tests/flow/flow-propose.test.ts
  */
 
 import { expect } from "chai";

@@ -141,8 +141,6 @@ use super::receipt::flow_dna_hash;
 use super::receipt::FlowReceipt;
 use super::verify::{verify_receipt_within, ReceiptVerdict};
 use crate::perspectives::shacl_parser::{GrantedByFlow, SHACLFlow};
-#[cfg(test)]
-use crate::types::DecoratedLinkExpression;
 use std::collections::HashMap;
 
 /// How many `ad4m://flow/granted_by` edges a reader will follow away from
@@ -349,6 +347,7 @@ mod tests {
     use crate::perspectives::flow_instance::verify::VerdictKind;
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::perspectives::shacl_parser::ModelQueryCount;
+    use crate::types::LinkExpression;
     use serde_json::{json, Value};
 
     const INSTANCE: &str = "ad4m://flow/instance/i1";
@@ -456,7 +455,7 @@ mod tests {
     /// the instance's `granted_by` edges.
     fn evidence(
         receipts: Vec<FlowReceipt>,
-        revocations: Vec<DecoratedLinkExpression>,
+        revocations: Vec<LinkExpression>,
     ) -> Vec<RoleGrantEvidence> {
         vec![RoleGrantEvidence {
             to_state: "done".into(),
@@ -472,7 +471,8 @@ mod tests {
                     true,
                     None,
                     ASSIGNMENT_LINK_AT,
-                )],
+                )
+                .into()],
                 revocation_links: revocations,
                 asserted_instance_timestamp: Some(ASSIGNMENT_LINK_AT.into()),
                 granting_receipts: receipts,
@@ -539,7 +539,8 @@ mod tests {
                 true,
                 None,
                 ASSIGNMENT_LINK_AT,
-            )],
+            )
+            .into()],
             revocation_links: Vec::new(),
             asserted_instance_timestamp: Some(ASSIGNMENT_LINK_AT.into()),
             granting_receipts: receipts,
@@ -1174,7 +1175,7 @@ mod tests {
             T2,
         );
 
-        let ev = evidence(vec![receipt], vec![tombstone]);
+        let ev = evidence(vec![receipt], vec![tombstone.into()]);
         let view = resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat).expect("resolves");
         assert_eq!(
             view.windows.len(),

@@ -12,6 +12,7 @@ Language in its own Deno isolate on its own OS thread. Split plan: spec item 9.
 | `language_runtime.rs` | One runtime = thread + `JsCore::new_for_language` + request channel; thread-local `AgentContext` so ops sign as the right user |
 | `language_runtime_handle.rs` | Cloneable handle: send JS source string, await result |
 | `language.rs` | `Language` struct: executor-side view (name, address, adapters present) |
+| `conductor_languages.rs` | `load_link_and_installed_languages`: the system-language steps whose constructors wait for the Holochain conductor (known link languages, installed languages). Run in the background after generate/unlock by `agent::conductor_startup` |
 | `language_context.rs`, `capability.rs`, `literal.rs`, `byte_array.rs`, `error.rs`, `wasm_delegate.rs` | context passed at load, per-language capability grants, `Literal` codec, `LanguageError` |
 
 Calls into a Language are built as JS source via `format!` and evaluated (≈20

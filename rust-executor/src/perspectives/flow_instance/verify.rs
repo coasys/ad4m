@@ -189,9 +189,13 @@ pub enum ReceiptVerdict {
         /// the first at the previous edge's `settled_at`, so the walk's
         /// settle times are non-decreasing.
         settled_at: String,
-        /// The nodes this receipt speaks for, as carried. The binding to
+        /// The nodes this receipt speaks for, **as carried** — the one field
+        /// of a `Verified` verdict that is the minter's word rather than
+        /// re-derived: nothing the quorum signed covers it
+        /// (<https://github.com/coasys/ad4m/issues/1104>). The binding to
         /// check before honouring a `granted_by` edge; see
-        /// [`FlowReceipt::speaks_for`].
+        /// [`FlowReceipt::speaks_for`] for what that check does and does not
+        /// prove.
         outputs: Vec<String>,
         /// The distinct eligible DIDs that made up the quorum on every
         /// settled edge of the walk, sorted. This is the "n distinct DIDs"
@@ -569,6 +573,16 @@ impl FlowReceipt {
     /// and this is the check that closes the loop: verify the receipt, then
     /// ask whether it names the node whose edge you followed. Either half
     /// alone is forgeable.
+    ///
+    /// **Both halves together still do not make the binding quorum-signed**
+    /// (r4077689151, <https://github.com/coasys/ad4m/issues/1104>): `outputs`
+    /// is minter-asserted, minting is permissionless, and a run's signed
+    /// read-set is public material inside its space — so a re-mint of a
+    /// genuine run naming a *different* node verifies and answers `true`
+    /// here. Until outputs are committed into voter-signed material, a
+    /// consumer paying out on this must independently trust the output list
+    /// — a verified receipt proves the run completed, not that the quorum
+    /// granted anything to `node`.
     pub fn speaks_for(&self, node: &str) -> bool {
         self.outputs.iter().any(|o| o == node)
     }
@@ -586,6 +600,7 @@ mod tests {
     use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::types::DecoratedLinkExpression;
+    use crate::types::LinkExpression;
     use serde_json::{json, Value};
 
     const INSTANCE: &str = "ad4m://flow/instance/i1";
@@ -1086,17 +1101,20 @@ mod tests {
     }
 
     /// `r0 --agent--> did`, the assignment link that dates a grant.
-    /// `valid` is honoured cryptographically; `claims_valid` is what the
-    /// carried read-set *says* about it.
-    fn grant_link(who: &str, valid: bool, claims_valid: Option<bool>) -> DecoratedLinkExpression {
-        signed_link("r0", "agent", did_of(who), "admin", valid, claims_valid, T2)
+    /// `valid` is honoured cryptographically: a forged link is signed with a
+    /// key that is not the author's. Plain [`LinkExpression`] on purpose —
+    /// since #1065 the role-evidence half of a read-set cannot carry a
+    /// verdict claim at all, so "claims to be valid" is unrepresentable and
+    /// a forgery has nothing left to assert but its (wrong) signature.
+    fn grant_link(who: &str, valid: bool) -> LinkExpression {
+        signed_link("r0", "agent", did_of(who), "admin", valid, None, T2).into()
     }
 
-    fn reviewer_evidence(grant: DecoratedLinkExpression) -> RoleGrantEvidence {
+    fn reviewer_evidence(grant: LinkExpression) -> RoleGrantEvidence {
         reviewer_evidence_from(vec![grant])
     }
 
-    fn reviewer_evidence_from(grant_links: Vec<DecoratedLinkExpression>) -> RoleGrantEvidence {
+    fn reviewer_evidence_from(grant_links: Vec<LinkExpression>) -> RoleGrantEvidence {
         RoleGrantEvidence {
             to_state: "done".into(),
             role_class: REVIEWER.into(),
@@ -1132,10 +1150,11 @@ mod tests {
     ///   (keep `history.asserted_instance_timestamp.clone()`) — the window
     ///   widens to `INSTANCE_CREATED`, the vote at `T3` becomes eligible and
     ///   the tampered receipt reports `Verified`;
-    /// - write the grant filter as `.filter(|l| l.proof.valid != Some(false))`
-    ///   over the *carried* links instead of `reverified_link` + `link_counts`
-    ///   — the forgery's own `"valid": true` is inherited, the link survives,
-    ///   and the tampered receipt reports `Verified`.
+    /// - write the grant filter as a pass-through (skip
+    ///   `compute_proof_valid`) — the forgery survives on its wrong-key
+    ///   signature, and the tampered receipt reports `Verified`. (The older
+    ///   shape of this mutation — inheriting a carried `"valid": true` — is
+    ///   unrepresentable since #1065: the plain type has no verdict field.)
     ///
     /// And red in the third scenario if the collapse is not the *filter's*
     /// doing — see the comment there for why a verdict assertion alone cannot
@@ -1146,7 +1165,7 @@ mod tests {
         let honest = read_set(
             // Vote at T3, grant at T2: eligible as of its own timestamp.
             vec![proposal("ad4m://p/1", ALICE, "done", T3)],
-            vec![reviewer_evidence(grant_link(ALICE, true, None))],
+            vec![reviewer_evidence(grant_link(ALICE, true))],
         );
         let receipt = mint(&flow, honest);
         let reader = catalogue(vec![flow]);
@@ -1156,10 +1175,9 @@ mod tests {
         );
 
         // What arrives: the same receipt, its assignment link replaced by one
-        // signed with somebody else's key and still claiming to be valid.
+        // signed with somebody else's key.
         let mut tampered = receipt;
-        tampered.read_set.role_grants =
-            vec![reviewer_evidence(grant_link(ALICE, false, Some(true)))];
+        tampered.read_set.role_grants = vec![reviewer_evidence(grant_link(ALICE, false))];
 
         let verdict = verify_receipt(&reader, &tampered, None);
         assert!(
@@ -1198,8 +1216,8 @@ mod tests {
         // for `resolve` to date a window from.
         let mut half_forged = tampered;
         half_forged.read_set.role_grants = vec![reviewer_evidence_from(vec![
-            grant_link(ALICE, false, Some(true)),
-            grant_link(ALICE, true, None),
+            grant_link(ALICE, false),
+            grant_link(ALICE, true),
         ])];
         let verdict = verify_receipt(&reader, &half_forged, None);
         assert!(
@@ -1476,6 +1494,115 @@ mod tests {
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt, None),
             ReceiptVerdict::NoOutputs
+        );
+    }
+
+    /// **The genesis is the flow's, never the minter's.** A read-set carries
+    /// `genesis` as data and the fold starts walking wherever it points, so
+    /// left unchecked that one field skips the whole verification: plant the
+    /// genesis AT the terminal state and carry no proposals at all, and the
+    /// walk "reaches" `done` having settled nothing — a completion claim
+    /// with an **empty voter list**, under the correct DNA hash, binding
+    /// real outputs (r4077689141).
+    ///
+    /// Red without the genesis check in `fold_read_set`: the fold
+    /// initialises at `done`, finds nothing to settle, and the receipt
+    /// reports `Verified` with no voters.
+    #[test]
+    fn a_genesis_planted_at_the_terminal_state_is_not_a_completion() {
+        let flow = two_state_flow();
+        let receipt = mint(&flow, completed());
+        let reader = catalogue(vec![flow]);
+
+        let mut forged = receipt;
+        forged.read_set = ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "done".to_string(),
+            proposals: Vec::new(),
+            role_grants: Vec::new(),
+        };
+
+        let verdict = verify_receipt(&reader, &forged, None);
+        assert!(
+            verdict.is_rejected(),
+            "a walk that starts at the finish line settled nothing and proves nothing — \
+             got: {verdict}"
+        );
+        let ReceiptVerdict::Unfoldable { reason } = &verdict else {
+            panic!(
+                "the refusal is the fold's — a planted genesis is not foldable material — \
+                 got: {verdict}"
+            );
+        };
+        assert!(
+            reason.contains("genesis"),
+            "the refusal must name the planted genesis, got: {reason}"
+        );
+    }
+
+    /// The subtler shape of the same forgery, and the reason "did the walk
+    /// settle at least one edge?" is not the check: plant the genesis one
+    /// edge short of terminal and carry ONE genuine settled edge. The walk
+    /// then settles something — a no-edges-settled backstop waves it through
+    /// — while every quorum before the planted genesis is skipped.
+    ///
+    /// Red without the genesis check in `fold_read_set`: the fold starts at
+    /// `doing`, takes the one carried edge, and reports `Verified` naming
+    /// only the final edge's voter — Alice's `open → doing` quorum simply
+    /// never happened.
+    #[test]
+    fn a_genesis_planted_mid_flow_cannot_skip_the_quorums_before_it() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "doing", "value": 0.5 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Start", "from_state": "open", "to_state": "doing", "actions": [] },
+                { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let final_edge = || ProposalLinks {
+            uri: "ad4m://p/2".into(),
+            links: signed_proposal("ad4m://p/2", BOB, "doing", "done", "seal-2", T2),
+        };
+        // The honest run walks both edges…
+        let full = ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "open".to_string(),
+            proposals: vec![
+                ProposalLinks {
+                    uri: "ad4m://p/1".into(),
+                    links: signed_proposal("ad4m://p/1", ALICE, "open", "doing", "seal-1", T1),
+                },
+                final_edge(),
+            ],
+            role_grants: Vec::new(),
+        };
+        let receipt = mint(&flow, full);
+        let reader = catalogue(vec![flow]);
+        assert!(
+            verify_receipt(&reader, &receipt, None).is_verified(),
+            "precondition: the full walk verifies"
+        );
+
+        // …what arrives claims it STARTED at `doing`, carrying only the
+        // final edge.
+        let mut forged = receipt;
+        forged.read_set = ReadSet {
+            genesis: "doing".to_string(),
+            proposals: vec![final_edge()],
+            ..forged.read_set
+        };
+
+        let verdict = verify_receipt(&reader, &forged, None);
+        assert!(
+            matches!(&verdict, ReceiptVerdict::Unfoldable { reason } if reason.contains("genesis")),
+            "a planted mid-flow genesis skips every quorum before it and must be \
+             refused — got: {verdict}"
         );
     }
 

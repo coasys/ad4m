@@ -154,7 +154,7 @@ use crate::perspectives::model_query::{matches_condition, WhereCondition};
 use crate::perspectives::shacl_parser::{
     ConsensusRule, GrantedByFlow, ModelQuery, ModelQueryCount,
 };
-use crate::types::DecoratedLinkExpression;
+use crate::types::LinkExpression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -286,16 +286,21 @@ impl RoleGrant {
 pub struct RoleInstanceHistory {
     /// URI of the instance the role query matched for this DID.
     pub instance_id: String,
-    /// Every `instance --<didProperty>--> did` link, as read from the store.
+    /// Every `instance --<didProperty>--> did` link, as read from the store —
+    /// carried as plain [`LinkExpression`]: the decorated form's
+    /// `proof.valid` / `status` are one executor's read-model flags, and on
+    /// carried material they would be the minter's claims, so the type
+    /// refuses to carry them (see
+    /// [`RoleGrantLinks`](crate::perspectives::flow_evaluator::RoleGrantLinks)).
     /// Not signature-filtered — see the module header and #1063. May be empty:
     /// non-`didProperty` queries, or membership acquired without a dated
     /// assignment link.
-    pub grant_links: Vec<DecoratedLinkExpression>,
+    pub grant_links: Vec<LinkExpression>,
     /// Every signed tombstone on the instance naming this DID, carried
     /// **before** authority filtering so the reader applies
     /// [`revocation_authorised`] itself against the flow definition it holds.
     /// Never truncated: dropping a tombstone can only widen a window.
-    pub revocation_links: Vec<DecoratedLinkExpression>,
+    pub revocation_links: Vec<LinkExpression>,
     /// Fallback dating when `grant_links` yields nothing: the instance's
     /// hydrated timestamp. **Asserted** by the minter — a hydration product
     /// with no single link behind it, and the one field here that stays
@@ -359,21 +364,20 @@ impl RoleGrantEvidence {
     /// collection side and the pre-#1027 behaviour; see the module header and
     /// <https://github.com/coasys/ad4m/issues/1063>.
     ///
-    /// A tombstone counts only when its signature verifies, and `resolve`
-    /// **recomputes that verdict itself** instead of reading the carried
-    /// `proof.valid`: every revocation link is re-decorated with
-    /// [`DecoratedLinkExpression::verify_signature`] before
-    /// [`revocation_link_counts_for_did`] sees it. `proof.valid` is a claim
-    /// made by whoever serialised the read-set, so on a receipt that arrived
-    /// from elsewhere it is worth exactly as much as the sender — and a forged
-    /// `"valid": true` on a tombstone ends a grant early, changing who counted
-    /// toward quorum. Doing it here rather than asking the caller to
-    /// re-decorate first makes it **unskippable**: there is no path from
-    /// carried evidence to a [`RoleGrantWindow`] that does not go through this
-    /// function, so a future ingest seam cannot forget the step.
+    /// A tombstone counts only when its signature verifies, and that verdict
+    /// is **computed, never carried**: the evidence types hold plain
+    /// [`LinkExpression`], whose proof has no verdict field, so a read-set
+    /// cannot even state one — and [`revocation_link_counts_for_did`] runs
+    /// the check itself, from the signature, on every call. A forged
+    /// `"valid": true` on a tombstone would have ended a grant early,
+    /// changing who counted toward quorum; that attack is now unrepresentable
+    /// rather than filtered. Doing the check inside the shared predicate
+    /// makes it **unskippable**: there is no path from carried evidence to a
+    /// [`RoleGrantWindow`] that does not go through it, so a future ingest
+    /// seam cannot forget the step.
     ///
-    /// This keeps `resolve` pure — `verify_signature` is SHA256 plus an
-    /// Ed25519 check against the author's own `did:key`: no store, no clock,
+    /// This keeps `resolve` pure — the check is SHA256 plus an Ed25519
+    /// verification against the author's own `did:key`: no store, no clock,
     /// no network — at a cost bounded by the number of tombstones carried.
     ///
     /// Grant links get no such treatment because they are not
@@ -418,8 +422,7 @@ impl RoleGrantEvidence {
             );
         }
         let did_literal = did_literal_url(&self.did)?;
-        let grant_counts =
-            |l: &&DecoratedLinkExpression| grant_link_names_did(l, &self.did, &did_literal);
+        let grant_counts = |l: &&LinkExpression| grant_link_names_did(l, &self.did, &did_literal);
 
         let mut windows = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
@@ -525,17 +528,11 @@ impl RoleGrantEvidence {
         translated_role_query: &Value,
         did_literal: &str,
     ) -> Vec<RoleRevocation> {
-        let reverified = |l: &DecoratedLinkExpression| {
-            let mut l = l.clone();
-            l.verify_signature();
-            l
-        };
         // Sorted here, not by the store: the view must not depend on the
         // order a store happens to return links in.
         let mut revocations: Vec<RoleRevocation> = instance
             .revocation_links
             .iter()
-            .map(reverified)
             .filter(|l| revocation_link_counts_for_did(l, &self.did, did_literal))
             .filter(|l| revocation_authorised(translated_role_query, &l.author))
             .map(|l| RoleRevocation {
@@ -815,24 +812,24 @@ mod tests {
         }
     }
 
-    /// One link as `get_links` returns it. Author, target, signature validity
-    /// and timestamp are all inputs the filters read, so every fixture states
-    /// them explicitly.
+    /// One link as the evidence types carry it. Author, target, signature
+    /// validity and timestamp are all inputs the filters read, so every
+    /// fixture states them explicitly.
     ///
-    /// `valid` is honoured **cryptographically**, not by setting `proof.valid`:
-    /// a valid link is signed by `author`'s own key over its own data and
-    /// timestamp, and a forged one carries a signature from a key that is not
-    /// `author`'s. `proof.valid` is still pre-set to match, because that is
-    /// what a store hands back — but `resolve` recomputes it, so a fixture
-    /// whose claim and signature disagree gets ruled on by the signature.
+    /// `valid` is honoured **cryptographically** — the carried form has no
+    /// `proof.valid` a fixture could set: a valid link is signed by
+    /// `author`'s own key over its own data and timestamp, and a forged one
+    /// carries a signature from a key that is not `author`'s. The filters
+    /// compute the verdict from the signature, so that is the only lever a
+    /// fixture has.
     fn role_link(
         predicate: &str,
         target: &str,
         author: &str,
         valid: bool,
         timestamp: &str,
-    ) -> DecoratedLinkExpression {
-        use crate::types::{Link as CoreLink, LinkExpression, LinkStatus};
+    ) -> LinkExpression {
+        use crate::types::Link as CoreLink;
         let at = chrono::DateTime::parse_from_rfc3339(timestamp)
             .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
             .with_timezone(&chrono::Utc);
@@ -852,20 +849,16 @@ mod tests {
         );
         expr.author = author.to_string();
         expr.proof.key = format!("{author}#key");
-        let mut link =
-            DecoratedLinkExpression::from((LinkExpression::from(expr), LinkStatus::Shared));
-        link.proof.valid = Some(valid);
-        link.proof.invalid = Some(!valid);
-        link
+        LinkExpression::from(expr)
     }
 
     /// A signed `instance --agent--> did` grant link at `at`.
-    fn grant_link(did: &str, at: &str) -> DecoratedLinkExpression {
+    fn grant_link(did: &str, at: &str) -> LinkExpression {
         role_link("agent", did, ADMIN(), true, at)
     }
 
     /// A signed tombstone by `by` at `at`.
-    fn tombstone(did: &str, by: &str, at: &str) -> DecoratedLinkExpression {
+    fn tombstone(did: &str, by: &str, at: &str) -> LinkExpression {
         role_link(
             crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
             did,
@@ -1335,13 +1328,13 @@ mod tests {
     /// moved the filter from the store boundary into the pure reader, and this
     /// is the assertion that says it survived the move.
     ///
-    /// The second half is the stronger claim, and the reason `resolve`
-    /// re-derives `proof.valid` instead of reading it: the carried verdict is
-    /// the *minter's* word about a link, and a read-set that arrived from
-    /// elsewhere can say anything it likes. A tombstone with a bad signature
-    /// and `"valid": true` written on it must not end a grant — otherwise a
-    /// sender could shrink anyone's eligibility window and change who counted
-    /// toward quorum, using nothing but a boolean.
+    /// This test used to have a second half: the same bad signature with
+    /// `"valid": true` written on it, pinning that `resolve` re-derives the
+    /// verdict instead of reading the carried one. That attack is now
+    /// **unrepresentable**: the evidence carries plain [`LinkExpression`],
+    /// whose proof has no verdict field, so a read-set cannot state a verdict
+    /// at all — the signature is the only thing a sender controls, and it is
+    /// exactly what this test forges (r4076927995).
     ///
     /// Grant links deliberately have no such check yet; see #1063.
     #[test]
@@ -1349,50 +1342,36 @@ mod tests {
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let query = translated(&role, ALICE());
 
-        let open_with = |revocation: DecoratedLinkExpression| {
-            RoleGrantEvidence {
-                to_state: "approved".into(),
-                role_class: "ns://Reviewer".into(),
-                did: ALICE().into(),
-                instances: vec![RoleInstanceHistory {
-                    instance_id: "r0".into(),
-                    grant_links: vec![grant_link(ALICE(), T1)],
-                    revocation_links: vec![revocation],
-                    asserted_instance_timestamp: None,
-                    granting_receipts: Vec::new(),
-                }],
-            }
-            .resolve(&query, None, None, GrantContext::empty())
-            .expect("resolves")
-        };
-
-        // Signature genuinely does not verify, and the link says so.
-        let honest_verdict = role_link(
+        // Signature genuinely does not verify: stated author ADMIN, signed by
+        // the forger persona's key.
+        let forged = role_link(
             crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
             ALICE(),
             ADMIN(),
             false,
             T2,
         );
-        let grant = open_with(honest_verdict.clone());
+        let grant = RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE().into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links: vec![grant_link(ALICE(), T1)],
+                revocation_links: vec![forged],
+                asserted_instance_timestamp: None,
+                granting_receipts: Vec::new(),
+            }],
+        }
+        .resolve(&query, None, None, GrantContext::empty())
+        .expect("resolves");
         assert!(
             grant.windows[0].revocations.is_empty(),
             "an unsigned tombstone is not a link anyone wrote"
         );
-        assert!(grant.eligible_at(NOW, None), "so the grant is still open");
-
-        // Same bad signature, but the read-set claims it verified.
-        let mut lying_verdict = honest_verdict;
-        lying_verdict.proof.valid = Some(true);
-        lying_verdict.proof.invalid = Some(false);
-        let grant = open_with(lying_verdict);
-        assert!(
-            grant.windows[0].revocations.is_empty(),
-            "`proof.valid` is the sender's claim; resolve re-derives it from the signature"
-        );
         assert!(
             grant.eligible_at(NOW, None),
-            "a forged verdict must not shrink the window"
+            "a forged tombstone must not shrink the window"
         );
     }
 

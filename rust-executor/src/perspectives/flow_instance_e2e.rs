@@ -1268,12 +1268,13 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     );
     assert!(
         read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
-            && g.instances.iter().any(|i| i
-                .revocation_links
+            && g.instances
                 .iter()
-                .any(|l| l.proof.valid == Some(true)))),
+                .any(|i| i.revocation_links.iter().any(|l| l.compute_proof_valid()))),
         "the read-set carries the tombstone link the verdict took into account — \
-         unfiltered by authority, so the reader applies that rule itself: {read_set:?}"
+         its signature verifying from the carried material alone (the plain form \
+         has no verdict flag to read), unfiltered by authority, so the reader \
+         applies that rule itself: {read_set:?}"
     );
 }
 
