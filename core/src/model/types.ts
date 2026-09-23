@@ -16,6 +16,15 @@ import type { NodeExpression } from "../shacl/NodeExpression";
 // Query DSL types
 // ---------------------------------------------------------------------------
 
+/**
+ * Who wrote a link: a DID, any of several DIDs, or `{ not }` / `{ contains }`
+ * over the author DID.
+ */
+export type AuthorCondition =
+  | string
+  | string[]
+  | { not?: string | string[]; contains?: string };
+
 export type WhereOps = {
   not: string | number | boolean | string[] | number[];
   between: [number, number];
@@ -24,6 +33,16 @@ export type WhereOps = {
   gt: number; // greater than
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
+  /** Equality as an operator: `{ eq: X }` is the bare value `X` (an array
+   *  means any of). It lets a value sit beside `author`, and cannot be
+   *  combined with the other value operators. */
+  eq: string | number | boolean | string[] | number[];
+  /** Per-link author: the link that satisfies this property's condition was
+   *  written by this author, e.g. `{ agent: { eq: did, author: admin } }`.
+   *  Alone, `{ agent: { author: admin } }`: admin wrote some `agent` link.
+   *  Only on properties and relations stored as links (not getters,
+   *  `timestamp` or `id`). See "Filtering by Author" in the model-classes guide. */
+  author: AuthorCondition;
 };
 export type WhereCondition =
   | string
@@ -385,6 +404,10 @@ type HasNoTypedFields<T extends Ad4mModel> =
 export type StringWhereOps = {
   not?: string | string[];
   contains?: string;
+  /** See {@link WhereOps.eq}. */
+  eq?: string | string[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type NumericWhereOps = {
@@ -394,12 +417,16 @@ export type NumericWhereOps = {
   gt?: number;
   gte?: number;
   between?: [number, number];
+  /** See {@link WhereOps.eq}. */
+  eq?: number | number[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type TypedWhereCondition<V> =
     V extends string  ? string | string[] | StringWhereOps
   : V extends number  ? number | number[] | NumericWhereOps
-  : V extends boolean ? boolean
+  : V extends boolean ? boolean | { eq?: boolean; author?: AuthorCondition }
   : V extends Array<infer U>
       ? U extends string ? string | string[] | StringWhereOps
         : U extends number ? number | number[] | NumericWhereOps
@@ -413,10 +440,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
-      /** Beside property/relation conditions: the links carrying those values
-       *  must have been written by this author (checked per link, in the store).
-       *  Alone: the instance's `.author`, i.e. the earliest link's author.
-       *  See "Filtering by Author" in the model-classes guide. */
+      /** Alone: the instance's `.author`, i.e. its earliest link's author.
+       *  Beside property/relation conditions in the same object: that, AND
+       *  each of those conditions is satisfied by a link this author wrote.
+       *  For "this author wrote the `agent` link" alone, nest it:
+       *  `{ agent: { eq: did, author } }`. It does not reach into
+       *  `OR`/`AND`/`NOT` sub-clauses. See "Filtering by Author" in the
+       *  model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];

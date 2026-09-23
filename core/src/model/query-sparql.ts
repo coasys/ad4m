@@ -82,6 +82,66 @@ export function hasJsOnlyWhereFilters(
 }
 
 /**
+ * Prepare a `where` for this client-side SPARQL builder: unwrap `{ eq: X }`
+ * to the bare `X`, and refuse a per-link `author`.
+ *
+ * A per-link `author` (nested, `{ agent: { eq: X, author: A } }`, or a
+ * top-level `author` beside link-backed property conditions) is answered by
+ * the executor, which joins each matched link's reifier (#1114). This builder
+ * has no such join, and treating the author as instance-level here would
+ * answer a different, wider question. `findAll()`/`count()` answer it.
+ */
+export function normalizeWhereForSparql(metadata: ModelMetadata, where?: Where): Where | undefined {
+  if (!where) return where;
+  assertNoPerLinkAuthor(metadata, where);
+  const out: Where = {};
+  for (const [key, condition] of Object.entries(where)) {
+    out[key] = unwrapEq(key, condition);
+  }
+  return out;
+}
+
+function isOpsObject(condition: unknown): condition is Record<string, unknown> {
+  return typeof condition === "object" && condition !== null && !Array.isArray(condition);
+}
+
+function unwrapEq(key: string, condition: any): any {
+  if (key === "OR" || key === "AND" || key === "NOT" || !isOpsObject(condition) || condition.eq === undefined) {
+    return condition;
+  }
+  if (Object.keys(condition).some((k) => k !== "eq")) {
+    throw new Error(`where.${key}: \`eq\` cannot be combined with another operator`);
+  }
+  return condition.eq;
+}
+
+function assertNoPerLinkAuthor(metadata: ModelMetadata, where: Where): void {
+  const refuse = (what: string) => {
+    throw new Error(
+      `buildSPARQLQuery: ${what} is a per-link \`author\`, which the executor answers by ` +
+        "checking who wrote each matched link. This client-side SPARQL builder cannot express " +
+        "it. Use the model query path (findAll/count).",
+    );
+  };
+  const linkBacked = (key: string) => {
+    const prop = metadata.properties[key];
+    return !!prop && !!prop.predicate && !prop.getter;
+  };
+  for (const [key, condition] of Object.entries(where)) {
+    if (key === "OR" || key === "AND") {
+      for (const branch of (condition as Where[]) ?? []) assertNoPerLinkAuthor(metadata, branch);
+    } else if (key === "NOT") {
+      if (condition) assertNoPerLinkAuthor(metadata, condition as Where);
+    } else if (key === "author") {
+      const sibling = Object.keys(where).find((k) => k !== "author" && linkBacked(k));
+      if (sibling) refuse(`\`author\` beside \`${sibling}\``);
+    } else if (isOpsObject(condition) && condition.author !== undefined) {
+      refuse(`\`${key}.author\``);
+    }
+  }
+}
+
+/**
  * Check whether a string value is a well-formed absolute IRI that can be
  * stored verbatim as a link target (raw `NamedNode`) instead of being
  * wrapped in a `literal:string:*` URI.
@@ -269,6 +329,7 @@ export function buildSPARQLQuery(
 ): string {
   const joinPatterns: string[] = [];
   const filterExpressions: string[] = [];
+  query = { ...query, where: normalizeWhereForSparql(metadata, query.where) };
 
   // Parent filter — direct triple pattern
   if (query.parent) {
