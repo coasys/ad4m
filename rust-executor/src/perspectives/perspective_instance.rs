@@ -3833,8 +3833,18 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+        let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // `where.producedByFlow` is resolved here, not in the pipeline: it
+        // needs the perspective (receipts, flow catalogue) and signature
+        // verification, neither of which SPARQL or the post-hydration filter
+        // has. Extracted BEFORE the query runs and turned into an id
+        // constraint the store applies ahead of `limit`/`offset` — so a page
+        // of N is N *valid* outputs, never N rows later thinned. Malformed or
+        // mis-placed filters error rather than silently admit everything.
+        let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
+            .map_err(deno_core::anyhow::Error::msg)?;
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
@@ -3849,6 +3859,41 @@ impl PerspectiveInstance {
             .await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
+
+        if let Some(filter) = produced_by_flow {
+            let valid = super::flow_instance::produced::flow_valid_outputs(
+                self,
+                &filter.flow,
+                filter.state.as_deref(),
+            )
+            .await?;
+            // An output is committed *as an instance of a class* (#1104); the
+            // same node read through another class is other content and not
+            // what the quorum signed. So only outputs named as the queried
+            // class pass — by the name the caller queries with or by the
+            // shape's target class, whichever spelling the flow's DNA used.
+            let allowed: std::collections::BTreeSet<String> = valid
+                .into_iter()
+                .filter(|v| {
+                    v.output.class_name == class_name || v.output.class_name == shape.target_class
+                })
+                .map(|v| v.output.id)
+                .collect();
+            if !super::model_query::constrain_ids(&mut query_input, allowed)
+                .map_err(deno_core::anyhow::Error::msg)?
+            {
+                // No valid output survives; answer directly rather than
+                // handing the store an empty VALUES block.
+                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                    instances: vec![],
+                    total_count: 0,
+                })
+                .map_err(|e| {
+                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+                });
+            }
+        }
+
         let result = super::model_query::execute_model_query(
             &self.sparql_store,
             shape.as_ref(),
