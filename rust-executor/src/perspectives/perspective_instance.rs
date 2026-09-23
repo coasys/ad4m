@@ -8477,7 +8477,7 @@ mod tests {
                 predicate: Some(p.to_string()),
                 target: t.to_string(),
             };
-            let signed = signer.sign_at(data, &ts);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
             let mut link = LinkExpression::from(signed);
             link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add link");
@@ -8573,7 +8573,7 @@ mod tests {
                 predicate: Some(pred.to_string()),
                 target: tgt.to_string(),
             };
-            let signed = signer.sign_at(data, &ts);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
             let mut link = LinkExpression::from(signed);
             link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add_link");

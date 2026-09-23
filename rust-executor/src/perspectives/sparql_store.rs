@@ -1350,7 +1350,7 @@ mod tests {
             },
             target: target.to_string(),
         };
-        let signed = signer.sign_at(data.normalize(), ts);
+        let signed = signer.sign_at(data.normalize(), ts.parse().expect("fixture timestamp"));
         LinkExpression {
             author: signed.author,
             timestamp: signed.timestamp,
