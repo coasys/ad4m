@@ -2575,7 +2575,10 @@ async fn propose_joins_a_non_terminal_proposal_carrying_a_stray_outputs_hash() {
     .expect("a stray outputs_hash on a non-terminal proposal must not stop a join");
     assert_eq!(joined.proposal_uri, bobs, "joined Bob's, not a twin");
     assert!(!joined.minted && joined.recorded_vote);
-    assert_eq!(joined.derived_state, "changes_requested", "the join fires the {{n:2}} edge");
+    assert_eq!(
+        joined.derived_state, "changes_requested",
+        "the join fires the {{n:2}} edge"
+    );
 }
 
 // ---------------------------------------------------------------------------
