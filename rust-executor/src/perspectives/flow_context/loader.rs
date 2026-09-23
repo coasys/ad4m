@@ -706,6 +706,7 @@ mod tests {
             requires: None,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         };
         let transition = |from: &str, to: &str| FlowTransition {
             action_name: format!("{from}->{to}"),
@@ -742,6 +743,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            consensus_rule_malformed: false,
         }
     }
 

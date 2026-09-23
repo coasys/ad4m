@@ -190,6 +190,23 @@ impl LinkExpression {
             status: input.status,
         }
     }
+
+    /// Derive the signature verdict for this link — the same recipe as
+    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form
+    /// whose proof carries no verdict field at all. Code that hands links
+    /// across a trust boundary carries `LinkExpression` precisely so a
+    /// verdict cannot travel with them; the receiving side calls this instead
+    /// of believing anyone. Normalizing `data` first is not optional: the
+    /// signature was produced over the normalized link.
+    pub fn compute_proof_valid(&self) -> bool {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        verify_or_false(&link_expr, "LinkExpression::compute_proof_valid")
+    }
 }
 
 impl From<LinkExpression> for Expression<Link> {
@@ -516,6 +533,7 @@ pub struct TriggeredNotification {
 pub enum ModelApiType {
     OpenAi,
     Anthropic,
+    Ollama,
 }
 
 impl FromStr for ModelApiType {
@@ -531,6 +549,9 @@ impl FromStr for ModelApiType {
             "anthropic" => Ok(ModelApiType::Anthropic),
             "Anthropic" => Ok(ModelApiType::Anthropic),
             "ANTHROPIC" => Ok(ModelApiType::Anthropic),
+            "ollama" => Ok(ModelApiType::Ollama),
+            "Ollama" => Ok(ModelApiType::Ollama),
+            "OLLAMA" => Ok(ModelApiType::Ollama),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -542,6 +563,7 @@ impl ToString for ModelApiType {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
             ModelApiType::Anthropic => "ANTHROPIC".to_string(),
+            ModelApiType::Ollama => "OLLAMA".to_string(),
         }
     }
 }
