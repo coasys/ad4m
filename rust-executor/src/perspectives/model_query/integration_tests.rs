@@ -8933,3 +8933,36 @@ async fn a_transitive_read_excludes_every_named_anchor() {
         "c1 is an anchor, so it is not also reported as root's descendant"
     );
 }
+
+/// The total a transitive read reports is built from the same scope as its rows.
+///
+/// The anchor exclusion is a conformance pattern rather than a post-filter, so it
+/// reaches `build_count_sparql` through the same `build_query_patterns` the rows
+/// go through. Asserted rather than assumed: a total that counts the anchors the
+/// query will not return is a client paging for rows that do not exist, which is
+/// the failure the walk's own total was fixed for.
+#[tokio::test]
+async fn a_transitive_read_totals_what_it_returns() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root", "we://c1"],
+            true,
+            ScopeDirection::Out,
+            None,
+        )),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert_eq!(
+        result.instances.len(),
+        5,
+        "c2, c3, r1, r2, rr1 — both anchors excluded"
+    );
+    assert_eq!(
+        result.total_count, 5,
+        "the total counts what the scope returns, not the anchors it starts from"
+    );
+}

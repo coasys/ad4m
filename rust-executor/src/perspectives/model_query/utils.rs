@@ -417,6 +417,25 @@ mod tests {
     }
 
     #[test]
+    fn test_not_in_filter_forms() {
+        let clean = vec!["test://a".to_string(), "test://b".to_string()];
+        assert_eq!(
+            not_in_filter("source", &clean).as_deref(),
+            Some("FILTER(?source NOT IN (<test://a>, <test://b>))")
+        );
+        // A `new_unchecked` store id cannot be written as an IRIREF, so the
+        // whole list falls back to the string form — as with the positive
+        // filter, since dropping the odd one would fail to exclude it.
+        let mixed = vec!["test://a".to_string(), "literal://string:x".to_string()];
+        assert_eq!(
+            not_in_filter("source", &mixed).as_deref(),
+            Some("FILTER(STR(?source) NOT IN (\"test://a\", \"literal://string:x\"))")
+        );
+        // Nothing to exclude, and `NOT IN ()` is not a term SPARQL will parse.
+        assert_eq!(not_in_filter("source", &[]), None);
+    }
+
+    #[test]
     fn test_validate_iri_rejects_injection() {
         assert!(validate_iri("task://status> . <injected://triple").is_err());
         assert!(validate_iri("<injected>").is_err());
