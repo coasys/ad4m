@@ -81,11 +81,37 @@ export type Scope =
  * This exists because a tree read one level at a time costs a round trip per
  * level and — under a subscription — one subscription per *parent*. Asking for
  * every anchor in one query makes both proportional to depth instead.
+ *
+ * The predicate is named the same two ways the other scopes name it: literally,
+ * or by the model and relation that own it. See {@link TraverseByPredicate} and
+ * {@link TraverseByModel}.
  */
-export interface TraverseScope {
+export type TraverseScope = TraverseByPredicate | TraverseByModel;
+
+/** A traversal naming its predicate literally, as the Raw scope does. */
+export interface TraverseByPredicate extends TraverseOptions {
+  predicate: string;
+}
+
+/**
+ * A traversal naming its predicate through the model that declares it, as the
+ * Model scope does — `{ model: Post, field: 'comments' }` rather than
+ * `'test://has_comment'`.
+ *
+ * Without `field` the predicate is resolved by scanning for a relation on
+ * `model` whose target is the queried class, which is the same rule the Model
+ * scope uses and the same reason to pass `field` when a parent has more than
+ * one relation to the same child.
+ */
+export interface TraverseByModel extends TraverseOptions {
+  model: typeof Ad4mModel;
+  field?: string;
+}
+
+/** Everything a traversal says that is not how it names its predicate. */
+export interface TraverseOptions {
   /** The anchors to walk from. A bare string is the single-anchor spelling. */
   ids: string | string[];
-  predicate: string;
   /**
    * Follow the predicate as far as it goes rather than one step.
    *
