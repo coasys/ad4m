@@ -5,10 +5,12 @@
  * cycling peers in and out of an SFU room for 60 seconds.  Every 5
  * seconds a new peer joins and the oldest active peer leaves.
  *
- * Tracks the executor process's RSS at each iteration.  After the
- * churn window, asserts that RSS growth stayed < 50 MB (detecting
- * unbounded leaks in the SFU's per-peer state management).
+ * Pre-provisions all users before the churn loop, then records
+ * initial RSS.  The churn loop only exercises SFU join/leave — no
+ * user creation — so the RSS delta isolates the SFU's per-peer
+ * state management.
  *
+ * Asserts that RSS growth stays < 50 MB (detecting unbounded leaks).
  * Reports the full RSS timeline for trend analysis.
  */
 
@@ -24,6 +26,7 @@ const ROOM_NAME = "s4-sfu-memory-churn";
 const NEIGHBOURHOOD = `windtunnel://s4-sfu`;
 const CHURN_DURATION_MS = 60_000;
 const CHURN_INTERVAL_MS = 5_000;
+const POOL_SIZE = 14;
 
 interface ActivePeer {
   peer: WebRtcPeer;
@@ -49,7 +52,6 @@ export const s4SfuMemoryChurn: Scenario = {
       roomName: ROOM_NAME,
     });
 
-    // Locate the executor's PID so we can sample its RSS.
     const executorPid = findListeningPid(port);
     metrics["executorPid"] = executorPid;
     if (!executorPid) {
@@ -69,13 +71,29 @@ export const s4SfuMemoryChurn: Scenario = {
       };
     }
 
+    // Pre-provision all users before measuring RSS.
+    // This isolates the churn loop from user-creation memory overhead
+    // (each user.create initializes agent infrastructure ~27 MB on CI).
+    const allSessions = await provisionPeers({
+      admin,
+      port,
+      count: POOL_SIZE,
+      labelPrefix: "s4-peer",
+    });
+    await registerSfuMembers({
+      admin,
+      neighbourhoodUrl: NEIGHBOURHOOD,
+      sessions: allSessions,
+    });
+    metrics["poolSize"] = POOL_SIZE;
+
     const activePeers: ActivePeer[] = [];
     const rssTimeline: Array<{ t: number; rssKb: number | null }> = [];
-    let nextPeerId = 0;
+    let nextIdx = 0;
 
     try {
-      // Record initial RSS.
-      const initialRss = executorPid ? readRssKb(executorPid) : null;
+      // Record initial RSS AFTER user provisioning completes.
+      const initialRss = readRssKb(executorPid);
       rssTimeline.push({ t: 0, rssKb: initialRss });
       metrics["initialRssKb"] = initialRss;
 
@@ -84,41 +102,38 @@ export const s4SfuMemoryChurn: Scenario = {
         const iterStart = Date.now();
         const elapsed = iterStart - loopStart;
 
-        // Leave the oldest peer if at least one active peer exists.
         if (activePeers.length > 0) {
           const oldest = activePeers.shift()!;
           await leavePeer(oldest);
         }
 
-        // Join a new peer.
-        const fresh = await joinPeer(admin, port, nextPeerId++);
-        activePeers.push(fresh);
+        if (nextIdx < allSessions.length) {
+          const session = allSessions[nextIdx++];
+          const fresh = await joinPeerFromSession(session, port);
+          activePeers.push(fresh);
+        }
 
-        // Sample RSS.
-        const rss = executorPid ? readRssKb(executorPid) : null;
+        const rss = readRssKb(executorPid);
         rssTimeline.push({ t: elapsed, rssKb: rss });
         samples.push({
-          name: `churn_iter_${nextPeerId - 1}`,
+          name: `churn_iter_${nextIdx - 1}`,
           durationMs: Date.now() - iterStart,
           timestamp: Date.now(),
         });
 
-        // Pace the churn to one cycle every CHURN_INTERVAL_MS.
         const iterElapsed = Date.now() - iterStart;
         if (iterElapsed < CHURN_INTERVAL_MS) {
           await sleep(CHURN_INTERVAL_MS - iterElapsed);
         }
       }
 
-      // Record final RSS.
-      const finalRss = executorPid ? readRssKb(executorPid) : null;
+      const finalRss = readRssKb(executorPid);
       rssTimeline.push({
         t: Date.now() - loopStart,
         rssKb: finalRss,
       });
       metrics["finalRssKb"] = finalRss;
 
-      // Compute growth.
       const initialVal = metrics["initialRssKb"] as number | null;
       const finalVal = metrics["finalRssKb"] as number | null;
       if (initialVal != null && finalVal != null) {
@@ -133,13 +148,19 @@ export const s4SfuMemoryChurn: Scenario = {
         metrics["rssWithinBudget"] = null;
       }
       metrics["rssTimeline"] = rssTimeline;
-      metrics["totalPeersJoined"] = nextPeerId;
+      metrics["totalPeersJoined"] = nextIdx;
       passed = metrics["rssWithinBudget"] === true;
     } finally {
-      // Drain remaining active peers.
       for (const ap of activePeers) {
         try {
           await leavePeer(ap);
+        } catch {
+          /* best-effort */
+        }
+      }
+      for (const s of allSessions) {
+        try {
+          await s.client.disconnect();
         } catch {
           /* best-effort */
         }
@@ -176,24 +197,12 @@ export const s4SfuMemoryChurn: Scenario = {
 
 // ── Helpers ──
 
-async function joinPeer(
-  admin: InstrumentedClient,
+async function joinPeerFromSession(
+  session: PeerSession,
   port: number,
-  idx: number,
 ): Promise<ActivePeer> {
-  const [session] = await provisionPeers({
-    admin,
-    port,
-    count: 1,
-    labelPrefix: `s4-peer-${idx}`,
-  });
-  await registerSfuMembers({
-    admin,
-    neighbourhoodUrl: NEIGHBOURHOOD,
-    sessions: [session],
-  });
   const peer = new WebRtcPeer(session.label, {
-    audioToneHz: 440 + (idx % 20) * 10,
+    audioToneHz: 440,
   });
   await peer.attachSyntheticStream();
   const wire = await wireRenegotiation({
@@ -238,19 +247,9 @@ async function leavePeer(ap: ActivePeer): Promise<void> {
   } catch {
     /* best-effort */
   }
-  try {
-    await ap.session.client.disconnect();
-  } catch {
-    /* best-effort */
-  }
 }
 
-/**
- * Find the PID of the process listening on the given TCP port.
- * Returns `null` if detection fails.
- */
 function findListeningPid(port: number): string | null {
-  // Try lsof first (most portable), then fall back to fuser.
   for (const cmd of [
     `lsof -t -i :${port} -sTCP:LISTEN 2>/dev/null | head -1`,
     `fuser ${port}/tcp 2>/dev/null | tr -dc '0-9 ' | awk '{print $1}'`,
@@ -265,10 +264,6 @@ function findListeningPid(port: number): string | null {
   return null;
 }
 
-/**
- * Read VmRSS from `/proc/<pid>/status`.
- * Returns RSS in kB, or `null` if the read fails.
- */
 function readRssKb(pid: string): number | null {
   try {
     const out = execSync(`cat /proc/${pid}/status 2>/dev/null`, {
