@@ -44,7 +44,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 use super::sparql_builder::local_status_filter;
-use super::types::ModelShape;
+use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
 
@@ -252,6 +252,68 @@ fn sort_link_rows(rows: &mut [Value]) {
     });
 }
 
+/// Every predicate a `links` request reads, at every `include` depth, for a
+/// subscription's trigger set.
+///
+/// The trigger set is otherwise built from the shape's predicates, and an IRI
+/// entry is by definition one the shape does not declare. Without this, a
+/// subscription asking for a revocation tombstone would never re-run when the
+/// tombstone lands and would keep reporting `[]`: "not revoked", fail-open.
+///
+/// Entries are resolved the way [`resolve_link_keys`] resolves them, against
+/// the class the (sub-)query reads; an entry that does not resolve is left out
+/// here, since the query itself rejects it. An include whose target class
+/// cannot be resolved (a polymorphic relation that declares none) still
+/// contributes its IRI entries.
+pub(crate) fn links_trigger_predicates(
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_links_predicates(Some(shape), query, resolver, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn collect_links_predicates(
+    shape: Option<&ModelShape>,
+    query: &ModelQueryInput,
+    resolver: &dyn ShapeResolver,
+    out: &mut Vec<String>,
+) {
+    for key in query.links.iter().flatten() {
+        let by_name = shape.and_then(|s| {
+            s.properties
+                .iter()
+                .find(|p| p.name == *key && !p.predicate.is_empty())
+                .map(|p| p.predicate.clone())
+                .or_else(|| {
+                    s.include_relations
+                        .iter()
+                        .find(|r| r.name == *key && !r.predicate.is_empty())
+                        .map(|r| r.predicate.clone())
+                })
+        });
+        match by_name {
+            Some(p) => out.push(p),
+            None if emittable_iri(key) => out.push(key.clone()),
+            None => {}
+        }
+    }
+    for (name, value) in query.include.iter().flatten() {
+        let IncludeValue::SubQuery(sub) = value else {
+            continue;
+        };
+        let target = shape
+            .and_then(|s| s.include_relations.iter().find(|r| r.name == *name))
+            .filter(|r| !r.target_class_name.is_empty())
+            .and_then(|r| resolver.get_shape(&r.target_class_name).ok());
+        collect_links_predicates(target.as_deref(), sub, resolver, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +325,56 @@ mod tests {
             "data": { "source": "we://i", "predicate": "we://p", "target": target },
             "proof": { "key": "k", "signature": signature },
         })
+    }
+
+    /// `links` names resolve against the class each (sub-)query reads, at every
+    /// include depth; IRI entries are taken as they are; an entry that is
+    /// neither contributes nothing (the query itself rejects it).
+    #[test]
+    fn links_trigger_predicates_walk_every_include_depth() {
+        use super::super::test_helpers::{prop, relation, shape, StaticShapeResolver};
+        use super::super::types::ShapeRelation;
+        use std::collections::HashMap;
+
+        let rel = |name: &str, predicate: &str, target: &str| ShapeRelation {
+            name: name.into(),
+            predicate: predicate.into(),
+            direction: "forward".into(),
+            kind: "hasMany".into(),
+            max_count: None,
+            target_class_name: target.into(),
+            target_class_uri: String::new(),
+        };
+        let mut top = shape("Top", vec![relation("mids", "we://mids")]);
+        top.include_relations = vec![rel("mids", "we://mids", "Mid")];
+        let mut mid = shape("Mid", vec![relation("leaves", "we://leaves")]);
+        mid.include_relations = vec![rel("leaves", "we://leaves", "Leaf")];
+        let leaf = shape("Leaf", vec![prop("note", "we://leaf_note")]);
+        let resolver = StaticShapeResolver::new();
+        resolver.register("Mid", mid);
+        resolver.register("Leaf", leaf);
+
+        let sub = |links: &[&str], include: Option<(&str, ModelQueryInput)>| ModelQueryInput {
+            links: Some(links.iter().map(|s| s.to_string()).collect()),
+            include: include.map(|(k, q)| {
+                HashMap::from([(k.to_string(), IncludeValue::SubQuery(Box::new(q)))])
+            }),
+            ..Default::default()
+        };
+        let query = sub(
+            &["we://top_tombstone"],
+            Some((
+                "mids",
+                sub(
+                    &["we://mid_tombstone", "not-a-key"],
+                    Some(("leaves", sub(&["note"], None))),
+                ),
+            )),
+        );
+        assert_eq!(
+            links_trigger_predicates(&top, &query, &resolver),
+            vec!["we://leaf_note", "we://mid_tombstone", "we://top_tombstone"]
+        );
     }
 
     /// Two agents write the same triple in the same millisecond. The store
