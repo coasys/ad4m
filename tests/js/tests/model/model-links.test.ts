@@ -301,6 +301,9 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     );
     expect(forged.proof.valid).to.equal(false);
     expect(forged.proof.invalid).to.equal(true);
+    // A failed signature is told apart from an unsigned link by its non-empty
+    // signature, since `invalid` alone covers both.
+    expect(forged.proof.signature).to.equal("00".repeat(64));
 
     // Same verdict perspective.get() reports for the stored link.
     const stored = await perspective.get(

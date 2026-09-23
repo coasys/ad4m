@@ -200,7 +200,10 @@ pub(super) async fn attach_links(
             let source = s(row, "source");
             let predicate = s(row, "predicate");
             // Same decoding as `sparql_store::decode_proof_valid`: only a
-            // stored "true" is valid; an absent annotation is not.
+            // stored "true" is valid; an absent annotation is not. As in
+            // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
+            // a failed signature, a missing verdict and a missing proof alike;
+            // an empty `signature` is what tells an unsigned link apart.
             let valid = s(row, "proofValid") == "true";
             let link = json!({
                 "author": s(row, "author"),

@@ -335,6 +335,12 @@ export type Query = {
  * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
  * one. Anything that acts on a row (counting a vote, granting a role) should
  * require `proof.valid`.
+ *
+ * `valid` is never `null` here and `invalid` is always `!valid`, the same
+ * convention as `perspective.get()`. So `invalid: true` does not by itself mean
+ * a signature failed: it also covers a link with no proof, or with no recorded
+ * verdict. To tell an unsigned link from a failed signature, check whether
+ * `proof.signature` is `""`.
  */
 export interface LinkRow {
   author: string;
