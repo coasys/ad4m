@@ -325,7 +325,7 @@ mod tests {
                 ModelApiType::Anthropic => {
                     Box::new(anthropic::AnthropicChat::new("k", base.clone()))
                 }
-                ModelApiType::Ollama => Box::new(ollama::OllamaChat::new("", base.clone())),
+                ModelApiType::Ollama => Box::new(ollama::OllamaChat::new("", base.clone(), None)),
             };
             assert_eq!(
                 api_type_supports_native_tools(&api_type),
