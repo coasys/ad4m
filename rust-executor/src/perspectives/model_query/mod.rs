@@ -87,6 +87,8 @@ mod hydration;
 #[cfg(test)]
 mod integration_tests;
 mod projection;
+#[cfg(test)]
+mod proof_valid_tests;
 mod query;
 mod relations;
 #[cfg(test)]
