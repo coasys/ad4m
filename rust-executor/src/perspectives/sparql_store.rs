@@ -2048,7 +2048,7 @@ mod tests {
                         &format!("ad4m://src_{}", thread_id),
                         "ad4m://pred",
                         &format!("ad4m://tgt_{}_{}", thread_id, i),
-                        &format!("2024-01-01T{:02}:{:02}:00Z", thread_id, i),
+                        &format!("2024-01-01T{:02}:{:02}:{:02}Z", thread_id, i / 60, i % 60),
                     );
                     svc.add_link(&link).unwrap();
                 }
@@ -2107,7 +2107,7 @@ mod tests {
                 "ad4m://keep",
                 "ad4m://pred",
                 &format!("ad4m://tgt_{}", i),
-                &format!("2024-01-01T00:{:02}:00Z", i),
+                &format!("2024-01-01T00:{:02}:{:02}Z", i / 60, i % 60),
             ))
             .unwrap();
             let remove = make_link_with_ts(
@@ -2115,7 +2115,7 @@ mod tests {
                 "ad4m://remove",
                 "ad4m://pred",
                 &format!("ad4m://tgt_{}", i),
-                &format!("2024-01-01T01:{:02}:00Z", i),
+                &format!("2024-01-01T01:{:02}:{:02}Z", i / 60, i % 60),
             );
             svc.add_link(&remove).unwrap();
             remove_links.push(remove);
