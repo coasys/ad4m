@@ -23,12 +23,6 @@ import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbour
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
-/** True for links in the interpretation-overlay namespace. */
-function isInterpLink(link: LinkExpression | undefined): boolean {
-    const predicate = link?.data?.predicate
-    return typeof predicate === 'string' && predicate.startsWith('ad4m://interp/')
-}
-
 /** Extract namespace prefix from a URI (everything up to and including the last / or #) */
 function extractNamespaceFromUri(uri: string): string {
     const hashIdx = uri.lastIndexOf('#');
@@ -591,35 +585,17 @@ export class PerspectiveProxy {
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #ensuredSubjectClasses = new Set<string>()
-
-    /** Cached `interpretationOverlays()` result with TTL-based expiry. */
-    #overlaysCache: { result: InterpretationOverlayInfo[]; cachedAt: number } | null = null
-    #overlaysCacheGen = 0
+    /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
-    static readonly #OVERLAYS_TTL_MS = 30_000
-
-    #invalidateIfInterpLink: LinkCallback = (link) => {
-        if (isInterpLink(link)) this.invalidateOverlaysCache()
-        return null
-    }
-
-    // `link-updated` listeners get the raw `{ oldLink, newLink }` event, not a
-    // link: PerspectiveClient passes it through under LinkCallback's type. Check
-    // both sides, since an update can create or retire an overlay link.
-    #invalidateIfInterpUpdate: LinkCallback = (event) => {
-        const { oldLink, newLink } = event as unknown as { oldLink?: LinkExpression; newLink?: LinkExpression }
-        if (isInterpLink(oldLink) || isInterpLink(newLink)) this.invalidateOverlaysCache()
-        return null
-    }
 
     /**
      * Creates a new PerspectiveProxy instance.
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = [this.#invalidateIfInterpLink]
-        this.#perspectiveLinkRemovedCallbacks = [this.#invalidateIfInterpLink]
-        this.#perspectiveLinkUpdatedCallbacks = [this.#invalidateIfInterpUpdate]
+        this.#perspectiveLinkAddedCallbacks = []
+        this.#perspectiveLinkRemovedCallbacks = []
+        this.#perspectiveLinkUpdatedCallbacks = []
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
@@ -873,47 +849,23 @@ export class PerspectiveProxy {
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
      *
-     * Results are cached for 30 seconds. Concurrent callers against a cold cache
-     * share one in-flight RPC (the burst this exists for). Callers that mutate
-     * the returned array do not affect other consumers — each call gets a copy.
-     * Pass `{ fresh: true }` to skip the TTL. Overlay-link traffic
-     * (`ad4m://interp/…`) invalidates the cache so remote/auto-processor changes
-     * do not wait out the TTL. Call {@link invalidateOverlaysCache} to drop it
-     * immediately.
+     * Concurrent callers share one in-flight RPC. Nothing is kept after it
+     * settles, so every call made after that fetches from the executor again.
+     * Each caller gets its own copy of the array.
      */
-    async interpretationOverlays(opts?: { fresh?: boolean }): Promise<InterpretationOverlayInfo[]> {
-        if (opts?.fresh) {
-            this.invalidateOverlaysCache()
-        } else if (this.#overlaysCache && Date.now() - this.#overlaysCache.cachedAt < PerspectiveProxy.#OVERLAYS_TTL_MS) {
-            return [...this.#overlaysCache.result]
-        } else if (this.#overlaysInFlight) {
-            const coalesced = await this.#overlaysInFlight
-            return [...coalesced]
+    async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
+        if (this.#overlaysInFlight) {
+            return [...(await this.#overlaysInFlight)]
         }
-        const gen = this.#overlaysCacheGen
         const pending = this.#client.interpretationOverlays(this.#handle.uuid)
         this.#overlaysInFlight = pending
         try {
-            const result = await pending
-            // Only store when no invalidation happened during the RPC — a concurrent
-            // accept/reject/invalidate bumps the generation, and the stale response
-            // must not repopulate the cache.
-            if (gen === this.#overlaysCacheGen) {
-                this.#overlaysCache = { result, cachedAt: Date.now() }
-            }
-            return [...result]
+            return [...(await pending)]
         } finally {
             if (this.#overlaysInFlight === pending) {
                 this.#overlaysInFlight = null
             }
         }
-    }
-
-    /** Drop the cached overlays so the next call fetches fresh data from the executor. */
-    invalidateOverlaysCache(): void {
-        this.#overlaysCacheGen++
-        this.#overlaysCache = null
-        this.#overlaysInFlight = null
     }
 
     /**
@@ -922,13 +874,7 @@ export class PerspectiveProxy {
      * `property` to accept a single predicate; omit it for the whole base.
      */
     async acceptInterpretation(base: string, property?: string): Promise<boolean> {
-        this.invalidateOverlaysCache()
-        try {
-            return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
-        } finally {
-            // The write has landed; anything read across the RPC is stale.
-            this.invalidateOverlaysCache()
-        }
+        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
     }
 
     /**
@@ -937,12 +883,7 @@ export class PerspectiveProxy {
      * rejected `update` drops the overlay and keeps the real value.
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
-        this.invalidateOverlaysCache()
-        try {
-            return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
-        } finally {
-            this.invalidateOverlaysCache()
-        }
+        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
     async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowProposeResult> {
