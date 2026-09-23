@@ -447,9 +447,7 @@ pub fn verify_receipt(
             }
         }
         SealedOutputs::NoOutputs => return ReceiptVerdict::NoOutputs,
-        SealedOutputs::PreimageMissing { seal } => {
-            return ReceiptVerdict::PreimageMissing { seal }
-        }
+        SealedOutputs::PreimageMissing { seal } => return ReceiptVerdict::PreimageMissing { seal },
     };
 
     let voters: BTreeSet<String> = derived
@@ -490,11 +488,11 @@ impl FlowReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::flow_evaluator::{evidence_hash, EvidenceItem};
     use crate::perspectives::flow_instance::atom::fixtures::{
         did_of, signed_link, signed_proposal, signed_vote, T1, T2, T3,
     };
     use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
-    use crate::perspectives::flow_evaluator::{evidence_hash, EvidenceItem};
     use crate::perspectives::flow_instance::receipt::EvidencePreimage;
     use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
@@ -1372,7 +1370,11 @@ mod tests {
     /// A flow whose terminal state has no `requires`. `mint` refuses it, so
     /// the receipts below are hand-built: they are what arrives from somebody
     /// who did not use `mint`.
-    fn receipt_under(flow: &SHACLFlow, final_seal: &str, preimages: Vec<EvidencePreimage>) -> FlowReceipt {
+    fn receipt_under(
+        flow: &SHACLFlow,
+        final_seal: &str,
+        preimages: Vec<EvidencePreimage>,
+    ) -> FlowReceipt {
         FlowReceipt {
             flow_uri: flow.flow_uri(),
             flow_dna_hash: flow_dna_hash(flow).expect("hash"),
@@ -1437,7 +1439,11 @@ mod tests {
             ]),
         );
         let nothing_blocks = sealed_over(&[BLOCKER], Vec::new());
-        let arrived = receipt_under(&negative, &nothing_blocks.seal.clone(), vec![nothing_blocks]);
+        let arrived = receipt_under(
+            &negative,
+            &nothing_blocks.seal.clone(),
+            vec![nothing_blocks],
+        );
 
         assert_eq!(
             verify_receipt(&catalogue(vec![negative]), &arrived),
@@ -1584,7 +1590,7 @@ mod tests {
             proposals: vec![
                 ProposalLinks {
                     uri: "ad4m://p/1".into(),
-                    links: signed_proposal("ad4m://p/1", ALICE, "open", "doing", &seal(), T1),
+                    links: signed_proposal("ad4m://p/1", ALICE, "open", "doing", "seal-1", T1),
                 },
                 final_edge(),
             ],

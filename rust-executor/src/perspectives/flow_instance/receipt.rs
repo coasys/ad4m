@@ -792,7 +792,7 @@ mod tests {
         tampered.items[0].content = "{\"id\":\"a1\",\"approved\":false}".to_string();
 
         let err = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered(), tampered])
-        .expect_err("a preimage that does not re-hash to its seal must not mint");
+            .expect_err("a preimage that does not re-hash to its seal must not mint");
         assert!(
             format!("{err:#}").contains("does not re-hash"),
             "the error must name the seal mismatch, got: {err:#}"
@@ -936,6 +936,44 @@ mod tests {
         );
     }
 
+    /// Only the edge into the terminal state says what the run produced. An
+    /// earlier guarded edge seals its own evidence, and that evidence is not
+    /// an output even though its preimage is carried.
+    ///
+    /// Red with `derived.settled.first()` in place of `.last()` in
+    /// `sealed_outputs`: the outputs would be the brief, not the deliverable.
+    #[test]
+    fn mint_reads_outputs_off_the_final_edge_not_an_earlier_one() {
+        let flow = flow_json(
+            serde_json::json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "doing", "value": 0.5, "requires": [{ "className": "coasys://Brief" }] },
+                { "name": "done", "value": 1.0, "requires": [{ "className": DELIVERABLE }] },
+            ]),
+            serde_json::json!([
+                { "action_name": "Start", "from_state": "open", "to_state": "doing", "actions": [] },
+                { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let brief = preimage(
+            &["coasys://Brief"],
+            vec![item(
+                "ad4m://brief/b1",
+                "coasys://Brief",
+                "{\"id\":\"ad4m://brief/b1\"}",
+            )],
+        );
+        let rs = read_set(
+            "open",
+            vec![
+                proposal("ad4m://p/1", ALICE, "open", "doing", &brief.seal, T1),
+                proposal("ad4m://p/2", BOB, "doing", "done", &delivered().seal, T2),
+            ],
+        );
+        let receipt = FlowReceipt::mint(&flow, rs, vec![brief, delivered()]).expect("mints");
+        assert_eq!(receipt.outputs, vec![OUTPUT.to_string()]);
+    }
+
     /// The outputs are read off the final edge's preimage, so without it
     /// there is nothing to mint. Before #1104 this minted: an empty
     /// `evidence_preimage` was accepted and the outputs came from the caller.
@@ -1021,7 +1059,7 @@ mod tests {
             )],
         );
         let err = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered(), bulky])
-        .expect_err("a receipt over the cap is not minted");
+            .expect_err("a receipt over the cap is not minted");
         assert!(
             format!("{err:#}").contains("byte cap"),
             "the error must name the cap, got: {err:#}"
@@ -1077,8 +1115,8 @@ mod tests {
     /// `EvidenceItem`.
     #[test]
     fn a_receipt_round_trips_through_its_stored_body() {
-        let receipt = FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered()])
-            .expect("mints");
+        let receipt =
+            FlowReceipt::mint(&two_state_flow(), completed(), vec![delivered()]).expect("mints");
 
         let read_back: FlowReceipt =
             serde_json::from_str(&receipt.body().expect("body")).expect("a stored receipt parses");
