@@ -2809,3 +2809,335 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
         "both DIDs on the `here → merged` edge are counted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// producedByFlow: valid outputs of a completed run (produced.rs)
+// ---------------------------------------------------------------------------
+
+/// Write `receipt`'s body to the graph exactly as any member could — the
+/// receipt-content link off its content-derived node. Discovery only; whether
+/// it proves anything is decided by verification, which is the point of
+/// half these tests.
+async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt::FlowReceipt) {
+    let body = ad4m_client::literal::Literal::from_json(
+        serde_json::to_value(receipt).expect("receipt serialises"),
+    )
+    .to_url()
+    .expect("literal url");
+    let uri = receipt.uri().expect("uri");
+    f.link(
+        &uri,
+        super::flow_instance::receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
+        &body,
+        LinkStatus::Shared,
+    )
+    .await;
+}
+
+/// The ids `model_query` returns for `ns://Task` under a `producedByFlow`
+/// filter, plus the reported total.
+async fn tasks_produced_by(
+    f: &Fixture,
+    query: serde_json::Value,
+) -> (Vec<String>, usize) {
+    let json = f
+        .perspective
+        .model_query("ns://Task", &query.to_string())
+        .await
+        .expect("model_query");
+    let result: serde_json::Value = serde_json::from_str(&json).expect("result parses");
+    let ids = result["instances"]
+        .as_array()
+        .expect("instances")
+        .iter()
+        .map(|i| i["id"].as_str().expect("id").to_string())
+        .collect();
+    let total = result["totalCount"].as_u64().expect("totalCount") as usize;
+    (ids, total)
+}
+
+/// The happy path, end to end through the production paths only: a proposer
+/// commits to the run's outputs (`propose_flow_transition`), a second real
+/// signer co-signs (`accept_flow_proposal`, `{n: 2}`), the completion is
+/// minted from the live material (`mint_flow_receipt`) — and the output
+/// answers all three consumer surfaces: the enumeration, the verdict, and
+/// the model-query filter.
+///
+/// Red if `mint_flow_receipt` cannot collect what `FlowReceipt::mint`
+/// demands from a live run (read-set, outputs content, preimages), or if any
+/// surface reads the discovery edges as trust instead of running the
+/// verifier.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cosigned_completion_mints_and_its_outputs_answer_every_produced_by_surface() {
+    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer's own production path");
+    assert!(outcome.recorded_vote, "the proposer voted");
+    assert!(outcome.outcomes.is_empty(), "one vote is short of {{n: 2}}");
+
+    let bob = second_agent("bob-produced-by@e2e.test");
+    let fired = accept_flow_proposal(&mut f.perspective, &outcome.proposal_uri, &bob)
+        .await
+        .expect("the co-signer's production path");
+    assert!(!fired.is_empty(), "the second vote settles the edge");
+    assert_eq!(f.derived().await.state, "scoped");
+
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("a settled run into a terminal state mints");
+    assert_eq!(receipt.terminal_state, "scoped");
+
+    // Surface 1: the enumeration, state-filtered and not.
+    for state in [None, Some("scoped")] {
+        let outputs = flow_valid_outputs(&f.perspective, &f.flow_uri, state)
+            .await
+            .expect("valid outputs");
+        assert_eq!(outputs.len(), 1, "state {state:?}: {outputs:?}");
+        assert_eq!(outputs[0].output, task_ref(TASK));
+        assert_eq!(outputs[0].terminal_state, "scoped");
+        assert_eq!(outputs[0].receipt_uri, receipt.uri().expect("uri"));
+    }
+
+    // Surface 2: the verdict — verified, with BOTH voters counted.
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    let super::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } = &verdict else {
+        panic!("the honest completion must verify, got: {verdict}");
+    };
+    assert_eq!(voters.len(), 2, "the quorum was two distinct DIDs");
+
+    // Surface 3: the model-query filter.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": {
+            "flow": f.flow_uri, "state": "scoped",
+        }}}),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+
+    // A state the run did not settle into admits nothing — same flow, same
+    // receipt, different question.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": {
+            "flow": f.flow_uri, "state": "identified",
+        }}}),
+    )
+    .await;
+    assert!(ids.is_empty(), "got {ids:?}");
+    assert_eq!(total, 0);
+}
+
+/// The #1104 re-mint against the live surfaces. A member takes the honest
+/// receipt's public signed material and re-writes it naming their own node
+/// (with that node's real live content, so only the signature chain can
+/// catch it). It sits in the graph as a perfectly ordinary receipt body —
+/// and neither the enumeration nor the filter honours it, while the honest
+/// receipt beside it keeps answering.
+///
+/// Red if any surface trusts `receipt.outputs`, the `granted_by`/receipt
+/// discovery edges, or drops every receipt once one is bad.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
+    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+    use super::flow_instance::verify::ReceiptVerdict;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    const SMUGGLED: &str = "ad4m://task/smuggled";
+    f.seed_task(SMUGGLED, "Never voted on").await;
+    let instance = f.instance_uri.clone();
+
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    assert!(
+        !outcome.outcomes.is_empty(),
+        "the default {{n: 1}} settles on the proposer's own vote"
+    );
+
+    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    let mut forged = honest.clone();
+    forged.outputs = f.task_outputs(&[SMUGGLED.to_string()]).await;
+    plant_receipt(&mut f, &forged).await;
+
+    let outputs = flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+        .await
+        .expect("valid outputs");
+    let ids: Vec<&str> = outputs.iter().map(|o| o.output.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![TASK],
+        "the smuggled node must not be listed, and the honest output must survive its neighbour"
+    );
+
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+
+    // And the verdict names exactly what is wrong with the forgery.
+    let verdict = verify_flow_receipt(&f.perspective, &forged)
+        .await
+        .expect("verify");
+    assert!(
+        matches!(verdict, ReceiptVerdict::OutputsNotCommitted { .. }),
+        "got: {verdict}"
+    );
+}
+
+/// The live-content check: an output edited AFTER the run completed is no
+/// longer what the quorum committed to, so the enumeration and the filter
+/// stop returning it — while the receipt itself keeps verifying, because a
+/// receipt attests to the content at completion and freezing that is the
+/// whole ratchet.
+///
+/// Red if `flow_valid_outputs` skips the live re-read, or if the filter
+/// admits by id alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_edited_after_completion_stops_being_a_valid_output() {
+    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .len(),
+        1,
+        "precondition: at completion the output is listed"
+    );
+
+    // The edit. `content` is the instance's model_query hydration, so a
+    // re-asserted title moves `updatedAt` even before the value differs.
+    f.seed_task(TASK, "Renamed after the vote").await;
+
+    assert!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "the live content no longer matches the commitment"
+    );
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+    )
+    .await;
+    assert!(ids.is_empty(), "got {ids:?}");
+    assert_eq!(total, 0);
+
+    // The receipt is NOT invalidated — its preimages are frozen inside it.
+    // "No longer a valid output as it stands" and "the receipt is bad" are
+    // different findings, and conflating them would slander every receipt
+    // whose output later gained a link.
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    assert!(verdict.is_verified(), "the ratchet holds — got: {verdict}");
+}
+
+/// The filter runs BEFORE the page is cut (the #1093 `limitPerAnchor`
+/// guarantee, restated for verification): with forged receipts planted for
+/// two other tasks, `limit: 2` still returns the two VALID outputs — never
+/// a page thinned down after slicing, and never a forged row occupying a
+/// place a valid one should have had.
+///
+/// Red if the filter were applied after pagination — the window would then
+/// hold forged-but-planted ids and the valid second output would fall off
+/// the page.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
+    use super::flow_instance::produced::mint_flow_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    const T2: &str = "ad4m://task/planted-2";
+    const T3: &str = "ad4m://task/genuine-3";
+    const T4: &str = "ad4m://task/planted-4";
+    f.seed_task(T2, "Planted").await;
+    f.seed_task(T3, "Also delivered").await;
+    f.seed_task(T4, "Planted too").await;
+    let instance = f.instance_uri.clone();
+
+    // One run, honestly committing to TWO outputs.
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK), task_ref(T3)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    // Forged receipts for the two planted tasks sit between them.
+    for planted in [T2, T4] {
+        let mut forged = honest.clone();
+        forged.outputs = f.task_outputs(&[planted.to_string()]).await;
+        plant_receipt(&mut f, &forged).await;
+    }
+
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({
+            "where": { "producedByFlow": { "flow": f.flow_uri } },
+            "limit": 2,
+        }),
+    )
+    .await;
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![TASK.to_string(), T3.to_string()],
+        "a page of 2 is 2 VALID outputs — got {ids:?}"
+    );
+    assert_eq!(total, 2, "and the total counts only what verified");
+}
