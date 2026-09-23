@@ -793,4 +793,45 @@ describe('PerspectiveProxy.interpretationOverlays cache', () => {
     await proxy.interpretationOverlays();
     expect(calls).toBe(1);
   });
+
+  // link-updated callbacks receive PerspectiveClient's raw event
+  // `{ type, perspectiveUuid, oldLink, newLink }`, not a link.
+  const updateEvent = (oldPredicate: string, newPredicate: string) => ({
+    type: 'link-updated',
+    perspectiveUuid: 'test-uuid',
+    oldLink: { data: { predicate: oldPredicate } },
+    newLink: { data: { predicate: newPredicate } },
+  });
+
+  it.each([
+    ['an update that creates an interp link', 'ad4m://has_child', 'ad4m://interp/suggestion'],
+    ['an update that retires an interp link', 'ad4m://interp/suggestion', 'ad4m://has_child'],
+  ])('%s invalidates the cache', async (_label, oldPredicate, newPredicate) => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+    await proxy.interpretationOverlays();
+
+    const updated: any[] = mockClient.addPerspectiveLinkUpdatedListener.mock.calls[0][1];
+    updated[0](updateEvent(oldPredicate, newPredicate));
+    expect(await proxy.interpretationOverlays()).toEqual(overlayB);
+    expect(calls).toBe(2);
+  });
+
+  it('an update between non-interp links does not invalidate the cache', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return overlayA; }),
+    };
+    const proxy = createProxy(mockClient);
+    await proxy.interpretationOverlays();
+    const updated: any[] = mockClient.addPerspectiveLinkUpdatedListener.mock.calls[0][1];
+    updated[0](updateEvent('ad4m://has_child', 'ad4m://has_parent'));
+    await proxy.interpretationOverlays();
+    expect(calls).toBe(1);
+  });
 });

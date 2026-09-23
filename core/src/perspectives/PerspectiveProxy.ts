@@ -22,6 +22,12 @@ import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbour
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
+/** True for links in the interpretation-overlay namespace. */
+function isInterpLink(link: LinkExpression | undefined): boolean {
+    const predicate = link?.data?.predicate
+    return typeof predicate === 'string' && predicate.startsWith('ad4m://interp/')
+}
+
 /** Extract namespace prefix from a URI (everything up to and including the last / or #) */
 function extractNamespaceFromUri(uri: string): string {
     const hashIdx = uri.lastIndexOf('#');
@@ -592,10 +598,16 @@ export class PerspectiveProxy {
     static readonly #OVERLAYS_TTL_MS = 30_000
 
     #invalidateIfInterpLink: LinkCallback = (link) => {
-        const predicate = link?.data?.predicate
-        if (typeof predicate === 'string' && predicate.startsWith('ad4m://interp/')) {
-            this.invalidateOverlaysCache()
-        }
+        if (isInterpLink(link)) this.invalidateOverlaysCache()
+        return null
+    }
+
+    // `link-updated` listeners get the raw `{ oldLink, newLink }` event, not a
+    // link: PerspectiveClient passes it through under LinkCallback's type. Check
+    // both sides, since an update can create or retire an overlay link.
+    #invalidateIfInterpUpdate: LinkCallback = (event) => {
+        const { oldLink, newLink } = event as unknown as { oldLink?: LinkExpression; newLink?: LinkExpression }
+        if (isInterpLink(oldLink) || isInterpLink(newLink)) this.invalidateOverlaysCache()
         return null
     }
 
@@ -606,7 +618,7 @@ export class PerspectiveProxy {
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
         this.#perspectiveLinkAddedCallbacks = [this.#invalidateIfInterpLink]
         this.#perspectiveLinkRemovedCallbacks = [this.#invalidateIfInterpLink]
-        this.#perspectiveLinkUpdatedCallbacks = [this.#invalidateIfInterpLink]
+        this.#perspectiveLinkUpdatedCallbacks = [this.#invalidateIfInterpUpdate]
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
