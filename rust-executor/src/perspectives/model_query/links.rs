@@ -30,6 +30,14 @@
 //! (single and two-phase) are covered by the same code instead of by two copies
 //! of a predicate list. A query that does not ask for `links` issues no extra
 //! query and returns exactly the JSON it returned before.
+//!
+//! The price of that placement: `__links` is a second read, not the same
+//! snapshot as the instance. A member added or removed between the two can be
+//! in the hydrated collection without a row here, or the reverse. A consumer
+//! dating members by their own link (#1112, #1103) must treat "in the
+//! collection, no row in `__links`" as an error, never fall back to
+//! `createdAt`: that is the earlier date, so for role eligibility it widens
+//! the window.
 
 use deno_core::anyhow::{anyhow, Error};
 use serde_json::{json, Map, Value};
@@ -119,8 +127,9 @@ pub(super) fn resolve_link_keys(
 ///
 /// Every requested key is present on every instance, as an empty array when the
 /// instance has no such link — "asked, none found" must read differently from
-/// "not asked". Rows are ordered by timestamp, then target, the same string
-/// order `createdAt` and collection hydration use.
+/// "not asked". Rows are ordered by timestamp, then target (the same string
+/// order `createdAt` and collection hydration use), then author and signature
+/// so the order is total — see [`sort_link_rows`].
 ///
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
 /// instance query applies, so a gossiped Shared link on a local predicate is not
@@ -130,6 +139,11 @@ pub(super) fn resolve_link_keys(
 /// "signature": ""}`. That is *not* "unsigned but valid":
 /// `LinkExpression::compute_proof_valid` returns `false` for it, and so must
 /// any verdict layered on these rows.
+///
+/// Not viewer-scoped: like the rest of `model_query` on `dev`, this read does
+/// not take a `viewer_did`. When #1058 threads `viewer_author_filter` through
+/// `model_query`, this query needs it too, after `{local_status}`. It accepts
+/// arbitrary predicate IRIs, so it is the widest read to leave unscoped.
 pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
@@ -197,15 +211,7 @@ pub(super) async fn attach_links(
         }
         for by_predicate in found.values_mut() {
             for rows in by_predicate.values_mut() {
-                rows.sort_by(|a, b| {
-                    let key = |v: &Value| {
-                        (
-                            v["timestamp"].as_str().unwrap_or("").to_string(),
-                            v["data"]["target"].as_str().unwrap_or("").to_string(),
-                        )
-                    };
-                    key(a).cmp(&key(b))
-                });
+                sort_link_rows(rows);
             }
         }
     }
@@ -226,4 +232,73 @@ pub(super) async fn attach_links(
         }
     }
     Ok(())
+}
+
+/// Order one predicate's rows by timestamp, then target, author and
+/// signature. The last two make the order total: two agents can write the same
+/// triple in the same millisecond, and the store returns those rows in no fixed
+/// order. Anything hashing `__links` (an evidence seal, a receipt) needs every
+/// replica to produce the same array, and `canonical_json` sorts keys, not
+/// arrays.
+fn sort_link_rows(rows: &mut [Value]) {
+    rows.sort_by_cached_key(|v| {
+        let s = |x: &Value| x.as_str().unwrap_or("").to_string();
+        (
+            s(&v["timestamp"]),
+            s(&v["data"]["target"]),
+            s(&v["author"]),
+            s(&v["proof"]["signature"]),
+        )
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(author: &str, timestamp: &str, target: &str, signature: &str) -> Value {
+        json!({
+            "author": author,
+            "timestamp": timestamp,
+            "data": { "source": "we://i", "predicate": "we://p", "target": target },
+            "proof": { "key": "k", "signature": signature },
+        })
+    }
+
+    /// Two agents write the same triple in the same millisecond. The store
+    /// returns the two rows in whatever order it holds them, so a sort that
+    /// stops at `(timestamp, target)` hands two replicas the same rows in
+    /// different orders -- and anything hashing `__links` (an evidence seal, a
+    /// receipt) then disagrees between them. The order must be total.
+    #[test]
+    fn row_order_is_total_and_independent_of_store_order() {
+        let t = "2026-09-23T10:00:00.000Z";
+        let rows = vec![
+            row("did:key:b", t, "we://x", "s2"),
+            row("did:key:a", t, "we://x", "s3"),
+            row("did:key:a", t, "we://x", "s1"),
+        ];
+        let mut forward = rows.clone();
+        let mut reversed: Vec<Value> = rows.into_iter().rev().collect();
+        sort_link_rows(&mut forward);
+        sort_link_rows(&mut reversed);
+        assert_eq!(forward, reversed, "row order depends on store order");
+        let order: Vec<(&str, &str)> = forward
+            .iter()
+            .map(|r| {
+                (
+                    r["author"].as_str().unwrap(),
+                    r["proof"]["signature"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("did:key:a", "s1"),
+                ("did:key:a", "s3"),
+                ("did:key:b", "s2")
+            ]
+        );
+    }
 }
