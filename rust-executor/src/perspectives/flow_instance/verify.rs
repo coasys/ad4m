@@ -865,7 +865,12 @@ mod tests {
     #[test]
     fn a_run_in_which_nobody_voted_is_not_a_completion() {
         let standing_still = flow_json(json!([{ "name": "done", "value": 1.0 }]), json!([]));
-        let empty = read_set(Vec::new(), Vec::new());
+        // Genesis is this flow's own initial state, so `fold_read_set`'s
+        // genesis check passes and the zero-edge refusal is what answers.
+        let empty = ReadSet {
+            genesis: "done".into(),
+            ..read_set(Vec::new(), Vec::new())
+        };
         assert_eq!(
             fold_read_set(&standing_still, &empty.reverified(), GrantContext::empty())
                 .expect("a stateless walk folds")
