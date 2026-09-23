@@ -154,6 +154,36 @@ pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     }
 }
 
+/// The complement of [`values_or_str_filter`]: one SPARQL line excluding `ids`
+/// from `?{var}`.
+///
+/// Always a `FILTER`, since `VALUES` has no negative form. Returns `None` for an
+/// empty list — there is nothing to exclude, and `NOT IN ()` is not a term
+/// SPARQL will parse.
+pub(super) fn not_in_filter(var: &str, ids: &[String]) -> Option<String> {
+    if ids.is_empty() {
+        return None;
+    }
+    Some(if ids.iter().all(|id| emittable_iri(id)) {
+        let iris = ids
+            .iter()
+            .map(|id| format!("<{id}>"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("FILTER(?{var} NOT IN ({iris}))")
+    } else {
+        // `STR()` of a NamedNode is its IRI, so the string form covers a mixed
+        // list as well as an unparseable one — the same fallback the positive
+        // filter takes, for the same reason.
+        let strs = ids
+            .iter()
+            .map(|id| format!("\"{}\"", escape_sparql_string(id)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("FILTER(STR(?{var}) NOT IN ({strs}))")
+    })
+}
+
 /// Maximum recursion depth for include resolution to prevent stack overflow.
 pub(super) const MAX_INCLUDE_DEPTH: u8 = 8;
 

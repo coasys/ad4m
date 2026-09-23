@@ -95,8 +95,11 @@ export interface TraverseScope {
    * rebuild a tree, read the inverse relation (`@BelongsToOne`) alongside it and
    * assemble from the parent each row reports.
    *
-   * Excludes the anchor itself. Refused alongside `levels`, which is the bounded form of the same
-   * walk.
+   * Excludes every named anchor, not just the one a given row was reached through — a caller
+   * naming two anchors where one sits below the other gets neither back, exactly as with `levels`.
+   * An anchor is where the read started, not something it found, and that holds in a cycle too.
+   *
+   * Refused alongside `levels`, which is the bounded form of the same walk.
    */
   transitive?: boolean;
   /**

@@ -23,7 +23,7 @@ use super::types::{
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
-    validate_iri, values_or_str_filter,
+    not_in_filter, validate_iri, values_or_str_filter,
 };
 
 /// The variable a [`Scope::Traverse`] binds its anchor to.
@@ -515,7 +515,11 @@ pub(super) fn build_query_patterns(
                 }
 
                 // `+` is one-or-more, so a transitive read excludes the anchor
-                // itself — a thread's descendants, never the thread's root.
+                // itself — in a tree. In a cycle it does not: `a → b → a` puts
+                // the anchor one-or-more steps from itself, so the path matches
+                // it and the caller gets their own anchor back as its own
+                // descendant. The exclusion the doc promises is stated below
+                // rather than inferred from the path operator.
                 let path = if *transitive { "+" } else { "" };
                 let pattern = match direction {
                     ScopeDirection::Out => {
@@ -534,6 +538,23 @@ pub(super) fn build_query_patterns(
                     "    {}",
                     values_or_str_filter(ANCHOR_VAR, &safe_ids)
                 ));
+
+                // A walk excludes the anchors it started from — every one of
+                // them, not just the one a given row came through, so a caller
+                // naming two anchors where one sits below the other gets neither
+                // back. This is what `levels` already does by seeding `seen`
+                // with the roots; the two forms of the same walk should not
+                // disagree about what an anchor is.
+                //
+                // A single step makes no such promise and does not get this
+                // filter: there the scope is "the children of these nodes", and
+                // a node that really is its own child by one link is a fact
+                // about the graph, not an artefact of walking it. The other two
+                // `Scope` forms have never excluded anything either.
+                if *transitive {
+                    conformance_patterns
+                        .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
+                }
             }
         }
     }

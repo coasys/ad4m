@@ -239,6 +239,12 @@ pub enum Scope {
         /// no intermediate variables, so a transitive read says *that* a node is
         /// under the anchor and never *where*. Reconstructing the shape needs
         /// the inverse relation read separately (`@BelongsTo`).
+        ///
+        /// Every named anchor is excluded from the result, as with `levels` —
+        /// an anchor is where the read started, not something it found. The `+`
+        /// path gives that for free only in a tree; in a cycle the anchor is
+        /// one-or-more steps from itself, so the exclusion is stated in the
+        /// query rather than left to the path operator.
         #[serde(default)]
         transitive: bool,
         #[serde(default)]

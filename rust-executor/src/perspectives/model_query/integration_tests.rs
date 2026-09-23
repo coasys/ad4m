@@ -8877,3 +8877,59 @@ async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
         "c2's one slot goes to the reply it still had, not to an x already spoken for"
     );
 }
+
+/// `transitive` promises it excludes the anchor — and `+` delivers that only in
+/// a tree. In a cycle `a → b → a` the anchor is one-or-more steps from itself,
+/// so the path matched it and the caller got their own anchor back as its own
+/// descendant.
+#[tokio::test]
+async fn a_transitive_read_through_a_cycle_still_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://a"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec!["we://b".to_string()],
+        "the anchor is where the read started, not something it found"
+    );
+}
+
+/// The multi-anchor face of the same promise: a transitive read from two
+/// anchors, one of which sits below the other, reports neither of them.
+#[tokio::test]
+async fn a_transitive_read_excludes_every_named_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root", "we://c1"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec![
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "c1 is an anchor, so it is not also reported as root's descendant"
+    );
+}
