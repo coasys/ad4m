@@ -165,17 +165,21 @@ async fn sync_committed_proposal_from(
     committed: Option<&str>,
 ) -> String {
     use super::flow_instance::atom::{
-        EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
-        OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSER_PREDICATE,
+        proposal_uri, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
+        OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE, PROPOSER_PREDICATE,
     };
-    let uri = format!("ad4m://flow/proposal/{id}");
+    // The peer computes the content-addressed URI exactly as the engine does
+    // (#1108); `id` is their nonce. A peer that did not would sync a
+    // proposal no replica reads as an atom.
     let instance_uri = f.instance_uri.clone();
+    let uri = proposal_uri(&instance_uri, from, to, seal, committed, &signer.did, id);
     let mut links = vec![
         (PROPOSER_PREDICATE, signer.did.clone()),
         (FLOW_INSTANCE_PREDICATE, instance_uri),
         (FROM_STATE_PREDICATE, literal(from)),
         (TO_STATE_PREDICATE, literal(to)),
         (EVIDENCE_HASHES_PREDICATE, literal(seal)),
+        (PROPOSAL_NONCE_PREDICATE, literal(id)),
     ];
     links.extend(
         outputs
@@ -1114,17 +1118,16 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
     )
     .await;
     let seal = seal_for(&f, "scoped").await;
-    // write_proposal takes a short ID; the full URI is ad4m://flow/proposal/<id>.
-    let proposal_id = "revoke-timing";
-    let proposal_uri = format!("ad4m://flow/proposal/{proposal_id}");
-    f.write_proposal(
-        proposal_id,
-        "identified",
-        "scoped",
-        &[TASK.to_string()],
-        &seal,
-    )
-    .await;
+    // write_proposal takes a nonce; the content-addressed URI comes back.
+    let proposal_uri = f
+        .write_proposal(
+            "revoke-timing",
+            "identified",
+            "scoped",
+            &[TASK.to_string()],
+            &seal,
+        )
+        .await;
     assert_eq!(
         f.derived().await.state,
         "identified",
@@ -1560,9 +1563,9 @@ async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_with_the_same_links_derive_the_same_state() {
     let mut a = seed_review_flow().await;
-    settle(&mut a, "h1", "review", "changes_requested").await;
-    settle(&mut a, "h2", "changes_requested", "review").await;
-    settle(&mut a, "h3", "review", "approved").await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
     let derived_a = a.derived().await;
     assert_eq!(derived_a.state, "approved");
     assert_eq!(
@@ -1580,11 +1583,7 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
     // deliver them in whatever order the network chose.
     let mut b = seed_review_flow().await;
     let mut proposal_links = Vec::new();
-    for uri in [
-        "ad4m://flow/proposal/h1",
-        "ad4m://flow/proposal/h2",
-        "ad4m://flow/proposal/h3",
-    ] {
+    for uri in [&h1, &h2, &h3] {
         proposal_links.extend(links_of(&a, uri).await);
     }
     proposal_links.reverse();
@@ -2873,11 +2872,31 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
 
     // Scan order is `find_live_proposals`' sort, which is by URI — NOT the
     // write order, and not the store's own iteration order, which is
-    // arbitrary. So the ids are what put the foreign proposal first.
+    // arbitrary. URIs are content addresses now (#1108), so the sort is hash
+    // order over per-run random keys — no fixed nonce can pin it. The nonce
+    // search below is what puts the foreign proposal first: `proposal_uri`
+    // is pure, so Carol's nonce is picked until her URI sorts below Bob's.
     let carol = TestSigner::generate();
-    let foreign =
-        sync_proposal_from(&mut f, &carol, "foreign-1", "elsewhere", "merged", &seal).await;
     let bob = TestSigner::generate();
+    let empty = outputs_hash(&[]);
+    let uri_for = |signer: &TestSigner, from: &str, nonce: &str| {
+        super::flow_instance::atom::proposal_uri(
+            &instance,
+            from,
+            "merged",
+            &seal,
+            Some(&empty),
+            &signer.did,
+            nonce,
+        )
+    };
+    let joinable_uri = uri_for(&bob, "here", "joinable-1");
+    let foreign_nonce = (0..)
+        .map(|i| format!("foreign-{i}"))
+        .find(|nonce| uri_for(&carol, "elsewhere", nonce) < joinable_uri)
+        .expect("some nonce hashes below Bob's URI");
+    let foreign =
+        sync_proposal_from(&mut f, &carol, &foreign_nonce, "elsewhere", "merged", &seal).await;
     let joinable = sync_proposal_from(&mut f, &bob, "joinable-1", "here", "merged", &seal).await;
 
     assert!(

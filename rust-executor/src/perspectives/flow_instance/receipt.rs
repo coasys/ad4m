@@ -662,18 +662,18 @@ mod tests {
     /// One proposal, self-proposed and therefore self-voted: under the
     /// default `{ n: 1 }` rule that is a settled edge. `proposer` is a
     /// persona *name*; the links are signed with that persona's real key.
+    /// `nonce` salts the content-addressed URI the fixture computes — the
+    /// old per-fixture URI strings serve as nonces now.
     fn proposal(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
         seal: &str,
         at: &str,
     ) -> ProposalLinks {
-        ProposalLinks {
-            uri: uri.to_string(),
-            links: signed_proposal(uri, proposer, from, to, seal, at),
-        }
+        let (uri, links) = signed_proposal(nonce, proposer, from, to, seal, at);
+        ProposalLinks { uri, links }
     }
 
     /// A proposal into a terminal state: signed like [`proposal`], and
@@ -681,7 +681,7 @@ mod tests {
     /// `outputs_hash`. Honest when `committed == hash_of(outputs)`.
     #[allow(clippy::too_many_arguments)]
     fn committing(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
@@ -690,10 +690,9 @@ mod tests {
         committed: &str,
         at: &str,
     ) -> ProposalLinks {
-        ProposalLinks {
-            uri: uri.to_string(),
-            links: signed_terminal_proposal(uri, proposer, from, to, seal, outputs, committed, at),
-        }
+        let (uri, links) =
+            signed_terminal_proposal(nonce, proposer, from, to, seal, outputs, committed, at);
+        ProposalLinks { uri, links }
     }
 
     /// Alice's honest final proposal `open → done`, committing to [`OUTPUT`].
@@ -1187,24 +1186,16 @@ mod tests {
     /// instead of reporting it.
     #[test]
     fn mint_refuses_a_final_edge_that_committed_to_no_outputs() {
-        let rs = read_set(
-            "open",
-            vec![proposal(
-                "ad4m://p/1",
-                ALICE,
-                "open",
-                "done",
-                &delivered().seal,
-                T1,
-            )],
-        );
+        let uncommitted = proposal("ad4m://p/1", ALICE, "open", "done", &delivered().seal, T1);
+        let uncommitted_uri = uncommitted.uri.clone();
+        let rs = read_set("open", vec![uncommitted]);
         assert_eq!(
             final_edge_commitment(
                 &fold_read_set(&two_state_flow(), &rs.reverified()).expect("folds"),
                 &rs.reverified()
             ),
             OutputsCommitment::Uncommitted {
-                proposal_uri: "ad4m://p/1".into()
+                proposal_uri: uncommitted_uri
             }
         );
         let err = FlowReceipt::mint(&two_state_flow(), rs, outs(&[OUTPUT]), vec![delivered()])

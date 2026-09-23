@@ -73,6 +73,15 @@ pub const OUTPUT_PREDICATE: &str = "ad4m://flow/output";
 /// Domain tag of [`outputs_hash`]. Versioned: v1 hashed ids only (#1108 v2),
 /// v2 hashes instance content.
 pub const OUTPUTS_HASH_TAG: &str = "ad4m-flow-outputs/v2";
+/// Proposal → the proposer's uniqueness salt for this proposal's
+/// content-addressed URI. `literal:string:`-encoded. Any string the proposer
+/// can defend as unique (the engine writes a UUID); it exists so one
+/// proposer can open two proposals whose other fields agree (a re-propose
+/// after a retraction, a deliberate twin). Signed by the proposer like every
+/// other field, and part of the [`proposal_uri`] preimage.
+pub const PROPOSAL_NONCE_PREDICATE: &str = "ad4m://flow/nonce";
+/// Domain tag of a proposal's content-addressed URI ([`proposal_uri`]).
+pub const PROPOSAL_URI_TAG: &str = "ad4m-flow-proposal-uri/v1";
 /// Proposal → a voting DID. A vote counts only when the link's author IS the
 /// DID it names, with a valid signature (see [`valid_votes`]).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
@@ -190,6 +199,53 @@ impl OutputRef {
 /// refused rather than normalised.
 pub fn outputs_hash(items: &[EvidenceItem]) -> String {
     crate::perspectives::flow_evaluator::tagged_items_hash(OUTPUTS_HASH_TAG, items)
+}
+
+/// **The one producer of a proposal's URI**: `ad4m://flow/proposal/<hash>`,
+/// where the hash is the [`content_address`](crate::perspectives::content_address::content_address)
+/// of everything a co-signer's vote must cover.
+///
+/// A vote is `proposal_uri --acceptedBy--> voter` — it signs the URI and
+/// nothing else. With a random URI that covered nothing, and the final-edge
+/// proposer could re-sign `outputs_hash` (or the seal) *under the same URI*
+/// after the votes landed, walking a swapped output into a verified receipt
+/// (#1108 review, @lal-bot-coasys). Deriving the URI from the fields closes
+/// it: a proposal whose fields do not hash to its own URI is not an atom
+/// ([`AtomRejection::UriMismatch`]), so every vote the fold counts covers
+/// the instance, the edge, the seal and the outputs commitment.
+///
+/// The preimage is positional under [`PROPOSAL_URI_TAG`]:
+/// `(instance, from_state, to_state, evidence_hash, outputs_hash-or-none)`,
+/// with the proposer as the address's author and the proposer-signed
+/// [`PROPOSAL_NONCE_PREDICATE`] value as its salt. `outputs_hash` stays an
+/// `Option` — absent (a non-terminal proposal) is not the empty string.
+///
+/// Every producer routes through here — the engine pass and the manual
+/// propose path via `flow_classes::write_flow_transition_proposal`, and the
+/// test fixtures — so there is exactly one definition of "the URI for these
+/// fields".
+pub fn proposal_uri(
+    instance_uri: &str,
+    from_state: &str,
+    to_state: &str,
+    evidence_hash: &str,
+    outputs_hash: Option<&str>,
+    proposer: &str,
+    nonce: &str,
+) -> String {
+    let hash = crate::perspectives::content_address::content_address(
+        PROPOSAL_URI_TAG,
+        proposer,
+        &[
+            Some(instance_uri),
+            Some(from_state),
+            Some(to_state),
+            Some(evidence_hash),
+            outputs_hash,
+        ],
+        nonce,
+    );
+    crate::perspectives::flow_classes::flow_transition_proposal_uri(&hash)
 }
 
 /// `refs` sorted and deduplicated: the form a proposal names.
@@ -318,6 +374,17 @@ pub enum AtomRejection {
     /// encoded [`OutputRef`]. Rejecting the atom, rather than skipping the
     /// link, keeps a voter from co-signing outputs it could not read.
     MalformedOutput(String),
+    /// The proposal's URI is not the content address of its own
+    /// proposer-signed fields ([`proposal_uri`]). Either a field was re-signed
+    /// after the URI was fixed — the post-co-sign swap this check exists to
+    /// refuse — or the proposal predates content-addressed URIs (a pre-#1108
+    /// UUID URI), which is rejected the same way: a vote on such a URI covers
+    /// nothing.
+    UriMismatch {
+        /// [`proposal_uri`] over the fields as the proposer currently signs
+        /// them.
+        expected: String,
+    },
 }
 
 impl std::fmt::Display for AtomRejection {
@@ -343,6 +410,11 @@ impl std::fmt::Display for AtomRejection {
                 f,
                 "the proposer's `{OUTPUT_PREDICATE}` value `{text}` is not a \
                  {{\"className\", \"id\"}} pair"
+            ),
+            Self::UriMismatch { expected } => write!(
+                f,
+                "its URI is not the content address of its proposer-signed fields \
+                 (they address `{expected}`), so a vote on it covers nothing"
             ),
         }
     }
@@ -677,6 +749,9 @@ pub(super) mod fixtures {
 
     pub const INSTANCE: &str = "ad4m://flow/instance/i1";
     pub const PROPOSAL: &str = "ad4m://flow/proposal/p1";
+    /// The nonce every claimed-verdict fixture proposal salts its URI with.
+    /// Tests that need twins pass their own distinct nonces instead.
+    pub const NONCE: &str = "fixture-nonce";
     pub const ALICE: &str = "did:key:alice";
     pub const BOB: &str = "did:key:bob";
     pub const MALLORY: &str = "did:key:mallory";
@@ -716,7 +791,7 @@ pub(super) mod fixtures {
         }
     }
 
-    /// The five links `write_flow_transition_proposal` emits, all signed by
+    /// The six links `write_flow_transition_proposal` emits, all signed by
     /// the proposer.
     pub fn honest_proposal(
         proposer: &str,
@@ -737,11 +812,44 @@ pub(super) mod fixtures {
                 true,
                 at,
             ),
+            link(PROPOSAL_NONCE_PREDICATE, &literal(NONCE), proposer, true, at),
         ]
     }
 
+    /// The URI these links address: recomputed from the proposer-signed
+    /// fields exactly as [`TransitionAtom::from_links`] recomputes it, so a
+    /// field-focused test exercises field logic rather than tripping the URI
+    /// check with a stale fixture constant. Falls back to [`PROPOSAL`] when
+    /// a field is missing or ambiguous — `from_links` rejects those shapes
+    /// before it reaches the URI either way. Tests **of** the URI check call
+    /// `from_links` with a deliberately different URI instead.
+    pub fn addressed_uri(links: &[DecoratedLinkExpression]) -> String {
+        let Ok(proposer) = self_authored_proposer(links) else {
+            return PROPOSAL.to_string();
+        };
+        let field = |p: &'static str| unique_field(links, p, &proposer).ok();
+        let (Some(from), Some(to), Some(seal), Some(nonce)) = (
+            field(FROM_STATE_PREDICATE),
+            field(TO_STATE_PREDICATE),
+            field(EVIDENCE_HASHES_PREDICATE),
+            field(PROPOSAL_NONCE_PREDICATE),
+        ) else {
+            return PROPOSAL.to_string();
+        };
+        let outputs_hash = field(OUTPUTS_HASH_PREDICATE);
+        proposal_uri(
+            INSTANCE,
+            &from,
+            &to,
+            &seal,
+            outputs_hash.as_deref(),
+            &proposer,
+            &nonce,
+        )
+    }
+
     pub fn atom_of(links: &[DecoratedLinkExpression]) -> Result<TransitionAtom, AtomRejection> {
-        TransitionAtom::from_links(INSTANCE, PROPOSAL, links)
+        TransitionAtom::from_links(INSTANCE, &addressed_uri(links), links)
     }
 
     // -----------------------------------------------------------------------
@@ -828,44 +936,44 @@ pub(super) mod fixtures {
         link
     }
 
-    /// The five links `write_flow_transition_proposal` emits, all genuinely
-    /// signed by the proposer, sourced at the proposal's own URI.
+    /// The six links `write_flow_transition_proposal` emits, all genuinely
+    /// signed by the proposer, sourced at the proposal's **content-addressed
+    /// URI** — computed here from the same fields, so the fixture and the
+    /// production writer agree by construction. `nonce` distinguishes twins;
+    /// the old fixture URI strings ("ad4m://p/1") make fine nonces. Returns
+    /// the URI alongside the links because everything downstream (votes, the
+    /// read-set) names the proposal by it.
     pub fn signed_proposal(
-        proposal_uri: &str,
+        nonce: &str,
         proposer_name: &str,
         from: &str,
         to: &str,
         seal: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        let signed = |predicate: &str, target: &str| {
-            signed_link(
-                proposal_uri,
-                predicate,
-                target,
-                proposer_name,
-                true,
-                None,
-                at,
-            )
-        };
-        vec![
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        let uri = proposal_uri(INSTANCE, from, to, seal, None, did_of(proposer_name), nonce);
+        let signed =
+            |predicate: &str, target: &str| signed_link(&uri, predicate, target, proposer_name, true, None, at);
+        let links = vec![
             signed(PROPOSER_PREDICATE, did_of(proposer_name)),
             signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
             signed(FROM_STATE_PREDICATE, &literal(from)),
             signed(TO_STATE_PREDICATE, &literal(to)),
             signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
-        ]
+            signed(PROPOSAL_NONCE_PREDICATE, &literal(nonce)),
+        ];
+        (uri, links)
     }
 
-    /// [`signed_proposal`] into a terminal state: the five links plus one
+    /// [`signed_proposal`] into a terminal state: the six links plus one
     /// signed `output` link per id in `outputs` (as [`out_ref`]) and a signed
-    /// `outputs_hash` equal to `committed`. Pass [`hash_of`]`(outputs)` for
-    /// an honest proposal; anything else builds a proposal whose commitment
-    /// does not match its named outputs.
+    /// `outputs_hash` equal to `committed` — which is part of the URI
+    /// preimage, so the returned URI covers it. Pass [`hash_of`]`(outputs)`
+    /// for an honest proposal; anything else builds a proposal whose
+    /// commitment does not match its named outputs.
     #[allow(clippy::too_many_arguments)]
     pub fn signed_terminal_proposal(
-        proposal_uri: &str,
+        nonce: &str,
         proposer_name: &str,
         from: &str,
         to: &str,
@@ -873,26 +981,33 @@ pub(super) mod fixtures {
         outputs: &[&str],
         committed: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        let mut links = signed_proposal(proposal_uri, proposer_name, from, to, seal, at);
-        let signed = |predicate: &str, target: &str| {
-            signed_link(
-                proposal_uri,
-                predicate,
-                target,
-                proposer_name,
-                true,
-                None,
-                at,
-            )
-        };
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        let uri = proposal_uri(
+            INSTANCE,
+            from,
+            to,
+            seal,
+            Some(committed),
+            did_of(proposer_name),
+            nonce,
+        );
+        let signed =
+            |predicate: &str, target: &str| signed_link(&uri, predicate, target, proposer_name, true, None, at);
+        let mut links = vec![
+            signed(PROPOSER_PREDICATE, did_of(proposer_name)),
+            signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
+            signed(FROM_STATE_PREDICATE, &literal(from)),
+            signed(TO_STATE_PREDICATE, &literal(to)),
+            signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
+            signed(PROPOSAL_NONCE_PREDICATE, &literal(nonce)),
+        ];
         links.extend(
             outputs
                 .iter()
                 .map(|id| signed(OUTPUT_PREDICATE, &literal(&out_ref(id).encode()))),
         );
         links.push(signed(OUTPUTS_HASH_PREDICATE, &literal(committed)));
-        links
+        (uri, links)
     }
 
     /// The class every fixture output is an instance of.

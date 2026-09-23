@@ -26,9 +26,12 @@ import { Model } from "../model/decorators";
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
 // on the engine side; see file header). One node per proposed transition; the
-// URI is `ad4m://flow/proposal/<uuid>` when the engine mints it, but the class
-// carries no URI-format constraint — apps constructing proposals directly may
-// choose any URI they can defend as unique.
+// URI the engine mints is `ad4m://flow/proposal/<hash>` — the content address
+// of the proposer-signed fields under the `nonce` (#1108). The class carries
+// no URI-format constraint, but a proposal whose URI is not that content
+// address (including any app-chosen URI) is not engine-visible: co-signatures
+// name the URI, so the engine only counts proposals whose URI commits to
+// their fields.
 
 @Model({ name: "FlowTransitionProposal" })
 export class FlowTransitionProposal extends Ad4mModel {
@@ -91,6 +94,18 @@ export class FlowTransitionProposal extends Ad4mModel {
    */
   @Property({ through: "ad4m://flow/outputs_hash" })
   outputsHash: string = "";
+
+  /**
+   * The proposer's uniqueness salt for this proposal's content-addressed
+   * URI (`ad4m://flow/proposal/<hash>`; the hash covers the instance, the
+   * edge, the seal, the outputs commitment, the proposer DID and this
+   * nonce). The engine writes a UUID. A proposal without one — or whose URI
+   * does not match its own signed fields — is not engine-visible:
+   * co-signatures name the URI, so the URI must commit to what they sign
+   * (#1108).
+   */
+  @Property({ through: "ad4m://flow/nonce" })
+  nonce: string = "";
 
   /**
    * URI of the `InterpretationRun` node that produced this proposal, when

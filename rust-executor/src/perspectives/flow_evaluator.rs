@@ -177,9 +177,9 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
 }
 
 /// Length-prefix one field, so no field's content can shift bytes across a
-/// boundary. The one framing [`evidence_hash`] and [`tagged_items_hash`]
-/// share.
-fn frame(hasher: &mut Sha256, field: &str) {
+/// boundary. The one framing [`evidence_hash`], [`tagged_items_hash`] and
+/// [`super::content_address::content_address`] share.
+pub(crate) fn frame(hasher: &mut Sha256, field: &str) {
     hasher.update((field.len() as u64).to_le_bytes());
     hasher.update(field.as_bytes());
 }

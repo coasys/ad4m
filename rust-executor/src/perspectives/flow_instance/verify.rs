@@ -594,39 +594,38 @@ mod tests {
     /// One proposal out of `open` into a terminal state, self-proposed and
     /// therefore self-voted, naming [`OUTPUT`] and committing to it.
     /// `proposer` is a persona name; the links carry that persona's real
-    /// signature.
-    fn proposal(uri: &str, proposer: &str, to: &str, at: &str) -> ProposalLinks {
-        ProposalLinks {
-            uri: uri.to_string(),
-            links: final_links(uri, proposer, "open", to, at),
-        }
+    /// signature. `nonce` salts the content-addressed URI the fixture
+    /// computes — the old per-fixture URI strings serve as nonces now.
+    fn proposal(nonce: &str, proposer: &str, to: &str, at: &str) -> ProposalLinks {
+        let (uri, links) = final_links(nonce, proposer, "open", to, at);
+        ProposalLinks { uri, links }
     }
 
-    /// The links of an honest proposal into terminal `to`, committing to
-    /// [`OUTPUT`].
+    /// An honest proposal into terminal `to`, committing to [`OUTPUT`]:
+    /// its content-addressed URI and its links.
     fn final_links(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        committed_links(uri, proposer, from, to, &[OUTPUT], &hash_of(&[OUTPUT]), at)
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        committed_links(nonce, proposer, from, to, &[OUTPUT], &hash_of(&[OUTPUT]), at)
     }
 
     /// A proposal into terminal `to` naming `outputs` and signing
     /// `committed` as their hash. Honest when `committed ==
     /// hash_of(outputs)`.
     fn committed_links(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
         outputs: &[&str],
         committed: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        signed_terminal_proposal(uri, proposer, from, to, &seal(), outputs, committed, at)
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        signed_terminal_proposal(nonce, proposer, from, to, &seal(), outputs, committed, at)
     }
 
     /// Each id's preimage as the fixture graph holds it ([`out_items`]).
@@ -1112,19 +1111,14 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
+        let proposal_uri = final_links("ad4m://p/1", ALICE, "open", "done", T1).0;
         let with_bobs_vote = |vote: DecoratedLinkExpression| {
-            let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+            let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
             links.push(vote);
-            read_set(
-                vec![ProposalLinks {
-                    uri: "ad4m://p/1".into(),
-                    links,
-                }],
-                Vec::new(),
-            )
+            read_set(vec![ProposalLinks { uri, links }], Vec::new())
         };
 
-        let receipt = mint(&flow, with_bobs_vote(signed_vote("ad4m://p/1", BOB, T2)));
+        let receipt = mint(&flow, with_bobs_vote(signed_vote(&proposal_uri, BOB, T2)));
         let reader = catalogue(vec![flow]);
         assert!(
             verify_receipt(&reader, &receipt).is_verified(),
@@ -1133,7 +1127,7 @@ mod tests {
 
         let mut tampered = receipt;
         tampered.read_set = with_bobs_vote(signed_link(
-            "ad4m://p/1",
+            &proposal_uri,
             ACCEPTED_BY_PREDICATE,
             did_of(BOB),
             BOB,
@@ -1167,7 +1161,7 @@ mod tests {
         let mut with_a_genuine_third = tampered;
         with_a_genuine_third.read_set.proposals[0]
             .links
-            .push(signed_vote("ad4m://p/1", CAROL, T2));
+            .push(signed_vote(&proposal_uri, CAROL, T2));
         let verdict = verify_receipt(&reader, &with_a_genuine_third);
         assert!(
             verdict.is_verified(),
@@ -1209,9 +1203,9 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
-        let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+        let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
         links.push(signed_link(
-            "ad4m://p/1",
+            &uri,
             ACCEPTED_BY_PREDICATE,
             did_of(BOB),
             BOB,
@@ -1219,13 +1213,7 @@ mod tests {
             Some(true),
             T2,
         ));
-        let forged = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links,
-            }],
-            Vec::new(),
-        );
+        let forged = read_set(vec![ProposalLinks { uri, links }], Vec::new());
 
         let err = FlowReceipt::mint(&flow, forged, outs(&[OUTPUT]), vec![delivered()])
             .expect_err("a quorum resting on a forged signature is not a quorum");
@@ -1239,15 +1227,9 @@ mod tests {
         // and it has no positive control of its own to say otherwise. The
         // same material with Bob's link genuinely signed must mint, so what
         // the refusal above turns on is the signature and nothing else.
-        let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
-        links.push(signed_vote("ad4m://p/1", BOB, T2));
-        let honest = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links,
-            }],
-            Vec::new(),
-        );
+        let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+        links.push(signed_vote(&uri, BOB, T2));
+        let honest = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         FlowReceipt::mint(&flow, honest, outs(&[OUTPUT]), vec![delivered()])
             .expect("the same material, honestly signed, must mint");
     }
@@ -1349,17 +1331,18 @@ mod tests {
         assert!(format!("{err:#}").contains("committed to"), "got: {err:#}");
 
         let mut with_twin = swapped;
+        let (twin_uri, twin_links) = committed_links(
+            "ad4m://p/attacker",
+            "mallory",
+            "open",
+            "done",
+            &[ATTACKER],
+            &hash_of(&[ATTACKER]),
+            T2,
+        );
         with_twin.read_set.proposals.push(ProposalLinks {
-            uri: "ad4m://p/attacker".into(),
-            links: committed_links(
-                "ad4m://p/attacker",
-                "mallory",
-                "open",
-                "done",
-                &[ATTACKER],
-                &hash_of(&[ATTACKER]),
-                T2,
-            ),
+            uri: twin_uri,
+            links: twin_links,
         });
         assert_eq!(
             verify_receipt(&reader, &with_twin),
@@ -1430,22 +1413,17 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
-        let rs = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links: signed_terminal_proposal(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &evidence_hash(&[], &[]),
-                    &[OUTPUT],
-                    &hash_of(&[OUTPUT]),
-                    T1,
-                ),
-            }],
-            Vec::new(),
+        let (uri, links) = signed_terminal_proposal(
+            "ad4m://p/1",
+            ALICE,
+            "open",
+            "done",
+            &evidence_hash(&[], &[]),
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
         );
+        let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         let receipt =
             FlowReceipt::mint(&unguarded, rs, outs(&[OUTPUT]), Vec::new()).expect("mints");
 
@@ -1500,17 +1478,18 @@ mod tests {
         );
 
         let mut conflicting = receipt;
+        let (rival_uri, rival_links) = committed_links(
+            "ad4m://p/2",
+            BOB,
+            "open",
+            "done",
+            &[OUTPUT, D2],
+            &hash_of(&[OUTPUT, D2]),
+            T2,
+        );
         conflicting.read_set.proposals[1] = ProposalLinks {
-            uri: "ad4m://p/2".into(),
-            links: committed_links(
-                "ad4m://p/2",
-                BOB,
-                "open",
-                "done",
-                &[OUTPUT, D2],
-                &hash_of(&[OUTPUT, D2]),
-                T2,
-            ),
+            uri: rival_uri,
+            links: rival_links,
         };
         let mut expected = vec![hash_of(&[OUTPUT]), hash_of(&[OUTPUT, D2])];
         expected.sort();
@@ -1549,6 +1528,7 @@ mod tests {
     fn a_final_edge_that_committed_to_no_outputs_is_refused() {
         let flow = two_state_flow();
         let mut receipt = mint(&flow, completed());
+        let proposal_uri = receipt.read_set.proposals[0].uri.clone();
         receipt.read_set.proposals[0].links.retain(|l| {
             l.data.predicate.as_deref()
                 != Some(crate::perspectives::flow_instance::atom::OUTPUTS_HASH_PREDICATE)
@@ -1556,9 +1536,7 @@ mod tests {
 
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt),
-            ReceiptVerdict::OutputsUncommitted {
-                proposal_uri: "ad4m://p/1".into()
-            }
+            ReceiptVerdict::OutputsUncommitted { proposal_uri }
         );
     }
 
@@ -1573,21 +1551,9 @@ mod tests {
     fn the_commitment_is_over_the_outputs_in_any_order_and_nothing_else() {
         let flow = two_state_flow();
         let three = [OUTPUT, "ad4m://deliverable/d2", "ad4m://deliverable/d3"];
-        let rs = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links: committed_links(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &three,
-                    &hash_of(&three),
-                    T1,
-                ),
-            }],
-            Vec::new(),
-        );
+        let (uri, links) =
+            committed_links("ad4m://p/1", ALICE, "open", "done", &three, &hash_of(&three), T1);
+        let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         let receipt = FlowReceipt::mint(&flow, rs, outs(&three), vec![delivered()]).expect("mints");
         let reader = catalogue(vec![flow]);
 
@@ -1699,26 +1665,28 @@ mod tests {
                 { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
             ]),
         );
-        let final_edge = || ProposalLinks {
-            uri: "ad4m://p/2".into(),
-            links: final_links("ad4m://p/2", BOB, "doing", "done", T2),
+        let final_edge = || {
+            let (uri, links) = final_links("ad4m://p/2", BOB, "doing", "done", T2);
+            ProposalLinks { uri, links }
         };
         // The honest run walks both edges…
+        let (first_uri, first_links) =
+            crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+                "ad4m://p/1",
+                ALICE,
+                "open",
+                "doing",
+                "seal-1",
+                T1,
+            );
         let full = ReadSet {
             instance_uri: INSTANCE.to_string(),
             subject: BASE.to_string(),
             genesis: "open".to_string(),
             proposals: vec![
                 ProposalLinks {
-                    uri: "ad4m://p/1".into(),
-                    links: crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
-                        "ad4m://p/1",
-                        ALICE,
-                        "open",
-                        "doing",
-                        "seal-1",
-                        T1,
-                    ),
+                    uri: first_uri,
+                    links: first_links,
                 },
                 final_edge(),
             ],

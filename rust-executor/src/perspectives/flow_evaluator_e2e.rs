@@ -448,7 +448,24 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
     )
     .await
     .expect("write_flow_transition_proposal");
-    assert_eq!(proposal_uri, "ad4m://flow/proposal/e2e-prop-1");
+    // The URI is the content address of the signed fields under the caller's
+    // nonce (#1108): the writer and `atom::proposal_uri` must agree byte for
+    // byte, or no co-signature would cover the fields it thinks it covers.
+    assert_eq!(
+        proposal_uri,
+        crate::perspectives::flow_instance::atom::proposal_uri(
+            &t.instance_uri,
+            &t.from_state,
+            &t.to_state,
+            &t.evidence_hash,
+            t.outputs
+                .as_deref()
+                .map(crate::perspectives::flow_instance::atom::outputs_hash)
+                .as_deref(),
+            "did:key:acting",
+            "e2e-prop-1",
+        )
+    );
 
     let by_pred = f.links_by_predicate(&proposal_uri).await;
     // IRIs and DIDs are stored raw; plain strings are literal-wrapped.
@@ -463,6 +480,9 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
         "ad4m://flow/evidence_hashes",
         &literal(&t.evidence_hash),
     );
+    // The nonce must land on the graph, or no reader could ever recompute
+    // the URI and the proposal would be a non-atom (#1108).
+    assert_has_target(&by_pred, "ad4m://flow/nonce", &literal("e2e-prop-1"));
     assert!(
         !by_pred.contains_key("ad4m://flow/rationale"),
         "no rationale was given"
