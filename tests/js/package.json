@@ -73,6 +73,7 @@
     "mocha": "*",
     "node-fetch": "^3.3.0",
     "node-wget-js": "^1.0.1",
+    "playwright-core": "^1.63.0",
     "react": "^17.0.1",
     "run-script-os": "^1.1.6",
     "sinon": "*",

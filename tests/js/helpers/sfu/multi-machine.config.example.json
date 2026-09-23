@@ -3,14 +3,18 @@
     {
       "id": "local",
       "sshHost": null,
+      "platform": "linux",
       "adRepoPath": "",
+      "weRepoPath": "/path/to/workspaces/coasys/we",
       "audioToneHz": 440,
       "shellPreamble": "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null"
     },
     {
-      "id": "remote-1",
+      "id": "remote-mac",
       "sshHost": "your-ssh-alias",
+      "platform": "darwin",
       "adRepoPath": "~/workspaces/coasys/ad4m",
+      "weRepoPath": "~/workspaces/coasys/we",
       "audioToneHz": 520,
       "shellPreamble": "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null"
     }
