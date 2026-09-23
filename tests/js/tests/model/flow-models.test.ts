@@ -225,6 +225,35 @@ describe("FlowTransitionProposal — @Model", function () {
       .to.equal(expectedTargetClass);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
+
+    // `outputsHash` (#1104) is the field a flow receipt pays out on, and the
+    // path→name map above cannot see cardinality or the setter. Compare the
+    // effective values against the same Rust SDNA JSON: an optional single
+    // value written through `setSingleTarget` — a divergence here means a
+    // TS-written commitment silently no-ops on the Rust reader.
+    const raw = fs.readFileSync(
+      path.join(SDNA_DIR, "flow_transition_proposal.json"),
+      "utf-8",
+    );
+    const rust = (JSON.parse(raw) as {
+      properties: Array<{
+        path: string;
+        min_count?: number;
+        max_count?: number;
+        setter?: unknown;
+      }>;
+    }).properties.find((prop) => prop.path === "ad4m://flow/outputs_hash");
+    expect(rust, "Rust SDNA must declare outputs_hash").to.exist;
+    const outputsHash = shape.properties.find(
+      (prop: any) => prop.path === "ad4m://flow/outputs_hash",
+    );
+    expect(outputsHash, "TS shape must declare outputsHash").to.exist;
+    expect(outputsHash.maxCount, "outputsHash is single-valued")
+      .to.equal(rust!.max_count);
+    expect(outputsHash.minCount ?? 0, "outputsHash is optional — empty on a non-terminal edge")
+      .to.equal(rust!.min_count);
+    expect(outputsHash.setter, "setter must match the Rust SDNA's setSingleTarget")
+      .to.deep.equal(rust!.setter);
   });
 });
 
