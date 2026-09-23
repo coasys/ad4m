@@ -2439,6 +2439,145 @@ async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
     assert!(!joined.minted && joined.recorded_vote);
 }
 
+/// The "different outputs" refusal above is reserved for a proposal a voter
+/// COULD sign. Bob's terminal proposal here commits to a hash its named
+/// outputs do not produce, so `accept_flow_proposal` refuses it and
+/// `reject_flow_proposal` only retracts the caller's own links — telling the
+/// caller to "co-sign one or reject it" would let one peer block the manual
+/// path into the terminal state for everyone. An honest propose mints its
+/// own proposal instead, does not sign Bob's, and the run completes.
+///
+/// Red if `live_proposal_role` compares commitments without first validating
+/// the live atom the way a co-signer would.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_with_a_bad_commitment() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    // Bob names the Task but signs a hash the Task's content does not produce.
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a proposal no voter could sign must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert_ne!(out.proposal_uri, bobs);
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the invalid proposal was not co-signed"
+    );
+    // Bob's proposer vote still pools with ours on this edge (`settle_edge`
+    // counts votes, not commitments), so `{n: 2}` is reached: the run
+    // completes instead of wedging.
+    assert_eq!(out.derived_state, "scoped");
+}
+
+/// As above, with the other invalid shape: Bob names an output that does not
+/// load on this replica (never written), under a commitment that matches
+/// nothing. No voter could sign it, so it must not block; the honest propose
+/// mints and the run completes.
+///
+/// Red if `live_proposal_role` reads the commitment mismatch before asking
+/// whether the proposal is signable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_whose_output_does_not_load() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref("ad4m://task/never-written")],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("an output that does not load must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the unloadable proposal was not co-signed"
+    );
+    assert_eq!(out.derived_state, "scoped");
+}
+
+/// Outputs are a terminal-edge concern: a co-signer ignores them anywhere
+/// else (`check_outputs_commitment` is a no-op off the final edge). So a
+/// non-terminal proposal carrying a stray `outputs_hash` stays joinable —
+/// comparing commitments there would refuse to join a proposal `accept`
+/// happily signs, since our own `committed` is always `None` off the final
+/// edge.
+///
+/// Red if `live_proposal_role` compares commitments on a non-terminal
+/// target.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_joins_a_non_terminal_proposal_carrying_a_stray_outputs_hash() {
+    let mut f = seed_review_flow().await;
+    set_consensus_rule(&mut f, "review://Review.changes_requested", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "changes_requested").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "review",
+        "changes_requested",
+        &seal,
+        &[],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let joined = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a stray outputs_hash on a non-terminal proposal must not stop a join");
+    assert_eq!(joined.proposal_uri, bobs, "joined Bob's, not a twin");
+    assert!(!joined.minted && joined.recorded_vote);
+    assert_eq!(joined.derived_state, "changes_requested", "the join fires the {{n:2}} edge");
+}
+
 // ---------------------------------------------------------------------------
 // The other side of the proposer-less key: the engine must NOT reach quorum
 // ---------------------------------------------------------------------------

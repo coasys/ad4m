@@ -1316,6 +1316,15 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
 /// whole contract — so it does not. Narrow (it needs two guard-identical edges
 /// into one state) and pre-existing, but real: prefer widening the key here
 /// over re-flattening the manual path onto it.
+///
+/// **The validity-blind match bites the same way.** A live terminal proposal
+/// no voter could sign — a bad or missing outputs commitment, an output that
+/// does not load — still matches the key, so it suppresses the engine mint
+/// on that edge for as long as it stays open. The manual path validates the
+/// atom as a co-signer would and mints past it (`live_proposal_role`); doing
+/// the same here needs `load_outputs`, which [`ProposalLookup`] cannot
+/// answer. Same remedy when it matters: a human proposes manually, or the
+/// invalid proposal's author rejects it.
 pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,

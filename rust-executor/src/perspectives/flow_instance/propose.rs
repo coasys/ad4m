@@ -32,11 +32,14 @@
 //!    instance of its class on this replica, checked by the same rule a
 //!    voter runs before co-signing (`atom::check_outputs_commitment`). Naming
 //!    outputs for a non-terminal state is refused: a run does not end there.
-//!    An open proposal on this edge that names *different* outputs is
-//!    neither joined nor twinned: joining would sign outputs the caller did
-//!    not name, and a twin would leave the final edge with two commitments,
-//!    which no receipt can verify. The caller is told to co-sign or reject
-//!    the open one. This sees only proposals the dedup key matches, so a
+//!    An open proposal on this edge that a voter could sign but that names
+//!    *different* outputs is neither joined nor twinned: joining would sign
+//!    outputs the caller did not name, and a twin would leave the final edge
+//!    with two commitments, which no receipt can verify. The caller is told
+//!    to co-sign or reject the open one — advice that only makes sense for a
+//!    proposal a voter COULD sign, so one whose commitment fails the
+//!    co-signer's own validation is stepped past and minted around instead
+//!    (`live_proposal_role`). This sees only proposals the dedup key matches, so a
 //!    twin under a different seal is still possible (see
 //!    `receipt::final_edge_commitment`).
 //! 6. **A lookup failure is an error, never silence.** The engine pass fails
@@ -62,7 +65,10 @@
 //! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
 use super::accept::{accept_flow_proposal, load_outputs};
-use super::atom::{normalised_outputs, outputs_hash, OutputRef, OutputsRefusal, TransitionAtom};
+use super::atom::{
+    check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
+    TransitionAtom,
+};
 use super::pass::{run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
@@ -171,7 +177,8 @@ pub async fn propose_flow_transition(
     // The outputs commitment (#1104): only a run that ends here produces
     // anything, and the proposer's own vote passes the same instance check a
     // co-signer runs.
-    let outputs = if is_terminal_state(flow, to_state) {
+    let terminal = is_terminal_state(flow, to_state);
+    let outputs = if terminal {
         let named = normalised_outputs(outputs);
         let loaded = load_outputs(&*perspective, &named).await?;
         if let Some(missing) = named.iter().find(|r| !loaded.contains_key(*r)) {
@@ -253,6 +260,7 @@ pub async fn propose_flow_transition(
             instance_uri,
             &derived.state,
             &acting_did,
+            terminal,
             committed.as_deref(),
         )
         .await?
@@ -389,12 +397,15 @@ enum LiveProposalRole {
     AlreadyVoted,
     /// Open on this edge and missing our vote — co-sign it.
     Joinable,
-    /// On this edge, but its outputs commitment is not the one this call
-    /// would write. Checked before [`Self::AlreadyVoted`], so a re-press
+    /// On this edge, VALID (a voter could sign it), but its outputs
+    /// commitment is not the one this call would write. Only a terminal
+    /// target is classified so — anywhere else `accept` ignores outputs
+    /// entirely. Checked before [`Self::AlreadyVoted`], so a re-press
     /// that names new outputs is not reported as a no-op.
     DifferentOutputs,
-    /// Same seal and target state, but not a proposal this call can join.
-    /// Carries the reason, for the log.
+    /// Same seal and target state, but not a proposal this call can join —
+    /// including a terminal proposal no voter could sign. Carries the
+    /// reason, for the log.
     OtherEdge(String),
 }
 
@@ -403,12 +414,23 @@ enum LiveProposalRole {
 /// Reads it as [`TransitionAtom`] — the same identity-checked view the fold
 /// counts — so "already voted" means a vote the fold would count, not a link
 /// that merely names our DID.
+///
+/// Into a terminal target (`terminal`), the atom is first validated the way
+/// a co-signer would validate it ([`load_outputs`] +
+/// [`check_outputs_commitment`]). One that no voter could sign is
+/// [`LiveProposalRole::OtherEdge`], NOT [`LiveProposalRole::DifferentOutputs`]:
+/// the latter tells the caller to "co-sign one or reject it", and neither is
+/// possible — `accept` refuses an invalid commitment, and `reject` only
+/// retracts the caller's own links — so classifying it as a rival commitment
+/// would let one peer block the manual path into the terminal state for
+/// everyone.
 async fn live_proposal_role(
     perspective: &PerspectiveInstance,
     proposal_uri: &str,
     instance_uri: &str,
     from_state: &str,
     acting_did: &str,
+    terminal: bool,
     committed: Option<&str>,
 ) -> anyhow::Result<LiveProposalRole> {
     let links = perspective
@@ -432,8 +454,34 @@ async fn live_proposal_role(
             atom.from_state
         )));
     }
-    if atom.outputs_hash.as_deref() != committed {
-        return Ok(LiveProposalRole::DifferentOutputs);
+    // Outputs are a terminal-edge concern only: off the final edge `accept`
+    // signs regardless of them (`check_outputs_commitment` is a no-op), and
+    // our own `committed` is always `None` there, so comparing would refuse
+    // to join a proposal every voter accepts over a hash nobody reads.
+    if terminal {
+        let loaded = match load_outputs(perspective, &atom.outputs).await {
+            Ok(loaded) => loaded,
+            // The failure is about the FOREIGN atom's outputs (e.g. a class
+            // this replica has no shape for); erroring the whole call would
+            // hand that proposer the same everyone-is-blocked shape this
+            // classification exists to avoid. Worst case of misreading a
+            // transient store error here is a twin commitment on the final
+            // edge, which the receipt refuses as `Conflicting` — recoverable,
+            // unlike the block.
+            Err(e) => {
+                return Ok(LiveProposalRole::OtherEdge(format!(
+                    "a voter could not load its outputs ({e:#})"
+                )))
+            }
+        };
+        if let Err(refusal) = check_outputs_commitment(&atom, true, |r| loaded.get(r).cloned()) {
+            return Ok(LiveProposalRole::OtherEdge(format!(
+                "a voter would refuse it ({refusal})"
+            )));
+        }
+        if atom.outputs_hash.as_deref() != committed {
+            return Ok(LiveProposalRole::DifferentOutputs);
+        }
     }
     if atom.votes.iter().any(|v| v.did == acting_did) {
         return Ok(LiveProposalRole::AlreadyVoted);
