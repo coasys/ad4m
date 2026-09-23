@@ -1066,6 +1066,7 @@ export class Ad4mModel {
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus !== undefined) queryInput.linkStatus = query.linkStatus;
 
     // Conformance getters, where filters, and target shapes for includes
     // are all resolved by the executor from the perspective's SHACL triples

@@ -1,0 +1,130 @@
+/**
+ * Ad4mModel — `linkStatus`: read an instance from links of one status only
+ * (issue #1116)
+ *
+ * A Local link is executor-private: it is never gossiped. #1028 made
+ * `local: true` properties read only their Local links, but nothing let a
+ * caller ask for the converse, "this instance as it exists in Shared links".
+ * A multi-user read (#1024) needs exactly that, for every property, including
+ * ordinary ones that happen to have a Local link.
+ *
+ * The card here has an ordinary `title` written Shared and an ordinary `note`
+ * whose only link was written Local. Neither is declared `local`, so the
+ * pre-#1116 read returns both, whoever asks.
+ *
+ * Not covered here, and still open: which instances are *selected* (`where`,
+ * the class's flags, `count`) is not restricted by `linkStatus`. See the
+ * `#[ignore]`d Rust test `link_status_shared_does_not_select_on_a_local_value`
+ * and #1120.
+ *
+ * Run with:
+ *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-link-status.test.ts
+ */
+
+import { expect } from "chai";
+import {
+  Ad4mClient,
+  Ad4mModel,
+  Flag,
+  Link,
+  LinkQuery,
+  Literal,
+  Model,
+  PerspectiveProxy,
+  Property,
+} from "@coasys/ad4m";
+import { startAgent } from "../../helpers/index.js";
+import { getSharedAgent } from "./hooks.js";
+
+@Model({ name: "LinkStatusCard" })
+class LinkStatusCard extends Ad4mModel {
+  @Flag({ through: "lsc://type", value: "lsc://card" })
+  type = "lsc://card";
+
+  @Property({ through: "lsc://title" })
+  title: string = "";
+
+  /** Not declared `local`: its link is Local only because it was written so. */
+  @Property({ through: "lsc://note" })
+  note: string = "";
+}
+
+describe("Ad4mModel — linkStatus reads", function () {
+  this.timeout(120_000);
+
+  let ownStop: (() => Promise<void>) | null = null;
+  let ad4m: Ad4mClient;
+  let perspective: PerspectiveProxy;
+  let cardId: string;
+
+  before(async () => {
+    const shared = getSharedAgent();
+    if (shared) {
+      ad4m = shared.client;
+    } else {
+      const agent = await startAgent("model-link-status");
+      ad4m = agent.client;
+      ownStop = agent.stop;
+    }
+    perspective = await ad4m.perspective.add("model-link-status-test");
+    await LinkStatusCard.register(perspective);
+
+    const card = new LinkStatusCard(perspective);
+    card.title = "shared title";
+    await card.save();
+    cardId = card.id;
+
+    await perspective.add(
+      new Link({
+        source: cardId,
+        predicate: "lsc://note",
+        target: Literal.from("local note").toUrl(),
+      }),
+      "local"
+    );
+
+    // Precondition: one Shared and one Local property link.
+    const status = async (predicate: string) =>
+      (await perspective.get(new LinkQuery({ source: cardId, predicate }))).map((l) =>
+        String(l.status ?? "shared").toLowerCase()
+      );
+    expect(await status("lsc://title")).to.deep.equal(["shared"]);
+    expect(await status("lsc://note")).to.deep.equal(["local"]);
+  });
+
+  after(async () => {
+    if (ownStop) await ownStop();
+  });
+
+  const find = async (query: object) => {
+    const all = await LinkStatusCard.findAll(perspective, query);
+    const card = all.find((c) => c.id === cardId);
+    expect(card, "the card is returned").to.exist;
+    return card!;
+  };
+
+  it("reads both statuses by default", async () => {
+    const card = await find({});
+    expect(card.title).to.equal("shared title");
+    expect(card.note).to.equal("local note");
+  });
+
+  it("returns only the Shared property with linkStatus: 'shared'", async () => {
+    const card = await find({ linkStatus: "shared" });
+    expect(card.title).to.equal("shared title");
+    expect(card.note, "the Local note must not be read").to.not.equal("local note");
+
+    const viaBuilder = await LinkStatusCard.query(perspective)
+      .where({ id: cardId })
+      .linkStatus("shared")
+      .get();
+    expect(viaBuilder[0]?.title).to.equal("shared title");
+    expect(viaBuilder[0]?.note).to.not.equal("local note");
+  });
+
+  it("returns only the Local property with linkStatus: 'local'", async () => {
+    const card = await find({ linkStatus: "local" });
+    expect(card.note).to.equal("local note");
+    expect(card.title).to.not.equal("shared title");
+  });
+});

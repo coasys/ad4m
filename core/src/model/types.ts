@@ -10,6 +10,7 @@
 // Forward type-only reference to Ad4mModel (no runtime circular dependency)
 // ---------------------------------------------------------------------------
 import type { Ad4mModel } from "./Ad4mModel";
+import type { LinkStatus } from "../perspectives/PerspectiveProxy";
 import type { NodeExpression } from "../shacl/NodeExpression";
 
 // ---------------------------------------------------------------------------
@@ -304,6 +305,24 @@ export type Query = {
    * queries where getter-backed properties are not needed.
    */
   deepQuery?: boolean;
+  /**
+   * Read instances as they exist in links of one status only.
+   *
+   * `'shared'` hydrates from Shared links only: every property, relation,
+   * `author` and `updatedAt` comes from links that are gossiped to the
+   * neighbourhood, and nothing from this executor's Local links. That is the
+   * read to use when showing data to another user (#1024). `'local'` is the
+   * converse. Unset (the default) reads both, and a property declared
+   * `local: true` still reads only its Local links.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * Scope: this restricts the links that hydrate an instance. Which instances
+   * are *selected* (`where`, the class's flags, `count`, `$` projection
+   * counts) still matches links of any status, see
+   * https://github.com/coasys/ad4m/issues/1120.
+   */
+  linkStatus?: LinkStatus;
 };
 
 /**
@@ -445,6 +464,8 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.linkStatus}. Inherited from the parent query when unset. */
+  linkStatus?: LinkStatus;
 };
 
 /** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
@@ -506,6 +527,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.linkStatus}. */
+  linkStatus?: LinkStatus;
 };
 
 export type TypedQuery<T extends Ad4mModel> =
