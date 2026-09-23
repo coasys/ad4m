@@ -1,0 +1,18 @@
+{
+  "machines": [
+    {
+      "id": "local",
+      "sshHost": null,
+      "adRepoPath": "",
+      "audioToneHz": 440,
+      "shellPreamble": "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null"
+    },
+    {
+      "id": "remote-1",
+      "sshHost": "your-ssh-alias",
+      "adRepoPath": "~/workspaces/coasys/ad4m",
+      "audioToneHz": 520,
+      "shellPreamble": "export NVM_DIR=\"$HOME/.nvm\" && [ -s \"$NVM_DIR/nvm.sh\" ] && . \"$NVM_DIR/nvm.sh\" 2>/dev/null"
+    }
+  ]
+}

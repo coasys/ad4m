@@ -94,3 +94,6 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
 .codegraph/
+
+# Multi-machine verification config (contains SSH hosts / network details)
+tests/js/helpers/sfu/multi-machine.config.json
