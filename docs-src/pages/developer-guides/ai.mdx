@@ -388,3 +388,27 @@ Transcription streams are automatically cleaned up after 30 seconds of inactivit
 - No need to manually close streams if the client disconnects
 - Resources are freed automatically when streams are abandoned
 - Streams remain active as long as they receive audio data regularly
+
+### Pending Interpretation Overlays
+
+When the interpretation engine would overwrite a value a human wrote, it stages
+the model's value as an *interpretation overlay* instead of applying it. The
+overlay waits until a human accepts or rejects it:
+
+```typescript
+const overlays = await perspective.interpretationOverlays();
+for (const o of overlays) {
+  // o.base: the instance, o.kind: "create" | "update",
+  // o.inferred: [realPredicate, stagedValue] pairs
+  console.log(o.base, o.kind, o.inferred);
+}
+
+await perspective.acceptInterpretation(base);          // the whole overlay
+await perspective.rejectInterpretation(base, "soa://title"); // one property
+```
+
+`interpretationOverlays()` always reads from the executor, so the list is never
+stale. When several callers ask at the same time (for example, many components
+rendering after a sync burst), they share one request, and each caller gets its
+own copy of the array. A call made after that request has finished sends a new
+one. Nothing is cached, so there is no cache to invalidate.
