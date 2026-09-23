@@ -614,7 +614,8 @@ pub fn final_edge_commitment(derived: &DerivedState, ingested: &ReadSet) -> Outp
 mod tests {
     use super::*;
     use crate::perspectives::flow_instance::atom::fixtures::{
-        did_of, hash_of, out_item, out_items, signed_proposal, signed_terminal_proposal, T1, T2,
+        did_of, hash_of, out_item, out_items, signed_proposal, signed_terminal_proposal,
+        signed_vote, T1, T2, T3,
     };
     use crate::perspectives::flow_instance::ProposalLinks;
 
@@ -1404,5 +1405,154 @@ mod tests {
         );
         assert_eq!(counted[0].to_state, "done");
         assert_eq!(counted[0].proposer, did_of(ALICE));
+    }
+
+    // ---- terminal-edge vote pooling is per outputs commitment --------------
+    // (#1108 re-review, @lal-bot-coasys; the fold half of #1118 option 2)
+
+    /// `open → done`, `done` terminal, guarded, `{ n: 2 }`: the shape of
+    /// every per-commitment pooling test below.
+    fn n2_terminal_flow() -> SHACLFlow {
+        flow_json(
+            serde_json::json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "done", "value": 1.0, "consensusRule": { "n": 2 },
+                  "requires": [{ "className": DELIVERABLE }] },
+            ]),
+            serde_json::json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+            ]),
+        )
+    }
+
+    /// The quorum a terminal edge needs and the verdict it produces.
+    fn mint_and_verify(
+        flow: SHACLFlow,
+        rs: ReadSet,
+        outputs: Vec<EvidenceItem>,
+    ) -> anyhow::Result<crate::perspectives::flow_instance::verify::ReceiptVerdict> {
+        use crate::perspectives::flow_instance::verify::verify_receipt;
+        let receipt = FlowReceipt::mint(&flow, rs, outputs, vec![delivered()])?;
+        let catalogue: std::collections::HashMap<String, SHACLFlow> =
+            std::iter::once((flow.flow_uri(), flow)).collect();
+        Ok(verify_receipt(&catalogue, &receipt))
+    }
+
+    /// `open → done` terminal at `{ n: 2 }` — Lal's exact scenario on the
+    /// re-review. Mallory (eligible — the rule has no `fromRole`) posts an
+    /// **uncommitted** terminal proposal at T1; Alice commits to [`OUTPUT`]
+    /// at T2 and Bob co-signs her at T3. Votes on a terminal edge pool per
+    /// outputs commitment, and an atom with no commitment contributes
+    /// nothing, so Alice + Bob settle within their group and the run mints
+    /// and verifies — Mallory's early garbage cannot poison the edge into a
+    /// permanent `Uncommitted`.
+    ///
+    /// Red while `settle_edge` pools every atom on the edge: Mallory's T1
+    /// vote counts toward quorum, her atom lands in `atom_uris`, and
+    /// `final_edge_commitment` reports `Uncommitted` — no receipt, ever.
+    /// Also the killing test for the mutation that pools terminal edges
+    /// across commitments again.
+    #[test]
+    fn an_early_uncommitted_terminal_proposal_cannot_poison_the_committed_quorum() {
+        let flow = n2_terminal_flow();
+        let mallory = proposal("p-mallory", "mallory", "open", "done", &delivered().seal, T1);
+        let mut alice = committing(
+            "p-alice",
+            ALICE,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T2,
+        );
+        alice.links.push(signed_vote(&alice.uri, BOB, T3));
+        let rs = read_set("open", vec![mallory, alice]);
+
+        let verdict = mint_and_verify(flow, rs, outs(&[OUTPUT]))
+            .expect("Alice + Bob reach quorum inside the committed group and the run mints");
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified {
+            voters, ..
+        } = &verdict
+        else {
+            panic!("expected Verified, got: {verdict}");
+        };
+        let expected: Vec<String> = [did_of(ALICE), did_of(BOB)]
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        assert_eq!(
+            voters, &expected,
+            "the quorum is Alice and Bob; Mallory's vote bound nothing"
+        );
+    }
+
+    /// The same shape with Mallory carrying a **valid but different**
+    /// commitment: her group holds one vote, Alice's holds two, so Alice's
+    /// settles and the receipt for [`OUTPUT`] mints — the twin commitment no
+    /// longer turns the settled edge `Conflicting`.
+    ///
+    /// Red while the fold pools across commitments: both hashes land on the
+    /// settled edge and `final_edge_commitment` reports `Conflicting`.
+    #[test]
+    fn a_rival_commitment_short_of_quorum_cannot_conflict_the_settled_edge() {
+        let flow = n2_terminal_flow();
+        let mallory = committing(
+            "p-mallory",
+            "mallory",
+            "open",
+            "done",
+            &delivered().seal,
+            &[ATTACKER],
+            &hash_of(&[ATTACKER]),
+            T1,
+        );
+        let mut alice = committing(
+            "p-alice",
+            ALICE,
+            "open",
+            "done",
+            &delivered().seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T2,
+        );
+        alice.links.push(signed_vote(&alice.uri, BOB, T3));
+        let rs = read_set("open", vec![mallory, alice]);
+
+        let verdict = mint_and_verify(flow, rs.clone(), outs(&[OUTPUT]))
+            .expect("the committed quorum mints past the one-vote rival");
+        assert!(verdict.is_verified(), "got: {verdict}");
+        assert!(
+            FlowReceipt::mint(&n2_terminal_flow(), rs, outs(&[ATTACKER]), vec![delivered()]).is_err(),
+            "and the rival's outputs still bind nothing"
+        );
+    }
+
+    /// Twins committing the **same** outputs under different nonces pool as
+    /// one group: the per-commitment rule must not split a quorum that
+    /// genuinely agrees. Alice and Bob each propose `(done, OUTPUT)` with
+    /// their own nonce; one vote each reaches `{ n: 2 }`.
+    #[test]
+    fn terminal_twins_committing_the_same_outputs_pool_as_one_group() {
+        let flow = n2_terminal_flow();
+        let twin = |nonce: &str, proposer: &str, at: &str| {
+            committing(
+                nonce,
+                proposer,
+                "open",
+                "done",
+                &delivered().seal,
+                &[OUTPUT],
+                &hash_of(&[OUTPUT]),
+                at,
+            )
+        };
+        let rs = read_set("open", vec![twin("twin-a", ALICE, T1), twin("twin-b", BOB, T2)]);
+        let verdict = mint_and_verify(flow, rs, outs(&[OUTPUT]))
+            .expect("two twins with one commitment are one group and reach quorum");
+        assert!(verdict.is_verified(), "got: {verdict}");
     }
 }

@@ -2970,3 +2970,127 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
         "both DIDs on the `here → merged` edge are counted"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The content-addressed URI on the live graph (#1108)
+// ---------------------------------------------------------------------------
+
+/// **Lal's attack, live-graph variant.** Alice proposes the final edge
+/// committing to [`TASK`], Bob co-signs, the edge settles — and Alice then
+/// deletes her `outputs_hash`/`output` links and re-signs new ones under the
+/// same URI. On a random URI the fold re-read the proposal with the swapped
+/// commitment and both votes intact. The URI is a content address now, so
+/// the re-signed fields no longer address it: the proposal stops being an
+/// atom, both votes stop counting, and the instance falls back to genesis —
+/// a run whose committed material was tampered with mid-air settles nothing.
+///
+/// Red while `from_links` skips the URI recompute: the state stays `scoped`
+/// with the swapped commitment under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_graph_outputs_swap_after_the_co_sign_uncounts_the_votes() {
+    use super::flow_instance::atom::{OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    let bob = TestSigner::generate();
+    sync_vote_from(&mut f, &bob, &out.proposal_uri).await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "precondition: the co-signed commitment settles the edge"
+    );
+
+    // The swap: withdraw the committed outputs, re-sign a different
+    // commitment under the settled URI. Both writes are Alice's own.
+    let stale: Vec<LinkExpression> = links_of(&f, &out.proposal_uri)
+        .await
+        .into_iter()
+        .filter(|l| {
+            l.data.predicate.as_deref() == Some(OUTPUTS_HASH_PREDICATE)
+                || l.data.predicate.as_deref() == Some(OUTPUT_PREDICATE)
+        })
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!stale.is_empty(), "the commitment links exist to remove");
+    f.perspective
+        .remove_links(stale, None)
+        .await
+        .expect("retract the committed outputs");
+    f.link(
+        &out.proposal_uri,
+        OUTPUTS_HASH_PREDICATE,
+        &literal(&outputs_hash(&[])),
+        LinkStatus::Shared,
+    )
+    .await;
+
+    assert_eq!(
+        f.derived().await.state,
+        "identified",
+        "the swapped fields no longer address the voted URI, so the proposal \
+         is not an atom and neither vote counts"
+    );
+    assert!(
+        f.read_set().await.atoms().is_empty(),
+        "the tampered proposal is dropped, not re-read with the new commitment"
+    );
+}
+
+/// The honest control for everything above: a run completed through the
+/// REAL co-sign path — a peer's committed proposal, this replica's
+/// `accept_flow_proposal` (which re-derives the seal and recomputes the
+/// outputs commitment before signing) — still mints a receipt that
+/// verifies, content-addressed URIs and all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt() {
+    use super::flow_instance::receipt::FlowReceipt;
+    use super::flow_instance::verify::verify_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-honest",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&committed),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &bobs, &f.ctx)
+        .await
+        .expect("the real co-sign path signs the committed proposal");
+    assert_eq!(f.derived().await.state, "scoped", "n = 2 settled");
+
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
+    let loaded = load_outputs(&f.perspective, &[task_ref(TASK)])
+        .await
+        .expect("load outputs");
+    let outputs: Vec<_> = loaded.into_values().collect();
+    let receipt = FlowReceipt::mint(flow, f.read_set().await, outputs, Vec::new())
+        .expect("the completed run mints");
+    let verdict = verify_receipt(&flows, &receipt);
+    assert!(
+        verdict.is_verified(),
+        "the honest end-to-end receipt verifies, got: {verdict}"
+    );
+}

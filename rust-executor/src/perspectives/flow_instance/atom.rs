@@ -991,8 +991,31 @@ pub(super) mod fixtures {
             did_of(proposer_name),
             nonce,
         );
+        let links =
+            signed_terminal_links_at(&uri, proposer_name, from, to, seal, outputs, committed, nonce, at);
+        (uri, links)
+    }
+
+    /// The links of [`signed_terminal_proposal`] sourced at an **arbitrary**
+    /// `uri` — the raw material of the post-co-sign swap: a proposer who
+    /// re-signs `outputs_hash` (or the seal) under a URI that was addressed
+    /// for other fields produces exactly this shape, genuinely signed.
+    /// Honest fixtures use [`signed_terminal_proposal`], which computes the
+    /// URI these links actually address.
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_terminal_links_at(
+        uri: &str,
+        proposer_name: &str,
+        from: &str,
+        to: &str,
+        seal: &str,
+        outputs: &[&str],
+        committed: &str,
+        nonce: &str,
+        at: &str,
+    ) -> Vec<DecoratedLinkExpression> {
         let signed =
-            |predicate: &str, target: &str| signed_link(&uri, predicate, target, proposer_name, true, None, at);
+            |predicate: &str, target: &str| signed_link(uri, predicate, target, proposer_name, true, None, at);
         let mut links = vec![
             signed(PROPOSER_PREDICATE, did_of(proposer_name)),
             signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
@@ -1007,7 +1030,7 @@ pub(super) mod fixtures {
                 .map(|id| signed(OUTPUT_PREDICATE, &literal(&out_ref(id).encode()))),
         );
         links.push(signed(OUTPUTS_HASH_PREDICATE, &literal(committed)));
-        (uri, links)
+        links
     }
 
     /// The class every fixture output is an instance of.
@@ -1516,6 +1539,96 @@ mod tests {
         assert_eq!(
             check_outputs_commitment(&unloaded, false, graph_with(&[])),
             Ok(())
+        );
+    }
+
+    // ---- the content-addressed URI (#1108) ------------------------------------
+
+    /// **The URI is the fields, or the proposal is not an atom.** A vote is
+    /// `uri --acceptedBy--> did`, so a URI that does not commit to the
+    /// proposer-signed fields lets the proposer swap them after the votes
+    /// land. Three shapes must reject: a URI addressed for other fields (the
+    /// swap), a legacy random-UUID URI (a vote on it covers nothing), and a
+    /// proposal with no signed nonce at all (nothing to recompute from).
+    ///
+    /// Red while `from_links` skips the recompute: every shape here parses.
+    #[test]
+    fn an_atom_whose_uri_is_not_its_fields_content_address_is_rejected() {
+        let links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        let expected = addressed_uri(&links);
+        assert!(
+            atom_of(&links).is_ok(),
+            "control: under its own content address the proposal is an atom"
+        );
+
+        // The swap / legacy shape: same signed fields, other URI.
+        assert_eq!(
+            TransitionAtom::from_links(INSTANCE, PROPOSAL, &links),
+            Err(AtomRejection::UriMismatch {
+                expected: expected.clone()
+            }),
+            "a URI the fields do not address is rejected, and the rejection \
+             names what they do address"
+        );
+        assert_eq!(
+            TransitionAtom::from_links(
+                INSTANCE,
+                "ad4m://flow/proposal/8f0e1a44-3d3c-4e0a-9c9c-3f5a1b2c3d4e",
+                &links
+            ),
+            Err(AtomRejection::UriMismatch { expected }),
+            "a pre-#1108 UUID URI is the same rejection — a vote on it covers nothing"
+        );
+
+        // No nonce: nothing to recompute the address from. `MissingField`,
+        // not `UriMismatch` — the reader must not invent a salt.
+        let mut without_nonce = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        without_nonce.retain(|l| l.data.predicate.as_deref() != Some(PROPOSAL_NONCE_PREDICATE));
+        assert_eq!(
+            atom_of(&without_nonce),
+            Err(AtomRejection::MissingField(PROPOSAL_NONCE_PREDICATE))
+        );
+    }
+
+    /// The address covers every field a vote must cover: change one — the
+    /// outputs commitment, the seal, the edge, the nonce — and the URI that
+    /// was right before is wrong now. This is the property the swap tests in
+    /// `verify` exercise end to end; here it is pinned per field.
+    ///
+    /// Red while `from_links` skips the recompute, and red for the mutations
+    /// that drop `outputs_hash` or the seal from the URI preimage.
+    #[test]
+    fn re_signing_any_addressed_field_under_the_old_uri_rejects_the_atom() {
+        let original = with_outputs(&[D1], &hash_of(&[D1]));
+        let uri = addressed_uri(&original);
+        assert!(
+            TransitionAtom::from_links(INSTANCE, &uri, &original).is_ok(),
+            "control: the unswapped fields address `{uri}`"
+        );
+
+        // Replace one proposer-signed field wholesale — the withheld-and-
+        // replaced shape, where the original links never reach the reader.
+        let resigned = |predicate: &'static str, value: &str| {
+            let mut links = original.clone();
+            links.retain(|l| l.data.predicate.as_deref() != Some(predicate));
+            links.push(link(predicate, &literal(value), ALICE, true, T2));
+            TransitionAtom::from_links(INSTANCE, &uri, &links)
+        };
+
+        let swapped_outputs = resigned(OUTPUTS_HASH_PREDICATE, &hash_of(&[ATTACKER]));
+        assert!(
+            matches!(swapped_outputs, Err(AtomRejection::UriMismatch { .. })),
+            "a re-signed outputs commitment no longer addresses the voted URI: {swapped_outputs:?}"
+        );
+        let swapped_seal = resigned(EVIDENCE_HASHES_PREDICATE, "h2-reframed-evidence");
+        assert!(
+            matches!(swapped_seal, Err(AtomRejection::UriMismatch { .. })),
+            "a re-signed evidence seal no longer addresses the voted URI: {swapped_seal:?}"
+        );
+        let swapped_edge = resigned(TO_STATE_PREDICATE, "rejected");
+        assert!(
+            matches!(swapped_edge, Err(AtomRejection::UriMismatch { .. })),
+            "a re-signed target state no longer addresses the voted URI: {swapped_edge:?}"
         );
     }
 
