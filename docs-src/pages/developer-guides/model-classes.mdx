@@ -858,7 +858,13 @@ const recipes = await Recipe.query(perspective).includeUnverified().get();
 
 Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
 
-> **Current limit:** this filters the links that *hydrate* an instance. It does not yet filter the links that *select* instances: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `$` projection counts still match unverified links. So `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
+> **Current limit:** this filters the links that *hydrate* an instance. It does not yet filter the links that decide *which* instances come back. `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount`, `$` projection counts and the sort order behind `limit`/`offset` all still match unverified links. The consequences:
+>
+> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back. A node with no verified links at all cannot be conjured this way.
+> - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
+> - **Silent omission.** A forged link can reorder a page and push a genuine instance past `limit`. Nothing in the result shows that a row is missing.
+>
+> Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
 
 ### Query Engine
 

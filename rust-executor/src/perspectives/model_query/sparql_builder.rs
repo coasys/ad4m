@@ -314,11 +314,25 @@ pub(super) fn build_instance_sparql(
 /// matters for hydration in particular is last-write-wins — without it, a later
 /// forged link on a scalar property *becomes* the property's value.
 ///
+/// Why the join is sound: the reifier IRI is keyed on author, source,
+/// predicate, normalized target and timestamp (`make_reifier_iri` in
+/// `sparql_store.rs`), not on the triple alone. Two links asserting the same
+/// triple under different authors or timestamps get different reifiers, each
+/// with one `author`, one `timestamp` and one `proofValid`. So putting this
+/// pattern next to the `author`/`timestamp` reads is not a cross product, and a
+/// forged link cannot borrow a genuine sibling's verdict. A reifier holds two
+/// verdicts only when the same link expression is ingested twice, and then
+/// every projected column is identical. That is also why the cut is "a `true`
+/// exists" rather than "no `false` exists": the latter would let a
+/// re-ingestion of a genuine link suppress it.
+///
 /// Scope: this filters the rows that hydrate an instance, in both query plans,
 /// and [`verified_triple_filter`] does the same for the reverse-relation reads.
-/// Instance *selection* — conformance, `where`, `COUNT`, projections — matches
-/// the bare triple, which exists as soon as any link asserts it, and still
-/// matches unverified links: see #1120.
+/// Everything that decides *which* instances come back still matches the bare
+/// triple, which exists as soon as any link asserts it, so it still matches
+/// unverified links: conformance, pushed `where`, `COUNT`, projections, and
+/// the two-phase plan's pagination subquery, whose order keys can let a forged
+/// link reorder a page and push a genuine instance past `limit`. See #1120.
 ///
 /// Empty when the query opts in with `includeUnverified`.
 pub(super) fn proof_valid_filter(query: &ModelQueryInput) -> &'static str {
