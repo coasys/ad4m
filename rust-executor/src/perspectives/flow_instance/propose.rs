@@ -183,8 +183,13 @@ pub async fn propose_flow_transition(
             ));
         }
         // Hashed over exactly what a co-signer's `load_outputs` reads, so the
-        // commitment is the one `check_outputs_commitment` recomputes.
-        let items: Vec<_> = named.iter().map(|r| loaded[r].clone()).collect();
+        // commitment is the one `check_outputs_commitment` recomputes. Every
+        // ref is loaded by now; `filter_map` rather than indexing keeps a
+        // future edit above from turning a refusal into a panic.
+        let items: Vec<_> = named
+            .iter()
+            .filter_map(|r| loaded.get(r).cloned())
+            .collect();
         Some(items)
     } else if !outputs.is_empty() {
         return Err(anyhow::anyhow!(
