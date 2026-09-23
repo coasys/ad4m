@@ -715,22 +715,32 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // back-to-back dispatches could keep the fetch that saw 1 model and
     // drop the one that saw 2, after which the server has nothing further
     // to say (issue #1051 / CI: "Paginate callback did not see second model save").
+    // After dispose() no read starts and no result is delivered, including
+    // a read that was already in flight when dispose() ran.
+    let disposed = false;
     let fetching = false;
     let pending = false;
-    const processResults = async () => {
+    let coalesced = 0;
+    const processResults = async (): Promise<void> => {
+      if (disposed) return;
       if (fetching) {
         pending = true;
+        coalesced++;
         return;
       }
       fetching = true;
       try {
         const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
-        callback({ results, totalCount, pageSize, pageNumber });
+        if (!disposed) callback({ results, totalCount, pageSize, pageNumber });
       } finally {
         fetching = false;
         if (pending) {
+          console.debug(`[ModelQueryBuilder.paginateSubscribe] ${coalesced} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
           pending = false;
-          void processResults();
+          coalesced = 0;
+          // Detached from the caller's promise: needs its own handler, or a
+          // rejection here is unhandled.
+          processResults().catch(e => console.error('Paginate subscription error:', e));
         }
       }
     };
@@ -743,7 +753,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    let disposed = false;
     let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
     let resubscribeAttempts = 0;
     const MAX_RESUBSCRIBE_ATTEMPTS = 5;
