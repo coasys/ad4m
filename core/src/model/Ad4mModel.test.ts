@@ -1719,16 +1719,29 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
 
     builder.dispose();
 
-    deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
-    await new Promise(r => setTimeout(r, 10));
+    // The in-flight read's finally block still sees pending === true, so the
+    // coalescing log must not claim a trailing fetch that the disposed guard
+    // then drops.
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
+      await new Promise(r => setTimeout(r, 10));
 
-    expect(userCallback).not.toHaveBeenCalled();
-    expect(deferred.length).toBe(1);
+      expect(userCallback).not.toHaveBeenCalled();
+      expect(deferred.length).toBe(1);
+      expect(
+        debugSpy.mock.calls.filter(args =>
+          String(args[0]).includes("coalesced into one trailing fetch")
+        )
+      ).toEqual([]);
 
-    // A dispatch that races the unsubscribe starts no read either.
-    capturedCallback!({});
-    await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(1);
+      // A dispatch that races the unsubscribe starts no read either.
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 });
 
