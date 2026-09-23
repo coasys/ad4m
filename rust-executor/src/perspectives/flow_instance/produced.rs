@@ -205,6 +205,23 @@ pub fn produced_by_flow(
         .any(|v| v.output.id == instance_id)
 }
 
+/// Is a committed output named as the class a `model_query` asks about?
+///
+/// An output is committed *as an instance of a class* (#1104): the same node
+/// read through another class is other content, and not what the quorum
+/// signed. So the `producedByFlow` filter admits an output only into queries
+/// for that class — matched against either spelling a flow's DNA may have
+/// used, the query-side class name or the shape's target class.
+///
+/// This is defense in depth on top of shape conformance (a node that is not
+/// an instance of the queried class never matches its SPARQL patterns), and
+/// it is the half conformance cannot do: one node can conform to two classes
+/// with different content, and a quorum that committed to it as one has said
+/// nothing about it as the other.
+pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class: &str) -> bool {
+    output.class_name == queried_name || output.class_name == target_class
+}
+
 /// How many receipt bodies one enumeration reads. The
 /// `ad4m://flow/receipt_content` links are writable by anyone, so without a
 /// cap a member could hang thousands of junk bodies on the perspective and
@@ -739,6 +756,41 @@ mod tests {
             )
             .is_empty(),
             "a state the run did not settle into admits nothing"
+        );
+    }
+
+    // ---- the class dimension ----------------------------------------------
+
+    /// The `producedByFlow` model-query filter admits an output only into
+    /// queries for the class it was committed as — by either spelling — and
+    /// a quorum that committed to a node as one class has said nothing about
+    /// it as another. Conformance cannot carry this alone: one node can
+    /// conform to two classes with different content.
+    ///
+    /// Red if `output_matches_class` returns true for a foreign class, or
+    /// matches only one of the two spellings.
+    #[test]
+    fn an_output_counts_only_for_the_class_it_was_committed_as() {
+        let committed = OutputRef {
+            class_name: "coasys://Deliverable".into(),
+            id: OUTPUT.into(),
+        };
+        assert!(output_matches_class(
+            &committed,
+            "coasys://Deliverable",
+            "coasys://Deliverable"
+        ));
+        assert!(
+            output_matches_class(&committed, "Deliverable", "coasys://Deliverable"),
+            "the DNA may name the target class where the query names the shape"
+        );
+        assert!(
+            output_matches_class(&committed, "coasys://Deliverable", "we://deliverable"),
+            "or the query-side name where the shape's target differs"
+        );
+        assert!(
+            !output_matches_class(&committed, "coasys://Task", "we://task"),
+            "a query for another class must not inherit the commitment"
         );
     }
 

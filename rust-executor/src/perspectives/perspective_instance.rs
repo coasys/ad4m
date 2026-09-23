@@ -3867,15 +3867,16 @@ impl PerspectiveInstance {
                 filter.state.as_deref(),
             )
             .await?;
-            // An output is committed *as an instance of a class* (#1104); the
-            // same node read through another class is other content and not
-            // what the quorum signed. So only outputs named as the queried
-            // class pass — by the name the caller queries with or by the
-            // shape's target class, whichever spelling the flow's DNA used.
+            // Only outputs committed as the queried class pass; see
+            // `output_matches_class` for why conformance alone is not enough.
             let allowed: std::collections::BTreeSet<String> = valid
                 .into_iter()
                 .filter(|v| {
-                    v.output.class_name == class_name || v.output.class_name == shape.target_class
+                    super::flow_instance::produced::output_matches_class(
+                        &v.output,
+                        class_name,
+                        &shape.target_class,
+                    )
                 })
                 .map(|v| v.output.id)
                 .collect();
