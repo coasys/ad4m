@@ -10,6 +10,7 @@ use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::link_author::refuse_unanswerable_link_author;
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
@@ -258,6 +259,11 @@ pub(super) async fn execute_model_query_inner(
             ));
         }
     }
+
+    // A per-link `author` condition is answered in the store or not at all.
+    // The post-hydration fallback only knows the earliest link's author, so a
+    // clause that would reach it is refused here, before any plan is chosen.
+    refuse_unanswerable_link_author(query_input, shape, resolver)?;
 
     // Fast path: COUNT-only
     //

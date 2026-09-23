@@ -75,6 +75,7 @@
 //! | [`sparql_builder`] | Generating SPARQL query strings (conformance, where-clauses, pagination) |
 //! | [`hydration`] | Converting raw SPARQL result rows into hydrated JSON instances |
 //! | [`filtering`] | Post-hydration where-clause matching and multi-key sorting |
+//! | [`link_author`] | `where: { author }` beside property conditions: a condition on the links those conditions match |
 //! | [`getters`] | Evaluating `ASK`/`SELECT` getter expressions in batched queries |
 //! | [`relations`] | Resolving reverse relations and recursive `include` eager-loading |
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
@@ -86,6 +87,7 @@ mod getters;
 mod hydration;
 #[cfg(test)]
 mod integration_tests;
+mod link_author;
 #[cfg(test)]
 mod link_author_tests;
 mod projection;

@@ -745,6 +745,33 @@ const recipes = await Recipe.findAll(perspective, {
 });
 ```
 
+### Filtering by Author
+
+`author` in a `where` means different things depending on what sits beside it.
+
+**Beside a property or relation condition, `author` is about the link that carries the value.** `{ agent: did, author: admin }` matches an instance only if admin wrote the `agent` link pointing at `did`. It does not matter who created the instance.
+
+```typescript
+// Reviewers that admin appointed. Admin must have written the `agent` link itself.
+const appointed = await Reviewer.findAll(perspective, {
+  where: { agent: candidateDid, author: adminDid }
+});
+```
+
+This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If `author` only checked who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass that check.
+
+The rules:
+
+- **Every property and relation condition in the clause is scoped.** With `{ agent: did, note: "x", author: admin }`, admin must have written both links.
+- **Nested clauses are covered.** An `author` scopes the conditions in its `AND`, `OR` and `NOT` sub-clauses. An `author` inside a sub-clause also scopes the property conditions of the clauses around it. `{ agent: did, OR: [{ author: admin }, { author: lead }] }` means "admin or lead wrote the `agent` link".
+- **Supported forms.** A DID, an array of DIDs (any of them), `{ not: did }` or `{ not: [dids] }`, and `{ contains: "..." }`.
+- **Where it runs.** The check runs in the store, on each link's own author. The same result comes back for `findAll`, `count` and paginated queries.
+- **When it is refused.** If part of the clause can only be evaluated after the query runs (`timestamp`, a getter property, a relation `some`/`none` beside the `author`, or an operator the store cannot express), the query is rejected with an error. At that stage each instance has only its single `.author`, so the per-link answer is no longer available. The engine refuses rather than check the wrong author.
+
+**On its own, `author` refers to the instance.** `{ author: me }` with no property condition beside it matches instances whose earliest link I wrote. That is the same value as the built-in `.author` property. Combining it with `timestamp` or `createdAt` is fine.
+
+A condition on the value alone, such as `{ agent: did }`, accepts a link from any author. The instance JSON does not change: `.author` is still the author of the earliest link, and a property still reads its latest value.
+
 ### Eager Loading with `include`
 
 By default, relation fields contain raw URI strings. Use `include` to hydrate them into full model instances:

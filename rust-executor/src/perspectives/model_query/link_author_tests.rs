@@ -167,13 +167,18 @@ async fn author_is_not_laundered_through_a_relation_link() {
         &[(MALLORY, "ns://member", MALLORY.to_string())],
     );
 
-    assert!(ids_on_every_plan(&store, json!({ "member": MALLORY, "author": ADMIN }))
-        .await
-        .is_empty());
     assert!(
-        ids_on_every_plan(&store, json!({ "member": [MALLORY, ALICE], "author": ADMIN }))
+        ids_on_every_plan(&store, json!({ "member": MALLORY, "author": ADMIN }))
             .await
-            .is_empty(),
+            .is_empty()
+    );
+    assert!(
+        ids_on_every_plan(
+            &store,
+            json!({ "member": [MALLORY, ALICE], "author": ADMIN })
+        )
+        .await
+        .is_empty(),
         "the IN form of a relation condition is scoped the same way"
     );
 }
@@ -231,9 +236,11 @@ async fn the_author_of_the_matching_value_counts_not_any_link_on_the_predicate()
         ids_on_every_plan(&store, json!({ "member": ALICE, "author": ADMIN })).await,
         vec!["ns://r/shared"]
     );
-    assert!(ids_on_every_plan(&store, json!({ "member": MALLORY, "author": ADMIN }))
-        .await
-        .is_empty());
+    assert!(
+        ids_on_every_plan(&store, json!({ "member": MALLORY, "author": ADMIN }))
+            .await
+            .is_empty()
+    );
 }
 
 /// The shape the flow translator emits for `or` branches that each name a
@@ -387,4 +394,73 @@ async fn a_scoped_author_beside_an_unpushable_condition_is_refused() {
             "the refusal should say why: {err}"
         );
     }
+}
+
+/// Inside a relation quantifier the nested clause describes the *linked*
+/// record, so its `author` scopes the linked record's links. The compiled
+/// clause is rebased onto the quantifier's variable. That rebase has to rewrite
+/// `?source` inside the reifier's `<<( … )>>` triple term too. Otherwise the
+/// join would silently name the outer record's link and match nothing.
+#[tokio::test]
+async fn author_inside_a_relation_quantifier_scopes_the_linked_records_links() {
+    use super::shape::parse_shape_from_json;
+    use super::test_helpers::StaticShapeResolver;
+
+    let store = SparqlStore::new(None).unwrap();
+    let t0 = "2026-01-01T00:00:00.000Z";
+    let t1 = "2026-01-01T00:00:01.000Z";
+    for (task, review, verdict_author) in [
+        ("ns://t/honest", "ns://rv/honest", ADMIN),
+        ("ns://t/forged", "ns://rv/forged", MALLORY),
+    ] {
+        for l in [
+            link(ADMIN, task, "ns://type", "ns://task", t0),
+            link(ADMIN, task, "ns://review", review, t0),
+            link(ADMIN, review, "ns://type", "ns://review", t0),
+            link(verdict_author, review, "ns://verdict", &lit("approved"), t1),
+        ] {
+            store.add_link(&l).unwrap();
+        }
+    }
+
+    let task_shape = parse_shape_from_json(
+        r#"{
+            "className": "Task",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://task" }
+            },
+            "relations": {
+                "reviews": { "predicate": "ns://review", "targetClassName": "Review" }
+            }
+        }"#,
+        "Task",
+    )
+    .unwrap();
+    let review_shape = parse_shape_from_json(
+        r#"{
+            "className": "Review",
+            "properties": {
+                "type": { "predicate": "ns://type", "required": true, "flag": true, "initial": "ns://review" },
+                "verdict": { "predicate": "ns://verdict", "resolveLanguage": "literal" }
+            },
+            "relations": {}
+        }"#,
+        "Review",
+    )
+    .unwrap();
+    let resolver = StaticShapeResolver::new();
+    resolver.register("Task", task_shape.clone());
+    resolver.register("Review", review_shape);
+
+    let query = input(json!({
+        "where": { "reviews": { "some": { "verdict": "approved", "author": ADMIN } } }
+    }));
+    let result = super::query::execute_model_query(&store, &task_shape, &query, &resolver)
+        .await
+        .expect("query should execute");
+    assert_eq!(
+        ids(&result),
+        vec!["ns://t/honest"],
+        "only the review whose verdict admin wrote counts"
+    );
 }

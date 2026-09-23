@@ -413,6 +413,10 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
+      /** Beside property/relation conditions: the links carrying those values
+       *  must have been written by this author (checked per link, in the store).
+       *  Alone: the instance's `.author`, i.e. the earliest link's author.
+       *  See "Filtering by Author" in the model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];
