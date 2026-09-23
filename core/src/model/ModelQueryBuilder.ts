@@ -738,8 +738,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
           const dispatches = coalesced;
           pending = false;
           coalesced = 0;
-          // Only after the disposed check below does a trailing fetch actually
-          // start, so logging above it would claim one on the dispose path.
+          // Whether a trailing fetch actually starts is decided by the entry
+          // guard at the top of processResults, which returns when disposed.
+          // Log only what that guard will let through, or the dispose path
+          // announces a fetch it then drops.
           if (!disposed) {
             console.debug(`[ModelQueryBuilder.paginateSubscribe] ${dispatches} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
           }
