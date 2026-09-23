@@ -475,10 +475,41 @@ fn delocalized(link: &LinkExpression) -> LinkExpression {
 /// The fold itself does no role work; every eligibility decision is visible
 /// in the read-set before it runs.
 ///
+/// Before either step: **the walk starts where this flow definition starts,
+/// never where the read-set says it does.** `genesis` on a carried read-set
+/// is the minter's word, and folding from it would honour a walk planted at
+/// (or one edge short of) a terminal state — every quorum before the planted
+/// genesis simply skipped, up to a "completion" with an empty voter list
+/// (r4077689141). Every honest producer ([`FlowInstance::read_set`]) writes
+/// [`initial_state_of`] here, so the only read-sets this refuses are ones no
+/// honest producer built. The check lives at this seam rather than in
+/// [`FlowReceipt::mint`](receipt::FlowReceipt::mint) and
+/// [`verify_receipt`](verify::verify_receipt) separately so that it also
+/// holds for [`counted_seals`](receipt::FlowReceipt::counted_seals) and any
+/// future caller, rather than resting on each call site (the #1078 lesson).
+///
 /// This is the function an off-perspective verifier re-runs over a minted
 /// token's proof to reach the same verdict independently — after
 /// re-decorating the carried links' signatures, per [`ReadSet`].
 pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<DerivedState> {
+    let Some(initial) = initial_state_of(flow) else {
+        anyhow::bail!(
+            "fold_read_set: flow `{}` has no states, so {} has no genesis to fold from",
+            flow.flow_uri(),
+            read_set.instance_uri
+        );
+    };
+    if read_set.genesis != initial {
+        anyhow::bail!(
+            "fold_read_set: {} claims genesis `{}`, but flow `{}` starts in `{}`; a walk \
+             folded from a carried genesis would skip every quorum before it, so it is \
+             refused",
+            read_set.instance_uri,
+            read_set.genesis,
+            flow.flow_uri(),
+            initial
+        );
+    }
     let grants = role_grant_views(flow, read_set)?;
     let vouched: Vec<VouchedAtom> = read_set
         .atoms()

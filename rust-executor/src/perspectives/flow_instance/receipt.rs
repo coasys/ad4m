@@ -38,6 +38,17 @@
 //! under the definition it holds. Making the hash quorum-signed (inside the
 //! proposal seal) is named, deferred hardening.
 //!
+//! **`outputs` is minter-asserted too, and there the argument does NOT
+//! hold** (r4077689151, tracked in
+//! <https://github.com/coasys/ad4m/issues/1104>). What voters sign never
+//! covers the output list — the seal is taken over guard evidence — and
+//! minting is permissionless, so anyone holding a run's public signed
+//! read-set can re-mint it naming *their own* node and the result verifies.
+//! Until outputs are committed into quorum-signed material, a `Verified`
+//! verdict authenticates the run, **not** the binding: a consumer that pays
+//! out on [`FlowReceipt::speaks_for`] must independently trust the outputs
+//! it honours. See [`FlowReceipt::outputs`] and `speaks_for`.
+//!
 //! # What is NOT here
 //!
 //! - **The verifier.** [`verify_receipt`](super::verify::verify_receipt) and
@@ -169,6 +180,11 @@ pub struct FlowReceipt {
     pub terminal_state: String,
     /// The nodes this receipt speaks for — the binding a verifier checks
     /// before honouring a `granted_by` edge. Never empty.
+    ///
+    /// **Minter-asserted.** Nothing the quorum signed covers this list, so
+    /// verification re-derives everything else and carries this through
+    /// unchecked — see the module header and
+    /// <https://github.com/coasys/ad4m/issues/1104>.
     pub outputs: Vec<String>,
     /// The proof body: signed links, carried raw, exactly as the fold
     /// received them.
@@ -731,6 +747,26 @@ mod tests {
         assert!(
             format!("{err:#}").contains("no outputs"),
             "the error must name the missing binding, got: {err:#}"
+        );
+    }
+
+    /// A caller can hand `mint` a read-set whose `genesis` points anywhere,
+    /// and the fold starts walking wherever it points. Planted at `done`, an
+    /// empty read-set "completes" with zero votes behind it (r4077689141).
+    ///
+    /// Red without the genesis check in `fold_read_set`.
+    #[test]
+    fn mint_refuses_a_genesis_that_is_not_the_flows_initial_state() {
+        let err = FlowReceipt::mint(
+            &two_state_flow(),
+            read_set("done", Vec::new()),
+            vec![BASE.to_string()],
+            Vec::new(),
+        )
+        .expect_err("a walk that starts at the finish line is not a completion");
+        assert!(
+            format!("{err:#}").contains("genesis"),
+            "the error must name the planted genesis, got: {err:#}"
         );
     }
 

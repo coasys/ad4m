@@ -134,9 +134,13 @@ pub enum ReceiptVerdict {
         /// The state the reader's own fold reached — equal to
         /// `receipt.terminal_state`, re-derived rather than read.
         terminal_state: String,
-        /// The nodes this receipt speaks for, as carried. The binding to
+        /// The nodes this receipt speaks for, **as carried** — the one field
+        /// of a `Verified` verdict that is the minter's word rather than
+        /// re-derived: nothing the quorum signed covers it
+        /// (<https://github.com/coasys/ad4m/issues/1104>). The binding to
         /// check before honouring a `granted_by` edge; see
-        /// [`FlowReceipt::speaks_for`].
+        /// [`FlowReceipt::speaks_for`] for what that check does and does not
+        /// prove.
         outputs: Vec<String>,
         /// The distinct eligible DIDs that made up the quorum on every
         /// settled edge of the walk, sorted. This is the "n distinct DIDs"
@@ -423,6 +427,16 @@ impl FlowReceipt {
     /// and this is the check that closes the loop: verify the receipt, then
     /// ask whether it names the node whose edge you followed. Either half
     /// alone is forgeable.
+    ///
+    /// **Both halves together still do not make the binding quorum-signed**
+    /// (r4077689151, <https://github.com/coasys/ad4m/issues/1104>): `outputs`
+    /// is minter-asserted, minting is permissionless, and a run's signed
+    /// read-set is public material inside its space — so a re-mint of a
+    /// genuine run naming a *different* node verifies and answers `true`
+    /// here. Until outputs are committed into voter-signed material, a
+    /// consumer paying out on this must independently trust the output list
+    /// — a verified receipt proves the run completed, not that the quorum
+    /// granted anything to `node`.
     pub fn speaks_for(&self, node: &str) -> bool {
         self.outputs.iter().any(|o| o == node)
     }
@@ -1114,6 +1128,115 @@ mod tests {
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt),
             ReceiptVerdict::NoOutputs
+        );
+    }
+
+    /// **The genesis is the flow's, never the minter's.** A read-set carries
+    /// `genesis` as data and the fold starts walking wherever it points, so
+    /// left unchecked that one field skips the whole verification: plant the
+    /// genesis AT the terminal state and carry no proposals at all, and the
+    /// walk "reaches" `done` having settled nothing — a completion claim
+    /// with an **empty voter list**, under the correct DNA hash, binding
+    /// real outputs (r4077689141).
+    ///
+    /// Red without the genesis check in `fold_read_set`: the fold
+    /// initialises at `done`, finds nothing to settle, and the receipt
+    /// reports `Verified` with no voters.
+    #[test]
+    fn a_genesis_planted_at_the_terminal_state_is_not_a_completion() {
+        let flow = two_state_flow();
+        let receipt = mint(&flow, completed());
+        let reader = catalogue(vec![flow]);
+
+        let mut forged = receipt;
+        forged.read_set = ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "done".to_string(),
+            proposals: Vec::new(),
+            role_grants: Vec::new(),
+        };
+
+        let verdict = verify_receipt(&reader, &forged);
+        assert!(
+            verdict.is_rejected(),
+            "a walk that starts at the finish line settled nothing and proves nothing — \
+             got: {verdict}"
+        );
+        let ReceiptVerdict::Unfoldable { reason } = &verdict else {
+            panic!(
+                "the refusal is the fold's — a planted genesis is not foldable material — \
+                 got: {verdict}"
+            );
+        };
+        assert!(
+            reason.contains("genesis"),
+            "the refusal must name the planted genesis, got: {reason}"
+        );
+    }
+
+    /// The subtler shape of the same forgery, and the reason "did the walk
+    /// settle at least one edge?" is not the check: plant the genesis one
+    /// edge short of terminal and carry ONE genuine settled edge. The walk
+    /// then settles something — a no-edges-settled backstop waves it through
+    /// — while every quorum before the planted genesis is skipped.
+    ///
+    /// Red without the genesis check in `fold_read_set`: the fold starts at
+    /// `doing`, takes the one carried edge, and reports `Verified` naming
+    /// only the final edge's voter — Alice's `open → doing` quorum simply
+    /// never happened.
+    #[test]
+    fn a_genesis_planted_mid_flow_cannot_skip_the_quorums_before_it() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "doing", "value": 0.5 },
+                { "name": "done", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Start", "from_state": "open", "to_state": "doing", "actions": [] },
+                { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let final_edge = || ProposalLinks {
+            uri: "ad4m://p/2".into(),
+            links: signed_proposal("ad4m://p/2", BOB, "doing", "done", "seal-2", T2),
+        };
+        // The honest run walks both edges…
+        let full = ReadSet {
+            instance_uri: INSTANCE.to_string(),
+            subject: BASE.to_string(),
+            genesis: "open".to_string(),
+            proposals: vec![
+                ProposalLinks {
+                    uri: "ad4m://p/1".into(),
+                    links: signed_proposal("ad4m://p/1", ALICE, "open", "doing", "seal-1", T1),
+                },
+                final_edge(),
+            ],
+            role_grants: Vec::new(),
+        };
+        let receipt = mint(&flow, full);
+        let reader = catalogue(vec![flow]);
+        assert!(
+            verify_receipt(&reader, &receipt).is_verified(),
+            "precondition: the full walk verifies"
+        );
+
+        // …what arrives claims it STARTED at `doing`, carrying only the
+        // final edge.
+        let mut forged = receipt;
+        forged.read_set = ReadSet {
+            genesis: "doing".to_string(),
+            proposals: vec![final_edge()],
+            ..forged.read_set
+        };
+
+        let verdict = verify_receipt(&reader, &forged);
+        assert!(
+            matches!(&verdict, ReceiptVerdict::Unfoldable { reason } if reason.contains("genesis")),
+            "a planted mid-flow genesis skips every quorum before it and must be \
+             refused — got: {verdict}"
         );
     }
 
