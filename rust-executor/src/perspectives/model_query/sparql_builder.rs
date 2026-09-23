@@ -286,6 +286,7 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        let proof_valid = proof_valid_filter(query);
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -295,8 +296,55 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{proof_valid}{local_status}}}"#
         ))
+    }
+}
+
+/// SPARQL fragment withholding rows whose link signature did not verify — the
+/// `model_query` default (#1046 §2, #1113).
+///
+/// Each row of the instance query is one link, joined through its own reifier,
+/// and since #1064 the reifier's `proofValid` is computed from the signature on
+/// every insert rather than taken from the caller. So requiring it to be
+/// `"true"` drops exactly the links whose signature does not verify, and a link
+/// with no verdict at all is dropped with them: the triple pattern is required,
+/// not `OPTIONAL`, so absence fails closed. That is the same rule the flow
+/// engine applies by hand (`proof.valid == Some(true)`), and the reason it
+/// matters for hydration in particular is last-write-wins — without it, a later
+/// forged link on a scalar property *becomes* the property's value.
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// and [`verified_triple_filter`] does the same for the reverse-relation reads.
+/// Instance *selection* — conformance, `where`, `COUNT`, projections — matches
+/// the bare triple, which exists as soon as any link asserts it, and still
+/// matches unverified links: see #1120.
+///
+/// Empty when the query opts in with `includeUnverified`.
+pub(super) fn proof_valid_filter(query: &ModelQueryInput) -> &'static str {
+    if query.include_unverified.unwrap_or(false) {
+        ""
+    } else {
+        "    ?_reifier <ad4m://ontology/proofValid> \"true\" .\n"
+    }
+}
+
+/// [`proof_valid_filter`] for reads that match the bare triple
+/// `?source <predicate> ?target` instead of joining one reifier per row: the
+/// reverse-relation reads in `relations.rs`, which hydrate `belongsToOne` /
+/// `belongsToMany` values. The row is kept when at least one link asserting the
+/// triple verified. `FILTER EXISTS` rather than a join, so two verified links
+/// over one triple do not return the source twice.
+///
+/// Empty when `include_unverified` is `Some(true)`.
+pub(super) fn verified_triple_filter(predicate: &str, include_unverified: Option<bool>) -> String {
+    if include_unverified.unwrap_or(false) {
+        String::new()
+    } else {
+        format!(
+            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( ?source <{predicate}> ?target )>> . ?_pv <ad4m://ontology/proofValid> \"true\" . }}"
+        )
     }
 }
 
