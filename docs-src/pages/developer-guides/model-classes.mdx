@@ -843,6 +843,25 @@ const comments = await Comment.query(perspective)
   .get();
 ```
 
+### Reading by Link Status
+
+Every link is either **Shared** (gossiped to the neighbourhood) or **Local** (kept on this executor). A query normally reads both. A property declared `local: true` reads only its Local links. To read instances as they exist in links of one status only, for every property, set `linkStatus`:
+
+```typescript
+// Only what the neighbourhood sees: no Local link reaches the result
+const cards = await Card.findAll(perspective, { linkStatus: "shared" });
+
+// or with the query builder
+const cards = await Card.query(perspective).linkStatus("shared").get();
+
+// Only this executor's Local links
+const drafts = await Card.findAll(perspective, { linkStatus: "local" });
+```
+
+Use `linkStatus: "shared"` when the result is shown to another user, so nothing executor-private leaks into it. Under `"shared"`, a `local: true` property always comes back empty. Included relations inherit the setting unless their own sub-query sets `linkStatus`.
+
+> **Current limit:** `linkStatus` restricts the links that *hydrate* an instance. It does not yet restrict the links that *select* instances: `where` conditions pushed into SPARQL, the class's flags, and `count`/`totalCount` and `$` projection counts still match links of any status. So a `"shared"` read with `where: { note: "x" }` can return an instance whose only `note` link is Local, with `note` left empty. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
+
 ### Query Engine
 
 `Ad4mModel` uses the **SPARQL query engine** for all query operations. The executor compiles queries to SPARQL for Oxigraph to execute, then hydrates results back into model instances.
