@@ -625,9 +625,7 @@ pub fn constrain_ids(
     let wc = input.where_clause.get_or_insert_with(BTreeMap::new);
     let intersected: Vec<String> = match wc.get("id") {
         None => allowed.into_iter().collect(),
-        Some(WhereCondition::String(one)) => {
-            allowed.into_iter().filter(|id| id == one).collect()
-        }
+        Some(WhereCondition::String(one)) => allowed.into_iter().filter(|id| id == one).collect(),
         Some(WhereCondition::StringArray(several)) => allowed
             .into_iter()
             .filter(|id| several.contains(id))
@@ -1078,7 +1076,9 @@ mod produced_by_flow_filter_tests {
                 "title": "Ship it",
             }
         }));
-        let filter = take_produced_by_flow(&mut q).expect("well-formed").expect("present");
+        let filter = take_produced_by_flow(&mut q)
+            .expect("well-formed")
+            .expect("present");
         assert_eq!(
             filter,
             ProducedByFlowFilter {
@@ -1086,7 +1086,10 @@ mod produced_by_flow_filter_tests {
                 state: Some("done".into()),
             }
         );
-        let wc = q.where_clause.as_ref().expect("the rest of the clause stays");
+        let wc = q
+            .where_clause
+            .as_ref()
+            .expect("the rest of the clause stays");
         assert!(!wc.contains_key("producedByFlow"));
         assert!(wc.contains_key("title"), "sibling conditions are untouched");
 

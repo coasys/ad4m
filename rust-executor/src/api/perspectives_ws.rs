@@ -2631,14 +2631,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.proposeFlowTransition",
         propose_flow_transition_handler,
     );
-    map.register(
-        "perspective.verifyFlowReceipt",
-        verify_flow_receipt_handler,
-    );
-    map.register(
-        "perspective.flowValidOutputs",
-        flow_valid_outputs_handler,
-    );
+    map.register("perspective.verifyFlowReceipt", verify_flow_receipt_handler);
+    map.register("perspective.flowValidOutputs", flow_valid_outputs_handler);
     map.register("perspective.mintFlowReceipt", mint_flow_receipt_handler);
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);

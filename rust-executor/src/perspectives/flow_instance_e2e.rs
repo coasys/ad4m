@@ -2836,10 +2836,7 @@ async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt:
 
 /// The ids `model_query` returns for `ns://Task` under a `producedByFlow`
 /// filter, plus the reported total.
-async fn tasks_produced_by(
-    f: &Fixture,
-    query: serde_json::Value,
-) -> (Vec<String>, usize) {
+async fn tasks_produced_by(f: &Fixture, query: serde_json::Value) -> (Vec<String>, usize) {
     let json = f
         .perspective
         .model_query("ns://Task", &query.to_string())
@@ -2869,7 +2866,9 @@ async fn tasks_produced_by(
 /// verifier.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cosigned_completion_mints_and_its_outputs_answer_every_produced_by_surface() {
-    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
 
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
@@ -2955,7 +2954,9 @@ async fn a_cosigned_completion_mints_and_its_outputs_answer_every_produced_by_su
 /// discovery edges, or drops every receipt once one is bad.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
-    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
     use super::flow_instance::verify::ReceiptVerdict;
 
     let mut f = seed_satisfied_fixture(None).await;
@@ -3024,7 +3025,9 @@ async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
 /// admits by id alone.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_output_edited_after_completion_stops_being_a_valid_output() {
-    use super::flow_instance::produced::{flow_valid_outputs, mint_flow_receipt, verify_flow_receipt};
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
 
     let mut f = seed_satisfied_fixture(None).await;
     let instance = f.instance_uri.clone();

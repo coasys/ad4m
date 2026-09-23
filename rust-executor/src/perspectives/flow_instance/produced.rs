@@ -234,9 +234,7 @@ pub async fn load_flow_receipts(
         .await?;
     // Deterministic before the cap: sorted by (node, body) so two replicas
     // whose stores enumerate links differently read the same survivors.
-    bodies.sort_by(|a, b| {
-        (&a.data.source, &a.data.target).cmp(&(&b.data.source, &b.data.target))
-    });
+    bodies.sort_by(|a, b| (&a.data.source, &a.data.target).cmp(&(&b.data.source, &b.data.target)));
     bodies.dedup_by(|a, b| a.data.source == b.data.source && a.data.target == b.data.target);
     if bodies.len() > MAX_FLOW_RECEIPTS {
         log::warn!(
@@ -584,8 +582,20 @@ mod tests {
                 receipt_uri: receipt.uri().expect("uri"),
             }]
         );
-        assert!(produced_by_flow(&cat, OUTPUT, FLOW, None, std::slice::from_ref(&receipt)));
-        assert!(produced_by_flow(&cat, OUTPUT, FLOW, Some("done"), std::slice::from_ref(&receipt)));
+        assert!(produced_by_flow(
+            &cat,
+            OUTPUT,
+            FLOW,
+            None,
+            std::slice::from_ref(&receipt)
+        ));
+        assert!(produced_by_flow(
+            &cat,
+            OUTPUT,
+            FLOW,
+            Some("done"),
+            std::slice::from_ref(&receipt)
+        ));
     }
 
     /// The run's subject, and any stranger node, are not outputs: only what
@@ -596,7 +606,13 @@ mod tests {
         let cat = catalogue(vec![flow_named("Delivery")]);
         for not_an_output in [BASE, ATTACKER, INSTANCE] {
             assert!(
-                !produced_by_flow(&cat, not_an_output, FLOW, None, std::slice::from_ref(&receipt)),
+                !produced_by_flow(
+                    &cat,
+                    not_an_output,
+                    FLOW,
+                    None,
+                    std::slice::from_ref(&receipt)
+                ),
                 "`{not_an_output}` must not read as an output"
             );
         }
@@ -662,8 +678,13 @@ mod tests {
 
         // FlowUnknown: the reader holds no definition at all.
         assert!(
-            valid_outputs(&catalogue(Vec::new()), FLOW, None, std::slice::from_ref(&receipt))
-                .is_empty(),
+            valid_outputs(
+                &catalogue(Vec::new()),
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt)
+            )
+            .is_empty(),
             "no catalogue, no answer — and no output"
         );
 
@@ -710,8 +731,13 @@ mod tests {
             "the same receipt answers for its own flow"
         );
         assert!(
-            valid_outputs(&cat, &other_uri, Some("open"), std::slice::from_ref(&foreign))
-                .is_empty(),
+            valid_outputs(
+                &cat,
+                &other_uri,
+                Some("open"),
+                std::slice::from_ref(&foreign)
+            )
+            .is_empty(),
             "a state the run did not settle into admits nothing"
         );
     }

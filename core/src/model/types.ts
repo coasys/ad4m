@@ -42,6 +42,19 @@ export type Where = {
   AND?: Where[];
   /** Logical NOT: instance must NOT satisfy the given sub-clause. */
   NOT?: Where;
+  /**
+   * Only instances that are valid outputs of a completed run of `flow`
+   * (optionally: of a run settled into terminal state `state`).
+   *
+   * Decided executor-side by cryptographic receipt verification, not by a
+   * property: an instance passes only when a verified receipt of the flow
+   * names it among the outputs its quorum committed to AND its live content
+   * still matches that commitment. Fail-closed — a forged, unverifiable or
+   * stale receipt excludes the instance — and applied BEFORE `limit`/
+   * `offset`, so a page of N is N valid outputs. Only supported as a
+   * top-level key on the queried class; anywhere else the query errors.
+   */
+  producedByFlow?: { flow: string; state?: string };
   [propertyName: string]: WhereCondition | undefined;
 };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
