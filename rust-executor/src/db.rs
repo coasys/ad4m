@@ -2144,7 +2144,7 @@ impl Ad4mDb {
 
         // Export models
         let models: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name FROM models"
+            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx FROM models"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2159,7 +2159,8 @@ impl Ad4mDb {
                 "local_revision": row.get::<_, Option<String>>(9)?,
                 "local_tokenizer_repo": row.get::<_, Option<String>>(10)?,
                 "local_tokenizer_revision": row.get::<_, Option<String>>(11)?,
-                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?
+                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?,
+                "api_max_num_ctx": row.get::<_, Option<u32>>(13)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
@@ -2585,8 +2586,8 @@ impl Ad4mDb {
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
                         match self.conn.execute(
-                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx) 
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                             params![
                                 model["id"].as_str().unwrap_or(""),
                                 model["name"].as_str().unwrap_or(""),
@@ -2600,7 +2601,11 @@ impl Ad4mDb {
                                 model["local_revision"].as_str(),
                                 model["local_tokenizer_repo"].as_str(),
                                 model["local_tokenizer_revision"].as_str(),
-                                model["local_tokenizer_file_name"].as_str()
+                                model["local_tokenizer_file_name"].as_str(),
+                                // Absent in exports that predate the column.
+                                model["api_max_num_ctx"]
+                                    .as_u64()
+                                    .and_then(|v| u32::try_from(v).ok())
                             ],
                         ) {
                             Ok(_) => result.models.imported += 1,
@@ -4085,16 +4090,17 @@ mod tests {
             )
             .unwrap();
 
-        // Add models
+        // Add models — Ollama with a non-default ceiling, so the export
+        // must carry api_max_num_ctx for it to survive the round trip.
         let model_input = ModelInput {
             name: "Test Model".to_string(),
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
-                base_url: "https://api.example.com".to_string(),
+                base_url: "http://localhost:11434".to_string(),
                 api_key: "test-key".to_string(),
-                model: "gpt-4".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
-                max_num_ctx: None,
+                model: "qwen3:32b".to_string(),
+                api_type: ModelApiType::Ollama.to_string(),
+                max_num_ctx: Some(16_384),
             }),
             local: None,
         };
@@ -4147,6 +4153,9 @@ mod tests {
         let imported_model = models.first().unwrap();
         assert_eq!(imported_model.id, model_id);
         assert_eq!(imported_model.name, "Test Model");
+        let imported_api = imported_model.api.as_ref().unwrap();
+        assert_eq!(imported_api.api_type, ModelApiType::Ollama);
+        assert_eq!(imported_api.max_num_ctx, Some(16_384));
 
         // Verify default model mapping was imported
         let imported_default_model = import_db.get_default_model(ModelType::Llm).unwrap();

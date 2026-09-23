@@ -161,7 +161,9 @@ impl OllamaChat {
             for (key, val) in info {
                 if key.ends_with(".context_length") {
                     if let Some(ctx) = val.as_u64() {
-                        let capped = (ctx as u32).min(self.max_num_ctx);
+                        // Clamp before narrowing: `ctx as u32` wraps a
+                        // context_length above u32::MAX to a tiny window.
+                        let capped = ctx.min(u64::from(self.max_num_ctx)) as u32;
                         log::info!(
                             "Ollama model {model}: context_length={ctx}, using num_ctx={capped}"
                         );
@@ -866,6 +868,36 @@ mod wire_tests {
         let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
         client
             .chat(ChatRequest::new("big-model:latest", turns()))
+            .await
+            .expect("completion succeeds");
+
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn a_context_length_beyond_u32_is_capped_not_wrapped() {
+        let mut server = mockito::Server::new_async().await;
+        // Truncated to u32 this is 1024 — a wrap would request a tiny window.
+        let _show = mock_show(&mut server, (1u64 << 32) + 1024).await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .match_body(mockito::Matcher::PartialJson(json!({
+                "options": {"num_ctx": DEFAULT_MAX_NUM_CTX},
+            })))
+            .with_status(200)
+            .with_body(
+                json!({
+                    "message": {"role": "assistant", "content": "ok"},
+                    "done": true,
+                })
+                .to_string(),
+            )
+            .create_async()
+            .await;
+
+        let client = OllamaChat::new("", Url::parse(&server.url()).unwrap(), None);
+        client
+            .chat(ChatRequest::new("huge-model:latest", turns()))
             .await
             .expect("completion succeeds");
 

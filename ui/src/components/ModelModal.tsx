@@ -82,6 +82,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const apiUrlRef = useRef("https://api.openai.com/v1");
   const apiKeyRef = useRef("");
   const [maxNumCtx, setMaxNumCtx] = useState("");
+  const [maxNumCtxError, setMaxNumCtxError] = useState("");
   const [useCustomTokenizer, setUseCustomTokenizer] = useState(false);
   const [customHfModel, setCustomHfModel] = useState({
     huggingfaceRepo: "",
@@ -118,6 +119,10 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   function resetApiState(url: string) {
     setApiUrl(url);
     apiUrlRef.current = url;
+    // A key entered for one provider must not follow the user to another
+    // provider's endpoint.
+    setApiKey("");
+    apiKeyRef.current = "";
     setApiValid(false);
     setApiModelValid(false);
     setApiModels([]);
@@ -242,9 +247,16 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   async function saveModel() {
     setLoading(true);
     // validate model settings
+    // Optional num_ctx ceiling for Ollama: a positive integer that fits the
+    // executor's u32. Anything else is rejected rather than silently dropped.
+    const cap = maxNumCtx.trim() === "" ? undefined : Number(maxNumCtx);
+    const capValid =
+      cap === undefined || (Number.isSafeInteger(cap) && cap > 0 && cap <= 0xffffffff);
     if (!newModelName) setNewModelNameError(true);
     else if (isRemoteApi && !apiModel) {
       setApiModelError("Model required");
+    } else if (isOllama && !capValid) {
+      setMaxNumCtxError("Must be a whole number between 1 and 4294967295");
     } else {
       // create new model
       const model = {
@@ -274,8 +286,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         };
         // Optional ceiling for num_ctx — how much VRAM the Ollama host may
         // spend on KV cache is the operator's call.
-        const cap = parseInt(maxNumCtx, 10);
-        if (!isNaN(cap) && cap > 0) model.api.maxNumCtx = cap;
+        if (cap !== undefined) model.api.maxNumCtx = cap;
       } else if (newModel.includes("Custom Hugging Face Model")) {
         model.local = {
           fileName: customHfModel.fileName,
@@ -542,9 +553,15 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                       type="number"
                       placeholder="131072"
                       value={maxNumCtx}
-                      onInput={(e: any) => setMaxNumCtx(e.target.value)}
+                      error={!!maxNumCtxError}
+                      errortext={maxNumCtxError}
+                      onInput={(e: any) => {
+                        setMaxNumCtx(e.target.value);
+                        setMaxNumCtxError("");
+                      }}
                       style={{ width: "100%" }}
                     />
+                    {maxNumCtxError && <j-icon name="x-circle" color="danger-500" />}
                   </j-flex>
                 )}
 
