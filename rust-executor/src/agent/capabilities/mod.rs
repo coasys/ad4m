@@ -36,20 +36,9 @@ lazy_static! {
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 
 /// Minimum interval (seconds) between two `users.last_seen` writes for the same
-/// user. [`track_last_seen_from_token`] runs on the authenticated request path,
-/// so it throttles writes to at most one per this period to spare the DB.
-///
-/// **This is a read-across-modules constant, not a local tuning knob.** It is
-/// the worst-case staleness of a continuously-active user's `last_seen` row,
-/// which makes it a lower bound on the hysteresis band any consumer of
-/// `last_seen` must allow before concluding a user has gone away. The
-/// auto-processor supervisor derives its reap window from it — see
-/// [`crate::perspectives::auto_processor::watcher::MANAGED_USER_REAP_WINDOW_S`]
-/// for why raising this number in isolation re-introduces #1070.
-///
-/// Distinct from [`CACHE_TTL_SECONDS`], which happens to share the value 300
-/// but means something else entirely (how long we trust the in-memory cache
-/// before re-reading the DB). Do not merge them.
+/// user, so an active user's `last_seen` can be this stale. The auto-processor
+/// supervisor's online window depends on it
+/// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
 pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
@@ -141,10 +130,7 @@ pub fn user_email_from_token(token: String) -> Option<String> {
 }
 
 /// Update last_seen timestamp for the user from the auth token
-/// This is throttled to at most one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to
-/// reduce database writes. Raising that throttle makes `last_seen` staler for
-/// every active user; read its doc before doing so — the auto-processor
-/// supervisor's reap window is derived from it.
+/// This is throttled to only update once every 5 minutes to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
 pub async fn track_last_seen_from_token(token: String) {
     use crate::db::Ad4mDb;
