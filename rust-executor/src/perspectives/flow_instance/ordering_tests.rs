@@ -110,6 +110,8 @@ fn vouched(uri: &str, votes: &[(&str, &str)]) -> VouchedAtom {
             proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
             proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
             evidence_hash: "seal".to_string(),
+            outputs_hash: None,
+            outputs: Vec::new(),
             votes: votes.clone(),
         },
         eligible_votes: votes,

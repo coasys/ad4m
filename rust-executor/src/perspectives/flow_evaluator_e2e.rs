@@ -174,7 +174,9 @@ impl Fixture {
     }
 
     /// `write_flow_transition_proposal` with the fixture's own DID, instance
-    /// URI and context filled in.
+    /// URI and context filled in. Names `evidence_ids` as the run's outputs,
+    /// as the engine does for a proposal into a terminal state (#1104), so
+    /// a co-signer does not refuse the fixture as uncommitted.
     pub(super) async fn write_proposal(
         &mut self,
         proposal_id: &str,
@@ -194,6 +196,7 @@ impl Fixture {
             to_state,
             evidence_ids,
             evidence_hash,
+            Some(evidence_ids),
             None,
             None,
             &self.ctx,
@@ -416,6 +419,7 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
         &t.to_state,
         &t.evidence_ids,
         &t.evidence_hash,
+        t.outputs.as_deref(),
         None,
         None,
         &f.ctx,
@@ -440,6 +444,22 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
     assert!(
         !by_pred.contains_key("ad4m://flow/rationale"),
         "no rationale was given"
+    );
+
+    // `scoped` is terminal, so the engine names the matched Tasks as the
+    // run's outputs and commits to them (#1104). Stored like `evidence` and
+    // `evidence_hashes`: ids raw, the hash literal-wrapped. That the atom
+    // reads them back is pinned through the real writer in
+    // `propose_commits_to_the_named_outputs_and_refuses_a_missing_one`.
+    use crate::perspectives::flow_instance::atom::outputs_hash;
+    let expected = vec!["ad4m://task/1".to_string(), "ad4m://task/2".to_string()];
+    assert_eq!(t.outputs.as_deref(), Some(&expected[..]));
+    assert_has_target(&by_pred, "ad4m://flow/output", "ad4m://task/1");
+    assert_has_target(&by_pred, "ad4m://flow/output", "ad4m://task/2");
+    assert_has_target(
+        &by_pred,
+        "ad4m://flow/outputs_hash",
+        &literal(&outputs_hash(&expected)),
     );
 }
 

@@ -146,6 +146,7 @@ mod tests {
             ],
             evidence_hash: "abc".into(),
             semantic_check: Some("The scope was agreed on.".into()),
+            outputs: None,
         }
     }
 

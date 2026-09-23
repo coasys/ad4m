@@ -77,6 +77,12 @@ pub struct SatisfiedTransition {
     pub evidence_hash: String,
     /// The target state's `semanticCheck` hint, if it declares one.
     pub semantic_check: Option<String>,
+    /// `Some` exactly when `to_state` is terminal: the nodes the proposer
+    /// names as the run's outputs. The proposal carries them and signs
+    /// their `outputs_hash` next to the evidence seal (#1104); see
+    /// `flow_instance::atom::check_outputs_commitment` for what a voter
+    /// checks.
+    pub outputs: Option<Vec<String>>,
 }
 
 /// One hydrated piece of guard evidence: an instance a `requires` query
@@ -898,6 +904,16 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             match evaluate_requires(perspective, requires, record, acting_did).await {
                 RequiresResult::Satisfied(class_names, evidence) => {
                     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
+                    // The engine has no user to ask what a run produced, so
+                    // into a terminal state it names what the guard matched.
+                    // That is this proposer's choice, not a rule: a receipt
+                    // is checked against the signed commitment, never
+                    // against `requires` (#1104).
+                    let outputs = crate::perspectives::flow_instance::receipt::is_terminal_state(
+                        flow,
+                        &state.name,
+                    )
+                    .then(|| evidence_ids.clone());
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -907,6 +923,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
+                        outputs,
                     })
                 }
                 RequiresResult::Unmet => {}
@@ -1325,6 +1342,7 @@ pub(crate) async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
+        transition.outputs.as_deref(),
         rationale,
         Some(batch_id.clone()),
         context,
@@ -2133,6 +2151,9 @@ mod tests {
                     }],
                 ),
                 semantic_check: Some("Agreed?".into()),
+                // `scoped` is terminal, so the engine names what the guard
+                // matched as the run's outputs (#1104).
+                outputs: Some(vec!["ad4m://task/1".into()]),
             }]
         );
     }
@@ -2334,6 +2355,7 @@ mod tests {
                 evidence: Vec::new(),
                 evidence_hash: "hash".into(),
                 semantic_check: None,
+                outputs: None,
             }
         }
 

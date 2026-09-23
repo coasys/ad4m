@@ -74,6 +74,23 @@ export class FlowTransitionProposal extends Ad4mModel {
   evidenceHashes: string = "";
 
   /**
+   * Nodes the proposer names as the run's outputs. Written only on a
+   * proposal into a terminal state; one link per node, ordering not
+   * significant.
+   */
+  @HasMany({ through: "ad4m://flow/output", datatype: "xsd:string" })
+  outputs: string[] = [];
+
+  /**
+   * SHA-256 (hex) over the sorted, deduplicated `outputs` ids, signed by the
+   * proposer next to the evidence seal. Co-signers recompute it before
+   * voting, and a flow receipt's outputs must hash to it. Empty on a
+   * proposal into a non-terminal state.
+   */
+  @Property({ through: "ad4m://flow/outputs_hash" })
+  outputsHash: string = "";
+
+  /**
    * URI of the `InterpretationRun` node that produced this proposal, when
    * the proposal came from an LLM extraction pass. Absent when a human
    * clicked "propose" in the UI or an external tool wrote the proposal

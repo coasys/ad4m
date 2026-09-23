@@ -26,7 +26,19 @@
 //!    pressing the same button would otherwise never reach quorum. Re-pressing
 //!    it as the *same* agent stays a no-op — the acting DID is already among
 //!    the proposal's votes, and nothing is written.
-//! 5. **A lookup failure is an error, never silence.** The engine pass fails
+//! 5. **Into a terminal state, the caller names the run's outputs** and the
+//!    proposal signs `outputs_hash` over their ids next to the seal (#1104).
+//!    Every named node must exist on this replica — the same check a voter
+//!    runs before co-signing (`atom::check_outputs_commitment`). Naming
+//!    outputs for a non-terminal state is refused: a run does not end there.
+//!    An open proposal on this edge that names *different* outputs is
+//!    neither joined nor twinned: joining would sign outputs the caller did
+//!    not name, and a twin would leave the final edge with two commitments,
+//!    which no receipt can verify. The caller is told to co-sign or reject
+//!    the open one. This sees only proposals the dedup key matches, so a
+//!    twin under a different seal is still possible (see
+//!    `receipt::final_edge_commitment`).
+//! 6. **A lookup failure is an error, never silence.** The engine pass fails
 //!    closed on a transient store error because it retries on the next pass.
 //!    A user's click has no next pass, so the same silence would report a
 //!    lost vote as success.
@@ -48,9 +60,10 @@
 //! behaviour-preserving. Left for the change that owns the engine pass. See
 //! [`proposal_already_exists`](crate::perspectives::flow_evaluator).
 
-use super::accept::accept_flow_proposal;
-use super::atom::TransitionAtom;
+use super::accept::{accept_flow_proposal, nodes_in_graph};
+use super::atom::{normalised_outputs, outputs_hash, OutputsRefusal, TransitionAtom};
 use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -105,11 +118,19 @@ pub struct ProposeOutcome {
 /// - the target state has a `requires` guard that is not currently satisfied
 ///   on this replica (an untranslatable guard collapses into the same
 ///   refusal — it is the disposition a voter would reach too),
+/// - `outputs` is non-empty and `to_state` is not terminal,
+/// - `to_state` is terminal and a node in `outputs` is not in this
+///   replica's graph,
+/// - an open proposal on this edge names different outputs,
 /// - a store lookup fails.
+///
+/// `outputs` is ignored in order and duplicates: the proposal carries the
+/// sorted, deduplicated ids.
 pub async fn propose_flow_transition(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,
     to_state: &str,
+    outputs: &[String],
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<ProposeOutcome> {
@@ -145,6 +166,28 @@ pub async fn propose_flow_transition(
             )
         })?;
 
+    // The outputs commitment (#1104): only a run that ends here produces
+    // anything, and the proposer's own vote passes the same existence check
+    // a co-signer runs.
+    let outputs = if is_terminal_state(flow, to_state) {
+        let named = normalised_outputs(outputs);
+        let present = nodes_in_graph(perspective, &named).await?;
+        if let Some(id) = named.iter().find(|id| !present.contains(*id)) {
+            return Err(anyhow::anyhow!(
+                "a voter would refuse this proposal: {} — no proposal written",
+                OutputsRefusal::OutputNotInGraph { id: id.clone() }
+            ));
+        }
+        Some(named)
+    } else if !outputs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "`{to_state}` is not terminal, so a run does not end there and has no outputs to \
+             name — no proposal written"
+        ));
+    } else {
+        None
+    };
+
     let record_now = FlowInstanceRecord {
         current_state: derived.state.clone(),
         ..record.clone()
@@ -176,7 +219,9 @@ pub async fn propose_flow_transition(
         evidence,
         evidence_hash: evidence_hash_val,
         semantic_check: target_state.semantic_check.clone(),
+        outputs,
     };
+    let committed = transition.outputs.as_deref().map(outputs_hash);
 
     // `?`, not fail-closed: there is no next pass behind a button.
     //
@@ -188,9 +233,17 @@ pub async fn propose_flow_transition(
     let live = find_live_proposals(perspective, &transition).await?;
     let mut already_voted = None;
     let mut joinable = None;
+    let mut other_outputs = Vec::new();
     for uri in &live {
-        match live_proposal_role(perspective, uri, instance_uri, &derived.state, &acting_did)
-            .await?
+        match live_proposal_role(
+            perspective,
+            uri,
+            instance_uri,
+            &derived.state,
+            &acting_did,
+            committed.as_deref(),
+        )
+        .await?
         {
             // Terminal: our vote is already on this edge, so nothing this call
             // could write would add one. Stop — a later candidate can only be
@@ -211,6 +264,9 @@ pub async fn propose_flow_transition(
             LiveProposalRole::Joinable => {
                 joinable.get_or_insert_with(|| uri.clone());
             }
+            // On this edge, committed to other outputs. Neither ours to
+            // sign nor safe to twin; decided after the loop.
+            LiveProposalRole::DifferentOutputs => other_outputs.push(uri.clone()),
             LiveProposalRole::OtherEdge(why) => log::debug!(
                 "propose_flow_transition: {uri} shares the dedup key of \
                  {instance_uri} → {to_state} but {why}; not a candidate for this call"
@@ -241,6 +297,17 @@ pub async fn propose_flow_transition(
         (None, Some(uri)) => {
             let outcomes = accept_flow_proposal(perspective, &uri, context).await?;
             (uri, false, true, outcomes)
+        }
+        // An open proposal on this edge commits to other outputs. A twin
+        // would put two outputs commitments on the final edge, and a receipt
+        // for such a run is refused (`OutputsCommitmentConflict`), so the
+        // disagreement goes back to the caller instead.
+        (None, None) if !other_outputs.is_empty() => {
+            return Err(anyhow::anyhow!(
+                "{instance_uri} → {to_state}: open proposal(s) {} on this edge name different \
+                 outputs; co-sign one or reject it — no proposal written",
+                other_outputs.join(", ")
+            ));
         }
         // Either nothing shares the key, or everything that does belongs to
         // another edge. Both mean this edge has no open proposal to join.
@@ -310,6 +377,10 @@ enum LiveProposalRole {
     AlreadyVoted,
     /// Open on this edge and missing our vote — co-sign it.
     Joinable,
+    /// On this edge, but its outputs commitment is not the one this call
+    /// would write. Checked before [`Self::AlreadyVoted`], so a re-press
+    /// that names new outputs is not reported as a no-op.
+    DifferentOutputs,
     /// Same seal and target state, but not a proposal this call can join.
     /// Carries the reason, for the log.
     OtherEdge(String),
@@ -326,6 +397,7 @@ async fn live_proposal_role(
     instance_uri: &str,
     from_state: &str,
     acting_did: &str,
+    committed: Option<&str>,
 ) -> anyhow::Result<LiveProposalRole> {
     let links = perspective
         .get_links(&LinkQuery {
@@ -347,6 +419,9 @@ async fn live_proposal_role(
             "it leaves `{}`, not `{from_state}`",
             atom.from_state
         )));
+    }
+    if atom.outputs_hash.as_deref() != committed {
+        return Ok(LiveProposalRole::DifferentOutputs);
     }
     if atom.votes.iter().any(|v| v.did == acting_did) {
         return Ok(LiveProposalRole::AlreadyVoted);

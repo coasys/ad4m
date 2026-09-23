@@ -405,9 +405,10 @@ export class PerspectiveClient {
         instanceUri: string,
         toState: string,
         rationale?: string,
+        outputs?: string[],
     ): Promise<FlowProposeResult> {
         return this.#apiClient.call<FlowProposeResult>(
-            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
         )
     }
 

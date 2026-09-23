@@ -455,12 +455,18 @@ export class FlowInstance {
    * How to read the result — fired vs. queued vs. no-op vs. stalled — is
    * documented on {@link FlowProposeResult} itself.
    *
+   * `outputs` names the nodes the run produces, for a transition into a
+   * terminal state: the proposal signs a hash over them, every co-signer
+   * checks it, and a receipt for the run speaks for exactly these nodes.
+   *
    * Throws when `toState` is not reachable from the derived state, when the
    * target state carries a `requires` guard that is not currently satisfied
-   * on this replica, or when the instance is already contested.
+   * on this replica, when the instance is already contested, when `outputs`
+   * is given for a non-terminal state or names a node not in the graph, or
+   * when an open proposal on the same edge names different outputs.
    */
-  async proposeTransition(toState: string, rationale?: string): Promise<FlowProposeResult> {
-    return this.perspective.proposeFlowTransition(this.uri, toState, rationale);
+  async proposeTransition(toState: string, rationale?: string, outputs?: string[]): Promise<FlowProposeResult> {
+    return this.perspective.proposeFlowTransition(this.uri, toState, rationale, outputs);
   }
 
   async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {

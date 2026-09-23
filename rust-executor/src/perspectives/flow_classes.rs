@@ -44,9 +44,8 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 
 /// Idempotently register both hard-wired flow-runtime subject classes into the
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
-/// No `required_path` guard yet — the shapes are stable at this point; add one
-/// when a future property forces a re-register.
-///
+/// `FlowTransitionProposal` carries a `required_path` guard since the outputs
+/// commitment was added to it (#1104); `FlowInstance` has none yet.
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -60,12 +59,16 @@ pub(crate) async fn ensure_flow_model_classes(
         context,
     )
     .await?;
+    // `outputs_hash` is the newest path (#1104). A perspective that
+    // registered the shape before it would silently drop the outputs a
+    // proposal into a terminal state writes, so its presence forces a
+    // re-register.
     ensure_subject_class(
         perspective,
         FLOW_TRANSITION_PROPOSAL_CLASS,
         FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
         FLOW_TRANSITION_PROPOSAL_SDNA,
-        None,
+        Some(crate::perspectives::flow_instance::atom::OUTPUTS_HASH_PREDICATE),
         context,
     )
     .await
@@ -177,6 +180,13 @@ pub(crate) async fn mint_flow_instance(
 /// `rationale` is written only when `Some` and non-empty. `runUri` is not
 /// written; engine-emitted proposals do not track back to a run today.
 ///
+/// `outputs` is `Some` exactly for a proposal into a terminal state: the
+/// nodes the proposer names as the run's outputs. The writer stores each id
+/// as an `outputs` link and signs `outputsHash` =
+/// [`outputs_hash`](crate::perspectives::flow_instance::atom::outputs_hash)
+/// over them, so the id list and its hash cannot disagree on an honest
+/// write. `Some(&[])` commits to "no outputs"; `None` writes neither.
+///
 /// Property names must match the SDNA `name` fields exactly. A mismatched
 /// key is silently dropped by `create_subject`; the alignment test below
 /// locks the mapping.
@@ -190,6 +200,7 @@ pub(crate) async fn write_flow_transition_proposal(
     to_state: &str,
     evidence_ids: &[String],
     evidence_hash: &str,
+    outputs: Option<&[String]>,
     rationale: Option<&str>,
     batch_id: Option<String>,
     context: &AgentContext,
@@ -213,6 +224,15 @@ pub(crate) async fn write_flow_transition_proposal(
 
     if !evidence_ids.is_empty() {
         values["evidence"] = serde_json::json!(evidence_ids);
+    }
+
+    if let Some(outputs) = outputs {
+        let outputs = crate::perspectives::flow_instance::atom::normalised_outputs(outputs);
+        values["outputsHash"] =
+            crate::perspectives::flow_instance::atom::outputs_hash(&outputs).into();
+        if !outputs.is_empty() {
+            values["outputs"] = serde_json::json!(outputs);
+        }
     }
 
     perspective
@@ -514,6 +534,8 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
+            "outputs",
+            "outputsHash",
             // Optional LLM-attribution field. Same alignment guard as
             // the required scalars — a rename in the SDNA that did not
             // land here would silently drop the rationale from the
@@ -529,37 +551,65 @@ mod tests {
     }
 
     #[test]
-    fn evidence_property_is_a_collection_with_add_link_setter() {
-        // The writer passes `evidence` as a JSON array, and
+    fn evidence_and_outputs_properties_are_collections_with_add_link_setters() {
+        // The writer passes `evidence` and `outputs` as JSON arrays, and
         // `create_subject` only expands an array into per-element
         // `addLink`s when every setter action is `addLink` — on a
         // `setSingleTarget` setter the array would be stored as one
         // `literal:json:` blob instead. Locking the shape here so a
         // well-meaning SDNA edit that switches to `setSingleTarget`
         // (which would type-check) breaks this test instead of silently
-        // changing the on-graph representation of evidence at runtime.
+        // changing the on-graph representation at runtime. For `outputs`
+        // that would also break the atom reader, which reads one
+        // `ad4m://flow/output` link per named node.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
-        let evidence = v["properties"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"].as_str() == Some("evidence"))
-            .expect("evidence property must exist");
+        for name in ["evidence", "outputs"] {
+            let property = v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} property must exist"));
+            assert_eq!(
+                property["collection"].as_bool(),
+                Some(true),
+                "{name} must be declared `collection: true`",
+            );
+            let setter_actions: Vec<&str> = property["setter"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must declare a setter array"))
+                .iter()
+                .filter_map(|s| s["action"].as_str())
+                .collect();
+            assert_eq!(
+                setter_actions,
+                vec!["addLink"],
+                "{name} collection setter must be `addLink` — `setSingleTarget` would clobber",
+            );
+        }
+    }
+
+    #[test]
+    fn outputs_properties_write_the_predicates_the_atom_reads() {
+        // The writer goes through the SDNA; the atom reads raw predicates.
+        // If the two drift, a proposal into a terminal state is written with
+        // outputs no voter can see, and every co-sign refuses it as
+        // `Uncommitted`.
+        use crate::perspectives::flow_instance::atom::{OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE};
+        let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
+        let path_of = |name: &str| {
+            v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .and_then(|p| p["path"].as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(path_of("outputs").as_deref(), Some(OUTPUT_PREDICATE));
         assert_eq!(
-            evidence["collection"].as_bool(),
-            Some(true),
-            "evidence must be declared `collection: true`",
-        );
-        let setter_actions: Vec<&str> = evidence["setter"]
-            .as_array()
-            .expect("evidence must declare a setter array")
-            .iter()
-            .filter_map(|s| s["action"].as_str())
-            .collect();
-        assert_eq!(
-            setter_actions,
-            vec!["addLink"],
-            "evidence collection setter must be `addLink` — `setSingleTarget` would clobber",
+            path_of("outputsHash").as_deref(),
+            Some(OUTPUTS_HASH_PREDICATE)
         );
     }
 

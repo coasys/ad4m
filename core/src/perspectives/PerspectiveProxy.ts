@@ -869,8 +869,14 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
-    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowProposeResult> {
-        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale)
+    /**
+     * `outputs` names the nodes a run produces, for a transition into a
+     * terminal state. The proposal signs a hash over them, and a receipt for
+     * the run can only speak for exactly these nodes. Naming outputs for a
+     * non-terminal state is refused.
+     */
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: string[]): Promise<FlowProposeResult> {
+        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
     }
 
     async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {

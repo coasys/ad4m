@@ -53,6 +53,16 @@ pub const TO_STATE_PREDICATE: &str = "ad4m://flow/to_state";
 pub const PROPOSER_PREDICATE: &str = "ad4m://flow/proposer";
 /// Proposal → the evidence seal computed at mint. `literal:string:`-encoded.
 pub const EVIDENCE_HASHES_PREDICATE: &str = "ad4m://flow/evidence_hashes";
+/// Proposal → [`outputs_hash`] over the nodes the proposer names as the run's
+/// outputs. Written only on a proposal **into a terminal state**, next to the
+/// evidence seal. `literal:string:`-encoded. Every voter recomputes it from
+/// the [`OUTPUT_PREDICATE`] links before co-signing (`super::accept`), and a
+/// receipt's `outputs` must hash to it (`super::verify`, #1104).
+pub const OUTPUTS_HASH_PREDICATE: &str = "ad4m://flow/outputs_hash";
+/// Proposal → one node the proposer names as an output of the run. One link
+/// per node. Only the proposer's own signed links count, like every other
+/// field of an atom.
+pub const OUTPUT_PREDICATE: &str = "ad4m://flow/output";
 /// Proposal → a voting DID. A vote counts only when the link's author IS the
 /// DID it names, with a valid signature (see [`valid_votes`]).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
@@ -105,9 +115,125 @@ pub struct TransitionAtom {
     /// The fold never re-runs the guard behind it; every voter checked the
     /// seal on their own replica before signing (`super::accept`).
     pub evidence_hash: String,
+    /// The proposer's [`OUTPUTS_HASH_PREDICATE`] value. `None` when the
+    /// proposer signed none, which is correct for a proposal into a
+    /// non-terminal state and a refusal reason for one into a terminal state
+    /// ([`check_outputs_commitment`]).
+    pub outputs_hash: Option<String>,
+    /// The nodes the proposer named with [`OUTPUT_PREDICATE`], sorted and
+    /// deduplicated. What a voter re-hashes and checks against
+    /// `outputs_hash`; not read by the fold or by `verify_receipt`.
+    pub outputs: Vec<String>,
     /// The proposer's own vote plus every self-authored `acceptedBy`,
     /// one per DID, earliest first.
     pub votes: Vec<Vote>,
+}
+
+/// The one definition of a run's outputs commitment: SHA-256, hex, over the
+/// sorted and deduplicated node ids, **ids only** (a node's content is not
+/// hashed; the evidence seal covers content). Order and duplicates in `ids`
+/// do not change the result.
+///
+/// The ids are framed as a JSON array behind a version tag, so no two
+/// distinct id lists share an encoding, and no evidence seal can be read as
+/// an outputs hash.
+pub fn outputs_hash(ids: &[String]) -> String {
+    use sha2::{Digest, Sha256};
+    let ids = normalised_outputs(ids);
+    let framed = serde_json::to_string(&ids).expect("a list of strings serialises");
+    hex::encode(Sha256::digest(
+        format!("ad4m-flow-outputs/v1\n{framed}").as_bytes(),
+    ))
+}
+
+/// `ids` sorted and deduplicated: the form a receipt carries and
+/// [`outputs_hash`] hashes.
+pub fn normalised_outputs(ids: &[String]) -> Vec<String> {
+    let mut ids = ids.to_vec();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+/// Why a voter refuses to co-sign a proposal into a terminal state. Each
+/// reason is its own variant so a client and a test can tell them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputsRefusal {
+    /// The proposal enters a terminal state but its proposer signed no
+    /// [`OUTPUTS_HASH_PREDICATE`]. Nothing would bind a receipt for the run
+    /// to any node, so co-signing it would complete a run no receipt can
+    /// speak for.
+    Uncommitted,
+    /// The proposer's signed `outputs_hash` is not the hash of the output
+    /// ids the proposer named.
+    HashMismatch {
+        /// The ids named by the proposer's [`OUTPUT_PREDICATE`] links.
+        named: Vec<String>,
+        /// `outputs_hash` as the proposer signed it.
+        committed: String,
+        /// [`outputs_hash`] of `named`, as this replica computes it.
+        recomputed: String,
+    },
+    /// A named output is not a node in this replica's graph.
+    OutputNotInGraph { id: String },
+}
+
+impl std::fmt::Display for OutputsRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Uncommitted => write!(
+                f,
+                "it enters a terminal state but carries no `{OUTPUTS_HASH_PREDICATE}`, so no \
+                 receipt could bind the run to any output"
+            ),
+            Self::HashMismatch {
+                named,
+                committed,
+                recomputed,
+            } => write!(
+                f,
+                "its `{OUTPUTS_HASH_PREDICATE}` is `{committed}`, but the outputs it names \
+                 {named:?} hash to `{recomputed}`"
+            ),
+            Self::OutputNotInGraph { id } => write!(
+                f,
+                "it names `{id}` as an output, and that node is not in this replica's graph"
+            ),
+        }
+    }
+}
+
+/// The voter's outputs check, pure. Run by `super::accept` before co-signing
+/// and by `super::propose` before the proposer's own vote, so both sides of a
+/// vote apply one rule.
+///
+/// Only a proposal into a terminal state is checked (`terminal`); anywhere
+/// else a run does not end and there is nothing to bind. `in_graph` answers
+/// whether a node exists on this replica. Checks in order: a commitment is
+/// present, it hashes the named ids, and every named id exists.
+pub fn check_outputs_commitment(
+    atom: &TransitionAtom,
+    terminal: bool,
+    in_graph: impl Fn(&str) -> bool,
+) -> Result<(), OutputsRefusal> {
+    if !terminal {
+        return Ok(());
+    }
+    let Some(committed) = &atom.outputs_hash else {
+        return Err(OutputsRefusal::Uncommitted);
+    };
+    let recomputed = outputs_hash(&atom.outputs);
+    if &recomputed != committed {
+        return Err(OutputsRefusal::HashMismatch {
+            named: atom.outputs.clone(),
+            committed: committed.clone(),
+            recomputed,
+        });
+    }
+    if let Some(id) = atom.outputs.iter().find(|id| !in_graph(id)) {
+        return Err(OutputsRefusal::OutputNotInGraph { id: id.clone() });
+    }
+    Ok(())
 }
 
 /// Why a proposal is not an atom. Logged and tested; never acted on by
@@ -327,6 +453,14 @@ impl TransitionAtom {
         if evidence_hash.is_empty() {
             return Err(AtomRejection::EmptySeal);
         }
+        // Optional, because only a proposal into a terminal state carries
+        // one. Two distinct proposer values are still a rejection: "pick one"
+        // would let the proposer show different voters different outputs.
+        let outputs_hash = match unique_field(links, OUTPUTS_HASH_PREDICATE, &proposer) {
+            Ok(hash) => Some(hash),
+            Err(AtomRejection::MissingField(_)) => None,
+            Err(other) => return Err(other),
+        };
         let proposed_at = earliest_proposer_timestamp(links, &proposer)
             .ok_or(AtomRejection::NoParseableTimestamp)?;
         Ok(TransitionAtom {
@@ -334,11 +468,25 @@ impl TransitionAtom {
             from_state: unique_field(links, FROM_STATE_PREDICATE, &proposer)?,
             to_state: unique_field(links, TO_STATE_PREDICATE, &proposer)?,
             votes: valid_votes(links, &proposer, &proposed_at),
+            outputs: named_outputs(links, &proposer),
+            outputs_hash,
             proposed_at,
             proposer,
             evidence_hash,
         })
     }
+}
+
+/// The nodes `proposer` named with [`OUTPUT_PREDICATE`], sorted and
+/// deduplicated. A third party's `output` link is invisible here, exactly as
+/// in [`unique_field`], so nobody can add an output to someone else's
+/// proposal.
+fn named_outputs(links: &[DecoratedLinkExpression], proposer: &str) -> Vec<String> {
+    let ids: Vec<String> = links_on(links, OUTPUT_PREDICATE)
+        .filter(|l| signed_by(l, proposer))
+        .map(|l| field_value(&l.data.target))
+        .collect();
+    normalised_outputs(&ids)
 }
 
 /// Earliest timestamp among the proposer's own signed links, by parsed
@@ -637,6 +785,44 @@ pub(super) mod fixtures {
         ]
     }
 
+    /// [`signed_proposal`] into a terminal state: the five links plus one
+    /// signed `output` link per node in `outputs` and a signed
+    /// `outputs_hash` equal to `committed`. Pass
+    /// `&outputs_hash(outputs)` for an honest proposal; anything else builds
+    /// a proposal whose commitment does not match its named outputs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn signed_terminal_proposal(
+        proposal_uri: &str,
+        proposer_name: &str,
+        from: &str,
+        to: &str,
+        seal: &str,
+        outputs: &[&str],
+        committed: &str,
+        at: &str,
+    ) -> Vec<DecoratedLinkExpression> {
+        let mut links = signed_proposal(proposal_uri, proposer_name, from, to, seal, at);
+        let signed = |predicate: &str, target: &str| {
+            signed_link(
+                proposal_uri,
+                predicate,
+                target,
+                proposer_name,
+                true,
+                None,
+                at,
+            )
+        };
+        links.extend(outputs.iter().map(|id| signed(OUTPUT_PREDICATE, id)));
+        links.push(signed(OUTPUTS_HASH_PREDICATE, &literal(committed)));
+        links
+    }
+
+    /// [`outputs_hash`] over `&str` ids, for fixtures.
+    pub fn hash_of(ids: &[&str]) -> String {
+        outputs_hash(&ids.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+    }
+
     /// A genuinely signed `proposal --acceptedBy--> voter` co-signature.
     pub fn signed_vote(proposal_uri: &str, voter_name: &str, at: &str) -> DecoratedLinkExpression {
         signed_link(
@@ -890,6 +1076,132 @@ mod tests {
             !marked_fired(&[other_value]),
             "only the `fired` value marks a proposal fired"
         );
+    }
+
+    // ---- the outputs commitment (#1104) --------------------------------------
+
+    const D1: &str = "ad4m://deliverable/d1";
+    const D2: &str = "ad4m://deliverable/d2";
+    const ATTACKER: &str = "ad4m://attacker/node";
+
+    fn with_outputs(outputs: &[&str], committed: &str) -> Vec<DecoratedLinkExpression> {
+        let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        links.extend(
+            outputs
+                .iter()
+                .map(|id| link(OUTPUT_PREDICATE, id, ALICE, true, T1)),
+        );
+        links.push(link(
+            OUTPUTS_HASH_PREDICATE,
+            &literal(committed),
+            ALICE,
+            true,
+            T1,
+        ));
+        links
+    }
+
+    /// The hash is over the id **set**: a proposer and a receipt that list the
+    /// same nodes in another order, or repeat one, commit to the same thing.
+    /// Different sets never share a hash, and neither does the empty set with
+    /// a set of one.
+    ///
+    /// Red if `outputs_hash` drops the sort or the dedup, or hashes only the
+    /// first id.
+    #[test]
+    fn outputs_hash_is_over_the_sorted_deduplicated_ids() {
+        assert_eq!(hash_of(&[D2, D1]), hash_of(&[D1, D2]));
+        assert_eq!(hash_of(&[D1, D1, D2]), hash_of(&[D1, D2]));
+        assert_ne!(hash_of(&[D1]), hash_of(&[D1, D2]));
+        assert_ne!(hash_of(&[D1]), hash_of(&[ATTACKER]));
+        assert_ne!(hash_of(&[]), hash_of(&[D1]));
+    }
+
+    /// The atom reads the proposer's named outputs and commitment, and only
+    /// the proposer's: Mallory's `output` link on Alice's proposal names
+    /// nothing. Two distinct commitments by Alice reject the atom, the same
+    /// way two `to_state` values do.
+    ///
+    /// Red if `named_outputs` drops its `signed_by` filter (Mallory's node
+    /// becomes an output), or if an ambiguous `outputs_hash` is read as
+    /// `None` rather than rejected.
+    #[test]
+    fn an_atom_reads_only_the_proposers_named_outputs_and_commitment() {
+        let mut links = with_outputs(&[D2, D1], &hash_of(&[D1, D2]));
+        links.push(link(OUTPUT_PREDICATE, ATTACKER, MALLORY, true, T2));
+        let atom = atom_of(&links).expect("atom");
+        assert_eq!(atom.outputs, vec![D1.to_string(), D2.to_string()]);
+        assert_eq!(atom.outputs_hash, Some(hash_of(&[D1, D2])));
+
+        let plain = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1)).expect("atom");
+        assert_eq!(plain.outputs_hash, None, "no commitment is not a rejection");
+        assert!(plain.outputs.is_empty());
+
+        links.push(link(
+            OUTPUTS_HASH_PREDICATE,
+            &literal(&hash_of(&[ATTACKER])),
+            ALICE,
+            true,
+            T2,
+        ));
+        assert_eq!(
+            atom_of(&links),
+            Err(AtomRejection::AmbiguousField(OUTPUTS_HASH_PREDICATE))
+        );
+    }
+
+    /// **Required test (b).** The proposer names d1 and signs a hash over d1
+    /// and the attacker's node. A voter recomputes the hash from the named
+    /// ids and refuses.
+    ///
+    /// Red if `check_outputs_commitment` skips the recompute, or compares the
+    /// commitment against itself.
+    #[test]
+    fn a_voter_refuses_an_outputs_hash_that_does_not_match_the_named_outputs() {
+        let atom = atom_of(&with_outputs(&[D1], &hash_of(&[D1, ATTACKER]))).expect("atom");
+        assert_eq!(
+            check_outputs_commitment(&atom, true, |_| true),
+            Err(OutputsRefusal::HashMismatch {
+                named: vec![D1.to_string()],
+                committed: hash_of(&[D1, ATTACKER]),
+                recomputed: hash_of(&[D1]),
+            })
+        );
+        let honest = atom_of(&with_outputs(&[D1], &hash_of(&[D1]))).expect("atom");
+        assert_eq!(
+            check_outputs_commitment(&honest, true, |_| true),
+            Ok(()),
+            "control: the matching commitment passes"
+        );
+    }
+
+    /// **Required test (c).** The commitment matches, but one named output is
+    /// not a node on this replica. The voter refuses and names it.
+    ///
+    /// Red if `check_outputs_commitment` skips the `in_graph` check.
+    #[test]
+    fn a_voter_refuses_a_named_output_that_is_not_in_the_graph() {
+        let atom = atom_of(&with_outputs(&[D1, D2], &hash_of(&[D1, D2]))).expect("atom");
+        assert_eq!(
+            check_outputs_commitment(&atom, true, |id| id == D1),
+            Err(OutputsRefusal::OutputNotInGraph { id: D2.to_string() })
+        );
+    }
+
+    /// A terminal proposal with no commitment is refused as `Uncommitted`.
+    /// A non-terminal proposal is not checked at all: a run that does not end
+    /// there has nothing to bind.
+    ///
+    /// Red if a missing commitment is treated as the empty set (it would pass
+    /// as "no outputs"), or if non-terminal proposals are checked.
+    #[test]
+    fn only_a_terminal_proposal_must_commit_to_its_outputs() {
+        let plain = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1)).expect("atom");
+        assert_eq!(
+            check_outputs_commitment(&plain, true, |_| true),
+            Err(OutputsRefusal::Uncommitted)
+        );
+        assert_eq!(check_outputs_commitment(&plain, false, |_| false), Ok(()));
     }
 
     /// `only_a_local_fired_mark_is_a_mark` rests on a sentence that stopped
