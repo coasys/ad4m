@@ -1226,8 +1226,13 @@ mod tests {
             derived.state, "open",
             "an uncommitted terminal proposal settles nothing (#1108/#1118)"
         );
-        let err = FlowReceipt::mint(&two_state_flow(), rs.clone(), outs(&[OUTPUT]), vec![delivered()])
-            .expect_err("no commitment, no settle, no receipt");
+        let err = FlowReceipt::mint(
+            &two_state_flow(),
+            rs.clone(),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect_err("no commitment, no settle, no receipt");
         assert!(
             format!("{err:#}").contains("can still transition out"),
             "got: {err:#}"
@@ -1544,7 +1549,14 @@ mod tests {
     #[test]
     fn an_early_uncommitted_terminal_proposal_cannot_poison_the_committed_quorum() {
         let flow = n2_terminal_flow();
-        let mallory = proposal("p-mallory", "mallory", "open", "done", &delivered().seal, T1);
+        let mallory = proposal(
+            "p-mallory",
+            "mallory",
+            "open",
+            "done",
+            &delivered().seal,
+            T1,
+        );
         let mut alice = committing(
             "p-alice",
             ALICE,
@@ -1560,9 +1572,8 @@ mod tests {
 
         let verdict = mint_and_verify(flow, rs, outs(&[OUTPUT]))
             .expect("Alice + Bob reach quorum inside the committed group and the run mints");
-        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified {
-            voters, ..
-        } = &verdict
+        let crate::perspectives::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } =
+            &verdict
         else {
             panic!("expected Verified, got: {verdict}");
         };
@@ -1615,7 +1626,13 @@ mod tests {
             .expect("the committed quorum mints past the one-vote rival");
         assert!(verdict.is_verified(), "got: {verdict}");
         assert!(
-            FlowReceipt::mint(&n2_terminal_flow(), rs, outs(&[ATTACKER]), vec![delivered()]).is_err(),
+            FlowReceipt::mint(
+                &n2_terminal_flow(),
+                rs,
+                outs(&[ATTACKER]),
+                vec![delivered()]
+            )
+            .is_err(),
             "and the rival's outputs still bind nothing"
         );
     }
@@ -1639,7 +1656,10 @@ mod tests {
                 at,
             )
         };
-        let rs = read_set("open", vec![twin("twin-a", ALICE, T1), twin("twin-b", BOB, T2)]);
+        let rs = read_set(
+            "open",
+            vec![twin("twin-a", ALICE, T1), twin("twin-b", BOB, T2)],
+        );
         let verdict = mint_and_verify(flow, rs, outs(&[OUTPUT]))
             .expect("two twins with one commitment are one group and reach quorum");
         assert!(verdict.is_verified(), "got: {verdict}");

@@ -545,11 +545,16 @@ fn settle_edge(
         .into_values()
         .filter_map(|group| settle_pool(from, to, after, &rule, &group))
         .min_by(|a, b| {
-            (parse_link_timestamp(&a.settled_at), &a.settled_at, &a.atom_uris).cmp(&(
-                parse_link_timestamp(&b.settled_at),
-                &b.settled_at,
-                &b.atom_uris,
-            ))
+            (
+                parse_link_timestamp(&a.settled_at),
+                &a.settled_at,
+                &a.atom_uris,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.settled_at),
+                    &b.settled_at,
+                    &b.atom_uris,
+                ))
         })
 }
 

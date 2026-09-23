@@ -842,7 +842,13 @@ pub(super) mod fixtures {
                 true,
                 at,
             ),
-            link(PROPOSAL_NONCE_PREDICATE, &literal(NONCE), proposer, true, at),
+            link(
+                PROPOSAL_NONCE_PREDICATE,
+                &literal(NONCE),
+                proposer,
+                true,
+                at,
+            ),
         ]
     }
 
@@ -982,8 +988,9 @@ pub(super) mod fixtures {
         at: &str,
     ) -> (String, Vec<DecoratedLinkExpression>) {
         let uri = proposal_uri(INSTANCE, from, to, seal, None, did_of(proposer_name), nonce);
-        let signed =
-            |predicate: &str, target: &str| signed_link(&uri, predicate, target, proposer_name, true, None, at);
+        let signed = |predicate: &str, target: &str| {
+            signed_link(&uri, predicate, target, proposer_name, true, None, at)
+        };
         let links = vec![
             signed(PROPOSER_PREDICATE, did_of(proposer_name)),
             signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
@@ -1021,8 +1028,17 @@ pub(super) mod fixtures {
             did_of(proposer_name),
             nonce,
         );
-        let links =
-            signed_terminal_links_at(&uri, proposer_name, from, to, seal, outputs, committed, nonce, at);
+        let links = signed_terminal_links_at(
+            &uri,
+            proposer_name,
+            from,
+            to,
+            seal,
+            outputs,
+            committed,
+            nonce,
+            at,
+        );
         (uri, links)
     }
 
@@ -1044,8 +1060,9 @@ pub(super) mod fixtures {
         nonce: &str,
         at: &str,
     ) -> Vec<DecoratedLinkExpression> {
-        let signed =
-            |predicate: &str, target: &str| signed_link(uri, predicate, target, proposer_name, true, None, at);
+        let signed = |predicate: &str, target: &str| {
+            signed_link(uri, predicate, target, proposer_name, true, None, at)
+        };
         let mut links = vec![
             signed(PROPOSER_PREDICATE, did_of(proposer_name)),
             signed(FLOW_INSTANCE_PREDICATE, INSTANCE),

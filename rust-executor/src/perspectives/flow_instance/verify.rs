@@ -639,7 +639,15 @@ mod tests {
         to: &str,
         at: &str,
     ) -> (String, Vec<DecoratedLinkExpression>) {
-        committed_links(nonce, proposer, from, to, &[OUTPUT], &hash_of(&[OUTPUT]), at)
+        committed_links(
+            nonce,
+            proposer,
+            from,
+            to,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            at,
+        )
     }
 
     /// A proposal into terminal `to` naming `outputs` and signing
@@ -1603,8 +1611,15 @@ mod tests {
     fn the_commitment_is_over_the_outputs_in_any_order_and_nothing_else() {
         let flow = two_state_flow();
         let three = [OUTPUT, "ad4m://deliverable/d2", "ad4m://deliverable/d3"];
-        let (uri, links) =
-            committed_links("ad4m://p/1", ALICE, "open", "done", &three, &hash_of(&three), T1);
+        let (uri, links) = committed_links(
+            "ad4m://p/1",
+            ALICE,
+            "open",
+            "done",
+            &three,
+            &hash_of(&three),
+            T1,
+        );
         let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         let receipt = FlowReceipt::mint(&flow, rs, outs(&three), vec![delivered()]).expect("mints");
         let reader = catalogue(vec![flow]);
@@ -2002,10 +2017,9 @@ mod tests {
             ]),
         );
         let twin = |nonce: &str, proposer: &str, at: &str| {
-            let (uri, links) =
-                crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
-                    nonce, proposer, "open", "doing", "seal-1", at,
-                );
+            let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+                nonce, proposer, "open", "doing", "seal-1", at,
+            );
             ProposalLinks { uri, links }
         };
         let rs = read_set(

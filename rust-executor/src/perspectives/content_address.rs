@@ -117,7 +117,10 @@ mod tests {
     /// lists whose concatenation agrees still address differently.
     #[test]
     fn field_boundaries_are_framed() {
-        assert_ne!(addr(&[Some("ab"), Some("c")]), addr(&[Some("a"), Some("bc")]));
+        assert_ne!(
+            addr(&[Some("ab"), Some("c")]),
+            addr(&[Some("a"), Some("bc")])
+        );
     }
 
     /// Domain separation against the existing flow hashes: the same strings
