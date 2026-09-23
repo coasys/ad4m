@@ -95,7 +95,10 @@ pub async fn accept_flow_proposal(
         &atom.proposer,
     )
     .await?;
-    if recomputed.as_deref() != Some(atom.evidence_hash.as_str()) {
+    // EvidenceSeal::hash() returns None for Unmet (guard not satisfied / state
+    // gone). Sealed(h) and NoGuard both produce a well-defined hash, so they
+    // can be compared against the proposal's stored seal.
+    if recomputed.hash().as_deref() != Some(atom.evidence_hash.as_str()) {
         return Err(anyhow::anyhow!(
             "proposal {proposal_uri} cites evidence this replica cannot reproduce — refusing to co-sign; the proposal is left untouched"
         ));

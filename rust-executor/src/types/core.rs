@@ -190,6 +190,23 @@ impl LinkExpression {
             status: input.status,
         }
     }
+
+    /// Derive the signature verdict for this link — the same recipe as
+    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form
+    /// whose proof carries no verdict field at all. Code that hands links
+    /// across a trust boundary carries `LinkExpression` precisely so a
+    /// verdict cannot travel with them; the receiving side calls this instead
+    /// of believing anyone. Normalizing `data` first is not optional: the
+    /// signature was produced over the normalized link.
+    pub fn compute_proof_valid(&self) -> bool {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        verify_or_false(&link_expr, "LinkExpression::compute_proof_valid")
+    }
 }
 
 impl From<LinkExpression> for Expression<Link> {
