@@ -81,6 +81,9 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const [apiModels, setApiModels] = useState<string[]>([]);
   const apiUrlRef = useRef("https://api.openai.com/v1");
   const apiKeyRef = useRef("");
+  // Bumped whenever provider, URL or key changes, so an API check still in
+  // flight for the old configuration cannot apply its result to the new one.
+  const apiCheckRef = useRef(0);
   const [maxNumCtx, setMaxNumCtx] = useState("");
   const [maxNumCtxError, setMaxNumCtxError] = useState("");
   const [useCustomTokenizer, setUseCustomTokenizer] = useState(false);
@@ -116,6 +119,11 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   const isOllama = newModel.includes("Ollama API");
   const isRemoteApi = isExternalApi || isAnthropic || isOllama;
 
+  function invalidateApiCheck() {
+    apiCheckRef.current += 1;
+    setLoading(false);
+  }
+
   function resetApiState(url: string) {
     setApiUrl(url);
     apiUrlRef.current = url;
@@ -135,6 +143,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
   // Check URL/key and list models via the executor, for the API types whose
   // native endpoints the browser cannot (or should not) talk to directly.
   async function checkApiViaExecutor(apiType: string) {
+    const check = ++apiCheckRef.current;
     setLoading(true);
     setApiKeyError("");
     setApiUrlError("");
@@ -144,21 +153,25 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         apiKeyRef.current,
         apiType
       );
+      if (check !== apiCheckRef.current) return;
       setApiValid(true);
       setApiModels(models);
       setApiModel("");
     } catch (e: any) {
+      if (check !== apiCheckRef.current) return;
       setApiValid(false);
       setApiModels([]);
       setApiModel("");
       const message = `${e?.message || e}`;
-      if (/401|403|key/i.test(message)) setApiKeyError(message);
+      // The Ollama view has no key field, so its errors go under the URL.
+      if (apiType !== "OLLAMA" && /401|403|key/i.test(message)) setApiKeyError(message);
       else setApiUrlError(message);
     }
     setLoading(false);
   }
 
   async function checkApi() {
+    const check = ++apiCheckRef.current;
     setLoading(true);
     setApiKeyError("");
     setApiUrlError("");
@@ -171,6 +184,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
           "Content-Type": "application/json",
         },
       });
+      if (check !== apiCheckRef.current) return;
       const { ok, status, statusText } = response;
       if (ok) valid = true;
       else {
@@ -178,6 +192,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         setApiKeyError(status === 401 ? "Invalid key" : statusText);
       }
     } catch {
+      if (check !== apiCheckRef.current) return;
       // url invalid
       setApiUrlError("Error connecting to API");
     }
@@ -198,6 +213,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
         });
         if (response.ok) {
           const body = await response.json();
+          if (check !== apiCheckRef.current) return;
           const models = body.data.map((e: any) => e.id);
           setApiModels(models);
           if (apiUrlRef.current === "https://api.openai.com/v1") setApiModel("gpt-4o");
@@ -207,7 +223,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
       setApiModels([]);
       setApiModel("");
     }
-    setLoading(false);
+    if (check === apiCheckRef.current) setLoading(false);
   }
 
   async function checkModel() {
@@ -447,6 +463,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                     <j-menu-item
                       selected={newModel === model}
                       onClick={() => {
+                        invalidateApiCheck();
                         setNewModel(model);
                         if (model.includes("External API"))
                           resetApiState("https://api.openai.com/v1");
@@ -470,6 +487,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                   <j-flex a="center" gap="400">
                     <j-button
                       onClick={() => {
+                        invalidateApiCheck();
                         setApiUrl("https://api.openai.com/v1");
                         apiUrlRef.current = "https://api.openai.com/v1";
                         setApiValid(false);
@@ -482,6 +500,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                     </j-button>
                     <j-button
                       onClick={() => {
+                        invalidateApiCheck();
                         setApiUrl("http://localhost:11434/v1");
                         apiUrlRef.current = "http://localhost:11434/v1";
                         setApiValid(false);
@@ -506,6 +525,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                     error={!!apiUrlError}
                     errortext={apiUrlError}
                     onInput={(e: any) => {
+                      invalidateApiCheck();
                       setApiUrl(e.target.value);
                       apiUrlRef.current = e.target.value;
                       setApiValid(false);
@@ -530,6 +550,7 @@ export default function ModelModal(props: { close: () => void; oldModel?: any })
                       error={!!apiKeyError}
                       errortext={apiKeyError}
                       onInput={(e: any) => {
+                        invalidateApiCheck();
                         setApiKey(e.target.value);
                         apiKeyRef.current = e.target.value;
                         setApiValid(false);

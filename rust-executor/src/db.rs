@@ -2585,6 +2585,27 @@ impl Ad4mDb {
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
+                        // Missing or null in exports that predate the column;
+                        // a present value must be a usable num_ctx ceiling.
+                        let max_num_ctx = match &model["api_max_num_ctx"] {
+                            serde_json::Value::Null => None,
+                            v => match v.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                                Some(ctx) if ctx > 0 => Some(ctx),
+                                _ => {
+                                    result.models.failed += 1;
+                                    result.models.errors.push(format!(
+                                        "Failed to import model {}: invalid api_max_num_ctx {}",
+                                        name, v
+                                    ));
+                                    log::warn!(
+                                        "Failed to import model {}: invalid api_max_num_ctx {}",
+                                        name,
+                                        v
+                                    );
+                                    continue;
+                                }
+                            },
+                        };
                         match self.conn.execute(
                             "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx) 
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
@@ -2602,10 +2623,7 @@ impl Ad4mDb {
                                 model["local_tokenizer_repo"].as_str(),
                                 model["local_tokenizer_revision"].as_str(),
                                 model["local_tokenizer_file_name"].as_str(),
-                                // Absent in exports that predate the column.
-                                model["api_max_num_ctx"]
-                                    .as_u64()
-                                    .and_then(|v| u32::try_from(v).ok())
+                                max_num_ctx
                             ],
                         ) {
                             Ok(_) => result.models.imported += 1,
@@ -4203,6 +4221,64 @@ mod tests {
         let imported_links2 = import_db.get_all_links(&perspective2.uuid).unwrap();
         assert_eq!(imported_links2.len(), 1);
         assert_eq!(imported_links2[0], (link2, LinkStatus::Local));
+    }
+
+    #[test]
+    fn import_rejects_invalid_max_num_ctx() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_model(&ModelInput {
+            name: "Ollama".to_string(),
+            model_type: ModelType::Llm,
+            api: Some(ModelApiInput {
+                base_url: "http://localhost:11434".to_string(),
+                api_key: String::new(),
+                model: "qwen3:32b".to_string(),
+                api_type: ModelApiType::Ollama.to_string(),
+                max_num_ctx: None,
+            }),
+            local: None,
+        })
+        .unwrap();
+        let exported = db.export_all_to_json().unwrap();
+
+        // Import the exported model with api_max_num_ctx replaced by `ctx`
+        // (None = field removed, as in exports that predate the column).
+        let import_with = |ctx: Option<serde_json::Value>| {
+            let mut data = exported.clone();
+            let model = data["models"][0].as_object_mut().unwrap();
+            match ctx {
+                Some(v) => model.insert("api_max_num_ctx".to_string(), v),
+                None => model.remove("api_max_num_ctx"),
+            };
+            let import_db = Ad4mDb::new(":memory:").unwrap();
+            let result = import_db.import_from_json(data).unwrap();
+            let models = import_db.get_models().unwrap();
+            (result.models, models)
+        };
+
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(1u64 << 32),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("8192"),
+        ] {
+            let (stats, models) = import_with(Some(invalid.clone()));
+            assert_eq!((stats.imported, stats.failed), (0, 1), "{}", invalid);
+            assert!(stats.errors[0].contains("api_max_num_ctx"), "{}", invalid);
+            assert!(models.is_empty(), "{}", invalid);
+        }
+
+        for (ctx, expected) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!(8192)), Some(8192)),
+            (Some(serde_json::json!(u32::MAX)), Some(u32::MAX)),
+        ] {
+            let (stats, models) = import_with(ctx);
+            assert_eq!((stats.imported, stats.failed), (1, 0));
+            assert_eq!(models[0].api.as_ref().unwrap().max_num_ctx, expected);
+        }
     }
 
     #[test]
