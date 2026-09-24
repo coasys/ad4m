@@ -259,10 +259,12 @@ pub(crate) async fn call_zome_within(
     fn_name: String,
     payload: Option<ExternIO>,
 ) -> Result<ZomeCallResponse, AnyError> {
-    let deadline = Some(Instant::now() + budget);
     let interface = started
         .await
         .ok_or_else(|| anyhow!("Holochain conductor not available"))?;
+    // Taken after the conductor wait (up to `SERVICE_WAIT`), so it is the instant the
+    // `timeout` below fires, however long the conductor took to start.
+    let deadline = Some(Instant::now() + budget);
     timeout(
         budget,
         interface.call_zome_function(app_id, cell_name, zome_name, fn_name, payload, deadline),
