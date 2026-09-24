@@ -758,7 +758,7 @@ Every link records who wrote it. `author` in a `where` can ask about one link or
 | Bare (per instance) | `{ author: admin }` | admin wrote the instance's earliest link (its `.author`) |
 | Side by side (both) | `{ agent: did, author: admin }` | admin wrote the earliest link **and** an `agent -> did` link |
 
-**Nested: ask who wrote the link.** Put `author` inside the property's operator object. The author and the value condition must hold on the same link.
+**Nested: ask who wrote the link.** Put `author` inside the property's operator object. The author and the value condition must hold on the same link. That link need not hold the current value: `{ agent: { eq: alice, author: admin } }` still matches after someone writes `agent -> bob`, and the returned instance then shows `agent: bob`.
 
 ```typescript
 // Reviewers that admin appointed: admin must have written the `agent` link itself.
