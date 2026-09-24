@@ -2260,8 +2260,8 @@ fn other_users_local_link(
     source: &str,
     predicate: &str,
     target: &str,
-) -> crate::types::DecoratedLinkExpression {
-    crate::types::DecoratedLinkExpression {
+) -> crate::types::LinkExpression {
+    crate::types::LinkExpression {
         author: "did:key:z6MkOtherManagedUser".to_string(),
         timestamp: "2026-01-01T00:00:00.000Z".to_string(),
         data: crate::types::Link {
@@ -2269,11 +2269,9 @@ fn other_users_local_link(
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         },
-        proof: crate::types::DecoratedExpressionProof {
+        proof: crate::types::ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
         },
         status: Some(crate::types::LinkStatus::Local),
     }

@@ -225,6 +225,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Asks for the individual links behind each instance — author, timestamp
+   * and proof per link — under `instance.__links`. See `Query.links`.
+   *
+   * @param keys - Property / relation names, or absolute predicate IRIs
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const [post] = await Post.query(perspective).links(["comments"]).get();
+   * post.__links!.comments.map((l) => l.timestamp); // when each comment was attached
+   * ```
+   */
+  links(keys: string[]): ModelQueryBuilder<T> {
+    this.queryParams.links = keys;
+    return this;
+  }
+
+  /**
    * Controls whether SPARQL property getters are evaluated during hydration.
    *
    * By default, collection queries evaluate property getters (deepQuery=true).
@@ -735,9 +753,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       } finally {
         fetching = false;
         if (pending) {
-          console.debug(`[ModelQueryBuilder.paginateSubscribe] ${coalesced} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
+          const dispatches = coalesced;
           pending = false;
           coalesced = 0;
+          // Whether a trailing fetch actually starts is decided by the entry
+          // guard at the top of processResults, which returns when disposed.
+          // Log only what that guard will let through, or the dispose path
+          // announces a fetch it then drops.
+          if (!disposed) {
+            console.debug(`[ModelQueryBuilder.paginateSubscribe] ${dispatches} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
+          }
           // Detached from the caller's promise: needs its own handler, or a
           // rejection here is unhandled.
           processResults().catch(e => console.error('Paginate subscription error:', e));

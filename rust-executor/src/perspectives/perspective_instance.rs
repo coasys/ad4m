@@ -701,8 +701,8 @@ impl PerspectiveInstance {
 
     /// Multi-user auto-processor spawn loop. Every supervisor tick it
     /// re-computes the set of managed users whose `last_seen` falls inside
-    /// `MANAGED_USER_ONLINE_WINDOW_S` (the same freshness window
-    /// `capabilities::track_last_seen_from_token` uses), spawns a per-user
+    /// `MANAGED_USER_ONLINE_WINDOW_S` (twice the `last_seen` write-throttle,
+    /// so active users do not flap — #1070), spawns a per-user
     /// `auto_processor_watch_loop` for any newly-online user, and aborts the
     /// loop of any user who has aged out. Users that go offline are cheap to
     /// re-spawn on next activity, so the transient churn is bounded.
@@ -906,7 +906,19 @@ impl PerspectiveInstance {
         &self,
         links: &[DecoratedLinkExpression],
     ) -> Result<(), deno_core::anyhow::Error> {
-        self.sparql_store.reload(links.to_vec())?;
+        let link_exprs: Vec<LinkExpression> = links
+            .iter()
+            .map(|l| {
+                let mut le = LinkExpression::from(l.clone());
+                // The rusqlite source always records a status, so `None` here
+                // is a legacy anomaly. Default it to Shared at this boundary
+                // rather than letting one odd row abort the whole boot-time
+                // rebuild (the store refuses status-less inserts).
+                le.status = le.status.or(Some(LinkStatus::Shared));
+                le
+            })
+            .collect();
+        self.sparql_store.reload(link_exprs)?;
         self.shape_cache.write().unwrap().clear();
         Ok(())
     }
@@ -1566,6 +1578,20 @@ impl PerspectiveInstance {
             }
         }
 
+        // Links arriving from the link language are shared by definition, but
+        // the wire form usually carries `status: None`. Assign it explicitly
+        // here — the store refuses status-less inserts rather than defaulting.
+        let store_diff = PerspectiveDiff {
+            additions: unique_additions
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                })
+                .collect(),
+            removals: unique_removals.clone(),
+        };
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: unique_additions
                 .iter()
@@ -1578,7 +1604,7 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await?;
+        self.persist_link_diff(&store_diff).await?;
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
@@ -1695,14 +1721,14 @@ impl PerspectiveInstance {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
 
-                let diff = PerspectiveDiff::from_removals(vec![link_expression.clone()]);
+                let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
                     DecoratedLinkExpression::from((link_from_db, status.clone()));
                 let decorated_diff =
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SPARQL store (primary storage)
-                self.persist_link_diff(&decorated_diff).await?;
+                self.persist_link_diff(&diff).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
@@ -1850,14 +1876,16 @@ impl PerspectiveInstance {
         }
 
         // Store link in SPARQL store
-        let diff = PerspectiveDiff::from_additions(vec![link_expression.clone()]);
+        let mut stored = link_expression.clone();
+        stored.status = Some(status.clone());
+        let diff = PerspectiveDiff::from_additions(vec![stored]);
         let decorated_link_expression =
             DecoratedLinkExpression::from((link_expression.clone(), status.clone()));
         let decorated_perspective_diff =
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&decorated_perspective_diff).await?;
+        self.persist_link_diff(&diff).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1914,12 +1942,20 @@ impl PerspectiveInstance {
                 .map(|l| DecoratedLinkExpression::from((l, status.clone())))
                 .collect::<Vec<DecoratedLinkExpression>>();
 
-            let perspective_diff = PerspectiveDiff::from_additions(link_expressions.clone());
+            let perspective_diff = PerspectiveDiff::from_additions(
+                link_expressions
+                    .into_iter()
+                    .map(|mut l| {
+                        l.status = Some(status.clone());
+                        l
+                    })
+                    .collect(),
+            );
             let decorated_perspective_diff =
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&decorated_perspective_diff).await?;
+            self.persist_link_diff(&perspective_diff).await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
             self.pubsub_publish_diff(decorated_perspective_diff).await;
@@ -1977,7 +2013,24 @@ impl PerspectiveInstance {
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
 
-        let diff = PerspectiveDiff::from(additions.clone(), removals.clone());
+        let store_diff = PerspectiveDiff::from(
+            additions
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(status.clone());
+                    l
+                })
+                .collect(),
+            removals
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(status.clone());
+                    l
+                })
+                .collect(),
+        );
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: additions
                 .into_iter()
@@ -1991,13 +2044,13 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&decorated_diff).await?;
+        self.persist_link_diff(&store_diff).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&diff);
+            self.spawn_commit_and_handle_error(&store_diff);
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -2086,8 +2139,11 @@ impl PerspectiveInstance {
 
             Ok(DecoratedLinkExpression::from((new_link_expr, link_status)))
         } else {
-            let diff =
-                PerspectiveDiff::from(vec![new_link_expression.clone()], vec![old_link.clone()]);
+            let mut stored_new = new_link_expression.clone();
+            stored_new.status = Some(link_status.clone());
+            let mut stored_old = old_link.clone();
+            stored_old.status = Some(link_status.clone());
+            let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
                 DecoratedLinkExpression::from((new_link_expression.clone(), link_status.clone()));
             let decorated_old_link =
@@ -2098,7 +2154,7 @@ impl PerspectiveInstance {
             );
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&decorated_diff).await?;
+            self.persist_link_diff(&diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2207,6 +2263,7 @@ impl PerspectiveInstance {
         } else {
             // Split into links and statuses
             let (links, statuses): (Vec<_>, Vec<_>) = existing_links.into_iter().unzip();
+            let persist_diff = PerspectiveDiff::from_removals(links.clone());
 
             // Create decorated versions
             let decorated_links: Vec<DecoratedLinkExpression> = links
@@ -2218,7 +2275,7 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SPARQL store (primary storage)
-            self.persist_link_diff(&decorated_diff).await?;
+            self.persist_link_diff(&persist_diff).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -3745,13 +3802,15 @@ impl PerspectiveInstance {
         })
     }
 
-    pub(crate) async fn persist_link_diff(
-        &self,
-        diff: &DecoratedPerspectiveDiff,
-    ) -> Result<(), AnyError> {
+    pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
+        //
+        // Takes `PerspectiveDiff` (`LinkExpression`), not the decorated form.
+        // `proof.valid` is a read view; the store writes from the signed expression
+        // and computes the verdict itself. Callers decorate *after* persist for
+        // pubsub/prolog, rather than decorating and converting back here.
 
         // Removals first
         for removal in &diff.removals {
@@ -5697,8 +5756,21 @@ impl PerspectiveInstance {
     ) -> Vec<String> {
         let mut predicates = Vec::new();
 
-        if let Ok(shape) = self.get_shape(class_name) {
+        let shape = self.get_shape(class_name).ok();
+        if let Some(shape) = &shape {
             predicates.extend(shape.predicates());
+        }
+
+        // `links` reaches predicates the shape does not declare (a revocation
+        // tombstone); a subscription asking for one must re-run when it lands.
+        if let (Some(shape), Some(qj)) = (&shape, query_json) {
+            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
+                predicates.extend(super::model_query::links_trigger_predicates(
+                    shape,
+                    &query,
+                    &self.shape_resolver(),
+                ));
+            }
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -6463,12 +6535,16 @@ impl PerspectiveInstance {
             removals: Vec::new(),
         };
 
+        let mut persist_diff = PerspectiveDiff::empty();
+
         // Process additions
         for link in diff.additions {
             let status = link.status.unwrap_or(LinkStatus::Shared);
             let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let decorated =
-                DecoratedLinkExpression::from((LinkExpression::from(signed_expr), status.clone()));
+            let mut stored = LinkExpression::from(signed_expr);
+            stored.status = Some(status.clone());
+            persist_diff.additions.push(stored.clone());
+            let decorated = DecoratedLinkExpression::from((stored, status.clone()));
 
             match status {
                 LinkStatus::Shared => shared_diff.additions.push(decorated),
@@ -6479,6 +6555,7 @@ impl PerspectiveInstance {
         // Process removals
         for link in diff.removals {
             let status = link.status.clone().unwrap_or(LinkStatus::Shared);
+            persist_diff.removals.push(link.clone());
             let decorated = DecoratedLinkExpression::from((link, status.clone()));
             match status {
                 LinkStatus::Shared => shared_diff.removals.push(decorated),
@@ -6533,7 +6610,7 @@ impl PerspectiveInstance {
             //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            self.persist_link_diff(&combined_diff).await?;
+            self.persist_link_diff(&persist_diff).await?;
 
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
@@ -6577,6 +6654,7 @@ pub fn prolog_result(result: String) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::signatures::TestSigner;
     use crate::agent::AgentService;
     use crate::db::Ad4mDb;
     use crate::perspectives::perspective_instance::PerspectiveHandle;
@@ -7632,8 +7710,8 @@ mod tests {
 
     /// Another managed user's Local link, written straight into the shared
     /// store as co-owning users do on a multi-user executor.
-    fn other_users_local(predicate: &str, target: &str) -> DecoratedLinkExpression {
-        DecoratedLinkExpression {
+    fn other_users_local(predicate: &str, target: &str) -> LinkExpression {
+        LinkExpression {
             author: OTHER_USER.to_string(),
             timestamp: "2026-01-01T00:00:00.000Z".to_string(),
             data: Link {
@@ -7641,11 +7719,9 @@ mod tests {
                 predicate: Some(predicate.to_string()),
                 target: target.to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: crate::types::ExpressionProof {
                 key: "key".to_string(),
                 signature: "sig".to_string(),
-                valid: Some(true),
-                invalid: Some(false),
             },
             status: Some(LinkStatus::Local),
         }
@@ -8358,6 +8434,41 @@ mod tests {
         )
     }
 
+    /// A subscription's trigger set covers the predicates its `links` read,
+    /// including ones the shape does not declare and ones asked for inside an
+    /// `include` sub-query. Before, it held only the shape's predicates, so a
+    /// subscription asking for a revocation tombstone never re-ran when the
+    /// tombstone landed and kept reporting `[]`.
+    #[tokio::test]
+    async fn test_model_trigger_predicates_cover_links_iris() {
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(cache_test_shacl("Recipe", "ns://")),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let query = r#"{
+            "links": ["name", "ad4m://flow/role_grant_revoked"],
+            "include": { "steps": { "links": ["ns://nested_note"] } }
+        }"#;
+        let predicates = perspective.build_model_trigger_predicates("Recipe", Some(query));
+        for expected in [
+            "ns://name",
+            "ad4m://flow/role_grant_revoked",
+            "ns://nested_note",
+        ] {
+            assert!(
+                predicates.iter().any(|p| p == expected),
+                "trigger set {predicates:?} is missing {expected}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_get_shape_returns_error_when_no_shacl_stored() {
         let perspective = setup().await;
@@ -8530,23 +8641,17 @@ mod tests {
             (board, "board://has_task", active2),
             (board, "board://has_task", done1),
         ];
+        let signer = TestSigner::generate();
         for (i, (s, p, t)) in triples.iter().enumerate() {
-            let link = DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: format!("17000000000{:02}", i),
-                data: Link {
-                    source: s.to_string(),
-                    predicate: Some(p.to_string()),
-                    target: t.to_string(),
-                },
-                proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
-                },
-                status: None,
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
             };
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add link");
         }
 
@@ -8625,27 +8730,24 @@ mod tests {
         let parent_root = "literal:string:test_parent_root";
 
         // Title link makes the post a BlogPost instance (structural conformance)
-        for (src, pred, tgt) in &[
+        let signer = TestSigner::generate();
+        for (i, (src, pred, tgt)) in [
             (post_root, "blog://title", "literal:string:my_post"),
             (parent_root, "blog://title", "literal:string:my_parent"),
             (post_root, "blog://reply_to", parent_root),
-        ] {
-            let link = DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: "1700000000000".into(),
-                data: Link {
-                    source: src.to_string(),
-                    predicate: Some(pred.to_string()),
-                    target: tgt.to_string(),
-                },
-                proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
-                },
-                status: None,
+        ]
+        .iter()
+        .enumerate()
+        {
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let data = Link {
+                source: src.to_string(),
+                predicate: Some(pred.to_string()),
+                target: tgt.to_string(),
             };
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
             perspective.sparql_store.add_link(&link).expect("add_link");
         }
 

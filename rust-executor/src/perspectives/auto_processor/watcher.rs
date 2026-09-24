@@ -16,6 +16,7 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
+use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -432,10 +433,11 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
 }
 
 /// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. Mirrors the freshness window used
-/// by `capabilities::track_last_seen_from_token` for last-seen tracking, so a
-/// user active by that surface is also considered active here.
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
+/// auto-processor loop supervision purposes. `last_seen` is written at most
+/// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
+/// by a margin for the gap between requests; otherwise an active user ages out
+/// right before their `last_seen` is refreshed and their loop flaps (#1070).
+pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
@@ -1332,6 +1334,27 @@ mod tests {
         assert!(selected.is_empty());
     }
 
+    /// The online window must leave room for the `last_seen` write-throttle
+    /// plus the gap between requests (#1070).
+    #[test]
+    fn online_window_exceeds_last_seen_write_throttle() {
+        assert!(
+            MANAGED_USER_ONLINE_WINDOW_S >= 2 * LAST_SEEN_WRITE_THROTTLE_S,
+            "`last_seen` is only rewritten once it is {LAST_SEEN_WRITE_THROTTLE_S}s old, so a \
+             {MANAGED_USER_ONLINE_WINDOW_S}s window without margin reaps every active user just \
+             before their `last_seen` is refreshed and respawns their loop (#1070)"
+        );
+        let now = 1_000_000_i64;
+        let stale_but_active = (
+            "u@x".to_string(),
+            Some(now - LAST_SEEN_WRITE_THROTTLE_S - 1),
+        );
+        assert_eq!(
+            select_online_managed_users(vec![stale_but_active], now, MANAGED_USER_ONLINE_WINDOW_S),
+            vec!["u@x"]
+        );
+    }
+
     // ---- WatcherState -------------------------------------------------------
 
     /// Nothing recorded → `drain_ready_batch` returns None regardless of the
@@ -1788,19 +1811,19 @@ mod tests {
     /// The LeaseGuard heartbeat refreshes `last_seen` during a long pass, which
     /// keeps the user in the online window. Simulated here via
     /// `select_online_managed_users`: a user freshly touched at `now - 10s` is
-    /// still online, while one untouched at `now - 400s` is reaped. This
+    /// still online, while one untouched at `now - 700s` is reaped. This
     /// documents the invariant that idle-loop reaping is NOT disabled — only
     /// passes that actually refresh `last_seen` stay alive (#1010).
     #[test]
     fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
         let now = 2_000_000_i64;
-        let window = 300_i64;
+        let window = MANAGED_USER_ONLINE_WINDOW_S;
         // `active` had last_seen refreshed 10s ago (simulates lease heartbeat).
-        // `idle` had last_seen 400s ago (no heartbeat — idle loop).
+        // `idle` had last_seen 700s ago (no heartbeat — idle loop).
         let online = select_online_managed_users(
             vec![
                 ("active@x".into(), Some(now - 10)), // heartbeat touched last_seen
-                ("idle@x".into(), Some(now - 400)),  // no activity — should be reaped
+                ("idle@x".into(), Some(now - 700)),  // no activity — should be reaped
             ],
             now,
             window,

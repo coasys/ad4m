@@ -14,12 +14,12 @@ use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProp
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{ExpressionProof, Link, LinkExpression};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
+fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    LinkExpression {
         author: "did:key:test123".to_string(),
         timestamp: ts.to_string(),
         data: Link {
@@ -27,13 +27,13 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         },
-        proof: DecoratedExpressionProof {
+        proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
         },
-        status: None,
+        // The store refuses status-less inserts; Shared is the plain case,
+        // `make_link_with_status` overrides for the local-property tests.
+        status: Some(crate::types::LinkStatus::Shared),
     }
 }
 
@@ -44,7 +44,7 @@ fn make_link_with_status(
     target: &str,
     ts: &str,
     status: crate::types::LinkStatus,
-) -> DecoratedLinkExpression {
+) -> LinkExpression {
     let mut link = make_link(source, predicate, target, ts);
     link.status = Some(status);
     link
@@ -61,7 +61,7 @@ fn make_link_by(
     target: &str,
     ts: &str,
     status: crate::types::LinkStatus,
-) -> DecoratedLinkExpression {
+) -> LinkExpression {
     let mut link = make_link(source, predicate, target, ts);
     link.author = author.to_string();
     link.status = Some(status);
@@ -9995,4 +9995,534 @@ async fn a_transitive_projection_follows_only_links_the_viewer_may_see() {
     assert_eq!(direct, json!(3));
     assert_eq!(all, json!(8), "executor scope is unchanged");
     assert_eq!(subtree, everything);
+}
+
+// ---------------------------------------------------------------------------
+// `links` — per-link rows, including undeclared predicates (#1046 §3/§4,
+// #1111, #1112)
+// ---------------------------------------------------------------------------
+
+const REVOKED: &str = "ad4m://flow/role_grant_revoked";
+const ROLE_ADMIN: &str = "did:key:zRoleAdmin";
+const ROLE_T0: &str = "2026-09-01T10:00:00.000Z";
+const ROLE_T1: &str = "2026-09-01T11:00:00.000Z";
+const ROLE_T2: &str = "2026-09-01T12:00:00.000Z";
+
+/// A role class the way the flow engine reads one: a type flag, a name, and a
+/// DID collection that `didProperty` names. It deliberately does NOT declare the
+/// revocation predicate — tombstones are links on the instance, not properties.
+const ROLE_SHAPE_JSON: &str = r#"{
+    "className": "Reviewer",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "role://Reviewer"
+        },
+        "name": {
+            "predicate": "role://name",
+            "required": false
+        }
+    },
+    "relations": {
+        "members": {
+            "predicate": "role://member"
+        }
+    }
+}"#;
+
+fn link_by(author: &str, source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    let mut l = make_link(source, predicate, target, ts);
+    l.author = author.to_string();
+    l
+}
+
+/// Role instance created at T0 (type + name by admin), one member added at T1
+/// by admin, and — when `revoked` — a tombstone on the instance at T2.
+fn seed_role(store: &SparqlStore, role: &str, member: &str, revoked: bool) {
+    for l in [
+        link_by(ROLE_ADMIN, role, "ad4m://type", "role://Reviewer", ROLE_T0),
+        link_by(
+            ROLE_ADMIN,
+            role,
+            "role://name",
+            "literal:string:reviewers",
+            ROLE_T0,
+        ),
+        link_by(ROLE_ADMIN, role, "role://member", member, ROLE_T1),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+    if revoked {
+        store
+            .add_link(&link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2))
+            .unwrap();
+    }
+}
+
+fn links_query(keys: &[&str]) -> ModelQueryInput {
+    ModelQueryInput {
+        links: Some(keys.iter().map(|k| k.to_string()).collect()),
+        ..Default::default()
+    }
+}
+
+/// #1111: a revocation tombstone — a link whose predicate the class does not
+/// declare — is visible through `model_query` when asked for, and comes back as
+/// the full signed link.
+///
+/// Before `links` there was no way to reach it through the class layer at all:
+/// the instance query binds `VALUES ?predicate` to the shape's predicates and
+/// hydration drops the rest, so a revoked role kept voting unless the caller
+/// went around `model_query` to raw `get_links`. Fails on `dev`: `__links` is
+/// absent (the `links` key is ignored by deserialization).
+#[tokio::test]
+async fn a_revocation_tombstone_is_reachable_through_links() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let member = "did:key:zMember";
+    seed_role(&store, role, member, true);
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    let rows = result.instances[0]["__links"][REVOKED]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the tombstone must be reachable through model_query: {}",
+                result.instances[0]
+            )
+        });
+    assert_eq!(rows.len(), 1, "exactly the one tombstone: {rows:?}");
+
+    // A row is the stored link itself, not a summary of it: a consumer can
+    // deserialize it and check the signature, which is what the flow engine's
+    // revocation rule does.
+    let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
+    let mut expected = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
+    expected.status = None;
+    assert_eq!(parsed, expected);
+}
+
+/// The additive half of #1111: asking for `links` adds `__links` and changes
+/// nothing else, and not asking returns the instance JSON exactly as before.
+///
+/// The case that would break it is the tombstone itself: it is the instance's
+/// latest link, so if it leaked into hydration `updatedAt` would move to T2.
+#[tokio::test]
+async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    seed_role(&store, role, "did:key:zMember", true);
+
+    let plain = execute_model_query_from_json(
+        &store,
+        "Reviewer",
+        &ModelQueryInput::default(),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let with_links = execute_model_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    let plain = plain.instances[0].clone();
+    assert!(
+        plain.get("__links").is_none(),
+        "not asked, not added: {plain}"
+    );
+    assert_eq!(
+        plain["updatedAt"],
+        json!(ROLE_T1),
+        "the tombstone is not a property link"
+    );
+
+    let mut stripped = with_links.instances[0].clone();
+    assert!(stripped
+        .as_object_mut()
+        .unwrap()
+        .remove("__links")
+        .is_some());
+    assert_eq!(
+        stripped, plain,
+        "`links` must add one key and change nothing else"
+    );
+}
+
+/// #1112, on the #1103 shape: the role instance exists from T0, a member is
+/// added at T1, and the query dates that member from T1 — its own link — not
+/// from the instance's `createdAt`. A second member added later by someone else
+/// is dated and attributed separately.
+///
+/// Fails on `dev`: there is no per-link timestamp to read, only `createdAt`
+/// (T0) and `updatedAt`, both computed across every link.
+#[tokio::test]
+async fn a_member_is_dated_and_attributed_by_its_own_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let alice = "did:key:zAlice";
+    let bob = "did:key:zBob";
+    let mallory = "did:key:zMallory";
+    seed_role(&store, role, alice, false);
+    store
+        .add_link(&link_by(mallory, role, "role://member", bob, ROLE_T2))
+        .unwrap();
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let inst = &result.instances[0];
+    assert_eq!(inst["createdAt"], json!(ROLE_T0));
+
+    let rows = inst["__links"]["members"]
+        .as_array()
+        .unwrap_or_else(|| panic!("per-link rows for `members`: {inst}"));
+    let seen: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["data"]["target"].as_str().unwrap(),
+                r["timestamp"].as_str().unwrap(),
+                r["author"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![(alice, ROLE_T1, ROLE_ADMIN), (bob, ROLE_T2, mallory)],
+        "each member dated and attributed by its own link, earliest first"
+    );
+    assert_eq!(
+        rows[0]["data"]["predicate"],
+        json!("role://member"),
+        "a name resolves to the predicate the shape declares"
+    );
+}
+
+/// Every requested key is present on every returned instance — `[]` when the
+/// instance has no such link — so "asked, none" never reads like "not asked".
+/// Also covers the paginated (two-phase) plan and a `properties` selection,
+/// which runs before `__links` is attached and must not strip it.
+#[tokio::test]
+async fn links_on_the_paginated_plan_with_a_property_selection() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    seed_role(&store, "role://instance/2", "did:key:zB", false);
+
+    let query = ModelQueryInput {
+        links: Some(vec![REVOKED.to_string(), "members".to_string()]),
+        properties: Some(vec!["name".to_string()]),
+        limit: Some(10),
+        ..Default::default()
+    };
+    let result = execute_model_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    let by_id = |id: &str| {
+        result
+            .instances
+            .iter()
+            .find(|i| i["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing"))
+    };
+    let one = by_id("role://instance/1");
+    let two = by_id("role://instance/2");
+    assert_eq!(one["__links"][REVOKED].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"][REVOKED], json!([]), "asked, none found");
+    assert_eq!(one["__links"]["members"].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"]["members"].as_array().unwrap().len(), 1);
+    assert!(
+        one.get("updatedAt").is_none(),
+        "the selection still applies"
+    );
+}
+
+/// A `local: true` property's links are read under the same Local-only rule as
+/// its hydrated value, so `links` is not a side door for a gossiped Shared link.
+/// The Shared link is the sole link on the predicate, so an unfiltered read
+/// cannot pass by result ordering.
+#[tokio::test]
+async fn links_on_a_local_property_withhold_a_shared_link() {
+    use crate::types::LinkStatus;
+
+    let store = SparqlStore::new(None).unwrap();
+    let id = "literal:string:cache_links";
+    store
+        .add_link(&make_link(id, "ad4m://type", "cache://Cache", ROLE_T0))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            id,
+            "cache://state",
+            "literal:string:gossiped",
+            ROLE_T1,
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = execute_model_query_from_json(
+        &store,
+        "Cache",
+        &links_query(&["state"]),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances[0]["__links"]["state"], json!([]));
+}
+
+/// A key that is neither a declared name nor an absolute IRI is an error. The
+/// alternative — an empty list — would tell a caller who misspelled the
+/// revocation predicate that nobody was ever revoked.
+#[tokio::test]
+async fn links_rejects_a_key_it_cannot_resolve() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    let err = execute_model_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["role_grant_revoked"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .expect_err("an unresolvable key must fail");
+    assert!(format!("{err}").contains("role_grant_revoked"), "{err}");
+}
+
+/// A reverse relation (`belongsToOne` / `belongsToMany`) is an error, not `[]`.
+///
+/// Its links point *at* the instance (`other --we://marks--> this`), and `links`
+/// reads the instance's outgoing links only. Resolving the name to its
+/// predicate and reading outgoing links answers "asked, none found" for a
+/// question that was never asked of the store, even with a real incoming link
+/// present, which this test seeds. On 6228563a5 the query succeeded with
+/// `"markedBy": []`.
+#[tokio::test]
+async fn links_rejects_a_reverse_relation_name() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://flag", "we://post", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://children", "we://p/2", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://m/1", "we://marks", "we://p/1", "3"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://post"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    // Control: the forward relation on the same shape is read.
+    let ok = execute_model_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.instances[0]["__links"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = execute_model_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+        .await
+        .expect_err("a reverse relation must not resolve to an empty list");
+    let msg = format!("{err}");
+    assert!(msg.contains("markedBy"), "names the key: {msg}");
+    assert!(msg.contains("reverse"), "says why: {msg}");
+}
+
+/// `links` inside an `include` sub-query: the sub-query recurses through
+/// `execute_model_query_inner`, so each included instance carries its own
+/// `__links`.
+#[tokio::test]
+async fn links_inside_an_include_sub_query() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://note", "literal:string:n", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "TextBlock" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(links_query(&["we://note"]))),
+        )])),
+        ..Default::default()
+    };
+    let result = super::query::execute_model_query(
+        &store,
+        collection_shape.as_ref(),
+        &query,
+        &resolver,
+        None,
+    )
+    .await
+    .unwrap();
+    let child = &result.instances[0]["children"][0];
+    assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
+    let rows = child["__links"]["we://note"]
+        .as_array()
+        .unwrap_or_else(|| panic!("included instance carries __links: {child}"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["data"]["target"], json!("literal:string:n"));
+    assert!(
+        result.instances[0].get("__links").is_none(),
+        "the parent did not ask"
+    );
+}
+
+/// `links` rows follow the same viewer rule as hydration (#1024). The option
+/// accepts any predicate IRI, so without it a co-owner could read another
+/// user's Local links by naming their predicate. The engine-derived
+/// `currentState` cache is the one Local link every viewer gets back.
+#[tokio::test]
+async fn links_rows_are_viewer_scoped() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+
+    let store = SparqlStore::new(None).unwrap();
+    let base = "literal:string:links_scoped";
+    for (author, pred, target, ts, status) in [
+        (
+            BOB,
+            "ad4m://type",
+            "cache://EngineCached",
+            "1700000000000",
+            LinkStatus::Shared,
+        ),
+        (
+            BOB,
+            "ad4m://flow/current_state",
+            "literal:string:InReview",
+            "1700000000001",
+            LinkStatus::Local,
+        ),
+        (
+            BOB,
+            "app://undeclared",
+            "literal:string:bob_private",
+            "1700000000002",
+            LinkStatus::Local,
+        ),
+        (
+            ALICE,
+            "app://undeclared",
+            "literal:string:alice_own",
+            "1700000000003",
+            LinkStatus::Local,
+        ),
+    ] {
+        store
+            .add_link(&make_link_by(author, base, pred, target, ts, status))
+            .unwrap();
+    }
+
+    let input = ModelQueryInput {
+        links: Some(vec![
+            "app://undeclared".to_string(),
+            "currentState".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let targets = |viewer: Option<&'static str>, key: &'static str| {
+        let (store, input) = (&store, &input);
+        async move {
+            let res = super::test_helpers::execute_model_query_from_json_for_viewer(
+                store,
+                "EngineCached",
+                input,
+                ENGINE_CACHE_SHAPE_JSON,
+                viewer,
+            )
+            .await
+            .unwrap();
+            assert_eq!(res.instances.len(), 1);
+            let mut t: Vec<String> = res.instances[0]["__links"][key]
+                .as_array()
+                .unwrap_or_else(|| panic!("__links.{key} missing: {}", res.instances[0]))
+                .iter()
+                .map(|r| r["data"]["target"].as_str().unwrap().to_string())
+                .collect();
+            t.sort();
+            t
+        }
+    };
+
+    assert_eq!(
+        targets(Some(ALICE), "app://undeclared").await,
+        vec!["literal:string:alice_own"],
+        "Alice gets her own Local row, not Bob's"
+    );
+    assert_eq!(
+        targets(Some(ALICE), "currentState").await,
+        vec!["literal:string:InReview"],
+        "the engine's cache is visible to every viewer"
+    );
+    assert_eq!(
+        targets(None, "app://undeclared").await,
+        vec!["literal:string:alice_own", "literal:string:bob_private"],
+        "executor scope reads every row"
+    );
 }
