@@ -295,6 +295,38 @@ impl<'a> GrantContext<'a> {
     }
 }
 
+/// A `grantedByFlow` gate was reached with no depth budget left while a
+/// carried receipt for its flow was still waiting to be verified.
+///
+/// This is "I could not decide", not "not a member", which is why it is an
+/// error and not a `None`. The two answers must stay apart for the same reason
+/// that [`ReceiptBudgetExceeded`](super::produced::ReceiptBudgetExceeded) and
+/// an unknown granting flow are errors: at the call site a silent "no" and a
+/// checked "no" look the same. See the module header, § *Running out of depth
+/// is undecidable*, for how far the error travels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantDepthExceeded {
+    /// The role instance whose grant could not be decided.
+    pub output: OutputRef,
+    /// The granting flow whose receipt would have had to be verified.
+    pub flow: String,
+}
+
+impl std::fmt::Display for GrantDepthExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "grantedByFlow: cannot decide whether `{}` `{}` was granted by flow `{}`: its \
+             receipt would be verified more than {MAX_GRANT_DEPTH} nested grant levels below \
+             the material being read, past the grant depth budget; refusing to decide rather \
+             than answering \"not a member\"",
+            self.output.class_name, self.output.id, self.flow
+        )
+    }
+}
+
+impl std::error::Error for GrantDepthExceeded {}
+
 /// When flow `spec` granted the role instance `output`, if a carried receipt
 /// says so.
 ///
@@ -1500,6 +1532,166 @@ mod tests {
             inner.is_verified(),
             "the nested chain is sound on its own — so the refusal above is the budget, not a \
              fixture that never verified — got: {inner}"
+        );
+    }
+
+    /// A root context over `cat`, walked down until `remaining` levels are
+    /// left: the context a gate sees that many levels of nesting below the
+    /// cap.
+    fn with_remaining(cat: &HashMap<String, SHACLFlow>, remaining: usize) -> GrantContext<'_> {
+        let mut ctx = GrantContext::root(cat);
+        while ctx.remaining() > remaining {
+            ctx = ctx.deeper().expect("within the budget");
+        }
+        ctx
+    }
+
+    /// **Running out of depth is "I could not decide", not "not a member".**
+    /// Lal's approval note on #1076: it was the third place in this stack
+    /// where the two were one value. The other two (a receipt flood, an
+    /// unknown granting flow) were already errors.
+    ///
+    /// The typed error has to survive two layers, because each of them wraps
+    /// it: `resolve`, and `fold_read_set`, whose `role_grant_views` adds
+    /// context. A downcast at the fold is what a caller actually holds.
+    ///
+    /// Two controls. With one level of budget left, the same receipt grants,
+    /// so the error is the depth and not the receipt. And at the cap, an
+    /// instance carrying **no** receipt for the flow is still an ordinary
+    /// "not a member": nothing was left unchecked, so "no" is a checked
+    /// answer there.
+    ///
+    /// Red while `granted_by_flow_at` answers `None` at the cap (`resolve`
+    /// returns `Ok` with no window).
+    #[test]
+    fn running_out_of_depth_is_a_typed_error_not_a_non_member() {
+        let (receipt, gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+        let gate_role = role(Some(&spec(&granting_uri, "done")));
+        let ev = evidence(vec![receipt], Vec::new());
+        let at_cap = with_remaining(&cat, 0);
+        let expected = GrantDepthExceeded {
+            output: OutputRef {
+                class_name: ROLE.into(),
+                id: ROLE_INSTANCE.into(),
+            },
+            flow: granting_uri.clone(),
+        };
+
+        let err = ev[0]
+            .resolve(&translated(), &gate_role, at_cap)
+            .expect_err("a receipt the budget cannot reach leaves the grant undecided");
+        assert_eq!(
+            err.downcast_ref::<GrantDepthExceeded>(),
+            Some(&expected),
+            "the typed depth error names the instance and the flow: {err:#}"
+        );
+
+        let err = fold_read_set(&gated, &gated_run(ev.clone()).reverified(), at_cap)
+            .expect_err("an undecidable grant aborts the fold that needed it");
+        assert_eq!(
+            err.downcast_ref::<GrantDepthExceeded>(),
+            Some(&expected),
+            "the typed error survives `role_grant_views`' context: {err:#}"
+        );
+
+        let one_left = ev[0]
+            .resolve(&translated(), &gate_role, with_remaining(&cat, 1))
+            .expect("one level of budget is enough for an ungated granting flow");
+        assert_eq!(
+            one_left
+                .windows
+                .iter()
+                .map(|w| w.granted_at.as_str())
+                .collect::<Vec<_>>(),
+            vec![T1],
+            "so the error above is the depth, not the receipt"
+        );
+
+        let nothing_to_check = evidence(Vec::new(), Vec::new());
+        let view = nothing_to_check[0]
+            .resolve(&translated(), &gate_role, at_cap)
+            .expect("with no receipt for the flow to verify, the answer is a checked \"no\"");
+        assert!(view.windows.is_empty());
+    }
+
+    /// **Why "not a member" at the cap was fail-OPEN, not just quiet.** A
+    /// dropped candidate can break a tie. `role_grant_views` already refuses
+    /// the whole fold for exactly this reason: `Contention` fires only while
+    /// both edges out of a state are quorate, so taking one voter away
+    /// de-quorates one edge and lets the other one fire.
+    ///
+    /// Here Alice holds the role and votes on both edges out of `open`: the
+    /// gated `done` and the ungated `alt`. Both are terminal, so a reader
+    /// with budget left sees a contested run. That is not a completion. A
+    /// reader at the cap that answered "Alice is not a member" would drop
+    /// her `done` vote, see only `alt`, and verify a receipt claiming `alt`.
+    /// The receipt would verify ONLY because it was nested deep. The module
+    /// doc promises the opposite: nesting can refuse more, never allow more.
+    ///
+    /// The refusal is pinned to the depth error (the reason text), not only
+    /// to "not verified", so it is the depth guard that answered and not
+    /// some other failure in a hand-built receipt. Which verdict *kind* that
+    /// is stays open (#1077).
+    ///
+    /// Red while `granted_by_flow_at` answers `None` at the cap: the receipt
+    /// then verifies at the cap.
+    #[test]
+    fn at_the_cap_a_voter_dropped_for_depth_cannot_break_a_tie() {
+        let granting = granting_flow("Onboarding");
+        let split = flow_json(
+            "Split",
+            json!([
+                { "name": "open", "value": 0.0 },
+                {
+                    "name": "done",
+                    "value": 1.0,
+                    "consensusRule": { "n": 1, "fromRole": gate(&granting.flow_uri(), "done") },
+                },
+                { "name": "alt", "value": 1.0 },
+            ]),
+            json!([
+                { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+                { "action_name": "Divert", "from_state": "open", "to_state": "alt", "actions": [] },
+            ]),
+        );
+        let cat = catalogue(vec![granting.clone(), split.clone()]);
+        let alice_granted = receipt_for(&granting, "done", T1, &[role_item(ROLE_INSTANCE)], &cat);
+
+        let outputs = [item(TASK_CLASS, BASE)];
+        let claims_alt = FlowReceipt {
+            flow_uri: split.flow_uri(),
+            flow_dna_hash: flow_dna_hash(&split).expect("hash"),
+            terminal_state: "alt".into(),
+            outputs: outputs.to_vec(),
+            read_set: ReadSet {
+                instance_uri: INSTANCE.to_string(),
+                subject: BASE.to_string(),
+                genesis: "open".to_string(),
+                proposals: vec![
+                    proposal("done", T2, &outputs),
+                    proposal("alt", T3, &outputs),
+                ],
+                role_grants: evidence(vec![alice_granted], Vec::new()),
+            },
+            evidence_preimage: Vec::new(),
+        };
+
+        let with_budget = verify_receipt_within(GrantContext::root(&cat), &claims_alt);
+        assert!(
+            matches!(with_budget, ReceiptVerdict::Contested { .. }),
+            "precondition: with budget left, Alice counts on both edges and the run is \
+             contested — got: {with_budget}"
+        );
+
+        let at_cap = verify_receipt_within(with_remaining(&cat, 0), &claims_alt);
+        assert!(
+            !at_cap.is_verified(),
+            "a receipt must not verify because it was nested past the cap — got: {at_cap}"
+        );
+        assert!(
+            format!("{at_cap}").contains("past the grant depth budget"),
+            "and it is the depth guard that refused it — got: {at_cap}"
         );
     }
 
