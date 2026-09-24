@@ -31,12 +31,12 @@
 //!    anyone-writable `granted_by` discovery edge.
 //!
 //! Every non-`Verified` verdict excludes the receipt — including the
-//! [`Undecidable`](super::verify::VerdictKind::Undecidable) kind. That is
+//! [`Undecidable`](super::verify::verdict::VerdictKind::Undecidable) kind. That is
 //! deliberately stricter than what `Undecidable` *means* ("this replica
 //! cannot decide", not "the receipt is bad"): a query that returns instances
 //! a payout system acts on must not return one on a receipt nobody could
 //! check. Fail closed, exactly as a payout system must (see
-//! [`VerdictKind`](super::verify::VerdictKind)).
+//! [`VerdictKind`](super::verify::verdict::VerdictKind)).
 //!
 //! # The live-content check
 //!
@@ -514,7 +514,7 @@ where
 /// A `flow_uri` this perspective's catalogue does not hold is an **error**,
 /// not an empty list: "no such flow here" and "no valid outputs" must not
 /// be the same answer (the same three-kind argument
-/// [`VerdictKind`](super::verify::VerdictKind) makes).
+/// [`VerdictKind`](super::verify::verdict::VerdictKind) makes).
 pub async fn flow_valid_outputs(
     perspective: &PerspectiveInstance,
     flow_uri: &str,
@@ -574,10 +574,10 @@ pub async fn verify_flow_receipt(
 /// The verdict as the API reports it: the three-kind `outcome` a caller must
 /// branch on, the human-readable `detail`, and — only when verified — what
 /// was verified. The kind travels explicitly so a client cannot reach
-/// "reject" through a boolean (the trap [`VerdictKind`](super::verify::VerdictKind)
+/// "reject" through a boolean (the trap [`VerdictKind`](super::verify::verdict::VerdictKind)
 /// exists to close).
 pub fn verdict_wire(verdict: &ReceiptVerdict) -> serde_json::Value {
-    use super::verify::VerdictKind;
+    use super::verify::verdict::VerdictKind;
     let outcome = match verdict.outcome() {
         VerdictKind::Verified => "verified",
         VerdictKind::Rejected => "rejected",
@@ -738,7 +738,7 @@ pub async fn mint_flow_receipt(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_instance::atom::fixtures::{
+    use crate::perspectives::flow_instance::test_support::{
         hash_of, out_item, out_items, out_ref, signed_terminal_proposal, T1,
     };
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
@@ -1050,7 +1050,7 @@ mod tests {
     /// branches on its `outcome` string — so each of the three kinds must
     /// reach the wire as itself. A `Rejected` spelled `"verified"` is a
     /// forged receipt vouched for; an `Undecidable` spelled `"rejected"` is
-    /// the boolean trap [`VerdictKind`](super::super::verify::VerdictKind)
+    /// the boolean trap [`VerdictKind`](super::super::verify::verdict::VerdictKind)
     /// exists to close, slandering a receipt this replica merely could not
     /// check. What was verified travels only with a verified verdict.
     ///
