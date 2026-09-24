@@ -644,8 +644,9 @@ describe("flow task handover — WE-facing API with roles", function () {
     expect(aliceDone.derivedState).to.equal("InReview");
 
     // Bob, the holder. Fail-on-old-code: every earlier version of this file
-    // ran against a gate that could not grant from TS (no mint API), and a
-    // gate that never reads F's receipt index fails here the same way.
+    // ran against a gate that could not grant from TS (no mint API). A gate
+    // that never reads F's receipt index fails here too, and fails the
+    // re-derivation probe above first.
     const bobDone = await (await instanceOn(bobP, positiveTask.id)).proposeTransition("Done");
     expect(
       bobDone.outcomes,
