@@ -366,8 +366,16 @@ pub(crate) fn requires_query_input(
 /// enclosing level's, nested under each of its fields:
 /// `{ didProperty: agent, where: { author: A }, or: [{ where: { rank: lead } }] }`
 /// becomes `{ agent: { eq: did, author: A }, OR: [{ rank: { eq: lead, author: A } }] }`.
-/// An arm with its own `author` keeps its own. An `author` never reaches out
-/// of an arm.
+/// An arm with its own `author` keeps its own.
+///
+/// An arm's `author` reaches its level's fields in one case only: when every
+/// arm names only a granter, the collapse makes their union the level's
+/// `author`, and it scopes the level's fields like an own one. A level with
+/// fields but no `author` (own, inherited or collapsed) whose arms name one
+/// anywhere below is refused: its fields would be emitted bare, so anyone's
+/// link could satisfy them beside a granter's arm, and one more condition in
+/// an arm (which stops the collapse) would widen the rule. The rule author puts
+/// the `author` on the level, or writes the level's fields into each arm.
 ///
 /// A level with no field to nest under keeps its own `author` top level, where
 /// `model_query` reads it as the instance's author; an inherited one has
@@ -430,6 +438,19 @@ fn requires_where(
     let collapsed = granters.is_some();
     if collapsed {
         author = granters;
+    }
+    if author.is_none()
+        && inherited_author.is_none()
+        && !out.is_empty()
+        && alts.is_some_and(|alts| alts.iter().any(names_author))
+    {
+        let fields = out.keys().map(|f| format!("`{f}`")).collect::<Vec<_>>();
+        bail!(
+            "an `or` arm names an `author` but its level has none, so the level's {} would \
+             match a link anyone wrote: put the `author` on the level, or write those fields \
+             into each `or` arm",
+            fields.join(", ")
+        );
     }
 
     // The level's own DID property, or an `or` branch granter's enclosing one.
@@ -498,6 +519,15 @@ fn with_author(field: &str, condition: Value, author: &Value) -> Result<Value> {
         }
         value => Ok(json!({ "eq": value, "author": author })),
     }
+}
+
+/// Whether `query`, or any `or` arm below it, has a `where.author`.
+fn names_author(query: &ModelQuery) -> bool {
+    query
+        .r#where
+        .as_ref()
+        .is_some_and(|w| w.contains_key("author"))
+        || query.or.iter().flatten().any(names_author)
 }
 
 /// The union of the granters when every `or` branch is only
@@ -2029,6 +2059,56 @@ mod tests {
                 requires_query_input(&arm, &inst(), "did:key:x").is_err(),
                 "inherited author beside {cond}"
             );
+        }
+    }
+
+    /// A level with fields but no `author` of its own (nor an inherited or
+    /// collapsed one) is refused when an `or` arm names one anywhere below:
+    /// its fields would be emitted bare beside the granter's arm (#1114).
+    /// Controls: the same fields under the collapse, under the level's own
+    /// `author`, written into each arm, and with no `author` anywhere.
+    #[test]
+    fn a_level_without_an_author_is_refused_beside_author_arms() {
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        let arm = |w: Value| json!({ "className": "ns://R", "where": w });
+        let admin = "did:key:admin";
+        let lead = "did:key:lead";
+        let for_task = json!({ "forTask": "$flow.base" });
+        for rule in [
+            // Arms that name granters but do not collapse.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "author": admin })), arm(json!({ "author": lead, "rank": "senior" })) ] }),
+            // An arm with no `author` beside a granter arm.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "rank": "senior" })), arm(json!({ "author": admin })) ] }),
+            // One level down: an arm with fields whose own arm names a granter.
+            json!({ "className": "ns://R", "didProperty": "agent",
+                    "or": [ { "className": "ns://R", "where": for_task, "or": [ arm(json!({ "author": admin })) ] } ] }),
+            // Without a `didProperty`.
+            json!({ "className": "ns://R", "where": { "reviewer": "$did" },
+                    "or": [ arm(json!({ "author": admin, "rank": "senior" })) ] }),
+        ] {
+            let err = requires_query_input(&role(rule.clone()), &inst(), "did:key:x")
+                .expect_err(&rule.to_string())
+                .to_string();
+            assert!(
+                err.contains("put the `author` on the level"),
+                "{rule}: {err}"
+            );
+        }
+        for rule in [
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "author": admin })), arm(json!({ "author": lead })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent", "where": { "forTask": "$flow.base", "author": admin },
+                    "or": [ arm(json!({ "author": lead, "rank": "senior" })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent",
+                    "or": [ arm(json!({ "author": admin, "forTask": "$flow.base" })),
+                            arm(json!({ "author": lead, "rank": "senior", "forTask": "$flow.base" })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "rank": "lead" })), arm(json!({ "rank": "senior" })) ] }),
+        ] {
+            requires_query_input(&role(rule.clone()), &inst(), "did:key:x")
+                .unwrap_or_else(|e| panic!("control {rule}: {e}"));
         }
     }
 

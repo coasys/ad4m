@@ -355,6 +355,46 @@ mod tests {
         assert!(!revocation_authorised(&both, ADMIN()));
     }
 
+    /// A level with fields and no `author`, beside `or` arms that name granters
+    /// without collapsing, is refused at translation, so it grants nobody and
+    /// has no revocation rule to read: resolving the role fails for grant and
+    /// revocation alike. The same rule with the fields written into each arm
+    /// accepts a revocation from each arm's granter and nobody else, as it
+    /// accepts a grant.
+    #[tokio::test]
+    async fn a_refused_level_grants_and_revokes_nothing_and_its_distributed_form_is_symmetric() {
+        let refused = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+            "where": { "forTask": "$flow.base" },
+            "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN() } },
+                    { "className": "ns://Reviewer", "where": { "author": LEAD(), "rank": "senior" } } ] }),
+        );
+        assert!(requires_query_input(&refused, &record(), ALICE()).is_err());
+        let mut stub = members(&[ALICE()]);
+        stub.histories
+            .insert(ALICE().into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
+        assert!(
+            resolve_role_grants(&stub, "approved", &refused, &record(), &dids(&[ALICE()]))
+                .await
+                .is_err(),
+            "no grant evidence, and so no revocation, for a refused rule"
+        );
+
+        let distributed = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+            "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN(), "forTask": "$flow.base" } },
+                    { "className": "ns://Reviewer",
+                      "where": { "author": LEAD(), "rank": "senior", "forTask": "$flow.base" } } ] }),
+        );
+        let translated = requires_query_input(&distributed, &record(), ALICE()).unwrap();
+        for revoker in [ADMIN(), LEAD()] {
+            assert!(revocation_authorised(&translated, revoker), "{revoker}");
+        }
+        for revoker in [MALLORY(), ALICE()] {
+            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
+        }
+    }
+
     /// The window is derived from the carried links, in a deterministic order:
     /// the grant link's timestamp when there is one, else the instance's own;
     /// the authorised tombstones earliest first.
