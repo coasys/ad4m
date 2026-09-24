@@ -47,7 +47,6 @@ fn a_re_mint_naming_another_node_is_refused_as_outputs_not_committed() {
         honest.read_set.clone(),
         outs(&[ATTACKER]),
         vec![delivered()],
-        GrantContext::empty(),
     )
     .expect_err("a re-mint naming another node must not mint");
     assert!(format!("{err:#}").contains("committed to"), "got: {err:#}");
@@ -111,7 +110,6 @@ fn a_receipt_carrying_edited_output_content_is_refused_as_outputs_not_committed(
         honest.read_set.clone(),
         vec![edited],
         vec![delivered()],
-        GrantContext::empty(),
     )
     .expect_err("a mint from edited content must not mint");
     assert!(format!("{err:#}").contains("committed to"), "got: {err:#}");
@@ -147,14 +145,7 @@ fn a_terminal_state_with_no_requires_still_produces_a_valid_receipt() {
         T1,
     );
     let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
-    let receipt = FlowReceipt::mint(
-        &unguarded,
-        rs,
-        outs(&[OUTPUT]),
-        Vec::new(),
-        GrantContext::empty(),
-    )
-    .expect("mints");
+    let receipt = FlowReceipt::mint(&unguarded, rs, outs(&[OUTPUT]), Vec::new()).expect("mints");
 
     let verdict = verify_receipt(&catalogue(vec![unguarded]), &receipt);
     assert_eq!(
@@ -245,7 +236,6 @@ fn twin_final_edge_atoms_with_different_outputs_hashes_are_refused() {
         conflicting.read_set,
         outs(&[OUTPUT]),
         vec![delivered()],
-        GrantContext::empty(),
     )
     .expect_err("mint refuses what verify refuses");
     assert!(
@@ -315,14 +305,7 @@ fn the_commitment_is_over_the_outputs_in_any_order_and_nothing_else() {
         T1,
     );
     let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
-    let receipt = FlowReceipt::mint(
-        &flow,
-        rs,
-        outs(&three),
-        vec![delivered()],
-        GrantContext::empty(),
-    )
-    .expect("mints");
+    let receipt = FlowReceipt::mint(&flow, rs, outs(&three), vec![delivered()]).expect("mints");
     let reader = catalogue(vec![flow]);
 
     let reordered_ids = ["ad4m://deliverable/d3", OUTPUT, "ad4m://deliverable/d2"];

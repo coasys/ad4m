@@ -26,7 +26,7 @@ fn a_receipt_still_verifies_after_the_links_behind_it_are_retracted() {
 
     let after_retraction = read_set(Vec::new(), Vec::new());
     assert_eq!(
-        fold_read_set(&flow, &after_retraction.reverified(), GrantContext::empty())
+        fold_read_set(&flow, &after_retraction.reverified())
             .expect("an empty read-set folds")
             .state,
         "open",

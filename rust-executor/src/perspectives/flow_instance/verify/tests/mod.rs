@@ -9,7 +9,6 @@ use super::verdict::VerdictKind;
 use super::*;
 use crate::perspectives::flow_evaluator::evidence_hash;
 use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
-use crate::perspectives::flow_instance::grant::GrantContext;
 use crate::perspectives::flow_instance::receipt::EvidencePreimage;
 use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
 use crate::perspectives::flow_instance::test_support::{
@@ -108,17 +107,8 @@ fn completed() -> ReadSet {
 }
 
 fn mint(flow: &SHACLFlow, rs: ReadSet) -> FlowReceipt {
-    // Minted against the same catalogue a reader would verify against, so
-    // the two sides of every fixture agree by construction.
-    let reader = catalogue(vec![flow.clone()]);
-    FlowReceipt::mint(
-        flow,
-        rs,
-        outs(&[OUTPUT]),
-        vec![delivered()],
-        GrantContext::root(&reader),
-    )
-    .expect("the fixture read-set mints")
+    FlowReceipt::mint(flow, rs, outs(&[OUTPUT]), vec![delivered()])
+        .expect("the fixture read-set mints")
 }
 
 // ---- the happy path, as the control for everything below --------------
@@ -193,13 +183,16 @@ impl Rename for SHACLFlow {
         self
     }
 }
+
+// ---- (0a) the settle time --------------------------------------------
+
 /// `settled_at` is the quorum time of the edge that **completed** the run,
 /// not of the one that started it.
 ///
 /// The single-edge fixture above cannot tell those apart — its first
 /// settled edge is also its last — so a walk with two hops at different
 /// times is the only shape that pins it. It matters because this value
-/// becomes `granted_at` for a `grantedByFlow` role: reporting the first
+/// becomes `granted_at` for a `producedByFlow` role: reporting the first
 /// hop would date a grant from the moment the run *began* to be decided,
 /// opening an eligibility window over a stretch in which the run had not
 /// completed and the grant did not exist.
@@ -284,7 +277,7 @@ fn a_run_in_which_nobody_voted_is_not_a_completion() {
         ..read_set(Vec::new(), Vec::new())
     };
     assert_eq!(
-        fold_read_set(&standing_still, &empty.reverified(), GrantContext::empty())
+        fold_read_set(&standing_still, &empty.reverified())
             .expect("a stateless walk folds")
             .settled
             .len(),
@@ -300,7 +293,6 @@ fn a_run_in_which_nobody_voted_is_not_a_completion() {
         },
         outs(&[OUTPUT]),
         Vec::new(),
-        GrantContext::empty(),
     )
     .expect_err("a completion nobody voted on is not a completion");
     assert!(

@@ -10,7 +10,7 @@ import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
-  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
+  TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -81,7 +81,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+  where(conditions: TypedQueryWhere<T>): ModelQueryBuilder<T> {
     this.queryParams.where = conditions as Where;
     return this;
   }
