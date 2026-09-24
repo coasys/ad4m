@@ -91,7 +91,7 @@ pub async fn accept_flow_proposal(
         .ok_or_else(|| anyhow::anyhow!("flow `{}` is not in the catalogue", record.flow_uri))?;
     let instance = FlowInstance::from_record(record, flow);
 
-    let derived = instance.derive_state(perspective, &flows).await?;
+    let derived = instance.derive_state(perspective).await?;
     if atom.from_state != derived.state {
         return Err(anyhow::anyhow!(
             "proposal {proposal_uri} is stale: it leaves `{}` but {instance_uri} is in `{}` — accept not recorded",

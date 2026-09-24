@@ -599,10 +599,10 @@ pub trait RequiresQueryable: Send + Sync {
     /// Every receipt filed under `flow_uri`'s index, read whole so the caller
     /// can verify them itself.
     ///
-    /// Called only for a role query that declares `grantedByFlow`. The index
+    /// Called only for a role query that declares `producedByFlow`. The index
     /// is writable by anyone and this call trusts nothing in it: collecting a
-    /// receipt decides nothing, and every check that matters runs on the
-    /// reading side (see
+    /// receipt decides nothing, and every check that matters runs in the
+    /// caller (see
     /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
     ///
     /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
@@ -615,6 +615,15 @@ pub trait RequiresQueryable: Send + Sync {
     /// turns into "granted by something I could not see".
     async fn flow_receipts(&self, _flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
         Ok(Vec::new())
+    }
+
+    /// This replica's flow definitions, keyed by `flow_uri()` — what a
+    /// `producedByFlow` gate verifies the granting flow's receipts against.
+    ///
+    /// The default is empty, which is fail-closed: a gate whose flow is not
+    /// in the catalogue is an error, never "not a member".
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        Ok(HashMap::new())
     }
 }
 
@@ -835,6 +844,10 @@ impl RequiresQueryable for PerspectiveInstance {
     /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
     async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
         crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
+    }
+
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        load_shacl_flows(self).await
     }
 }
 

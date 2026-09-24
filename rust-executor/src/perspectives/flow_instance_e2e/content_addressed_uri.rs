@@ -114,14 +114,8 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
         .await
         .expect("load outputs");
     let outputs: Vec<_> = loaded.into_values().collect();
-    let receipt = FlowReceipt::mint(
-        flow,
-        f.read_set().await,
-        outputs,
-        Vec::new(),
-        crate::perspectives::flow_instance::grant::GrantContext::empty(),
-    )
-    .expect("the completed run mints");
+    let receipt = FlowReceipt::mint(flow, f.read_set().await, outputs, Vec::new())
+        .expect("the completed run mints");
     let verdict = verify_receipt(&flows, &receipt);
     assert!(
         verdict.is_verified(),

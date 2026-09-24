@@ -7,7 +7,6 @@ use super::{
 };
 use crate::perspectives::flow_evaluator::EvidenceItem;
 use crate::perspectives::flow_instance::atom::{outputs_hash, OutputRef};
-use crate::perspectives::flow_instance::grant::GrantContext;
 use crate::perspectives::flow_instance::{fold_read_set, ReadSet};
 use crate::perspectives::shacl_parser::SHACLFlow;
 
@@ -42,28 +41,12 @@ impl FlowReceipt {
     ///   of them carry different ones;
     /// - `outputs` names one output twice with different content;
     /// - `outputs` does not hash to the final edge's `outputs_hash`;
-    /// - the fold took **no edge at all** — see below;
     /// - the serialised receipt exceeds [`MAX_RECEIPT_BYTES`].
-    ///
-    /// # A walk that took no edge is not a completion
-    ///
-    /// A flow whose genesis state has no transitions out of it is terminal
-    /// the moment an instance exists, so the fold "reaches" that state without
-    /// anybody having voted on anything. A receipt for it would carry an empty
-    /// voter list and no settle time, and anything that paid out on it would
-    /// be paying out on a run in which nothing was decided. Both sides refuse
-    /// it through the same [`final_edge_commitment`] call —
-    /// [`OutputsCommitment::NoFinalEdge`] here,
-    /// [`NoFinalEdge`](super::verify::ReceiptVerdict::NoFinalEdge) in
-    /// `verify_receipt` — which is what keeps mint and verify from disagreeing
-    /// about material that would otherwise mint cleanly and fail everywhere it
-    /// was presented.
     pub fn mint(
         flow: &SHACLFlow,
         read_set: ReadSet,
         mut outputs: Vec<EvidenceItem>,
         evidence_preimage: Vec<EvidencePreimage>,
-        grants: GrantContext<'_>,
     ) -> anyhow::Result<FlowReceipt> {
         outputs.sort_by(|a, b| {
             (&a.class_name, &a.id, &a.content).cmp(&(&b.class_name, &b.id, &b.content))
@@ -101,7 +84,7 @@ impl FlowReceipt {
         // on the raw value and verifying on the re-verified one would fold
         // different inputs by construction — see `ReadSet::reverified`.
         let ingested = read_set.reverified();
-        let derived = fold_read_set(flow, &ingested, grants)?;
+        let derived = fold_read_set(flow, &ingested)?;
         if let Some(contested) = &derived.contested {
             anyhow::bail!(
                 "FlowReceipt::mint: {} is contested in `{}` ({} settled edges out of it), so it \
@@ -179,15 +162,11 @@ impl FlowReceipt {
     /// the seal, and this dedupe silently drops the variant that differs.**
     /// Such a field needs either the seal widened to cover it or the dedupe
     /// key widened to include it — not a third `CountedAtom` member.
-    pub fn counted_seals(
-        flow: &SHACLFlow,
-        read_set: &ReadSet,
-        grants: GrantContext<'_>,
-    ) -> anyhow::Result<Vec<CountedAtom>> {
+    pub fn counted_seals(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<CountedAtom>> {
         // Same ingest as `mint` and `verify_receipt`: the atoms this walks
         // must be the atoms that walk counted.
         let read_set = read_set.reverified();
-        let derived = fold_read_set(flow, &read_set, grants)?;
+        let derived = fold_read_set(flow, &read_set)?;
         let counted: std::collections::BTreeSet<&str> = derived
             .settled
             .iter()
@@ -247,7 +226,6 @@ mod tests {
             completed(),
             outs(&[OUTPUT]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect("a settled run into a terminal state mints");
         assert_eq!(receipt.terminal_state, "done");
@@ -277,14 +255,8 @@ mod tests {
             vec![proposal("ad4m://p/1", ALICE, "open", "doing", "seal-1", T1)],
         );
 
-        let err = FlowReceipt::mint(
-            &flow,
-            half_way,
-            outs(&[OUTPUT]),
-            Vec::new(),
-            GrantContext::empty(),
-        )
-        .expect_err("an intermediate state is not a completion");
+        let err = FlowReceipt::mint(&flow, half_way, outs(&[OUTPUT]), Vec::new())
+            .expect_err("an intermediate state is not a completion");
         assert!(
             format!("{err:#}").contains("can still transition out"),
             "the error must say why `doing` is not terminal, got: {err:#}"
@@ -337,14 +309,8 @@ mod tests {
             ],
         );
 
-        let err = FlowReceipt::mint(
-            &flow,
-            both,
-            outs(&[OUTPUT]),
-            Vec::new(),
-            GrantContext::empty(),
-        )
-        .expect_err("a contested derivation has not completed");
+        let err = FlowReceipt::mint(&flow, both, outs(&[OUTPUT]), Vec::new())
+            .expect_err("a contested derivation has not completed");
         assert!(
             format!("{err:#}").contains("contested"),
             "the error must name the contention, got: {err:#}"
@@ -371,14 +337,8 @@ mod tests {
                 T1,
             )],
         );
-        let err = FlowReceipt::mint(
-            &two_state_flow(),
-            empty_commitment,
-            Vec::new(),
-            Vec::new(),
-            GrantContext::empty(),
-        )
-        .expect_err("a receipt with no outputs speaks for nothing");
+        let err = FlowReceipt::mint(&two_state_flow(), empty_commitment, Vec::new(), Vec::new())
+            .expect_err("a receipt with no outputs speaks for nothing");
         assert!(
             format!("{err:#}").contains("no outputs to speak for"),
             "the error must name the missing binding, got: {err:#}"
@@ -415,14 +375,8 @@ mod tests {
                 T1,
             )],
         );
-        let receipt = FlowReceipt::mint(
-            &unguarded,
-            rs,
-            outs(&[OUTPUT]),
-            Vec::new(),
-            GrantContext::empty(),
-        )
-        .expect("mints");
+        let receipt =
+            FlowReceipt::mint(&unguarded, rs, outs(&[OUTPUT]), Vec::new()).expect("mints");
         assert_eq!(receipt.outputs, outs(&[OUTPUT]));
     }
 
@@ -456,7 +410,6 @@ mod tests {
                 OUTPUT,
             ]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect("mints");
         assert_eq!(receipt.outputs, outs(&three));
@@ -473,7 +426,6 @@ mod tests {
             completed(),
             outs(&[ATTACKER]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect_err("a re-mint naming another node must not mint");
         assert!(
@@ -499,7 +451,6 @@ mod tests {
             completed(),
             vec![edited],
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect_err("edited content must not mint");
         assert!(
@@ -524,7 +475,6 @@ mod tests {
             completed(),
             vec![out_item(OUTPUT), edited],
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect_err("two contents for one output must not mint");
         assert!(
@@ -545,7 +495,6 @@ mod tests {
             read_set("done", Vec::new()),
             outs(&[OUTPUT]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect_err("a walk that starts at the finish line is not a completion");
         assert!(
@@ -573,7 +522,6 @@ mod tests {
             completed(),
             outs(&[OUTPUT]),
             vec![delivered(), bulky],
-            GrantContext::empty(),
         )
         .expect_err("a receipt over the cap is not minted");
         assert!(
@@ -628,7 +576,7 @@ mod tests {
             ],
         );
 
-        let counted = FlowReceipt::counted_seals(&flow, &rs, GrantContext::empty()).expect("folds");
+        let counted = FlowReceipt::counted_seals(&flow, &rs).expect("folds");
         let seals: Vec<&str> = counted.iter().map(|c| c.seal.as_str()).collect();
         assert_eq!(
             seals,
@@ -664,8 +612,7 @@ mod tests {
         outputs: Vec<EvidenceItem>,
     ) -> anyhow::Result<crate::perspectives::flow_instance::verify::ReceiptVerdict> {
         use crate::perspectives::flow_instance::verify::verify_receipt;
-        let receipt =
-            FlowReceipt::mint(&flow, rs, outputs, vec![delivered()], GrantContext::empty())?;
+        let receipt = FlowReceipt::mint(&flow, rs, outputs, vec![delivered()])?;
         let catalogue: std::collections::HashMap<String, SHACLFlow> =
             std::iter::once((flow.flow_uri(), flow)).collect();
         Ok(verify_receipt(&catalogue, &receipt))
@@ -769,8 +716,7 @@ mod tests {
                 &n2_terminal_flow(),
                 rs,
                 outs(&[ATTACKER]),
-                vec![delivered()],
-                GrantContext::empty()
+                vec![delivered()]
             )
             .is_err(),
             "and the rival's outputs still bind nothing"

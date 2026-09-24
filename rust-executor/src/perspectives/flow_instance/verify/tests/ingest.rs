@@ -50,7 +50,7 @@ fn reviewer_evidence_from(grant_links: Vec<LinkExpression>) -> RoleGrantEvidence
             // Earlier than the assignment link — the widening the
             // suppression rule exists to prevent.
             asserted_instance_timestamp: Some(INSTANCE_CREATED.into()),
-            granting_receipts: Vec::new(),
+            produced_at: None,
         }],
     }
 }
@@ -328,14 +328,8 @@ fn mint_refuses_material_a_verifier_would_refuse() {
     ));
     let forged = read_set(vec![ProposalLinks { uri, links }], Vec::new());
 
-    let err = FlowReceipt::mint(
-        &flow,
-        forged,
-        outs(&[OUTPUT]),
-        vec![delivered()],
-        GrantContext::empty(),
-    )
-    .expect_err("a quorum resting on a forged signature is not a quorum");
+    let err = FlowReceipt::mint(&flow, forged, outs(&[OUTPUT]), vec![delivered()])
+        .expect_err("a quorum resting on a forged signature is not a quorum");
     assert!(
         format!("{err:#}").contains("can still transition out"),
         "the fold must stay in `open` rather than counting the forgery, got: {err:#}"
@@ -349,12 +343,6 @@ fn mint_refuses_material_a_verifier_would_refuse() {
     let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
     links.push(signed_vote(&uri, BOB, T2));
     let honest = read_set(vec![ProposalLinks { uri, links }], Vec::new());
-    FlowReceipt::mint(
-        &flow,
-        honest,
-        outs(&[OUTPUT]),
-        vec![delivered()],
-        GrantContext::empty(),
-    )
-    .expect("the same material, honestly signed, must mint");
+    FlowReceipt::mint(&flow, honest, outs(&[OUTPUT]), vec![delivered()])
+        .expect("the same material, honestly signed, must mint");
 }
