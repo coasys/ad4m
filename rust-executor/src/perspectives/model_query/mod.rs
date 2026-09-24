@@ -81,6 +81,8 @@
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 
+#[cfg(test)]
+mod collection_provenance_tests;
 mod eval_transform;
 mod filtering;
 mod getters;
