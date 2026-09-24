@@ -138,6 +138,38 @@ fn canonical_and_non_literal_targets_verify_after_a_read_back() {
     ]);
 }
 
+/// Re-inserting a link on the same reifier (same author, source, predicate,
+/// timestamp and stored value) with a canonical target drops the wire target
+/// the first encoding left, so the read-back matches the later signature.
+#[test]
+fn a_canonical_re_insert_clears_the_earlier_wire_target() {
+    let signer = TestSigner::generate();
+    let a = SparqlStore::new(None).unwrap();
+    let raw = signed(&signer, "rt://s", "literal:string:Write the guide");
+    a.add_link(&raw).unwrap();
+    let data = Link {
+        target: "literal:string:Write%20the%20guide".to_string(),
+        ..raw.data.clone()
+    };
+    let canonical = signer.sign_at(data, raw.timestamp.parse().unwrap());
+    a.add_link(&LinkExpression {
+        author: canonical.author,
+        timestamp: canonical.timestamp,
+        data: canonical.data,
+        proof: canonical.proof,
+        status: Some(LinkStatus::Shared),
+    })
+    .unwrap();
+
+    let read_back = a.get_all_links().unwrap();
+    assert_eq!(read_back.len(), 1, "same reifier, one link");
+    assert_eq!(
+        read_back[0].data.target,
+        "literal:string:Write%20the%20guide"
+    );
+    assert_eq!(not_verified_after_read_back(&a), Vec::<String>::new());
+}
+
 /// The SHACL links `add_sdna` writes through `parse_shacl_to_links` (setter,
 /// adder, constructor, interpretation-hint JSON under `literal:string:`)
 /// verify after a read-back.

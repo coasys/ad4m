@@ -173,7 +173,7 @@ pub(super) async fn attach_links(
             .join(" ");
         let local_status = local_status_filter(shape);
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -182,6 +182,7 @@ pub(super) async fn attach_links(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 {local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
@@ -195,7 +196,12 @@ pub(super) async fn attach_links(
                 "data": {
                     "source": source,
                     "predicate": predicate,
-                    "target": s(row, "target"),
+                    // The signed bytes when the store keeps them apart
+                    // from its canonical literal rendering.
+                    "target": match s(row, "wireTarget") {
+                        w if w.is_empty() => s(row, "target"),
+                        w => w,
+                    },
                 },
                 "proof": {
                     "key": s(row, "proofKey"),
