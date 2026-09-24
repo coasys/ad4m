@@ -726,3 +726,159 @@ async fn proof_valid_a_forged_value_does_not_pass_a_relation_where() {
         "the opt-in reads the unverified `status`"
     );
 }
+
+/// #1113 across a publish: `ensure_public_links_are_shared` sends
+/// `sparql_store.get_all_links()` output to the link language, and every
+/// joiner ingests those copies with `add_link`. This signs one property link
+/// per `(name, target)` on store A, copies A's read-back links into store B
+/// the same way, and reads both with the default. Returns the cases that do
+/// not hydrate on B, that is, whose read-back copy no longer verifies.
+async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
+    let mut properties = serde_json::Map::new();
+    properties.insert(
+        "type".into(),
+        json!({"predicate":"ad4m://type","required":true,"flag":true,"initial":"pv://Recipe"}),
+    );
+    for (name, _) in cases {
+        properties.insert(
+            name.to_string(),
+            json!({"predicate": format!("pv://{name}"), "required": false}),
+        );
+    }
+    let shape_json =
+        json!({"className": "Recipe", "properties": properties, "relations": {}}).to_string();
+
+    let a = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    a.add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    for (i, (name, target)) in cases.iter().enumerate() {
+        a.add_link(&pv_signed(
+            &signer,
+            r,
+            &format!("pv://{name}"),
+            target,
+            i as u32 + 1,
+        ))
+        .unwrap();
+    }
+    let b = SparqlStore::new(None).unwrap();
+    for decorated in a.get_all_links().unwrap() {
+        b.add_link(&LinkExpression::from(decorated)).unwrap();
+    }
+
+    let mut withheld = Vec::new();
+    for (store, label) in [(&a, "a"), (&b, "b")] {
+        let result = execute_model_query_from_json(
+            store,
+            "Recipe",
+            &ModelQueryInput::default(),
+            &shape_json,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.instances.len(), 1, "the type link verifies");
+        let inst = &result.instances[0];
+        let missing: Vec<String> = cases
+            .iter()
+            .filter(|(name, _)| inst.get(*name).map_or(true, |v| v.is_null()))
+            .map(|(name, target)| format!("{name} ({target})"))
+            .collect();
+        if label == "a" {
+            assert!(
+                missing.is_empty(),
+                "control: every form verifies on the signing store, missing {missing:?}"
+            );
+        } else {
+            withheld = missing;
+        }
+    }
+    withheld
+}
+
+/// The forms the SDK writes (`Literal.from(v).toUrl()`, which uses
+/// `encodeRFC3986URIComponent`) survive the read-back: the store renders a
+/// literal with the same encoding, so B re-verifies the signed bytes. The
+/// JSON objects are `JSON.stringify` output, one with keys out of order.
+#[tokio::test]
+async fn proof_valid_sdk_literals_still_verify_after_a_read_back() {
+    let withheld = pv_withheld_after_read_back(&[
+        ("plain", "literal:string:approved"),
+        ("sdkString", "literal:string:Write%20the%20guide"),
+        // `{ a: 1, b: "x y" }`
+        (
+            "sdkJsonSorted",
+            "literal:json:%7B%22a%22%3A1%2C%22b%22%3A%22x%20y%22%7D",
+        ),
+        // `{ title: "x", done: false }`
+        (
+            "sdkJsonUnsorted",
+            "literal:json:%7B%22title%22%3A%22x%22%2C%22done%22%3Afalse%7D",
+        ),
+        ("number", "literal:number:42"),
+        ("boolean", "literal:boolean:true"),
+    ])
+    .await;
+    assert_eq!(withheld, Vec::<String>::new());
+}
+
+/// A literal the SDK would not write, here one with a raw space, is stored
+/// decoded and read back percent-encoded, so the copy B ingests is not what
+/// was signed and B stores `proofValid = "false"`. Under the default, B
+/// withholds it. Reported on #1123 (thread on `sparql_builder.rs`); whether to
+/// fix the round trip first is open, so this stays ignored until then.
+#[tokio::test]
+#[ignore = "#1123 review: a non-canonically encoded literal fails re-verify after a read-back"]
+async fn proof_valid_an_unencoded_literal_still_verifies_after_a_read_back() {
+    let withheld =
+        pv_withheld_after_read_back(&[("unencoded", "literal:string:Write the guide")]).await;
+    assert_eq!(withheld, Vec::<String>::new());
+}
+
+/// #1113 when a link's reifier carries no `proofValid` quad at all. The filter
+/// is `EXISTS "true"`, so a missing verdict reads as not verified, like a
+/// `"false"` one. `insert_link_triples` always writes the quad today; this pins
+/// the default in case a refactor makes the verdict `OPTIONAL` or turns the cut
+/// into `NOT EXISTS "false"`, which would keep every other test green.
+#[tokio::test]
+async fn proof_valid_a_link_with_no_verdict_does_not_hydrate_by_default() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    store
+        .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    let name = pv_signed(&signer, r, "pv://name", "literal:string:real", 1);
+    store.add_link(&name).unwrap();
+    store.remove_proof_valid_annotation(&name).unwrap();
+
+    let name_of = |include_unverified: Option<bool>| {
+        let store = &store;
+        async move {
+            let mut out = Vec::new();
+            // `limit` switches to the two-phase plan.
+            for limit in [None, Some(10)] {
+                let result = execute_model_query_from_json(
+                    store,
+                    "Recipe",
+                    &ModelQueryInput {
+                        limit,
+                        include_unverified,
+                        ..Default::default()
+                    },
+                    PV_SHAPE_JSON,
+                )
+                .await
+                .unwrap();
+                assert_eq!(result.instances.len(), 1);
+                out.push(result.instances[0].get("name").cloned());
+            }
+            assert_eq!(out[0], out[1], "both plans agree");
+            out.remove(0).filter(|v| !v.is_null())
+        }
+    };
+
+    assert_eq!(name_of(None).await, None, "no verdict reads as unverified");
+    assert_eq!(name_of(Some(true)).await, Some(json!("real")));
+}

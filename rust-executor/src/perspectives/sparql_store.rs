@@ -569,6 +569,31 @@ impl SparqlStore {
         self.insert_link_triples(link)
     }
 
+    /// Test-only: drop the `proofValid` annotation from a stored link's
+    /// reifier, leaving the link and its other metadata in place.
+    /// `insert_link_triples` always writes one, so no production path yields a
+    /// link without it; this lets the model_query tests pin how one reads.
+    #[cfg(test)]
+    pub(crate) fn remove_proof_valid_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        let reifier_iri = make_reifier_iri(link);
+        let quads: Vec<_> = self
+            .store
+            .quads_for_pattern(
+                Some(reifier_iri.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(ONT_PROOF_VALID)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        if quads.is_empty() {
+            return Err(anyhow!("link has no proofValid annotation"));
+        }
+        for quad in &quads {
+            self.store.remove(quad)?;
+        }
+        Ok(())
+    }
+
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
