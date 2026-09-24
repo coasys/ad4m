@@ -29,6 +29,7 @@ import {
   Ad4mClient,
   Ad4mModel,
   Flag,
+  Link,
   LinkExpression,
   LinkQuery,
   Literal,
@@ -159,24 +160,24 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
   });
 
   it("does not let a forged link reorder a page", async () => {
-    // A second recipe with no name of its own. Unnamed sorts last, so page 1
-    // of `order: { name: "ASC" }, limit: 1` is the first recipe. A forged
-    // name that sorts first would put the second recipe there instead.
-    const other = new UnverifiedRecipe(perspective);
-    other.cuisine = "greek";
-    await other.save();
-    const [cuisine] = await perspective.get(
-      new LinkQuery({ source: other.id, predicate: "uvr://cuisine" })
+    // A second recipe with no name at all: only its type link, written
+    // directly (`save()` would also write the `name = ""` initializer).
+    // Unnamed sorts last, so page 1 of `order: { name: "ASC" }, limit: 1` is
+    // the first recipe. A forged name that sorts first would put the second
+    // recipe there instead.
+    const otherId = "uvr://recipe/unnamed";
+    const typeLink = await perspective.add(
+      new Link({ source: otherId, predicate: "uvr://type", target: "uvr://recipe" })
     );
     await perspective.addLinkExpression({
-      author: cuisine.author,
-      timestamp: cuisine.timestamp,
+      author: typeLink.author,
+      timestamp: typeLink.timestamp,
       data: {
-        source: other.id,
+        source: otherId,
         predicate: "uvr://name",
         target: Literal.from("aaa").toUrl(),
       },
-      proof: { key: cuisine.proof.key, signature: cuisine.proof.signature },
+      proof: { key: typeLink.proof.key, signature: typeLink.proof.signature },
     } as LinkExpression);
 
     const page = (includeUnverified?: boolean) =>
@@ -189,7 +190,7 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
     expect(
       (await page(true)).map((r) => r.id),
       "the opt-in sorts on the forged name"
-    ).to.deep.equal([other.id]);
+    ).to.deep.equal([otherId]);
   });
 
   it("an explicit includeUnverified: false is the default", async () => {
