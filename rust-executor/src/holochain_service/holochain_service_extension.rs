@@ -1,3 +1,4 @@
+use deno_core::error::AnyError;
 use deno_core::{anyhow::anyhow, op2};
 use holochain::{
     conductor::api::AppInfo,
@@ -7,11 +8,12 @@ use holochain::{
 };
 use log::error;
 use serde::{Deserialize, Serialize};
+use std::future::Future;
 use std::io::Cursor;
 use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
-use super::holochain_service_once_started;
+use super::{holochain_service_once_started, HolochainServiceInterface};
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
 
@@ -242,6 +244,33 @@ async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, Anyho
         .map_err(AnyhowWrapperError::from)
 }
 
+/// The body of the `call_zome_function` op: waits for the conductor (`started`), then runs
+/// the call with `budget` as its timeout.
+///
+/// The dispatch loop refuses the call if it is still queued when that timeout fires (#1133):
+/// past that instant nobody is waiting for the result, so running it would only fire a
+/// stale zome call after the caller has already reported a timeout.
+pub(crate) async fn call_zome_within(
+    started: impl Future<Output = Option<HolochainServiceInterface>>,
+    budget: Duration,
+    app_id: String,
+    cell_name: String,
+    zome_name: String,
+    fn_name: String,
+    payload: Option<ExternIO>,
+) -> Result<ZomeCallResponse, AnyError> {
+    let deadline = Some(Instant::now() + budget);
+    let interface = started
+        .await
+        .ok_or_else(|| anyhow!("Holochain conductor not available"))?;
+    timeout(
+        budget,
+        interface.call_zome_function(app_id, cell_name, zome_name, fn_name, payload, deadline),
+    )
+    .await
+    .map_err(|_| anyhow!("Timeout error"))?
+}
+
 //TODO
 //Have install app use lair to generate the membrane proof
 #[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
@@ -267,26 +296,16 @@ async fn call_zome_function(
         }
         None => None,
     };
-    // The dispatch loop refuses the call if it is still queued when this op's own timeout
-    // fires (#1133): past that instant nobody is waiting for the result, so running it
-    // would only fire a stale zome call after the caller has already reported a timeout.
-    let deadline = Some(Instant::now() + TIMEOUT_DURATION);
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    let response = timeout(
+    let response = call_zome_within(
+        holochain_service_once_started(),
         TIMEOUT_DURATION,
-        interface.call_zome_function(
-            app_id,
-            cell_name,
-            zome_name,
-            fn_name,
-            extern_payload,
-            deadline,
-        ),
+        app_id,
+        cell_name,
+        zome_name,
+        fn_name,
+        extern_payload,
     )
     .await
-    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
     .map_err(AnyhowWrapperError::from)?;
 
     // Decode ExternIO bytes to JSON before returning to JS

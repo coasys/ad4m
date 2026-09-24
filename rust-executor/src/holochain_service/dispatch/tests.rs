@@ -13,7 +13,10 @@
 //!    whose deadline passes while it waits for a permit
 //!    (`request_expiring_while_waiting_for_a_permit_is_refused`);
 //! 5. `Shutdown` is answered only after every in-flight request has finished
-//!    (`shutdown_drains_in_flight_calls`).
+//!    (`shutdown_drains_in_flight_calls`);
+//! 6. the `call_zome_function` op's deadline is the instant the op gives up: it starts only
+//!    once the conductor is up (`op_deadline_starts_after_the_conductor_is_up`) and it
+//!    reaches the loop (`op_passes_its_deadline_to_the_loop`).
 //!
 //! Requests go through the real `HolochainServiceInterface` methods, so what is tested is
 //! what `holochain_service_extension.rs` and `unyt_service.rs` call. The mock reads the
@@ -30,6 +33,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::holochain_service::holochain_service_extension::call_zome_within;
 use crate::holochain_service::interface::HolochainServiceInterface;
 
 struct MockDispatch {
@@ -308,16 +312,7 @@ async fn expired_request_is_refused_without_reaching_the_service() {
 async fn request_expiring_while_waiting_for_a_permit_is_refused() {
     let h = Harness::start();
 
-    let busy: Vec<_> = (0..ZOME_CALL_CONCURRENCY)
-        .map(|i| tokio::spawn(h.zome_call(&format!("busy{i}"), 300, None)))
-        .collect();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while h.mock.in_flight.load(Ordering::SeqCst) < ZOME_CALL_CONCURRENCY {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .expect("every permit must be taken within 5 s");
+    let busy = fill_permits(&h, 300).await;
 
     // Dequeued at once, well before its deadline, but no permit frees up until the busy
     // calls finish ~300 ms later: by then its caller has given up.
@@ -363,4 +358,93 @@ async fn shutdown_drains_in_flight_calls() {
         .await
         .expect("loop must exit after Shutdown")
         .unwrap();
+}
+
+/// Takes every permit with a call the mock holds for `hold_ms`, and returns once all run.
+async fn fill_permits(
+    h: &Harness,
+    hold_ms: u64,
+) -> Vec<JoinHandle<Result<ZomeCallResponse, AnyError>>> {
+    let busy: Vec<_> = (0..ZOME_CALL_CONCURRENCY)
+        .map(|i| tokio::spawn(h.zome_call(&format!("busy{i}"), hold_ms, None)))
+        .collect();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.mock.in_flight.load(Ordering::SeqCst) < ZOME_CALL_CONCURRENCY {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("every permit must be taken within 5 s");
+    busy
+}
+
+/// The op's deadline must not count the wait for the conductor: a conductor start longer
+/// than the op's budget still leaves the call its whole budget.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn op_deadline_starts_after_the_conductor_is_up() {
+    let h = Harness::start();
+    let budget = Duration::from_millis(200);
+
+    // The conductor comes up only after longer than the op's whole budget.
+    let iface = h.iface.clone();
+    let started = async move {
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        Some(iface)
+    };
+    let response = call_zome_within(
+        started,
+        budget,
+        "app".into(),
+        "cell".into(),
+        "0".into(),
+        "after-start".into(),
+        None,
+    )
+    .await
+    .expect("a call made while the conductor starts must get its whole budget");
+
+    assert_eq!(label_of(response), "after-start");
+    assert_eq!(
+        h.mock.events(),
+        vec!["start:after-start", "done:after-start"]
+    );
+}
+
+/// The op must hand its give-up instant to the loop, so a call still queued when the op
+/// times out never reaches the conductor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn op_passes_its_deadline_to_the_loop() {
+    let h = Harness::start();
+    let busy = fill_permits(&h, 300).await;
+
+    // Waits for a permit for ~300 ms, but the op gives up after 100 ms.
+    let iface = h.iface.clone();
+    let err = call_zome_within(
+        async move { Some(iface) },
+        Duration::from_millis(100),
+        "app".into(),
+        "cell".into(),
+        "0".into(),
+        "late".into(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("Timeout"), "got: {err}");
+
+    for call in busy {
+        call.await.unwrap().unwrap();
+    }
+    // Queued after "late", so answered only once the loop has admitted or refused it.
+    assert_eq!(
+        label_of(h.zome_call("probe", 0, None).await.unwrap()),
+        "probe"
+    );
+
+    // The verdict: the loop refused "late" at its deadline instead of running it.
+    let events = h.mock.events();
+    assert!(
+        !events.contains(&"start:late".to_string()),
+        "a call whose op already timed out must never reach the dispatcher: {events:?}"
+    );
 }
