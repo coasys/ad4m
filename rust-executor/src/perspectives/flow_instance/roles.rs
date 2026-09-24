@@ -79,10 +79,13 @@
 //! `author` condition (top level, and any `or` branch) is applied to the
 //! tombstone's author through `model_query`'s own condition evaluator
 //! ([`revocation_authorised`]). The translator nests that condition under
-//! every field the rule filters on, `{ forTask: { eq: T, author: A }, agent:
-//! { eq: did, author: A } }`, so a grant counts only when A wrote the `agent`
-//! link and every other link the rule matches on (#1114), and a revocation
-//! only when A wrote the tombstone. That covers eligibility, not dating:
+//! every `where` field the rule filters on, `{ forTask: { eq: T, author: A },
+//! agent: { eq: did, author: A } }`, and under the fields of every `or` arm
+//! that names no author of its own, so a grant counts only when A wrote the
+//! `agent` link and every other `where` link the rule matches on (#1114), and
+//! a revocation only when A wrote the tombstone. The `linkedTo` link is not
+//! one of them: it is matched from any author until `model_query` can scope
+//! the parent link (#1139). That covers eligibility, not dating:
 //! `granted_at` is still the earliest `agent -> did` link from *any* author,
 //! so a candidate's own earlier link back-dates a grant A made later (#1063).
 //! The condition is read from the *translated*
@@ -450,7 +453,8 @@ impl RoleGrantEvidence {
 /// condition means exactly what it means for the instances. At a level, every
 /// author condition must accept: the ones the translator nests under each
 /// field of the level (`{ agent: { eq: did, author: A } }`, the grant link's
-/// author, and the same `author` under every other field), and a top-level
+/// author, and the same `author` under every other field, an `or` arm's fields
+/// included when the arm inherits its level's), and a top-level
 /// `author` (emitted when the level has no field to nest it under). These are
 /// the conditions the grant query itself
 /// requires, so grants and revocations stay symmetric. No author condition
@@ -1180,13 +1184,17 @@ mod tests {
         for revoker in [MALLORY(), ALICE(), LEAD()] {
             assert!(!revocation_authorised(&translated, revoker), "{revoker}");
         }
-        // With more fields the same author sits under each, in the plain form
-        // and inside an `or` arm; the reader still accepts admin alone there.
+        // With more fields the same author sits under each, in the plain form,
+        // inside an `or` arm, and inside arms that inherit the level's author;
+        // the reader still accepts admin alone there.
         for rule in [
             json!({ "className": "ns://Reviewer", "didProperty": "agent",
                     "where": { "forTask": "$flow.base", "author": ADMIN() } }),
             json!({ "className": "ns://Reviewer", "didProperty": "agent",
                     "or": [ { "className": "ns://Reviewer", "where": { "rank": "lead", "author": ADMIN() } } ] }),
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() },
+                    "or": [ { "className": "ns://Reviewer", "where": { "rank": "lead" } },
+                            { "className": "ns://Reviewer", "where": { "rank": "senior" } } ] }),
         ] {
             let translated = requires_query_input(
                 &serde_json::from_value::<ModelQuery>(rule.clone()).unwrap(),

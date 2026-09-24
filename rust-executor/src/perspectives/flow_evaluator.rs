@@ -277,7 +277,7 @@ pub(crate) fn requires_query_input(
     record: &FlowInstanceRecord,
     acting_did: &str,
 ) -> Result<Value> {
-    let where_clause = requires_where(query, record, acting_did, None, false)?;
+    let where_clause = requires_where(query, record, acting_did, None, None, false)?;
     let mut out = Map::new();
     if !where_clause.is_empty() {
         out.insert("where".into(), Value::Object(where_clause));
@@ -319,16 +319,29 @@ pub(crate) fn requires_query_input(
 /// granter (`where: { author: X }`) with plain DIDs collapse into one author
 /// list on the outer DID property: `{ agent: { eq: did, author: [A, B] } }`.
 /// Branches that say more keep their own `OR` arm, with the author nested
-/// under each of the arm's fields. An `author` never reaches into or out of an
-/// `OR` arm.
+/// under each of the arm's fields.
 ///
-/// A level with no field to nest under keeps `author` top level, where
-/// `model_query` reads it as the instance's author.
+/// A level's `where` and its `or` are ANDed, so an arm's fields are links the
+/// rule filters on too. An arm with no `author` of its own therefore takes the
+/// enclosing level's, nested under each of its fields:
+/// `{ didProperty: agent, where: { author: A }, or: [{ where: { rank: lead } }] }`
+/// becomes `{ agent: { eq: did, author: A }, OR: [{ rank: { eq: lead, author: A } }] }`.
+/// An arm with its own `author` keeps its own. An `author` never reaches out
+/// of an arm.
+///
+/// A level with no field to nest under keeps its own `author` top level, where
+/// `model_query` reads it as the instance's author; an inherited one has
+/// nothing to scope there and is dropped.
+///
+/// `author` covers the `where` fields only. The `linkedTo` link (the `parent`
+/// scope) is matched from any author: `model_query` has no author condition
+/// on it yet (#1139).
 fn requires_where(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
     inherited_did_property: Option<&str>,
+    inherited_author: Option<&Value>,
     nested: bool,
 ) -> Result<Map<String, Value>> {
     if nested && query.linked_to.is_some() {
@@ -388,13 +401,16 @@ fn requires_where(
         out.insert(prop.to_string(), Value::String(acting_did.to_string()));
     }
 
-    if let Some(author) = author {
-        if out.is_empty() {
-            out.insert("author".to_string(), author);
-        } else {
-            for (field, value) in out.iter_mut() {
-                *value = with_author(field, value.take(), &author)?;
-            }
+    // The level's own `author`, else the one its enclosing level passed down.
+    let scope = author.as_ref().or(inherited_author);
+    if let Some(scope) = scope {
+        for (field, value) in out.iter_mut() {
+            *value = with_author(field, value.take(), scope)?;
+        }
+    }
+    if out.is_empty() {
+        if let Some(author) = &author {
+            out.insert("author".to_string(), author.clone());
         }
     }
 
@@ -402,7 +418,8 @@ fn requires_where(
         let branches = alts
             .iter()
             .map(|alt| {
-                requires_where(alt, record, acting_did, did_property, true).map(Value::Object)
+                requires_where(alt, record, acting_did, did_property, scope, true)
+                    .map(Value::Object)
             })
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
@@ -412,11 +429,26 @@ fn requires_where(
 
 /// Nest `author` into one field's condition: `v` becomes `{ eq: v, author }`,
 /// and an operator object takes `author` as one more key.
+///
+/// Only value operators take it. `equals` passes any JSON through, and beside
+/// a relation quantifier `author` would mean something else: `{ none: {…},
+/// author: A }` is "A wrote no such link", which `model_query` deliberately
+/// does not scope side by side, and `{ some: {…}, author: A }` scopes only the
+/// relation link, not the linked record's fields. A sub-clause object has no
+/// value to scope at all. Each is refused, so the rule fails closed.
 fn with_author(field: &str, condition: Value, author: &Value) -> Result<Value> {
+    const VALUE_OPS: [&str; 8] = ["eq", "not", "contains", "between", "lt", "lte", "gt", "gte"];
     match condition {
         Value::Object(mut ops) => {
             if ops.contains_key("author") {
                 bail!("`{field}` already carries an `author` beside the rule's `author`");
+            }
+            if let Some(key) = ops.keys().find(|k| !VALUE_OPS.contains(&k.as_str())) {
+                bail!(
+                    "`{field}`: the rule's `author` cannot be nested beside `{key}`; only value \
+                     operators ({}) take it",
+                    VALUE_OPS.join(", ")
+                );
             }
             ops.insert("author".to_string(), author.clone());
             Ok(Value::Object(ops))
@@ -1800,7 +1832,8 @@ mod tests {
     /// A role rule's `author` names who may grant the role, so it is nested
     /// under every field the level emits, the DID property included
     /// (`model_query` reads that per link, #1114), and `or` branches that only
-    /// name a granter collapse into one author list. What these queries match
+    /// name a granter collapse into one author list. An `or` arm with no
+    /// `author` of its own takes its level's. What these queries match
     /// is pinned in `model_query::link_author_tests::flow_rules`; this table
     /// only pins the shape.
     #[test]
@@ -1853,6 +1886,25 @@ mod tests {
                 ] }),
             ),
             (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" },
+                        "or": [ { "className": "ns://R", "where": { "rank": "lead" } },
+                                { "className": "ns://R", "where": { "rank": { "equals": { "not": "junior" } } } } ] }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" }, "OR": [
+                    { "rank": { "eq": "lead", "author": "did:key:admin" } },
+                    { "rank": { "not": "junior", "author": "did:key:admin" } },
+                ] }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" },
+                        "or": [ { "className": "ns://R", "where": { "rank": "lead", "author": "did:key:lead" } },
+                                { "className": "ns://R", "where": {} } ] }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" }, "OR": [
+                    { "rank": { "eq": "lead", "author": "did:key:lead" },
+                      "agent": { "eq": did, "author": "did:key:lead" } },
+                    {},
+                ] }),
+            ),
+            (
                 json!({ "className": "ns://R", "didProperty": "agent", "where": { "role": "lead" } }),
                 json!({ "role": "lead", "agent": did }),
             ),
@@ -1868,6 +1920,43 @@ mod tests {
             let q = role(rule.clone());
             let got = qin(&q, did);
             assert_eq!(got["where"], expected, "{rule}");
+        }
+    }
+
+    /// `equals` passes any JSON through. Beside a relation quantifier or in a
+    /// sub-clause, a rule's `author` would not mean "the author wrote this
+    /// link", so the translator refuses it instead of nesting it; the same
+    /// condition without an `author` still translates.
+    #[test]
+    fn role_author_is_refused_beside_a_quantifier_or_sub_clause() {
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        for cond in [
+            json!({ "none": { "verdict": "rejected" } }),
+            json!({ "some": { "verdict": "approved" } }),
+            json!({ "verdict": "approved" }),
+        ] {
+            let rule = |author: Option<&str>| {
+                let mut w = json!({ "reviews": { "equals": cond } });
+                if let Some(a) = author {
+                    w["author"] = json!(a);
+                }
+                role(json!({ "className": "ns://R", "didProperty": "agent", "where": w }))
+            };
+            let err = requires_query_input(&rule(Some("did:key:admin")), &inst(), "did:key:x")
+                .expect_err(&format!("author beside {cond}"))
+                .to_string();
+            assert!(err.contains("cannot be nested beside"), "{cond}: {err}");
+            requires_query_input(&rule(None), &inst(), "did:key:x")
+                .unwrap_or_else(|e| panic!("control without author, {cond}: {e}"));
+
+            // An inherited author is refused the same way inside an `or` arm.
+            let arm = role(json!({ "className": "ns://R", "didProperty": "agent",
+                "where": { "author": "did:key:admin" },
+                "or": [ { "className": "ns://R", "where": { "reviews": { "equals": cond } } } ] }));
+            assert!(
+                requires_query_input(&arm, &inst(), "did:key:x").is_err(),
+                "inherited author beside {cond}"
+            );
         }
     }
 
