@@ -131,4 +131,18 @@ mod tests {
         // Objects are returned as-is (not wrapped)
         assert_eq!(decoded, value);
     }
+
+    /// Same bytes as the SDK's `Literal.from(v).toUrl()`
+    /// (`encodeRFC3986URIComponent`): `-_.~` stay bare.
+    #[test]
+    fn test_encode_matches_the_sdk_encoding() {
+        assert_eq!(
+            literal_encode(&JsonValue::String("board://status a-b_c.d~e".into())),
+            "string:board%3A%2F%2Fstatus%20a-b_c.d~e"
+        );
+        assert_eq!(
+            literal_encode(&serde_json::json!({ "a": "x-y" })),
+            "json:%7B%22a%22%3A%22x-y%22%7D"
+        );
+    }
 }

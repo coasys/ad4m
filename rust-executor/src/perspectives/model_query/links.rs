@@ -413,4 +413,66 @@ mod tests {
             ]
         );
     }
+
+    /// A `__links` row is documented as a signed link a consumer can verify
+    /// itself, so its target must be the signed bytes, not the store's
+    /// canonical rendering of a literal written in another encoding.
+    #[tokio::test]
+    async fn a_links_row_carries_the_signed_target() {
+        use super::super::test_helpers::execute_model_query_from_json;
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        let sign = |predicate: &str, target: &str| {
+            let e = signer.sign(Link {
+                source: "we://i".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            });
+            LinkExpression {
+                author: e.author,
+                timestamp: e.timestamp,
+                data: e.data,
+                proof: e.proof,
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let raw = "literal:string:Write the guide";
+        store.add_link(&sign("ad4m://type", "we://Note")).unwrap();
+        store.add_link(&sign("we://name", raw)).unwrap();
+
+        let shape = r#"{
+            "className": "Note",
+            "properties": {
+                "type": { "predicate": "ad4m://type", "required": true, "flag": true,
+                          "initial": "we://Note" },
+                "name": { "predicate": "we://name", "required": false }
+            }
+        }"#;
+        let result = execute_model_query_from_json(
+            &store,
+            "Note",
+            &ModelQueryInput {
+                links: Some(vec!["name".into()]),
+                ..Default::default()
+            },
+            shape,
+        )
+        .await
+        .unwrap();
+        let rows = result.instances[0][LINKS_KEY]["name"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["data"]["target"], raw);
+        let link = LinkExpression {
+            author: row["author"].as_str().unwrap().into(),
+            timestamp: row["timestamp"].as_str().unwrap().into(),
+            data: serde_json::from_value(row["data"].clone()).unwrap(),
+            proof: serde_json::from_value(row["proof"].clone()).unwrap(),
+            status: None,
+        };
+        assert!(link.compute_proof_valid(), "the row verifies as returned");
+    }
 }
