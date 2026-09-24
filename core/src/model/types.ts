@@ -42,8 +42,23 @@ export type Where = {
   AND?: Where[];
   /** Logical NOT: instance must NOT satisfy the given sub-clause. */
   NOT?: Where;
+  /**
+   * Only instances that are valid outputs of a completed run of `flow`
+   * (optionally: of a run settled into terminal state `state`).
+   *
+   * Decided executor-side by cryptographic receipt verification, not by a
+   * property: an instance passes only when a verified receipt of the flow
+   * names it among the outputs its quorum committed to AND its live content
+   * still matches that commitment. Fail-closed — a forged, unverifiable or
+   * stale receipt excludes the instance — and applied BEFORE `limit`/
+   * `offset`, so a page of N is N valid outputs. Only supported as a
+   * top-level key on the queried class; anywhere else the query errors.
+   */
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -459,6 +474,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
 
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
+
 // ---- Typed order -------------------------------------------------------------
 
 type StrictTypedOrder<T extends Ad4mModel> =
@@ -535,7 +557,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;

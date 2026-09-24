@@ -984,6 +984,12 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// bag, by definition) and for `Unmet` (there is nothing to cite).
 pub(crate) struct SealedEvidence {
     pub seal: EvidenceSeal,
+    /// The guard's class names, in the order [`evidence_hash`] framed them
+    /// into the seal. Carried because they are not recoverable from the
+    /// items: a negative guard contributes a class name and no item, so a
+    /// preimage of items alone could not be re-hashed (see
+    /// `flow_instance::receipt::EvidencePreimage`).
+    pub class_names: Vec<String>,
     pub evidence: Vec<EvidenceItem>,
 }
 
@@ -1019,6 +1025,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
 ) -> Result<SealedEvidence> {
     let unmet = |seal| SealedEvidence {
         seal,
+        class_names: Vec::new(),
         evidence: Vec::new(),
     };
     let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
@@ -1035,6 +1042,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
     match evaluate_requires(perspective, requires, record, acting_did).await {
         RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
             seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            class_names,
             evidence,
         }),
         RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),

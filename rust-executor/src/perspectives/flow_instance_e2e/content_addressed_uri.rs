@@ -130,7 +130,7 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
 /// it — and `create_subject` writes values only through setters. The
 /// engine's own proposal write must not depend on which shape a client
 /// registered: the outputs commitment it signs has to land as links, or the
-/// run completes with nothing to mint (found by #1127's SDK test in CI).
+/// run completes with nothing to mint (the #1127 SDK test's CI failure).
 ///
 /// Red if the writer hands the collections to `create_subject` — the
 /// relation-shaped class drops both with a "declares no setter" warning.
@@ -140,7 +140,7 @@ async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collectio
         FLOW_TRANSITION_PROPOSAL_CLASS, FLOW_TRANSITION_PROPOSAL_SDNA,
     };
     use crate::perspectives::flow_instance::atom::OUTPUT_PREDICATE;
-    use crate::perspectives::flow_instance::receipt::FlowReceipt;
+    use crate::perspectives::flow_instance::produced::mint_flow_receipt;
     use crate::perspectives::perspective_instance::SdnaType;
 
     let mut f = seed_satisfied_fixture(None).await;
@@ -202,31 +202,9 @@ async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collectio
         "and so must the cited evidence"
     );
 
-    // Mint from what the proposal's links name, the way a receipt minter
-    // reads a completed run — not from the refs this test proposed with.
-    let read_set = f.read_set().await;
-    let named: Vec<OutputRef> = read_set
-        .atoms()
-        .into_iter()
-        .find(|a| a.uri == outcome.proposal_uri)
-        .expect("the proposal is an atom")
-        .outputs;
-    assert_eq!(
-        named,
-        vec![task_ref(TASK)],
-        "the atom reads its outputs back"
-    );
-    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
-    let loaded = load_outputs(&f.perspective, &named)
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
         .await
-        .expect("load outputs");
-    let receipt = FlowReceipt::mint(
-        &flows[&f.flow_uri],
-        read_set,
-        loaded.into_values().collect(),
-        Vec::new(),
-    )
-    .expect("a run whose outputs landed mints");
+        .expect("a run whose outputs landed mints");
     assert_eq!(
         receipt
             .outputs
