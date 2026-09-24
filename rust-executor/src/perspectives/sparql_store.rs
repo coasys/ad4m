@@ -1,3 +1,4 @@
+use crate::languages::literal::RFC3986_COMPONENT_ENCODE;
 use crate::types::LinkStatus;
 use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link, LinkExpression};
 use chrono::DateTime as ChronoDateTime;
@@ -15,6 +16,10 @@ const ONT_PROOF_KEY: &str = "ad4m://ontology/proofKey";
 const ONT_PROOF_SIG: &str = "ad4m://ontology/proofSignature";
 const ONT_PROOF_VALID: &str = "ad4m://ontology/proofValid";
 const ONT_STATUS: &str = "ad4m://ontology/status";
+/// The target exactly as the link was signed, kept only when it differs from
+/// what [`storage_term_to_target_string`] renders for the stored term. See
+/// [`signed_target_annotation`].
+const ONT_WIRE_TARGET: &str = "ad4m://ontology/wireTarget";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
 
 /// Datatype IRI for AD4M JSON literals — used when a property holds a JSON
@@ -25,15 +30,6 @@ const ONT_JSON: &str = "ad4m://json";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
 const XSD_DECIMAL: &str = "http://www.w3.org/2001/XMLSchema#decimal";
 const XSD_BOOLEAN: &str = "http://www.w3.org/2001/XMLSchema#boolean";
-
-/// Percent-encoding set matching JS `encodeRFC3986URIComponent`.
-/// Leaves `A-Z a-z 0-9 - _ . ~` un-encoded — same characters the SDK
-/// preserves, so `literal:*:` URLs round-trip without re-encoding drift.
-const RFC3986_COMPONENT_ENCODE: percent_encoding::AsciiSet = percent_encoding::NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'~');
 
 /// Convert a wire-format link target string to the oxigraph [`Term`] that
 /// represents it in storage.
@@ -127,6 +123,23 @@ fn storage_term_to_target_string(term: &Term) -> String {
         Term::BlankNode(b) => format!("_:{}", b.as_str()),
         Term::Triple(_) => String::new(),
     }
+}
+
+/// The `ad4m://ontology/wireTarget` value to store for a link, if any.
+///
+/// [`target_to_storage_term`] is lossy for `literal:*` targets: it
+/// percent-decodes `string:` and `json:` payloads and re-serialises JSON, and
+/// [`storage_term_to_target_string`] renders the result back with the
+/// RFC 3986 set. A target signed in any other encoding (raw text, raw JSON,
+/// `-_.~` escaped, JSON whitespace) would read back as different bytes, and a
+/// read-back copy would no longer verify. Keeping the signed string beside the
+/// canonical term makes every link-returning read hand back what was signed,
+/// while the typed literal keeps value queries and the index unchanged.
+/// Canonical targets and plain IRIs need no annotation, so the common case
+/// costs nothing.
+fn signed_target_annotation(link: &LinkExpression, target_term: &Term) -> Option<String> {
+    let rendered = storage_term_to_target_string(target_term);
+    (rendered != link.data.target).then(|| link.data.target.clone())
 }
 
 /// Heap entry for bounded top-N selection. Ordered by `(dt, seq)` ascending —
@@ -399,6 +412,12 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// 2. Reifier: `<link:HASH> rdf:reifies <<( source predicate target )>> .`
 /// 3. Metadata: `<link:HASH> ad4m://ontology/* "value" .` (default graph)
 ///
+/// A `literal:*` target is stored as a typed literal, so its wire bytes are
+/// not kept by the triple. When they differ from the canonical rendering, the
+/// reifier also carries `ad4m://ontology/wireTarget`, and every read that
+/// returns links (`get_all_links`, `query_links`, `model_query`'s `__links`)
+/// hands back those signed bytes.
+///
 /// # Thread Safety
 /// Oxigraph's `Store` is `Send + Sync` and uses internal locking for concurrent access.
 #[derive(Clone)]
@@ -520,13 +539,18 @@ impl SparqlStore {
             )
         })?;
 
-        let annotations: Vec<(&str, &str)> = vec![
-            (ONT_AUTHOR, &link.author),
-            (ONT_TIMESTAMP, &link.timestamp),
-            (ONT_PROOF_KEY, &proof.key),
-            (ONT_PROOF_SIG, &proof.signature),
-            (ONT_STATUS, status_str(status)),
-            (ONT_PROOF_VALID, &valid_str),
+        let wire_target = signed_target_annotation(link, &target_term);
+
+        // `None` writes nothing, after clearing a stale value: a canonical
+        // re-insert must not keep the wire target of an earlier encoding.
+        let annotations: Vec<(&str, Option<&str>)> = vec![
+            (ONT_AUTHOR, Some(&link.author)),
+            (ONT_TIMESTAMP, Some(&link.timestamp)),
+            (ONT_PROOF_KEY, Some(&proof.key)),
+            (ONT_PROOF_SIG, Some(&proof.signature)),
+            (ONT_STATUS, Some(status_str(status))),
+            (ONT_PROOF_VALID, Some(&valid_str)),
+            (ONT_WIRE_TARGET, wire_target.as_deref()),
         ];
 
         for (pred_uri, value) in &annotations {
@@ -552,6 +576,7 @@ impl SparqlStore {
                 self.store.remove(quad)?;
             }
 
+            let Some(value) = value else { continue };
             let lit = literal(value);
             self.store.insert(QuadRef::new(
                 reifier_iri.as_ref(),
@@ -650,7 +675,7 @@ impl SparqlStore {
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
         let query = r#"
             PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
+            SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
                 ?source ?predicate ?target .
                 ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
                 FILTER(isIRI(?source) && isIRI(?predicate))
@@ -660,6 +685,7 @@ impl SparqlStore {
                 OPTIONAL { ?reifier <ad4m://ontology/proofSignature> ?proofSig . }
                 OPTIONAL { ?reifier <ad4m://ontology/proofValid> ?proofValid . }
                 OPTIONAL { ?reifier <ad4m://ontology/status> ?status . }
+                OPTIONAL { ?reifier <ad4m://ontology/wireTarget> ?wireTarget . }
             }
         "#;
 
@@ -888,6 +914,7 @@ impl SparqlStore {
                 let mut proof_sig = String::new();
                 let mut proof_valid_str = String::new();
                 let mut status_val = String::new();
+                let mut wire_target = None;
                 for ann_quad in self.store.quads_for_pattern(
                     Some(reifier_subject),
                     None,
@@ -907,6 +934,7 @@ impl SparqlStore {
                         ONT_PROOF_SIG => proof_sig = value,
                         ONT_PROOF_VALID => proof_valid_str = value,
                         ONT_STATUS => status_val = value,
+                        ONT_WIRE_TARGET => wire_target = Some(value),
                         _ => {}
                     }
                 }
@@ -972,7 +1000,7 @@ impl SparqlStore {
                         } else {
                             Some(pred.clone())
                         },
-                        target: tgt.clone(),
+                        target: wire_target.unwrap_or_else(|| tgt.clone()),
                     },
                     proof: DecoratedExpressionProof {
                         key: proof_key,
@@ -1072,9 +1100,13 @@ impl SparqlStore {
         // SPARQL solutions may bind ?target to either a NamedNode (raw IRI
         // target) or a typed Literal (post-typed-literal-migration storage).
         // Both are serialised back to the wire-format `literal:*:` form via
-        // `storage_term_to_target_string` so callers see a stable shape.
+        // `storage_term_to_target_string` so callers see a stable shape,
+        // unless the link was signed over another encoding (`?wireTarget`).
         let target = match solution.get("target")? {
-            t @ Term::NamedNode(_) | t @ Term::Literal(_) => storage_term_to_target_string(t),
+            t @ Term::NamedNode(_) | t @ Term::Literal(_) => match solution.get("wireTarget") {
+                Some(Term::Literal(w)) => w.value().to_string(),
+                _ => storage_term_to_target_string(t),
+            },
             _ => return None,
         };
 
