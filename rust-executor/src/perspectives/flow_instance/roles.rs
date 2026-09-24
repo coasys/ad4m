@@ -59,10 +59,12 @@
 //!   precise one the widest one available. Every such grant was therefore
 //!   retroactive to the instance's creation, and votes cast between then and
 //!   the DID actually being assigned counted toward quorum. `didProperty` is
-//!   resolved through the class shape at the store boundary since #1065
-//!   (`flow_evaluator::PerspectiveInstance::did_property_predicate`); the
-//!   sentence above is true from that commit forward and from no earlier one.
-//!   Receipts minted before it date their grants from the instance.
+//!   resolved through the class shape since #1065 — by a hand-rolled lookup
+//!   at first, and since #1103 by `model_query` itself, which reads the
+//!   assignment links through its `links` option
+//!   ([`RoleGrantLinks::query_keys`]); the sentence above is true from #1065
+//!   forward and from no earlier commit. Receipts minted before it date their
+//!   grants from the instance.
 //! - `granted_at` is **the granting run's quorum time** when the role query
 //!   declares `grantedByFlow`, and then nothing else may date it — not the
 //!   assignment link, not the instance timestamp, not even as a fallback. See
@@ -148,7 +150,7 @@ use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
 use crate::perspectives::flow_evaluator::{
     cardinality_satisfied, did_literal_url, grant_link_names_did, requires_query_input,
-    revocation_link_counts_for_did, run_query, EvidenceItem, RequiresQueryable,
+    revocation_link_counts_for_did, run_query, EvidenceItem, RequiresQueryable, RoleGrantLinks,
 };
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
@@ -654,10 +656,12 @@ fn instance_timestamp(item: &EvidenceItem) -> Option<String> {
 /// that cannot be placed in time fails closed in [`RoleGrantEvidence::resolve`],
 /// on both sides of the wire, rather than only on this one.
 ///
-/// Per matched instance there is one [`RequiresQueryable::role_grant_links`]
-/// call for the grant links and the signed tombstones — two `get_links`
-/// queries under the live impl, so the store fan-out is
-/// candidates × instances × 2. Authority is deliberately **not** applied
+/// The grant links and the signed tombstones come back with the matches: the
+/// role query asks `model_query` for [`RoleGrantLinks::query_keys`] and
+/// [`RoleGrantLinks::from_instance`] reads each match's history off the
+/// result, so the fan-out is one `model_query` per candidate (it was
+/// candidates × instances × 2 `get_links` before #1103). Authority is
+/// deliberately **not** applied
 /// here: the tombstones travel unfiltered and the reader applies
 /// [`revocation_authorised`] itself, so a minter cannot silently mis-apply
 /// the rule. Nothing here is queried again by the fold.
@@ -681,9 +685,9 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         );
     }
 
-    // A property NAME, not a predicate. The store boundary resolves it
-    // through the class's shape before querying links — see
-    // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
+    // A property NAME, not a predicate. `model_query` resolves it through
+    // the class's shape, for the `where` that matches and for the `links`
+    // that date the match alike — see `RoleGrantLinks::query_keys`.
     let did_property = role.did_property.as_deref();
 
     // A `grantedByFlow` gate reads the granting flow's receipts once, up
@@ -705,14 +709,16 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
 
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
-        let input = requires_query_input(role, record, did)?;
+        // `links` is added to this read only. The translated query `resolve`
+        // reads the authority rule from is rebuilt by the reader without it.
+        let mut input = requires_query_input(role, record, did)?;
+        input["links"] = Value::from(RoleGrantLinks::query_keys(did_property));
         let matched = run_query(perspective, &role.class_name, &input).await?;
 
         let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
-            let links = perspective
-                .role_grant_links(&role.class_name, &item.id, did_property, did)
-                .await?;
+            let content: Value = serde_json::from_str(&item.content)?;
+            let links = RoleGrantLinks::from_instance(&content, did_property, did)?;
             // Discovery narrowing only: the receipts that CLAIM this
             // instance. Verification happens on the reading side.
             let this = OutputRef {
@@ -778,7 +784,6 @@ mod tests {
     use super::super::grant::GrantContext;
     use super::*;
     use crate::agent::signatures::TestSigner;
-    use crate::perspectives::flow_evaluator::RoleGrantLinks;
     use async_trait::async_trait;
     use serde_json::json;
     use std::collections::HashMap;
@@ -971,7 +976,10 @@ mod tests {
     /// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
     /// `undated_instances`); `unconditional_instances` (for DID-independent queries)
     /// wins over matching when set; `error` fails every call. `histories`
-    /// is what the store says about each DID's instances.
+    /// is what the store says about each DID's instances, answered the way
+    /// `model_query` answers `links`: under `__links`, one array per
+    /// requested key — the tombstone predicate gets `revocation_links`, any
+    /// other key `grant_links`.
     #[derive(Default)]
     struct RoleStub {
         member_dids: Vec<String>,
@@ -1001,26 +1009,42 @@ mod tests {
                     0
                 }
             });
+            let query: Value = serde_json::from_str(query_json)?;
+            let history = self
+                .histories
+                .iter()
+                .find(|(did, _)| query_json.contains(did.as_str()))
+                .map(|(_, h)| h.clone())
+                .unwrap_or_default();
+            let links: Option<Map<String, Value>> = query["links"].as_array().map(|keys| {
+                keys.iter()
+                    .filter_map(Value::as_str)
+                    .map(|key| {
+                        let rows = if key
+                            == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
+                        {
+                            &history.revocation_links
+                        } else {
+                            &history.grant_links
+                        };
+                        (key.to_string(), json!(rows))
+                    })
+                    .collect()
+            });
             let instances: Vec<Value> = (0..n)
                 .map(|i| {
-                    if self.undated_instances {
+                    let mut inst = if self.undated_instances {
                         json!({ "id": format!("r{i}") })
                     } else {
                         json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
+                    };
+                    if let Some(links) = &links {
+                        inst["__links"] = Value::Object(links.clone());
                     }
+                    inst
                 })
                 .collect();
             Ok(json!({ "instances": instances, "totalCount": n }).to_string())
-        }
-
-        async fn role_grant_links(
-            &self,
-            _role_class: &str,
-            _instance_id: &str,
-            _did_property: Option<&str>,
-            did: &str,
-        ) -> anyhow::Result<RoleGrantLinks> {
-            Ok(self.histories.get(did).cloned().unwrap_or_default())
         }
     }
 

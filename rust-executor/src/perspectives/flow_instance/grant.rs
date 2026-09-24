@@ -1251,7 +1251,8 @@ mod tests {
 
     /// A store that answers the role query with `ROLE_INSTANCE` for the
     /// member DIDs, and hands back `receipts` as the granting flow's index.
-    /// Records which flows' receipts were asked for.
+    /// Records which flows' receipts were asked for. Every `links` key the
+    /// query asks for comes back empty: no assignment link, no tombstone.
     struct GateStore {
         members: Vec<String>,
         receipts: Result<Vec<FlowReceipt>, ReceiptBudgetExceeded>,
@@ -1261,8 +1262,20 @@ mod tests {
     #[async_trait]
     impl RequiresQueryable for GateStore {
         async fn model_query(&self, _class: &str, query_json: &str) -> anyhow::Result<String> {
+            let query: Value = serde_json::from_str(query_json)?;
+            let links: serde_json::Map<String, Value> = query["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(|key| (key.to_string(), json!([])))
+                .collect();
             let instances: Vec<Value> = if self.members.iter().any(|d| query_json.contains(d)) {
-                vec![json!({ "id": ROLE_INSTANCE, "timestamp": ASSIGNMENT_LINK_AT })]
+                vec![json!({
+                    "id": ROLE_INSTANCE,
+                    "timestamp": ASSIGNMENT_LINK_AT,
+                    "__links": links,
+                })]
             } else {
                 Vec::new()
             };
