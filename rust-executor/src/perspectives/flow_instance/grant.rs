@@ -1596,11 +1596,21 @@ mod tests {
     /// A root context over `cat`, walked down until `remaining` levels are
     /// left: the context a gate sees that many levels of nesting below the
     /// cap.
+    ///
+    /// A bounded loop plus an assertion, never `while remaining > n`: under
+    /// a `deeper()` that stops counting down, the `while` form spins forever
+    /// and the regression shows up as a hung suite instead of a failed
+    /// assertion.
     fn with_remaining(cat: &HashMap<String, SHACLFlow>, remaining: usize) -> GrantContext<'_> {
         let mut ctx = GrantContext::root(cat);
-        while ctx.remaining() > remaining {
+        for _ in remaining..MAX_GRANT_DEPTH {
             ctx = ctx.deeper().expect("within the budget");
         }
+        assert_eq!(
+            ctx.remaining(),
+            remaining,
+            "precondition: the context is {remaining} level(s) from the cap"
+        );
         ctx
     }
 
@@ -1615,9 +1625,9 @@ mod tests {
     ///
     /// Two controls. With one level of budget left, the same receipt grants,
     /// so the error is the depth and not the receipt. And at the cap, an
-    /// instance carrying **no** receipt for the flow is still an ordinary
-    /// "not a member": nothing was left unchecked, so "no" is a checked
-    /// answer there.
+    /// instance carrying **no** receipt for the flow (none at all, or only
+    /// another flow's) is still an ordinary "not a member": nothing was left
+    /// unchecked, so "no" is a checked answer there.
     ///
     /// Red while `granted_by_flow_at` answers `None` at the cap (`resolve`
     /// returns `Ok` with no window).
@@ -1670,6 +1680,18 @@ mod tests {
         let view = nothing_to_check[0]
             .resolve(&translated(), &gate_role, at_cap)
             .expect("with no receipt for the flow to verify, the answer is a checked \"no\"");
+        assert!(view.windows.is_empty());
+
+        // The same holds for a receipt for ANOTHER flow: `first_produced_at`
+        // skips it before verifying anything, so it needs no budget and
+        // leaves nothing undecided. Counting it would make any stray receipt
+        // in the carried evidence an abort at the cap.
+        let training = granting_flow("Training");
+        let elsewhere = receipt_for(&training, "done", T1, &[role_item(ROLE_INSTANCE)], &cat);
+        let other_flow_only = evidence(vec![elsewhere], Vec::new());
+        let view = other_flow_only[0]
+            .resolve(&translated(), &gate_role, at_cap)
+            .expect("another flow's receipt is not one this gate had to verify");
         assert!(view.windows.is_empty());
     }
 
