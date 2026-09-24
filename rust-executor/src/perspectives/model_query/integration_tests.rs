@@ -9362,12 +9362,19 @@ impl crate::perspectives::flow_evaluator::RequiresQueryable for RoleStore {
 /// closed. Inside a declined `OR` it had not. One unpushable leaf in any
 /// branch sends the whole disjunction to the Rust filter, where the
 /// DID condition passed vacuously. Every Reviewer instance then matched every
-/// candidate. `author` is that leaf here: it is hydrated, so it can be filtered,
-/// but it is not a shape property, so it cannot be pushed.
+/// candidate.
+///
+/// The unpushable leaf here is `timestamp`: it is hydrated, so it can be
+/// filtered, but it is no link, so it cannot be pushed. It used to be
+/// `author`, until #1122 answered an `author` beside link-backed siblings in
+/// the store, per link. The `author` rows are kept: they are the route the
+/// #1129 review found, and they must stay closed now that SPARQL answers
+/// them. They no longer reach the Rust filter, which is why the `timestamp`
+/// rows exist.
 ///
 /// Mallory authored nothing and belongs to nothing. Alice is the only member.
-/// Red before the fix on the `or` cases: Mallory came back holding
-/// `role://instance/1`.
+/// Red before the fix on the `or` rows with `timestamp`: Mallory came back
+/// holding `role://instance/1`.
 #[tokio::test]
 #[rustfmt::skip]
 async fn a_did_collection_role_gate_does_not_admit_a_non_member() {
@@ -9388,21 +9395,35 @@ async fn a_did_collection_role_gate_does_not_admit_a_non_member() {
         created_at: None,
     };
 
+    // Holds for the instance (its earliest link is at T0), and only the Rust
+    // filter can answer it. `gte` takes epoch milliseconds.
+    let t0_ms = chrono::DateTime::parse_from_rfc3339(ROLE_T0).unwrap().timestamp_millis();
+    let since_t0 = json!({ "equals": { "gte": t0_ms } });
     let cases: Vec<(&str, Value)> = vec![
-        ("top level: didProperty beside an unpushable sibling (the reviewed route)",
+        ("top level: didProperty beside `author` (the reviewed route, per-link since #1122)",
          json!({ "className": "Reviewer", "didProperty": "members",
                  "where": { "author": ROLE_ADMIN } })),
-        ("top level: `$did` on the collection beside an unpushable sibling",
+        ("top level: `$did` on the collection beside `author`",
          json!({ "className": "Reviewer",
                  "where": { "members": "$did", "author": ROLE_ADMIN } })),
-        ("`or`: the DID condition inside a branch the compiler declines",
+        ("`or`: the DID condition beside `author` in a branch",
          json!({ "className": "Reviewer",
                  "or": [{ "className": "Reviewer",
                           "where": { "members": "$did", "author": ROLE_ADMIN } }] })),
+        ("top level: didProperty beside an unpushable sibling",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "timestamp": since_t0 } })),
+        ("top level: `$did` on the collection beside an unpushable sibling",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "timestamp": since_t0 } })),
+        ("`or`: the DID condition inside a branch the compiler declines",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "timestamp": since_t0 } }] })),
         ("`or`: `in` over the collection inside a declined branch",
          json!({ "className": "Reviewer",
                  "or": [{ "className": "Reviewer",
-                          "where": { "members": { "in": ["$did"] }, "author": ROLE_ADMIN } }] })),
+                          "where": { "members": { "in": ["$did"] }, "timestamp": since_t0 } }] })),
     ];
 
     for (name, role_json) in cases {
