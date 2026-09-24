@@ -824,12 +824,11 @@ async fn proof_valid_sdk_literals_still_verify_after_a_read_back() {
 }
 
 /// A literal the SDK would not write, with a raw space or raw JSON, is stored
-/// decoded and read back percent-encoded, so the copy B ingests is not what
-/// was signed and B stores `proofValid = "false"`. Under the default, B
-/// withholds it. Reported on #1123 (thread on `sparql_builder.rs`); whether to
-/// fix the round trip first is open, so this stays ignored until then.
+/// as a decoded typed literal. The store keeps the signed bytes beside it
+/// (`ad4m://ontology/wireTarget`, #1141), so the copy B ingests is what was
+/// signed, B stores `proofValid = "true"` and the default does not withhold
+/// it. Without that, the read-back is percent-encoded and B withholds it.
 #[tokio::test]
-#[ignore = "#1123 review: a non-canonically encoded literal fails re-verify after a read-back"]
 async fn proof_valid_an_unencoded_literal_still_verifies_after_a_read_back() {
     let withheld = pv_withheld_after_read_back(&[
         ("unencoded", "literal:string:Write the guide"),
