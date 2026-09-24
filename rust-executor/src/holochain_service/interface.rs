@@ -18,13 +18,14 @@ pub struct HolochainServiceInterface {
     pub stream_receiver: Arc<Mutex<UnboundedReceiver<Signal>>>,
 }
 
-/// One queued request plus the two instants the dispatch loop reads when it takes the
-/// request off the channel (`dispatch::run_dispatch_loop`).
+/// One queued request plus the two instants the dispatch loop reads when it admits the
+/// request (`dispatch::admit`, once the request has its permit, the write lock or the drain).
 ///
 /// `queued_at` feeds the time-in-queue log line, the "five-minute diagnosis" #1133 asked
 /// for. `deadline` is the instant after which the caller has already given up (its own
-/// `timeout` fired); a request dequeued past it is answered with an error instead of run,
-/// so a stale presence broadcast never reaches the conductor. `None` never expires.
+/// `timeout` fired); a request still waiting past it when it is admitted is answered with
+/// an error instead of run, so a stale presence broadcast never reaches the conductor.
+/// `None` never expires.
 ///
 /// Built only by `HolochainServiceInterface::send`, so every request carries both.
 #[derive(Debug)]

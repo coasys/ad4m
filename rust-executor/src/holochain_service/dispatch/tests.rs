@@ -8,7 +8,7 @@
 //!    (`install_app_waits_for_in_flight_zome_calls_and_blocks_new_ones`);
 //! 3. at most `ZOME_CALL_CONCURRENCY` non-lifecycle requests run at once, and that many do
 //!    (`concurrency_is_bounded`);
-//! 4. a request dequeued past its deadline is refused by the loop and never reaches the
+//! 4. a request admitted past its deadline is refused by the loop and never reaches the
 //!    dispatcher (`expired_request_is_refused_without_reaching_the_service`), and so is one
 //!    whose deadline passes while it waits for a permit
 //!    (`request_expiring_while_waiting_for_a_permit_is_refused`);
