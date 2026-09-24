@@ -448,6 +448,14 @@ The gate is **fail-closed**, and Part 3 pins each direction:
 - The receipt is bound to its instance by `(className, id)`. Alice's own role instance — same class, same `domain` — did not pass the gate, because no receipt names *her* instance. A receipt is never "flow F completed"; it is "flow F produced *this*".
 - Receipts verify recursively when the granting flow is itself gated: a receipt for a gated flow carries the receipts that made its voters eligible. A depth budget bounds the recursion (see [Errors and limits](#errors-and-limits)).
 
+The gate has **three** outcomes, not two:
+
+1. **Granted.** A verified receipt names this instance.
+2. **Not granted.** No verified receipt names it.
+3. **Cannot decide.** The replica does not hold the granting flow, or the flow's receipt index is over budget. This comes back as an **error**. The error means "unknown", not "no".
+
+Do not write `if (granted) allow else deny` around a call that can throw. If you catch the error and deny, you bring back the silent denial that the engine refuses to give: a flood of junk index links would then deny every holder, with no signal. Show the error, or retry after sync. "Fail-closed" above means that an unproven grant never counts. It does not mean that an undecidable gate reads as "not a member".
+
 Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt.
 
 ## Errors and limits
