@@ -54,9 +54,11 @@ export type Where = {
    * `offset`, so a page of N is N valid outputs. Only supported as a
    * top-level key on the queried class; anywhere else the query errors.
    */
-  producedByFlow?: { flow: string; state?: string };
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -472,6 +474,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
 
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
+
 // ---- Typed order -------------------------------------------------------------
 
 type StrictTypedOrder<T extends Ad4mModel> =
@@ -548,7 +557,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;
