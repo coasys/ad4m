@@ -410,6 +410,10 @@ impl RoleGrantEvidence {
     /// the same thing at both ends of the rule, so this combination is an
     /// error rather than a subtlety.
     ///
+    /// A gate whose granting flow is not in the reader's catalogue is an
+    /// `Err` for the same reason: no receipt for it can be verified, and
+    /// "I cannot check" must not read as "not a member".
+    ///
     /// `role` is the role query **from the reader's own flow definition**,
     /// never from the carried evidence. Its `grantedByFlow`, its `count`, and
     /// its `className` all decide the answer, and a minter who could name any
@@ -430,6 +434,19 @@ impl RoleGrantEvidence {
                 self.role_class,
                 self.did
             );
+        }
+        if let Some(spec) = granted_by {
+            // The same rule `produced::flow_valid_outputs` applies to an
+            // unknown flow: without F's definition no receipt for F can be
+            // verified, and "I cannot check" must not read as "not a member".
+            if !grants.catalogue().contains_key(&spec.flow) {
+                anyhow::bail!(
+                    "RoleGrantEvidence::resolve: the `{}` role gate is granted by flow `{}`, which is not in this replica's catalogue, so no receipt for it can be verified and `{}`'s membership cannot be decided (fail-closed)",
+                    role.class_name,
+                    spec.flow,
+                    self.did
+                );
+            }
         }
         let did_literal = did_literal_url(&self.did)?;
         let grant_counts = |l: &&LinkExpression| grant_link_names_did(l, &self.did, &did_literal);

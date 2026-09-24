@@ -109,6 +109,12 @@
 //! abort exists for a grant that *is* claimed and cannot be dated, while this
 //! is a membership test returning false.
 //!
+//! Two answers are errors instead, because each is "I could not decide",
+//! not "no": a granting flow whose index is over budget (above), and a
+//! granting flow this replica holds no definition for, which is the rule
+//! [`flow_valid_outputs`](super::produced::flow_valid_outputs) applies to an
+//! unknown flow.
+//!
 //! **There is no fallback.** When a role query carries `grantedByFlow`,
 //! neither the assignment links nor `asserted_instance_timestamp` can date the
 //! grant — if they could, writing a plain assignment link would grant the role
