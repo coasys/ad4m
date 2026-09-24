@@ -82,7 +82,17 @@
 //! is one the grant's own rule would accept as a granter: the role query's
 //! `author` condition (top level, and any `or` branch) is applied to the
 //! tombstone's author through `model_query`'s own condition evaluator
-//! ([`revocation_authorised`]). The condition is read from the *translated*
+//! ([`revocation_authorised`]). The translator nests that condition under
+//! every `where` field the rule filters on, `{ forTask: { eq: T, author: A },
+//! agent: { eq: did, author: A } }`, and under the fields of every `or` arm
+//! that names no author of its own, so a grant counts only when A wrote the
+//! `agent` link and every other `where` link the rule matches on (#1114), and
+//! a revocation only when A wrote the tombstone. The `linkedTo` link is not
+//! one of them: it is matched from any author until `model_query` can scope
+//! the parent link (#1139). That covers eligibility, not dating:
+//! `granted_at` is still the earliest `agent -> did` link from *any* author,
+//! so a candidate's own earlier link back-dates a grant A made later (#1063).
+//! The condition is read from the *translated*
 //! query — `$did` is already substituted to the candidate whose membership
 //! is being tested, and never stands for anyone's author — so
 //! `where: { author: "did:…admin" }` makes grants *and* revocations
