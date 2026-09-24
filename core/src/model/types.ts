@@ -61,8 +61,23 @@ export type Where = {
   AND?: Where[];
   /** Logical NOT: instance must NOT satisfy the given sub-clause. */
   NOT?: Where;
+  /**
+   * Only instances that are valid outputs of a completed run of `flow`
+   * (optionally: of a run settled into terminal state `state`).
+   *
+   * Decided executor-side by cryptographic receipt verification, not by a
+   * property: an instance passes only when a verified receipt of the flow
+   * names it among the outputs its quorum committed to AND its live content
+   * still matches that commitment. Fail-closed — a forged, unverifiable or
+   * stale receipt excludes the instance — and applied BEFORE `limit`/
+   * `offset`, so a page of N is N valid outputs. Only supported as a
+   * top-level key on the queried class; anywhere else the query errors.
+   */
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -325,7 +340,9 @@ export type Query = {
   deepQuery?: boolean;
   /**
    * Return the individual links behind each instance, with their own author,
-   * timestamp and signature, under `instance.__links`.
+   * timestamp, signature and signature verdict, under `instance.__links`. For
+   * a collection this is per-item provenance: who added each member, when, and
+   * whether their signature holds.
    *
    * Each entry is a property or relation name the model declares, or an
    * absolute predicate IRI — including one the model does **not** declare
@@ -343,17 +360,27 @@ export type Query = {
 };
 
 /**
- * One stored link as returned under `__links` — the same shape as a
- * `LinkExpression`, so `proof` can be verified by the consumer.
+ * One stored link as returned under `__links` — the same shape as the
+ * `LinkExpression` `perspective.get()` returns, including the signature
+ * verdict the executor recorded when the link was stored.
  *
+ * `proof.valid` is `true` only when the signature verifies against `author`.
  * A link stored without a proof arrives with `key` and `signature` set to
- * `""`; that is an unverifiable link, not a valid unsigned one.
+ * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
+ * one. Anything that acts on a row (counting a vote, granting a role) should
+ * require `proof.valid`.
+ *
+ * `valid` is never `null` here and `invalid` is always `!valid`, the same
+ * convention as `perspective.get()`. So `invalid: true` does not by itself mean
+ * a signature failed: it also covers a link with no proof, or with no recorded
+ * verdict. To tell an unsigned link from a failed signature, check whether
+ * `proof.signature` is `""`.
  */
 export interface LinkRow {
   author: string;
   timestamp: string;
   data: { source: string; predicate: string; target: string };
-  proof: { key: string; signature: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
@@ -493,6 +520,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
 
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
+
 // ---- Typed order -------------------------------------------------------------
 
 type StrictTypedOrder<T extends Ad4mModel> =
@@ -569,7 +603,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;

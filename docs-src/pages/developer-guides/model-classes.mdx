@@ -881,7 +881,7 @@ post.__links.comments;
 // [
 //   { author: "did:key:z6Mk…", timestamp: "2026-09-23T10:00:00.000Z",
 //     data: { source: postId, predicate: "app://has_comment", target: "…" },
-//     proof: { key: "…", signature: "…" } },
+//     proof: { key: "…", signature: "…", valid: true, invalid: false } },
 //   …
 // ]
 post.__links["app://revoked"]; // [] when there is no such link
@@ -891,7 +891,8 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
-- **Rows** have the shape of a `LinkExpression` (`LinkRow` in the SDK), so you can verify `proof` yourself. A link stored without a proof arrives with an empty `key` and `signature`. Treat that as unverifiable, not as valid. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. A link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should require `proof.valid`. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Per-item provenance for collections:** `links: ["members"]` answers "who added each member, when, and does their signature hold". The plain `members` array stays as it is.
 - **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
 - **Additive:** the rows are read by a separate query over the returned page. Asking for them never changes `createdAt`, `updatedAt` or any property value. `links` works with `where`, `order`, pagination, `properties` and inside an `include` sub-query (`include: { comments: { links: ["app://flag"] } }`).

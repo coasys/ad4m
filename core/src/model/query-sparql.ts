@@ -135,7 +135,7 @@ function assertNoPerLinkAuthor(metadata: ModelMetadata, where: Where): void {
     } else if (key === "author") {
       const sibling = Object.keys(where).find((k) => k !== "author" && linkBacked(k));
       if (sibling) refuse(`\`author\` beside \`${sibling}\``);
-    } else if (isOpsObject(condition) && condition.author !== undefined) {
+    } else if (isOpsObject(condition) && (condition as Record<string, unknown>).author !== undefined) {
       refuse(`\`${key}.author\``);
     }
   }

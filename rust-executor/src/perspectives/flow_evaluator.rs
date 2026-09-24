@@ -77,6 +77,14 @@ pub struct SatisfiedTransition {
     pub evidence_hash: String,
     /// The target state's `semanticCheck` hint, if it declares one.
     pub semantic_check: Option<String>,
+    /// `Some` exactly when `to_state` is terminal: the instances the
+    /// proposer names as the run's outputs, each with the content this
+    /// replica's `model_query` returned for it. The proposal names their
+    /// `(class, id)` and signs `outputs_hash` over the content next to the
+    /// evidence seal (#1104); see
+    /// `flow_instance::atom::check_outputs_commitment` for what a voter
+    /// checks.
+    pub outputs: Option<Vec<EvidenceItem>>,
 }
 
 /// One hydrated piece of guard evidence: an instance a `requires` query
@@ -159,10 +167,28 @@ pub(crate) fn canonical_json(v: &Value) -> String {
 /// hash regardless of result order; **editing a cited instance changes the
 /// hash**, which is what lets a voter detect a stale seal before co-signing.
 pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
-    fn frame(hasher: &mut Sha256, field: &str) {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
+    for name in class_names {
+        frame(&mut hasher, name);
     }
+    frame_items(&mut hasher, evidence);
+    hex::encode(hasher.finalize())
+}
+
+/// Length-prefix one field, so no field's content can shift bytes across a
+/// boundary. The one framing [`evidence_hash`], [`tagged_items_hash`] and
+/// [`super::content_address::content_address`] share.
+pub(crate) fn frame(hasher: &mut Sha256, field: &str) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field.as_bytes());
+}
+
+/// Each item's `(class, id, canonical_json(content))` triple, sorted and
+/// framed. Sorting makes the result independent of the order `model_query`
+/// returned the instances in; [`canonical_json`] makes it independent of
+/// their key order. Non-JSON content is framed verbatim.
+fn frame_items(hasher: &mut Sha256, evidence: &[EvidenceItem]) {
     let mut items: Vec<(String, String, String)> = evidence
         .iter()
         .map(|e| {
@@ -173,16 +199,28 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         })
         .collect();
     items.sort();
-    let mut hasher = Sha256::new();
-    hasher.update((class_names.len() as u64).to_le_bytes());
-    for name in class_names {
-        frame(&mut hasher, name);
-    }
     for (class, id, content) in &items {
-        frame(&mut hasher, class);
-        frame(&mut hasher, id);
-        frame(&mut hasher, content);
+        frame(hasher, class);
+        frame(hasher, id);
+        frame(hasher, content);
     }
+}
+
+/// The [`evidence_hash`] item framing under a domain `tag`, for a hash that
+/// must never be read as an evidence seal (the flow outputs commitment,
+/// `flow_instance::atom::outputs_hash`).
+///
+/// The digest input opens with `u64::MAX` where an evidence seal has its
+/// class-name count. No evidence seal can open that way: it would need
+/// 2^64 − 1 class names. The framed `tag` follows, then the items exactly as
+/// [`evidence_hash`] frames them. So the two hashes share one
+/// canonicalisation and one item framing, and cannot collide by
+/// construction.
+pub(crate) fn tagged_items_hash(tag: &str, items: &[EvidenceItem]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(u64::MAX.to_le_bytes());
+    frame(&mut hasher, tag);
+    frame_items(&mut hasher, items);
     hex::encode(hasher.finalize())
 }
 
@@ -607,7 +645,7 @@ pub struct RoleRevocation {
 ///
 /// **Authority is deliberately not checked here** — whether a tombstone's
 /// author may revoke depends on the role query, so the reader applies
-/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::evidence::revocation_authorised)
 /// itself against the definition it holds, and cannot be handed a
 /// pre-filtered set to trust.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1047,6 +1085,16 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             match evaluate_requires(perspective, requires, record, acting_did).await {
                 RequiresResult::Satisfied(class_names, evidence) => {
                     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
+                    // The engine has no user to ask what a run produced, so
+                    // into a terminal state it names what the guard matched.
+                    // That is this proposer's choice, not a rule: a receipt
+                    // is checked against the signed commitment, never
+                    // against `requires` (#1104).
+                    let outputs = crate::perspectives::flow_instance::receipt::is_terminal_state(
+                        flow,
+                        &state.name,
+                    )
+                    .then(|| evidence.clone());
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -1056,6 +1104,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
+                        outputs,
                     })
                 }
                 RequiresResult::Unmet => {}
@@ -1084,6 +1133,12 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// bag, by definition) and for `Unmet` (there is nothing to cite).
 pub(crate) struct SealedEvidence {
     pub seal: EvidenceSeal,
+    /// The guard's class names, in the order [`evidence_hash`] framed them
+    /// into the seal. Carried because they are not recoverable from the
+    /// items: a negative guard contributes a class name and no item, so a
+    /// preimage of items alone could not be re-hashed (see
+    /// `flow_instance::receipt::EvidencePreimage`).
+    pub class_names: Vec<String>,
     pub evidence: Vec<EvidenceItem>,
 }
 
@@ -1119,6 +1174,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
 ) -> Result<SealedEvidence> {
     let unmet = |seal| SealedEvidence {
         seal,
+        class_names: Vec::new(),
         evidence: Vec::new(),
     };
     let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
@@ -1135,6 +1191,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
     match evaluate_requires(perspective, requires, record, acting_did).await {
         RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
             seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            class_names,
             evidence,
         }),
         RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
@@ -1416,6 +1473,15 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
 /// whole contract — so it does not. Narrow (it needs two guard-identical edges
 /// into one state) and pre-existing, but real: prefer widening the key here
 /// over re-flattening the manual path onto it.
+///
+/// **The validity-blind match bites the same way.** A live terminal proposal
+/// no voter could sign — a bad or missing outputs commitment, an output that
+/// does not load — still matches the key, so it suppresses the engine mint
+/// on that edge for as long as it stays open. The manual path validates the
+/// atom as a co-signer would and mints past it (`live_proposal_role`); doing
+/// the same here needs `load_outputs`, which [`ProposalLookup`] cannot
+/// answer. Same remedy when it matters: a human proposes manually, or the
+/// invalid proposal's author rejects it.
 pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
@@ -1474,6 +1540,7 @@ pub(crate) async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
+        transition.outputs.as_deref(),
         rationale,
         Some(batch_id.clone()),
         context,
@@ -2412,6 +2479,13 @@ mod tests {
                     }],
                 ),
                 semantic_check: Some("Agreed?".into()),
+                // `scoped` is terminal, so the engine names what the guard
+                // matched as the run's outputs, with its content (#1104).
+                outputs: Some(vec![EvidenceItem {
+                    id: "ad4m://task/1".into(),
+                    class_name: "ns://Task".into(),
+                    content: json!({ "id": "ad4m://task/1" }).to_string(),
+                }]),
             }]
         );
     }
@@ -2613,6 +2687,7 @@ mod tests {
                 evidence: Vec::new(),
                 evidence_hash: "hash".into(),
                 semantic_check: None,
+                outputs: None,
             }
         }
 
