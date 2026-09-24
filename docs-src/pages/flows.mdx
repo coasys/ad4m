@@ -2,470 +2,103 @@ import { Callout } from "nextra/components";
 
 # Flows: State Machines a Group Agrees On
 
-A flow is a state machine that a **group** advances together, over an expression that lives in a shared Perspective.
+A flow is a shared state machine. A group moves it forward with signed proposals and votes. The flow runs over an expression that lives in a shared Perspective, and every replica can recompute its state from links it can verify.
 
-That is the whole difference from a status field. A status field is whatever the last writer said it was. A flow's state is something the group's own rules produced: every transition is backed by an on-graph `FlowTransitionProposal`, optionally gated by a `ConsensusRule` saying how many distinct agents must sign before it counts — and every replica can recompute the answer for itself from links it can verify.
+That is the whole difference from a status field. A status field is whatever the last writer said. A flow's state is what the group's own rules produced: every transition is backed by an on-graph proposal, gated by a consensus rule that says how many distinct agents must sign before it counts.
+
+With flows you can build, among other things:
+
+- **a task handover** — Ready → InProgress → InReview → Done, where Done needs a deliverable, a review note, and a reviewer's signature;
+- **a review process** — a state that requires evidence in the graph before anyone can even propose entering it;
+- **a role grant** — a flow whose completion, proven by a receipt, is what makes someone a reviewer in *another* flow.
 
 Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspective, shared like any other link. Two agents in a [Neighbourhood](/neighbourhoods) run the same flow because they hold the same definition, not because they run the same app.
+
+## The parts
+
+```text
+  SHACLFlow  (the definition — Social DNA, shared as links)
+  ├── FlowState        name, value, requires (guard), consensusRule
+  └── FlowTransition   actionName, fromState → toState
+        │
+        │  FlowInstance.start(perspective, name, subjectUri)
+        ▼
+  FlowInstance  (one run, riding on a subject expression)
+        │
+        │  instance.proposeTransition(toState, rationale?, outputs?)
+        ▼
+  FlowTransitionProposal  (one proposed move; votes are signed links on it)
+        │
+        │  enough distinct eligible votes = the edge settles
+        ▼
+  derived state  (recomputed from the signed links, never stored)
+        │
+        │  terminal state reached → perspective.mintFlowReceipt(instanceUri)
+        ▼
+  FlowReceipt  (portable proof: this quorum settled this run into this state,
+        │       and committed to these outputs)
+        ▼
+  consumers: perspective.flowValidOutputs, verifyFlowReceipt,
+             model queries with where: { producedByFlow },
+             role gates with grantedByFlow
+```
 
 ## The one rule
 
 **A flow's state is never stored. It is derived, every time, from the signed links present right now.**
 
-Everything on this page follows from that sentence, so it is worth making concrete. To answer *"what state is this task in?"*, the engine:
+To answer *"what state is this task in?"*, the engine:
 
-1. starts at the flow's first state,
-2. looks at the declared edges out of it,
-3. takes whichever edge collected enough distinct, eligible signatures **earliest**,
+1. starts at the flow's lowest-valued state,
+2. looks at the declared edges that leave it,
+3. takes the edge that collected enough distinct, eligible signatures earliest,
 4. repeats from the state that edge leads to,
-5. stops at the first state where no edge has reached quorum — that state is the answer.
+5. stops at the first state where no edge has reached quorum. That state is the answer.
 
 Three consequences, all intended:
 
 - **Two replicas agree without talking.** Same links in, same state out. Every choice in the walk is made by an explicit sort key, never by the order a database returned rows.
-- **A third party can check the work.** The derivation is a pure function over plain data — no network, no database. Hand someone the links and they can re-run it and reach your verdict, or catch you claiming a state your links don't support.
-- **Retracting a vote moves the flow back.** Withdraw a signature that was the one settling an edge and the flow stands where it stood before you signed. That is not a bug to be patched with an "already fired" flag; it is what "the graph is the truth" costs, and it is what makes the second consequence possible. See [Reject is not cancel](#reject-is-not-cancel).
+- **A third party can check the work.** The derivation is a pure function over plain data. Hand someone the links and they can re-run it and reach your verdict.
+- **Retracting a vote moves the flow back.** Withdraw the signature that settled an edge and the flow stands where it stood before you signed. That is the semantics, not a bug. See [Reject is not cancel](#reject-is-not-cancel).
 
 <Callout type="info" emoji="ℹ️">
   The engine does write a `currentState` value onto each flow instance, but it
-  is a **cache for readers, never authority** — see [The `currentState`
-  cache](#the-currentstate-cache). Nothing in the derivation reads it.
+  is a **cache for readers, never authority**. It is a `Local` link — it never
+  syncs — and nothing in the derivation reads it. Read it for display. Never
+  decide anything on it.
 </Callout>
 
-## The on-graph objects
+## States and transitions
 
-Four things make up a flow, and all four are ordinary links in the Perspective.
-
-### `SHACLFlow` — the definition
-
-The flow itself: a name, a namespace, the states, the transitions between them, and the English that tells an LLM what the states mean. Registered with `perspective.addFlow(name, flow)`, which serialises it to links and records it under `ad4m://self --ad4m://has_flow--> "name"`.
-
-Its canonical identity is `flowUri` — `${namespace}${name}Flow`, e.g. `delivery://DeliveryFlow`. Instances store that URI rather than the bare name, because bare names collide the moment two communities share social DNA.
-
-| member | meaning |
-| --- | --- |
-| `inputTypes: string[]` | subject-class URIs the flow accepts as its base expression. Empty, or containing the `"any"` wildcard, matches anything. |
-| `outputTypes: string[]` | subject-class URIs a completed run is expected to have produced. |
-| `interpretationHint?: string` | one-paragraph English frame for the whole flow. |
-| `creationHint?: string` | when an instance of this flow should be *started* (as opposed to advanced). |
-| `context?: ModelQuery[]` | background queries threaded into the LLM prompt as context — never as evidence. |
-| `consensusRule?: ConsensusRule` | default rule for transitions that don't override it. |
-| `states` / `transitions` | added with `addState()` / `addTransition()`. |
-
-### `FlowState` — one state
+A flow is defined in TypeScript with `SHACLFlow`, then registered on a perspective with `addFlow`. The example below is the task flow the handover test drives end to end.
 
 ```typescript
-interface FlowState {
-  name: string;                  // "Scoped"
-  value: number;                 // ordering key; lowest value is the initial state
-  interpretationHint?: string;   // what puts an instance IN this state (see below)
-  requires?: ModelQuery[];       // model-level guard, AND semantics
-  semanticCheck?: string;        // optional LLM confirmation after `requires` matches
-  consensusRule?: ConsensusRule; // per-state override of the flow-level default
-}
-```
-
-`value` is an ordering key, not a progress percentage — `0, 1, 2` and `0, 10, 20` behave identically. **The lowest-valued state is where every instance begins.**
-
-`requires` is where "Done" stops meaning *somebody clicked Done* and starts meaning *the graph contains what Done requires*. Each `ModelQuery` names a subject class, optional per-property conditions, a cardinality, and optionally an anchor (`linkedTo: "base"` / `"flow"`). All queries in the array must match.
-
-### `FlowTransition` — one edge
-
-```typescript
-interface FlowTransition {
-  actionName: string;   // "Scope" — the label a UI shows
-  fromState: string;
-  toState: string;
-  actions: AD4MAction[]; // link mutations to perform alongside the transition
-}
-```
-
-### `FlowInstance` — one run
-
-When a flow is started on a concrete expression, an instance node is minted. On the graph it is the hard-wired subject class `FlowInstance` (`ad4m://FlowInstance`); in TypeScript the raw `@Model` row is exported as **`FlowInstanceRecord`**, because the name `FlowInstance` is taken by the wrapper class you actually work with.
-
-| predicate | field | notes |
-| --- | --- | --- |
-| `ad4m://flow/flow_uri` | `flowUri` | which `SHACLFlow` this runs; the row's identity |
-| `ad4m://flow/base` | `subject` | the expression the flow rides on |
-| `ad4m://flow/current_state` | `currentState` | **`Local` link** — this replica's cache, never authority |
-
-### `FlowTransitionProposal` — one proposed move
-
-One node per proposed transition, `ad4m://flow/proposal/<uuid>` when the engine mints it.
-
-| predicate | field | notes |
-| --- | --- | --- |
-| `ad4m://flow/instance` | `flowInstance` | the instance this targets; the row's identity |
-| `ad4m://flow/from_state` | `fromState` | |
-| `ad4m://flow/to_state` | `toState` | |
-| `ad4m://flow/proposer` | `proposer` | DID that opened it |
-| `ad4m://flow/evidence` | `evidence[]` | URIs cited as satisfying `toState.requires` |
-| `ad4m://flow/evidence_hashes` | `evidenceHashes` | JSON `{ uri: sha256 }`, sealed at mint |
-| `ad4m://flow/run_uri` | `runUri?` | the `InterpretationRun` that produced it, when an LLM pass did |
-| `ad4m://flow/rationale` | `rationale?` | free-form justification |
-
-Two more predicates belong to the proposal but are not fields of the class:
-
-- **`ad4m://acceptedBy` → a DID** is a vote. There is no Vote class, because a signed link already is one.
-- **`ad4m://flow/resolved_as` → `"fired"`** is a history mark for UIs, written `Local`. **Never an input to the derivation.**
-
-<Callout type="warning" emoji="⚠️">
-  Every field of a proposal is read **only from links the proposer themselves
-  signed**, and only when the executor recorded the signature as valid. A
-  synced link claiming to be part of your proposal but signed by someone else
-  is invisible to the engine, and a proposer who published two different values
-  for one field invalidates their own proposal. There is no last-write-wins
-  anywhere in this path.
-</Callout>
-
-## `interpretationHint`, and how the LLM sees it
-
-Each state's `interpretationHint` is one English sentence, and it is not a comment. It is rendered into the prompt the interpretation engine hands the LLM, next to that state's guards, so an agent reasoning about a transition is reasoning about *what the group meant by "Scoped"* rather than guessing from the name. A flow whose hints are vague produces agent proposals that are vague in exactly the same way.
-
-When an extraction pass runs on a scope that has live flow instances, the prompt gains an `active_flows` array — one entry per instance:
-
-```json
-{
-  "instance": "ad4m://flow/instance/7f3a…",
-  "subject": "ad4m://task/1",
-  "flow": "Delivery",
-  "currentState": "Identified",
-  "tokens": {
-    "$flow.base": "ad4m://task/1",
-    "$flow.instance": "ad4m://flow/instance/7f3a…",
-    "$flow.uri": "ad4m://flow/instance/7f3a…",
-    "$did": "(acting DID - substituted at evaluation time)"
-  },
-  "hint": "Advance a Task through delivery: Identified → Scoped → …",
-  "consensus": "2 signers",
-  "nextStates": [
-    {
-      "name": "Scoped",
-      "hint": "The Task has an acceptance criterion.",
-      "requires": "at least 1 match of AcceptanceCriterion linked to the base",
-      "semanticCheck": "The scope was agreed on, not merely discussed.",
-      "consensus": "2 signers"
-    }
-  ]
-}
-```
-
-Three things worth noting about that block:
-
-- **Optional fields are omitted when unset**, so a flow costs prompt tokens in proportion to what it actually declares. When no flows are live the key is absent entirely — the LLM never sees empty flow scaffolding it might be tempted to fill in.
-- **`requires` is rendered to English**, not to raw query JSON, and the `$flow.*` tokens are preserved verbatim with the `tokens` legend telling the model what each resolves to for this instance. Tokens in, tokens out; the engine substitutes afterwards.
-- **A [contested](#contention) flow is flagged as stalled**, so the model does not read it as "awaiting votes".
-
-### Who actually writes the proposal
-
-A UI writes one by calling `instance.proposeTransition(toState)`. The executor evaluates the guard, seals the evidence, and mints (or co-signs) as the acting DID. That is the path `tests/js/tests/model/flow-task-handover.test.ts` drives.
-
-The LLM does **not** write the proposal, and this is the part most people get backwards.
-
-After an extraction pass commits its writes, a **deterministic** evaluator *also* checks every live instance against the `requires` guards of the states reachable from its current one. Each fully satisfied `(instance, next-state)` pair becomes a `FlowTransitionProposal`, with the matched instances as its evidence bag and an order-independent SHA-256 over their canonicalised content as the seal. That is what keeps a flow moving when the LLM produces the evidence for a transition but forgets to propose it. A state with no `requires` guard is never proposed this way — nothing in the graph implies a human started work — so "InProgress"-style states only ever advance through `proposeTransition`.
-
-The LLM's own proposals — from the strategy path's JSON output, or from the `{FlowName}_propose_transition` tool the harness offers it — **never fire a transition on their own**. When one names a transition the deterministic guard has already satisfied, its `reason` becomes that proposal's `rationale`. Otherwise it is dropped.
-
-Between guard and write sits one optional gate: a state carrying a `semanticCheck` hint gets a second, small LLM call asking whether the condition really holds. A clear YES lets the proposal through; NO, an unclear answer and an LLM error all discard the transition. An uncertain confirmation must never advance a flow.
-
-## The read surface
-
-```typescript
-import { FlowInstance, SHACLFlow } from "@coasys/ad4m";
-
-// Every flow registered on this perspective, by name.
-const names = await perspective.sdnaFlows();            // ["Delivery"]
-
-// Which of them accept this expression? Matches the expression's registered
-// subject classes against each flow's `inputTypes`.
-const available = await perspective.availableFlows("ad4m://task/1"); // ["Delivery"]
-
-// Load a definition back.
-const flow: SHACLFlow | null = await perspective.getFlow("Delivery");
-
-// Mint a run, seeded in the flow's lowest-valued state.
-const instance = await FlowInstance.start(perspective, "Delivery", "ad4m://task/1");
-
-// Enumerate runs. The filter is a flow name, or `{ flowName?, subject? }` —
-// pass `subject` to ask "what is running on this expression?".
-const all       = await FlowInstance.findAll(perspective);
-const deliveries = await FlowInstance.findAll(perspective, "Delivery");
-const onThisTask = await FlowInstance.findAll(perspective, { subject: "ad4m://task/1" });
-```
-
-On a `FlowInstance` wrapper:
-
-| member | type | |
-| --- | --- | --- |
-| `uri` | `string` | the instance node's URI — what proposals reference |
-| `subject` | `string` | the base expression |
-| `flowName` / `flowUri` | `string` | display name / canonical identity |
-| `currentStateName` | `string` | state name |
-| `currentState` | `FlowState` | the state object on the definition — hint and guards included |
-| `availableTransitions` | `FlowTransition[]` | edges leaving `currentStateName`; empty on a terminal state |
-| `startedAtMillis` | `number \| undefined` | from `Ad4mModel`'s synthesised `createdAt` |
-| `proposals()` | `Promise<FlowTransitionProposal[]>` | every proposal targeting this instance |
-| `shape` / `record` | `SHACLFlow` / `FlowInstanceRecord` | the two wrapped objects, if you need to reach past the wrapper |
-
-```typescript
-instance.currentStateName;                     // "Identified"
-instance.currentState.interpretationHint;      // the sentence the LLM was given
-
-for (const t of instance.availableTransitions) {
-  console.log(t.actionName, "→", t.toState);   // "Scope" → "Scoped"
-}
-
-const pending = await instance.proposals();
-```
-
-<Callout type="info" emoji="ℹ️">
-  `findAll` never registers classes. On a perspective that has never minted an
-  instance it returns `[]` rather than installing the shape — a read must not
-  sync a write to every peer in the neighbourhood. Registration happens in
-  `FlowInstance.start`, which is the write path.
-</Callout>
-
-## The write surface: propose, accept, reject
-
-The button a UI puts on `availableTransitions` is `proposeTransition`. That is the call this page's [worked example](#a-transition-end-to-end) and `tests/js/tests/model/flow-task-handover.test.ts` both make.
-
-```typescript
-import { FlowInstance, type FlowProposeResult, type FlowFireOutcome } from "@coasys/ad4m";
-
-// Press the button. The executor evaluates the guard on THIS replica,
-// seals the evidence, and either mints a proposal or co-signs the one
-// another agent already opened for the same edge.
-const result: FlowProposeResult = await instance.proposeTransition(
-  "InProgress",
-  "I've started — see the log",
-);
-
-result.proposalUri;   // hand this to another agent, or to rejectProposal
-result.minted;        // true = this call wrote the proposal
-result.recordedVote;  // true = this DID's vote landed (mint or join)
-result.outcomes;      // FlowFireOutcome[] — empty while short of quorum
-result.derivedState;  // where the fold stands after the call
-result.contested;     // true = stalled; do not show "awaiting votes"
-
-// Add my signature to a listed proposal, then re-derive.
-const fired: FlowFireOutcome[] = await instance.acceptProposal(result.proposalUri);
-
-// Withdraw my own links from a proposal. Returns how many went.
-const retracted: number = await instance.rejectProposal(result.proposalUri);
-```
-
-`proposeTransition` is also reachable over WS-RPC as `perspective.proposeFlowTransition`. `acceptProposal` / `rejectProposal` are `perspective.acceptFlowProposal` / `perspective.rejectFlowProposal`, and over MCP as the `flow_proposal_accept` / `flow_proposal_reject` tools.
-
-Read `FlowProposeResult` like this — a bare `FlowFireOutcome[]` cannot tell these apart:
-
-| `outcomes` | `recordedVote` | `minted` | meaning |
-| --- | --- | --- | --- |
-| non-empty | — | — | the transition fired |
-| `[]` | `true` | `true` | you opened it; waiting for other voters |
-| `[]` | `true` | `false` | you joined someone else's proposal |
-| `[]` | `false` | `false` | you had already voted; nothing was written |
-| `[]` | — | — | plus `contested: true`: stalled, not waiting |
-
-Two agents pressing the same button both call `proposeTransition`. The second co-signs rather than minting a twin.
-
-A fired transition is reported as:
-
-```typescript
-interface FlowFireOutcome {
-  instanceUri: string;
-  fromState: string;
-  toState: string;
-  voters: string[];                   // the distinct DIDs that settled the edge
-  contributingProposalUris: string[]; // every proposal that fed it — twins included
-}
-```
-
-**An empty array is a normal answer.** A vote that does not yet reach quorum is a landed vote, not a failure. More than one outcome happens when your signature unblocks an edge that later edges were already waiting behind.
-
-### Signing is where you check — and refusing is all you can do
-
-`acceptProposal` re-verifies the proposal's evidence seal **against your own copy of the graph** before it signs. If the cited content changed since the mint, your replica declines to co-sign and writes nothing. It does not delete the proposal: your graph may simply be behind, and deleting another agent's work over that would be a replica exceeding its authority. A replica may only ever refuse its own action.
-
-Accept also refuses when the proposal isn't engine-visible at all, and when it leaves a state the flow is no longer standing in.
-
-This is why the derivation itself re-runs no guards. Every vote it counts was cast by someone who checked the seal first, and settled history is never re-tested against the live graph — otherwise editing a task that a finished transition had cited would silently unwind the flow that consumed it.
-
-### Reject is not cancel
-
-<Callout type="warning" emoji="⚠️">
-  **`rejectProposal` withdraws what *you* signed. It does not cancel anyone
-  else's proposal.**
-
-  It deletes only links this DID signed — your vote, or your whole proposal if
-  you opened it — and returns how many links went: one for a withdrawn vote,
-  more when you retract a proposal you opened. It never touches another agent's
-  links, and if you signed nothing on the proposal it **errors** rather than
-  silently doing nothing. A link that merely *names* your DID but carries
-  someone else's signature is not yours to retract either.
-
-  And because state is recomputed from the links present now, **withdrawing a
-  vote that had settled an edge moves the flow back to where it stood before
-  that vote.** With your vote gone the edge is one short of quorum again, so
-  the walk stops earlier. There is no "already fired, refuse" guard, and there
-  must not be one: the `resolved_as → "fired"` mark is an index, not authority,
-  and guarding on it would contradict the rule this whole page rests on.
-</Callout>
-
-### What is deliberately not here
-
-These are **absent, not stubbed**. Do not go looking for them:
-
-| | |
-| --- | --- |
-| `FlowInstance.fireAction()` | no direct fire — an edge fires only by reaching quorum |
-| `onStateChange` / `onProposalAdded` / `onProposalResolved` | no flow subscriptions — poll `findAll` / `proposals()` / `currentStateName` |
-| automatic receipt minting | a settled run gets a receipt only when someone calls `perspective.mintFlowReceipt(instanceUri)` — see [Roles](#roles-who-is-allowed-to-sign) |
-
-`FlowTransition.actions` is on the type and nothing executes it.
-
-## A transition, end to end
-
-Alice and Bob share a Neighbourhood. Their Delivery flow requires two distinct signatures to enter `Scoped`. The executable twin of this walk — a Task flow with roles — is `tests/js/tests/model/flow-task-handover.test.ts`.
-
-```typescript
-import { SHACLFlow, FlowInstance } from "@coasys/ad4m";
-
-const deliveryFlow = new SHACLFlow("Delivery", "delivery://");
-deliveryFlow.inputTypes = ["ad4m://Task"];
-deliveryFlow.interpretationHint =
-  "Advance a Task through delivery: Identified → Scoped → InProgress → Review → Done.";
-
-deliveryFlow.addState({
-  name: "Identified",
-  value: 0,
-  interpretationHint: "The Task has been named but not yet scoped.",
+import { SHACLFlow } from "@coasys/ad4m";
+
+const flow = new SHACLFlow("TaskFlow", "handover://");
+flow.inputTypes = ["HandoverTask"];      // subject classes this flow runs over
+flow.consensusRule = { n: 1 };           // default rule for every transition
+flow.interpretationHint =
+  "Advance a Task: Ready → InProgress → InReview → Done.";
+
+flow.addState({
+  name: "Ready",
+  value: 0,                              // lowest value = the initial state
+  interpretationHint: "Named, not yet started.",
 });
-deliveryFlow.addState({
-  name: "Scoped",
+flow.addState({
+  name: "InProgress",
   value: 1,
-  interpretationHint: "The Task has an acceptance criterion.",
-  requires: [{ className: "AcceptanceCriterion", linkedTo: "base", count: { min: 1 } }],
-  consensusRule: { n: 2 },
+  interpretationHint: "Someone is working on it.",
+  requires: [{ className: "HandoverWorkLog", linkedTo: "base", count: { min: 1 } }],
 });
-deliveryFlow.addTransition({
-  actionName: "Scope",
-  fromState: "Identified",
-  toState: "Scoped",
-  actions: [],
+flow.addState({
+  name: "InReview",
+  value: 2,
+  interpretationHint: "A deliverable exists and is waiting on review.",
+  requires: [{ className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } }],
 });
-
-await perspective.addFlow("Delivery", deliveryFlow);
-
-// Alice starts a run on a task. It begins in the lowest-valued state.
-const instance = await FlowInstance.start(perspective, "Delivery", "ad4m://task/1");
-instance.currentStateName; // "Identified"
-instance.availableTransitions.map((t) => t.actionName); // ["Scope"]
-```
-
-The conversation on that task then produces an acceptance criterion. A UI does **not** write proposal links by hand. Alice presses Scope:
-
-```typescript
-const alicePress = await instance.proposeTransition("Scoped", "criterion is on the graph");
-alicePress.outcomes;      // [] — n:2, first vote
-alicePress.recordedVote;  // true
-alicePress.minted;        // true
-alicePress.derivedState;  // "Identified"
-alicePress.proposalUri;   // the handle Bob's click will join
-```
-
-Bob presses the same button on his replica:
-
-```typescript
-const bobPress = await bobInstance.proposeTransition("Scoped");
-bobPress.outcomes[0].toState; // "Scoped"
-bobPress.minted;              // false — he joined Alice's proposal
-bobPress.proposalUri;         // same URI as alicePress.proposalUri
-bobPress.derivedState;        // "Scoped"
-```
-
-(The engine's evaluator pass still mints proposals after an extraction run when a `requires` guard is satisfied — that is how an LLM that produced the evidence but forgot the button is recovered. Manual `proposeTransition` is the UI path, and it is the only path into a guard-free state.)
-
-What those two clicks wrote, on the graph:
-
-```text
- ┌──────────────────────────────────────────────────────────────────────┐
- │ 1. PROPOSAL                                                          │
- │    Alice's evaluator pass writes ad4m://flow/proposal/abc,           │
- │    every link signed by Alice:                                       │
- │      flow/instance       → ad4m://flow/instance/7f3a…                │
- │      flow/from_state     → "Identified"                              │
- │      flow/to_state       → "Scoped"                                  │
- │      flow/proposer       → did:key:alice                             │
- │      flow/evidence       → ad4m://criterion/9 (the matched instance) │
- │      flow/evidence_hashes→ {"ad4m://criterion/9":"a91f…"}  ← the seal │
- │    The mint is Alice's own vote.                          [1 of n=2] │
- └────────────────────────────────┬─────────────────────────────────────┘
-                                  │  sync
-                                  ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │ 2. VOTE                                                              │
- │    Bob calls instance.acceptProposal("ad4m://flow/proposal/abc").    │
- │    His replica recomputes the seal over ad4m://criterion/9 on ITS    │
- │    OWN graph first. Match ⇒ he signs:                                │
- │      ad4m://acceptedBy → did:key:bob     (signed by Bob)             │
- │    Mismatch ⇒ he declines and writes nothing.             [2 of n=2] │
- └────────────────────────────────┬─────────────────────────────────────┘
-                                  │
-                                  ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │ 3. QUORUM — counted per EDGE, not per proposal                       │
- │    fold walks from "Identified":                                     │
- │      edge Identified→Scoped                                          │
- │        distinct eligible DIDs across ALL proposals for this edge     │
- │          = { did:key:alice, did:key:bob }  = 2                       │
- │        consensusRule for entry into "Scoped" = { n: 2 }              │
- │        ⇒ settled, at the 2nd voter's own timestamp                   │
- └────────────────────────────────┬─────────────────────────────────────┘
-                                  │
-                                  ▼
- ┌──────────────────────────────────────────────────────────────────────┐
- │ 4. TRANSITION                                                        │
- │    The walk crosses the edge and stops in "Scoped" — no edge out of  │
- │    it has quorum. acceptProposal resolves to:                        │
- │      [{ instanceUri: "ad4m://flow/instance/7f3a…",                   │
- │         fromState: "Identified", toState: "Scoped",                  │
- │         voters: ["did:key:alice","did:key:bob"],                     │
- │         contributingProposalUris: ["ad4m://flow/proposal/abc"] }]     │
- │    The pass then writes Bob's Local currentState cache and a         │
- │    resolved_as → "fired" mark. Neither is ever read back.            │
- └──────────────────────────────────────────────────────────────────────┘
-```
-
-```typescript
-const fired = await instance.acceptProposal("ad4m://flow/proposal/abc");
-fired[0].toState;  // "Scoped"
-fired[0].voters;   // ["did:key:alice", "did:key:bob"]
-```
-
-Now Bob changes his mind:
-
-```typescript
-const retracted = await instance.rejectProposal("ad4m://flow/proposal/abc"); // 1
-
-const after = await FlowInstance.findAll(perspective, { subject: "ad4m://task/1" });
-after[0].currentStateName; // "Identified" — back where it stood
-```
-
-One link went: Bob's `acceptedBy`. Alice's proposal is untouched and still standing. But the edge is `1 < n = 2` again, so the walk no longer crosses it and the flow stands where it stood before Bob signed. Nothing was "undone" — the same derivation simply ran over one link fewer.
-
-### Why quorum belongs to the edge
-
-When two replicas mint proposals for the same transition at the same time — each not yet having seen the other's — you get twin proposals for one edge. If quorum were counted *per proposal*, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short.
-
-So the question the engine asks is *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge instead of deadlocking, and both appear in the outcome's `contributingProposalUris`.
-
-## Roles: who is allowed to sign
-
-A `ConsensusRule` can require that voters hold a role. The same shape the handover test uses:
-
-```typescript
-taskFlow.addState({
+flow.addState({
   name: "Done",
   value: 3,
   interpretationHint: "Accepted.",
@@ -473,30 +106,304 @@ taskFlow.addState({
     { className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } },
     { className: "HandoverReviewNote", linkedTo: "base", count: { min: 1 } },
   ],
+  consensusRule: { n: 2 },               // per-state override of the default
+});
+
+flow.addTransition({ actionName: "Start", fromState: "Ready", toState: "InProgress", actions: [] });
+flow.addTransition({ actionName: "SubmitForReview", fromState: "InProgress", toState: "InReview", actions: [] });
+flow.addTransition({ actionName: "Accept", fromState: "InReview", toState: "Done", actions: [] });
+
+await perspective.addFlow("TaskFlow", flow);
+```
+
+*From `tests/js/tests/model/flow-task-handover.test.ts`, `makeTaskFlow`, driven by "Part 1 — Ready → InProgress → InReview → Done via proposeTransition; reject moves it back".*
+
+Facts about this shape:
+
+- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.**
+- The flow's canonical identity is its `flowUri`: `${namespace}${name}Flow`, here `handover://TaskFlowFlow`. Instances store that URI, because bare names collide when two communities share Social DNA.
+- Each state's `interpretationHint` is one English sentence. It is rendered into the prompt an interpreting LLM sees for that state, so an agent reasoning about a transition reads what the group meant, not a guess from the name.
+- A per-state `consensusRule` overrides the flow-level default. Cheap early edges can take one signature while the final one takes two, or a reviewer.
+- `FlowTransition.actions` exists on the type and nothing executes it yet.
+
+Starting a run and rendering it:
+
+```typescript
+import { FlowInstance } from "@coasys/ad4m";
+
+const task = await Task.create(perspective, { title: "Ship the handover" });
+const started = await FlowInstance.start(perspective, "TaskFlow", task.id);
+
+started.currentStateName;                              // "Ready"
+started.availableTransitions.map((t) => t.actionName); // ["Start"] — the button list
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+`availableTransitions` lists the edges that leave the current state. Render one button per entry. An empty list means the state is terminal.
+
+To find runs later, use `FlowInstance.findAll(perspective, filter?)`. The filter is a flow name or `{ flowName?, subject? }`. `findAll` never registers classes: on a perspective that has never minted an instance it returns `[]` instead of installing the shape, because a read must not sync a write to every peer.
+
+## Guards: `requires`
+
+`requires` is where "Done" stops meaning *somebody clicked Done* and starts meaning *the graph contains what Done requires*. Each entry is a model query: a subject class, optional property conditions, a cardinality, and an anchor (`linkedTo: "base"` ties the match to the flow's subject). All entries in the array must match.
+
+A proposal into a guarded state is refused while the guard is unmet:
+
+```typescript
+// InProgress requires a HandoverWorkLog linked to the task. None exists yet:
+try {
+  await started.proposeTransition("InProgress");
+} catch (e) {
+  // error message names the unmet guard
+}
+
+// Write the evidence, then the same press succeeds:
+await WorkLog.create(perspective, { note: "Picked up." },
+  { parent: { id: task.id, predicate: "ad4m://has_child" } });
+const result = await instance.proposeTransition("InProgress", "I've started — see the log");
+result.outcomes;      // [{ fromState: "Ready", toState: "InProgress", ... }] — n:1 fires
+result.derivedState;  // "InProgress"
+```
+
+*From `flow-task-handover.test.ts`, Part 1 and `advanceToInReview`.*
+
+When a proposal is minted, the executor evaluates the guard on the proposing replica and **seals the evidence**: it writes the matched instances as the proposal's evidence and an order-independent SHA-256 over their canonicalised content next to them. Every voter re-computes that seal against their own graph before they sign. If the cited content changed since the mint, the voter's replica declines to co-sign and writes nothing. It does not delete the proposal — the local graph may simply be behind, and a replica may only ever refuse its own action.
+
+The derivation itself re-runs no guards. Every vote it counts was cast by someone who checked the seal first, and settled history is never re-tested against the live graph. Otherwise editing a task that a finished transition had cited would silently unwind the flow that consumed it.
+
+<Callout type="info" emoji="ℹ️">
+  The engine also runs a deterministic evaluator after each LLM extraction
+  pass. It checks every live instance against the `requires` guards of the
+  reachable next states and mints a proposal for each fully satisfied pair.
+  That keeps a flow moving when an LLM produced the evidence but did not
+  press the button. A state with **no** guard is never proposed this way —
+  nothing in the graph implies a human started work — so guard-free states
+  advance only through `proposeTransition`. An LLM's own proposal never fires
+  a transition on its own.
+</Callout>
+
+## Proposing and voting
+
+The button a UI puts on each `availableTransitions` entry calls `proposeTransition`. The executor evaluates the guard on this replica, seals the evidence, and either mints a proposal or co-signs the one another agent already opened for the same edge.
+
+```typescript
+import { FlowInstance, type FlowProposeResult } from "@coasys/ad4m";
+
+const result: FlowProposeResult = await instance.proposeTransition(
+  "Done",
+  "Deliverable present and reviewed.",
+);
+
+result.proposalUri;   // hand this to another agent, or to rejectProposal
+result.minted;        // true = this call wrote the proposal
+result.recordedVote;  // true = this DID's vote landed (mint or join)
+result.outcomes;      // FlowFireOutcome[] — empty while short of quorum
+result.derivedState;  // where the derivation stands after the call
+result.contested;     // true = stalled; do not render "awaiting votes"
+```
+
+Read `FlowProposeResult` with this table. A bare outcome list cannot tell these cases apart:
+
+| `outcomes` | `recordedVote` | `minted` | meaning |
+| --- | --- | --- | --- |
+| non-empty | — | — | the transition fired |
+| `[]` | `true` | `true` | you opened the proposal; waiting for other voters |
+| `[]` | `true` | `false` | you joined someone else's proposal |
+| `[]` | `false` | `false` | you had already voted; nothing was written |
+| `[]` | — | — | plus `contested: true`: stalled, not waiting |
+
+**An empty outcome list is a normal answer.** A vote short of quorum is a landed vote, not a failure.
+
+Two agents who want the same transition both press the same button. The second call finds the open proposal for that edge and co-signs it instead of minting a twin:
+
+```typescript
+// Done has consensusRule { n: 2 }. Alice presses first:
+const alicePress = await aliceInstance.proposeTransition("Done", "Deliverable present and reviewed.");
+alicePress.outcomes;      // [] — one of two votes
+alicePress.minted;        // true
+alicePress.derivedState;  // "InReview" — unchanged
+
+// Bob presses the SAME button on his view — not acceptProposal:
+const bobPress = await bobInstance.proposeTransition("Done");
+bobPress.outcomes[0].toState;  // "Done" — two distinct DIDs is quorum
+bobPress.outcomes[0].voters;   // [aliceDid, bobDid]
+bobPress.minted;               // false — he joined Alice's proposal
+bobPress.proposalUri === alicePress.proposalUri; // true
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+A vote on a listed proposal is also available directly: `instance.acceptProposal(proposalUri)` adds this DID's signature and re-derives. On the wire these calls are `perspective.proposeFlowTransition`, `perspective.acceptFlowProposal` and `perspective.rejectFlowProposal`, and over MCP the `flow_proposal_accept` / `flow_proposal_reject` tools.
+
+### Quorum belongs to the edge
+
+When two replicas mint proposals for the same transition concurrently — each not yet having seen the other's — one edge carries twin proposals. If quorum were counted per proposal, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short. So the engine asks *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge, and each appears in the outcome's `contributingProposalUris`.
+
+### Reject is not cancel
+
+`rejectProposal` withdraws what **you** signed. It deletes only links this DID signed — your vote, or your whole proposal if you opened it — and returns how many links went. It never touches another agent's links. If you signed nothing on the proposal it errors instead of doing nothing silently.
+
+Because state is recomputed from the links present now, withdrawing a vote that had settled an edge moves the flow back:
+
+```typescript
+// Done had just settled at n:2. Bob withdraws his vote:
+const retracted = await bobInstance.rejectProposal(bobPress.proposalUri); // ≥ 1 link removed
+
+// The next derivation stands in InReview again — Alice's single vote
+// is one short of n:2:
+const after = await aliceInstance.proposeTransition("Done");
+after.derivedState;  // "InReview"
+after.outcomes;      // [] — Alice already voted
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+There is no "already fired" guard, and there must not be one. The `resolved_as → "fired"` mark the engine writes is a `Local` display index, never an input to the derivation.
+
+### Contention
+
+If two edges out of the current state both reach quorum, the engine does **not** pick a winner. It reports contention and the walk stops there. Choosing by timestamp would adjudicate a race with numbers the racing agents wrote themselves. A contested flow is **stalled, not waiting**: more votes cannot move it. While an instance is contested, `proposeTransition` into it is refused, and anything that pays out on a completed flow must refuse a contested derivation.
+
+## Roles: `fromRole` and `didProperty`
+
+A `ConsensusRule` can require that voters hold a role. A role is not a special object. It is ordinary data, and `fromRole` is an ordinary model query over it:
+
+```typescript
+flow.addState({
+  name: "Done",
+  value: 3,
+  requires: [ /* … as above … */ ],
   consensusRule: {
     n: 1,
     fromRole: {
       className: "HandoverReviewerRole",
       where: { domain: "frontend" },
-      didProperty: "agent",
+      didProperty: "agent",   // the property on each match that holds the member's DID
     },
   },
 });
 ```
 
-`fromRole` is an ordinary `ModelQuery` over ordinary subject classes — roles are not a special kind of object, just data the flow points at. `didProperty` names the property on each match that holds the member's DID. (The alternative shape templates `$did` into `where` and treats a non-empty result as "this DID matches".)
+A non-member can still press the button. Their vote is recorded, but the derivation does not count it:
 
-A non-member can still call `proposeTransition`. Their vote is recorded; the fold does not count it. That is why Part 2 of the handover test asserts Alice's Done click returns `outcomes: []` and `recordedVote: true`.
+```typescript
+// Bob holds a ReviewerRole instance with agent = bobDid. Alice does not.
+const alicePress = await aliceInstance.proposeTransition("Done");
+alicePress.outcomes;      // [] — her click does not settle an n:1 edge
+alicePress.recordedVote;  // true — the vote landed; it just does not count
 
-Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before being granted it does not count retroactively. Revocation is an explicit signed tombstone; it stops future votes rather than rewriting settled history.
+const bobPress = await bobInstance.proposeTransition("Done");
+bobPress.outcomes[0].voters;  // includes bobDid, not aliceDid
+bobPress.derivedState;        // "Done"
+```
 
-A per-state `consensusRule` overrides the flow-level default — so the cheap early edges can take one signature while the irreversible last one takes a reviewer.
+*From `flow-task-handover.test.ts`, "Part 2 — Done gated by fromRole: only the reviewer DID counts".*
 
-### Granting a role is itself a flow
+Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before the grant does not count retroactively. Revocation is a signed tombstone link on the role instance, never a deletion. It stops future votes and does not rewrite settled history.
 
-`fromRole` matches the **instance**, not a flow that was supposed to grant it. A `ReviewerRoleGrant` flow whose base expression *is* the role instance can reach `Granted` without changing who `fromRole` counts — that hole is an assertion in the handover test, not a surprise.
+One convention follows for Social DNA authors: **role instances are add-only, and membership ends only through tombstones.** The role query runs against the current graph — only the instance's existence is windowed in time — so a query keyed on a mutable property (`where: { active: true }`) reopens the deletion problem: flipping the property would remove the instance from historical verdicts and un-settle edges its votes once settled. State that changes belongs in new instances, not in edited ones.
 
-To bind membership to the grant flow completing, add `grantedByFlow`:
+<Callout type="warning" emoji="⚠️">
+  Plain `fromRole` matches the role **instance**. Anyone who can write a
+  matching instance passes the gate. Part 3 of the handover test asserts this
+  as "the hole": a `ReviewerRoleGrant` flow over the role instance was still
+  in `Proposed`, and `fromRole` matched the instance anyway. To bind
+  membership to a grant *process* completing, add
+  [`grantedByFlow`](#grantedbyflow-a-role-granted-by-another-flow).
+</Callout>
+
+## Outputs: what a final step names
+
+A run's outputs are the instances the group agrees the run produced — the deliverable a review accepted, the role a grant ceremony granted. The proposer of the final transition names them as `(className, id)` pairs:
+
+```typescript
+// The grant flow's final press names the role instance as the run's output:
+await grantInstance.proposeTransition("Granted", undefined, [
+  { className: "HandoverReviewerRole", id: role.id },
+]);
+```
+
+*From `flow-task-handover.test.ts`, "Part 3 — grant flow over a ReviewerRole …".*
+
+Rules, each enforced by the engine:
+
+- **The run's subject is never an output by default.** Name it, or the receipt speaks for nothing.
+- Outputs can only be named on a proposal into a **terminal** state. Naming them elsewhere is refused: the run does not end there.
+- Every named output must be an instance of its named class on the proposing replica, checked by the same rule every voter re-runs.
+- **Every co-signer must name the same outputs.** A press that names different outputs than the open proposal is refused, not joined — joining would sign outputs the presser did not name.
+
+**Why the content is hashed.** The proposal signs `outputs_hash`, a digest over each output's `(class, id, canonical content)`, next to the evidence seal. Every voter loads each named output through its class on their own graph, recomputes the hash, and refuses to co-sign on a mismatch. The receipt minted later must hash its carried outputs to that same quorum-signed commitment. Without the content in the hash, an id would be a movable target: any property of the instance could change after the vote while the id stayed the same, and the receipt would then speak for content the quorum never saw. "Content" here is exactly what a model query returns for the instance through its class: every scalar property, relations and collections as the ids they point at, and the synthetic `createdAt` / `updatedAt` / `author` fields.
+
+## Receipts: `mintFlowReceipt` and `verifyFlowReceipt`
+
+A settled run leaves no portable proof by itself. A **flow receipt** is that proof, and minting one is an explicit call:
+
+```typescript
+// Any member can mint once the run has settled. Nothing mints automatically.
+const minted = await perspective.mintFlowReceipt(instanceUri);
+minted.receiptUri;  // "ad4m://flow/receipt/…"
+minted.receipt;     // the receipt object — hand it to any replica
+
+// Any holder of the receipt can verify it against their own flow catalogue:
+const verdict = await perspective.verifyFlowReceipt(minted.receipt);
+verdict.outcome;        // "verified" | "rejected" | "undecidable"
+verdict.terminalState;  // "Done"
+verdict.outputs;        // [{ className, id }] — what the quorum committed to
+verdict.voters;         // the distinct DIDs that settled the final edge
+```
+
+*From `tests/js/tests/flow/flow-produced-by.test.ts`, "complete → mint → enumerate → verify → filter, through the SDK", and `flow-task-handover.test.ts`, Part 3.*
+
+**What a verified receipt proves.** Under the flow definition the *verifier* holds: n distinct eligible DIDs each signed a vote naming a proposal URI that is the content address of this evidence seal and this outputs commitment, the carried read-set re-folds to the claimed terminal state, and the receipt's outputs hash to the commitment that quorum signed. Nothing in the receipt is a minter's assertion of state. The mint itself re-derives the state and refuses to build a receipt for any other.
+
+**What a receipt does not prove** — see [Guarantees](#guarantees-and-non-guarantees) for the full list. The two that matter most in practice: it does not prove any voter actually re-checked the seal before signing (an honest client does, but the check itself is not signed), and it does not prove the outputs still have the committed content *now*. A receipt attests to content at completion. A later edit does not invalidate a minted receipt — its preimages are frozen inside it.
+
+**Verification never re-runs guards and never queries the live graph.** The receipt carries the signed material, and the verdict comes from re-folding that material under the verifier's own catalogue. A receipt minted under an older flow definition stops verifying when the definition changes — the verdict names that reason (`DnaChanged`) rather than calling the receipt bad.
+
+The three-way verdict is deliberate. `undecidable` means "this replica cannot decide", not "the receipt is bad". Do not collapse it into `rejected` in a UI, and never treat it as `verified`.
+
+Tampering is caught: the produced-by test copies a real receipt, swaps one output id to a node the quorum never committed to, and gets `rejected`.
+
+## `producedByFlow`: querying what a flow produced
+
+Every consumer of receipts asks the same question: *is this instance a valid output of flow F, settled into state S?* The engine answers it once, fail-closed, on three surfaces.
+
+**Enumerate** — `perspective.flowValidOutputs(flowUri, state?)`:
+
+```typescript
+const outputs = await perspective.flowValidOutputs("handover://ProducedDeliveryFlow", "Done");
+outputs[0].output;        // { className: "ProducedDeliverable", id: … }
+outputs[0].terminalState; // "Done"
+outputs[0].receiptUri;    // the receipt that proves it
+```
+
+**Filter** — the model-query `where: { producedByFlow }`:
+
+```typescript
+// Only instances a verifying receipt commits to pass the filter:
+const produced = await Deliverable.findAll(perspective, {
+  where: { producedByFlow: { flow: FLOW_URI, state: "Done" } },
+});
+
+// The run's subject is not an output, so it does not pass:
+const tasksProduced = await Task.findAll(perspective, {
+  where: { producedByFlow: { flow: FLOW_URI } },
+});
+// tasksProduced === []
+```
+
+*Both from `flow-produced-by.test.ts`, "complete → mint → enumerate → verify → filter, through the SDK".*
+
+An instance counts iff some receipt in the perspective **verifies** under this replica's catalogue, was minted for that flow, settled into the named state (any terminal state when omitted), and names the instance by **className and id together** in its committed outputs. The className is the one in *your* query — a node committed as a Task is not a produced Role, even with the same id.
+
+These two live surfaces apply one more check the receipt alone cannot: the instance's **live content must still equal the committed content**. An output edited after completion drops from `flowValidOutputs` and from the filter, while `verifyFlowReceipt` keeps saying `verified` — the receipt is about completion time, the query is about now.
+
+Fail-closed rules on every surface: a `rejected` receipt is excluded, an `undecidable` receipt is excluded the same way (a payout query must not trust a receipt nobody could check), an unknown flow is an **error** rather than an empty list, and a malformed filter is an **error** rather than a filter that admits everything.
+
+## `grantedByFlow`: a role granted by another flow
+
+Plain `fromRole` matches the instance. `grantedByFlow` adds the condition that the instance must be a **valid output of a completed run of another flow**:
 
 ```typescript
 consensusRule: {
@@ -506,77 +413,96 @@ consensusRule: {
     where: { domain: "frontend" },
     didProperty: "agent",
     grantedByFlow: {
-      flow: "handover://ReviewerRoleGrantFlow", // `${namespace}${name}Flow`
+      flow: "handover://ReviewerRoleGrantFlow",  // `${namespace}${name}Flow`
       terminalState: "Granted",
     },
   },
 }
 ```
 
-Both fields are required. The engine reads the receipts filed under `flow` (`flow --ad4m://flow/flow_receipt--> receipt`), verifies each against **this replica's** catalogue, and counts the instance only if a receipt is for `flow`, settled into `terminalState`, and names the instance as an output by **className and id**. The className is the one in your `fromRole` query, never one the receipt carries. The grant is dated from that receipt's `settled_at`, the moment the grant reached quorum. There is no fallback to the assignment link — if there were, writing that link would grant the role and the gate would be decorative.
+Both fields are required. The gate asks the [`producedByFlow`](#producedbyflow-querying-what-a-flow-produced) question for each candidate instance, with the className taken from your `fromRole` query, never from anything the receipt carries. The grant is dated from the receipt's `settled_at` — the moment the n-th distinct eligible voter signed the grant's final edge. No participant picks that time, and there is **no fallback** to the assignment link: if there were, writing one link would grant the role and the gate would be decorative.
 
-Closing the loop from a UI takes two calls:
+The full loop, from a UI, in three calls:
 
 ```typescript
-// 1. The Grant clicks name the role instance as the run's output. `Granted`
-//    is terminal, so the proposal signs a hash over that instance's content.
-//    The run's subject is NOT an output unless you name it.
+// 1. The Grant presses name the role instance as the run's output.
+//    Every co-signer names the same outputs.
 await grant.proposeTransition("Granted", undefined, [
   { className: "HandoverReviewerRole", id: role.id },
 ]);
+// (a second member presses the same button to reach the grant's n:2)
 
-// 2. Once the run has settled, any member mints its receipt.
+// 2. Once the run has settled, any member mints its receipt:
 await perspective.mintFlowReceipt(grantRunUri);
 
-// Optional: what the gate will read.
+// 3. Optional — inspect what the gate will read:
 await perspective.flowValidOutputs("handover://ReviewerRoleGrantFlow", "Granted");
 ```
 
-Every co-signer must name the same outputs; a click naming different ones is refused rather than joined. Nothing mints automatically: a run that settled but was never minted does not grant, and the gate is fail-closed until the receipt exists. Part 3 of the handover test runs both halves. Retracting a settling vote on the grant flow moves the *live* flow back; a verifying receipt keeps verifying. Un-grant is a signed `ad4m://flow/role_grant_revoked` tombstone, not an invalidation of the receipt.
+*From `flow-task-handover.test.ts`, Part 3.*
 
-## Contention
+The gate is **fail-closed**, and Part 3 pins each direction:
 
-If two edges out of the current state both reach quorum, the engine does **not** pick a winner. It reports contention and the walk stops there.
+- A settled grant run **without a minted receipt does not grant**. Bob's vote on the gated task did not count until someone called `mintFlowReceipt`. "The run completed" is not evidence. A receipt is.
+- Once the receipt exists, votes cast before the mint count on the next derivation — the vote was always valid, the gate just could not verify the grant yet. Nothing new needs to be written.
+- The receipt is bound to its instance by `(className, id)`. Alice's own role instance — same class, same `domain` — did not pass the gate, because no receipt names *her* instance. A receipt is never "flow F completed"; it is "flow F produced *this*".
+- Receipts verify recursively when the granting flow is itself gated: a receipt for a gated flow carries the receipts that made its voters eligible. A depth budget bounds the recursion (see [Errors and limits](#errors-and-limits)).
 
-That is a decision about honesty. Choosing by timestamp would mean adjudicating a race using numbers the racing agents wrote themselves. Rather than produce an authoritative-looking answer out of untrustworthy input, the engine says the group disagreed and needs to resolve it socially.
+Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt.
 
-A contested flow is **stalled, not waiting**: more votes cannot move it, because the obstacle is that two edges already carry a quorum. Anything that pays out on a completed flow must refuse a contested derivation, and a UI must never render one as "awaiting votes".
+## Errors and limits
 
-The verdict is deliberately three-valued, and the third value is the interesting one:
+The refusals a developer will meet, what each one means, and what to do:
 
-| status | meaning |
-| --- | --- |
-| not contested | a fresh derivation ran and found no conflict |
-| contested | two settled edges out of the current state |
-| unknown | the state came from the cache, so contention was **not computed** — not a claim either way |
+| You did | You get | It means | Do |
+| --- | --- | --- | --- |
+| `proposeTransition("Done")` from a state with no declared edge to Done | error naming the states, e.g. `` `Done` is not reachable from `Ready` `` | the flow's transitions do not include this edge from the **derived** state (not the cache) | render only `availableTransitions`; re-read `derivedState` from the error |
+| `proposeTransition` into a state whose `requires` is unmet | error naming the unmet guard | the guard query found no match on this replica at mint time | write the evidence first, or wait for it to sync |
+| `proposeTransition` while the instance is contested | refusal | two edges out of the current state both hold quorum; the group must resolve it socially (retract votes) | do not retry; surface the contention |
+| `proposeTransition` with `outputs` into a non-terminal state | refusal | a run does not end there, so there is nothing the outputs could be outputs *of* | name outputs only on the final transition |
+| `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
+| `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
+| `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
+| `flowValidOutputs` / `producedByFlow` / `grantedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
+| a query on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
+| a `grantedByFlow` chain nested more than 4 grant levels deep | error: `GrantDepthExceeded` (refuses the receipt one level up) | receipts verify recursively; the budget stops a planted deep chain from stalling every reader | flatten the grant ontology, or accept that the too-deep instance reads as not-a-member (the log names it) |
+| a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
 
-`unknown` exists so a cache read cannot be mistaken for a verdict. It renders as nothing in the LLM prompt rather than as "no contention", because an `Option` that conflates *"verified clear"* with *"never checked"* always fails in the permissive direction.
+Limits that are absences, not errors — do not go looking for these:
 
-## The `currentState` cache
+- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or the `currentStateName` cache.
+- **No read that re-derives without voting.** `currentStateName` is the engine's cache. The calls that re-derive are the ones that act (`proposeTransition`, `acceptProposal`); their `derivedState` and their refusal messages name the derived state.
+- **No automatic receipt minting.** A settled run gets a receipt only when someone calls `mintFlowReceipt`.
+- **No direct fire.** An edge fires only by reaching quorum. `FlowTransition.actions` is declared and not executed.
 
-Each instance carries a `currentState` property so a reader who cannot afford a full derivation — a list view, a query filter, a prompt block — still sees an answer.
+## Guarantees, and non-guarantees
 
-Two properties keep it from becoming a second, competing source of truth:
+Each claim below is enforced by a named code branch in `rust-executor/src/perspectives/flow_instance/`, and tested where a test is named.
 
-- **It is written as a `Local` link.** It never syncs. Your replica's cache is yours, and a peer's value cannot overwrite it or be mistaken for a shared claim.
-- **The derivation never reads it.** The background pass heals it toward the derived state, in one direction only.
+**The engine guarantees:**
 
-The history marks (`resolved_as → "fired"`) are `Local` for the same reason, with one extra consequence: the first pass a replica runs over an instance it has never derived before is a **silent catch-up**. It marks what has already settled and writes the cache without emitting outcomes, so joining a flow with history doesn't produce a flood of events for transitions that happened before you were watching.
+- **Determinism.** Two replicas holding the same links derive the same state. Every choice in the fold is made by an explicit sort key (`fold.rs`; the fold is a pure function with no I/O).
+- **Only self-signed facts count.** Every field of a proposal is read only from links the proposer signed, with the executor's signature verdict valid (`atom.rs`, `signed_by`, `unique_field`). A synced link claiming to be part of a proposal but signed by someone else is invisible. A proposer who published two values for one field invalidates their own proposal. There is no last-write-wins on this path.
+- **A vote binds the proposal's content.** The proposal URI is the content address of its signed fields — instance, edge, evidence seal, outputs commitment — recomputed on every read (`atom.rs`, `proposal_uri`). A vote signs that URI, so neither a peer nor the proposer can re-point a voted proposal's fields afterwards.
+- **Quorum cannot be manufactured by timestamps.** Quorum is a count of distinct eligible DIDs (`fold.rs`, `settle_edge`). Back-dating a vote can shift *when* an edge settled, never *whether* it settled.
+- **Eligibility is judged as of each vote's own timestamp** (`roles.rs`; tested by `flow-task-handover.test.ts` Part 2). Revocation stops future votes and never un-settles history.
+- **A co-sign re-checks the evidence and the outputs on the voter's own graph** before signing, and refuses on any mismatch (`accept.rs`, `check_outputs_commitment`; Rust e2e `a_co_signer_refuses_an_output_edited_since_the_proposal`).
+- **A receipt's outputs are what the quorum committed to.** Mint refuses outputs that do not hash to the final edge's signed commitment, and verification re-hashes the carried preimages against it (`receipt.rs`, `final_edge_commitment`; `verify.rs` step 7; tested by the tampered-receipt case in `flow-produced-by.test.ts`, and Rust e2e `a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter`).
+- **Every receipt consumer fails closed** (`produced.rs`): only a `Verified` verdict counts, `Undecidable` is excluded, an unknown flow and an over-budget receipt index are errors, never empty answers (Rust e2e `an_unknown_flow_is_an_error_not_an_empty_answer`, `a_receipt_flood_is_an_error_not_an_empty_answer`).
+- **`grantedByFlow` has no fallback** to the assignment link, binds by `(className, id)` with the class from the reader's own query, and dates the grant from the quorum's `settled_at` (`grant.rs`; tested by `flow-task-handover.test.ts` Part 3, both halves).
 
-Read the cache for display. Never decide anything on it. Anything that acts — minting, voting, firing, paying — derives.
+**The engine does NOT guarantee:**
 
-## What flows are for
-
-A flow is the smallest thing that makes a group's process **explicit, shared, and checkable**:
-
-- **Explicit**, because "what does Done mean here?" has an answer in the data — the guards and the hint — instead of living in someone's head or an app's source.
-- **Shared**, because the definition is Social DNA. An agent joining the Neighbourhood gets your process along with your data, without installing your app.
-- **Checkable**, because state is derived from signed links, so every participant can verify a transition rather than trust the app that displayed it.
-
-And because the definition carries English for every state, the same structure that renders your UI is the structure an agent reasons over. That is the point of the hints: one description of the process, serving both the humans and the machines taking part in it.
+- **That any voter actually ran the checks before signing.** The protocol requires each voter to recompute the seal and the outputs commitment and refuse on mismatch, and an honest client does. But the recomputation is not itself signed or carried, so a voter running modified code is indistinguishable from an honest one (`verify.rs`, the "not proven" table). The trust root of a receipt is the voter quorum, not the software.
+- **That outputs still have the committed content now.** A receipt attests to content at completion. The live-content check exists only on `flowValidOutputs` and the `producedByFlow` filter, not on `verifyFlowReceipt` and not on the grant gate — a grant keeps being honoured after the role instance accrues links.
+- **Who authored the evidence or the instance.** Instance authorship is never checked and never carried. Guard evidence is hashed, not author-verified.
+- **A trustworthy settlement time for the first edge.** Later edges settle no earlier than the walk's arrival at their from-state, but nothing bounds the *first* edge's timestamp backward: a genesis vote back-dated to 1970 settles at 1970 (`fold.rs`, § Ordering and time). Quorum is unaffected. Do not build anything that pays out on the settlement *time* of a flow's first edge.
+- **Delivery or liveness.** The engine derives over the links a replica holds. It does not guarantee that links sync, or when.
 
 <Callout type="info" emoji="📄">
-  The full design — the ordering and back-dating guarantees, the role-grant
-  windows, and why the derivation is pure and synchronous — is in
+  The executable twin of this page is
+  [`tests/js/tests/model/flow-task-handover.test.ts`](https://github.com/coasys/ad4m/blob/dev/tests/js/tests/model/flow-task-handover.test.ts)
+  — read it top to bottom for the same story as running code. The full design
+  rationale is in
   [`docs/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/docs/flow-interpretation-hints-design.md).
 </Callout>
