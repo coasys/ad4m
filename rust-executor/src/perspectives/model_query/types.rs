@@ -461,6 +461,13 @@ pub struct ModelQueryInput {
     /// See [`link_status_filter`](super::sparql_builder::link_status_filter).
     #[serde(default)]
     pub link_status: Option<crate::types::LinkStatus>,
+    /// Return the individual links behind these properties, relations or
+    /// predicate IRIs under the additive `__links` key — see
+    /// [`super::links`]. Reaches predicates the shape does not declare
+    /// (annotation links such as revocation tombstones), and dates and
+    /// attributes each link separately rather than the instance as a whole.
+    #[serde(default)]
+    pub links: Option<Vec<String>>,
 }
 
 /// Result returned by the model query endpoint.
