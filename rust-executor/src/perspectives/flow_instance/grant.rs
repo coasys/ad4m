@@ -184,11 +184,11 @@
 //! is, the fix is memoisation by receipt URI, not a larger constant.
 //!
 //! **Open: which kind of denial that is.** Running out of budget currently
-//! surfaces as a [`Rejected`](super::verify::VerdictKind::Rejected) verdict:
+//! surfaces as a [`Rejected`](super::verify::verdict::VerdictKind::Rejected) verdict:
 //! the receipt whose fold hit the cap is `Unfoldable`, and its reason names
 //! the [`GrantDepthExceeded`]. Further up, every level just sees a grant that
 //! did not happen. It arguably belongs in
-//! [`Undecidable`](super::verify::VerdictKind::Undecidable) instead: the same
+//! [`Undecidable`](super::verify::verdict::VerdictKind::Undecidable) instead: the same
 //! bytes verify for a reader handed the sub-receipt directly, so "I could not
 //! reach that far from where I stand" is a finding about the reader, not about
 //! the material — and `Undecidable` is where this module's own three-kind
@@ -216,7 +216,7 @@
 //! tombstone — a new signed event, per [`roles`](super::roles) § *What a grant
 //! is*: `instance --ad4m://flow/role_grant_revoked--> did`, honoured from its
 //! own timestamp, and only from an author
-//! [`revocation_authorised`](super::roles::revocation_authorised) accepts.
+//! [`revocation_authorised`](super::roles::evidence::revocation_authorised) accepts.
 //! So, concretely, for anyone writing social DNA:
 //!
 //! | Role query's `where.author` | Who can un-grant |
@@ -411,9 +411,6 @@ pub fn granted_by_flow_at(
 mod tests {
     use super::*;
     use crate::perspectives::flow_evaluator::{EvidenceItem, RequiresQueryable};
-    use crate::perspectives::flow_instance::atom::fixtures::{
-        did_of, literal, signed_link, INSTANCE, T1, T2, T3,
-    };
     use crate::perspectives::flow_instance::atom::{
         outputs_hash, proposal_uri, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE,
         FROM_STATE_PREDICATE, OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
@@ -424,9 +421,11 @@ mod tests {
     use crate::perspectives::flow_instance::roles::{
         resolve_role_grants, RoleGrant, RoleGrantEvidence, RoleGrantWindow, RoleInstanceHistory,
     };
-    use crate::perspectives::flow_instance::verify::{
-        verify_receipt_within, ReceiptVerdict, VerdictKind,
+    use crate::perspectives::flow_instance::test_support::{
+        did_of, literal, signed_link, INSTANCE, T1, T2, T3,
     };
+    use crate::perspectives::flow_instance::verify::verdict::VerdictKind;
+    use crate::perspectives::flow_instance::verify::{verify_receipt_within, ReceiptVerdict};
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
     use crate::perspectives::shacl_parser::{ModelQuery, ModelQueryCount};
     use crate::types::LinkExpression;
