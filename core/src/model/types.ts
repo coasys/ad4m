@@ -16,6 +16,15 @@ import type { NodeExpression } from "../shacl/NodeExpression";
 // Query DSL types
 // ---------------------------------------------------------------------------
 
+/**
+ * Who wrote a link: a DID, any of several DIDs, or `{ not }` / `{ contains }`
+ * over the author DID.
+ */
+export type AuthorCondition =
+  | string
+  | string[]
+  | { not?: string | string[]; contains?: string };
+
 export type WhereOps = {
   not: string | number | boolean | string[] | number[];
   between: [number, number];
@@ -24,6 +33,16 @@ export type WhereOps = {
   gt: number; // greater than
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
+  /** Equality as an operator: `{ eq: X }` is the bare value `X` (an array
+   *  means any of). It lets a value sit beside `author`, and cannot be
+   *  combined with the other value operators. */
+  eq: string | number | boolean | string[] | number[];
+  /** Per-link author: the link that satisfies this property's condition was
+   *  written by this author, e.g. `{ agent: { eq: did, author: admin } }`.
+   *  Alone, `{ agent: { author: admin } }`: admin wrote some `agent` link.
+   *  Only on properties and relations stored as links (not getters,
+   *  `timestamp` or `id`). See "Filtering by Author" in the model-classes guide. */
+  author: AuthorCondition;
 };
 export type WhereCondition =
   | string
@@ -54,9 +73,11 @@ export type Where = {
    * `offset`, so a page of N is N valid outputs. Only supported as a
    * top-level key on the queried class; anywhere else the query errors.
    */
-  producedByFlow?: { flow: string; state?: string };
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -319,7 +340,9 @@ export type Query = {
   deepQuery?: boolean;
   /**
    * Return the individual links behind each instance, with their own author,
-   * timestamp and signature, under `instance.__links`.
+   * timestamp, signature and signature verdict, under `instance.__links`. For
+   * a collection this is per-item provenance: who added each member, when, and
+   * whether their signature holds.
    *
    * Each entry is a property or relation name the model declares, or an
    * absolute predicate IRI — including one the model does **not** declare
@@ -337,17 +360,27 @@ export type Query = {
 };
 
 /**
- * One stored link as returned under `__links` — the same shape as a
- * `LinkExpression`, so `proof` can be verified by the consumer.
+ * One stored link as returned under `__links` — the same shape as the
+ * `LinkExpression` `perspective.get()` returns, including the signature
+ * verdict the executor recorded when the link was stored.
  *
+ * `proof.valid` is `true` only when the signature verifies against `author`.
  * A link stored without a proof arrives with `key` and `signature` set to
- * `""`; that is an unverifiable link, not a valid unsigned one.
+ * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
+ * one. Anything that acts on a row (counting a vote, granting a role) should
+ * require `proof.valid`.
+ *
+ * `valid` is never `null` here and `invalid` is always `!valid`, the same
+ * convention as `perspective.get()`. So `invalid: true` does not by itself mean
+ * a signature failed: it also covers a link with no proof, or with no recorded
+ * verdict. To tell an unsigned link from a failed signature, check whether
+ * `proof.signature` is `""`.
  */
 export interface LinkRow {
   author: string;
   timestamp: string;
   data: { source: string; predicate: string; target: string };
-  proof: { key: string; signature: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
@@ -432,6 +465,10 @@ type HasNoTypedFields<T extends Ad4mModel> =
 export type StringWhereOps = {
   not?: string | string[];
   contains?: string;
+  /** See {@link WhereOps.eq}. */
+  eq?: string | string[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type NumericWhereOps = {
@@ -441,12 +478,16 @@ export type NumericWhereOps = {
   gt?: number;
   gte?: number;
   between?: [number, number];
+  /** See {@link WhereOps.eq}. */
+  eq?: number | number[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type TypedWhereCondition<V> =
     V extends string  ? string | string[] | StringWhereOps
   : V extends number  ? number | number[] | NumericWhereOps
-  : V extends boolean ? boolean
+  : V extends boolean ? boolean | { eq?: boolean; author?: AuthorCondition }
   : V extends Array<infer U>
       ? U extends string ? string | string[] | StringWhereOps
         : U extends number ? number | number[] | NumericWhereOps
@@ -460,6 +501,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
+      /** Alone: the instance's `.author`, i.e. its earliest link's author.
+       *  Beside property/relation conditions in the same object: that, AND
+       *  each of those conditions is satisfied by a link this author wrote.
+       *  For "this author wrote the `agent` link" alone, nest it:
+       *  `{ agent: { eq: did, author } }`. It does not reach into
+       *  `OR`/`AND`/`NOT` sub-clauses. See "Filtering by Author" in the
+       *  model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];
@@ -471,6 +519,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
  *  shape when T has no declared fields (e.g. fromSHACL-derived classes). */
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
+
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
 
 // ---- Typed order -------------------------------------------------------------
 
@@ -548,7 +603,7 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;

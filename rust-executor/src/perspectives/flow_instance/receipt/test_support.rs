@@ -1,7 +1,5 @@
 //! Fixtures shared by the receipt tests.
 
-pub(super) use crate::perspectives::flow_instance::grant::GrantContext;
-
 pub(super) use crate::perspectives::flow_instance::test_support::{
     delivered, did_of, flow_json, hash_of, item, out_item, outs, preimage, signed_proposal,
     signed_terminal_proposal, signed_vote, two_state_flow, ATTACKER, BASE, DELIVERABLE, INSTANCE,

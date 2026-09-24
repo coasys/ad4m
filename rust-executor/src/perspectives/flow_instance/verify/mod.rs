@@ -140,24 +140,6 @@
 //! receipt means *granted at quorum time T*; un-granting is a new signed
 //! event, never an invalidation of the receipt.
 //!
-//! # The binding is the consumer's check, not a verdict
-//!
-//! Both discovery edges (`instance --ad4m://flow/receipt--> receipt`,
-//! `output --ad4m://flow/granted_by--> receipt`) and the per-flow index
-//! [`produced`](super::produced) reads are plain multi-edges **anyone may
-//! write, onto any node, pointing at any receipt.** A `Verified` verdict says
-//! the receipt is a genuine completion of its own flow; it says nothing about
-//! which node asked. So every consumer asks the second question itself —
-//! does this verified receipt name *my* `(class, id)`? — through
-//! [`FlowReceipt::speaks_for`]. There is exactly one such consumer path:
-//! [`produced::valid_outputs`](super::produced::valid_outputs), which the
-//! `grantedByFlow` role gate ([`grant`](super::grant)) and the app-facing
-//! `producedByFlow` surfaces all go through.
-//!
-//! Either half alone is forgeable: verifying without the binding lets anyone
-//! point a genuine receipt at their own node, and binding without verifying
-//! lets anyone write a receipt that names whatever they like.
-//!
 //! # The untrusted boundary is here
 //!
 //! A receipt is the first thing in this engine that arrives from off-replica,
@@ -175,7 +157,6 @@ pub mod verdict;
 use super::atom::{outputs_hash, OutputRef};
 use super::fold::Contention;
 use super::fold_read_set;
-use super::grant::GrantContext;
 use super::receipt::{
     final_edge_commitment, flow_dna_hash, is_terminal_state, FlowReceipt, OutputsCommitment,
 };
@@ -194,31 +175,10 @@ pub use verdict::ReceiptVerdict;
 /// [`load_shacl_flows`](crate::perspectives::flow_context::load_shacl_flows)
 /// returns and [`accept`](super::accept) and [`propose`](super::propose)
 /// already take.
-///
-/// It does **not** say which node the receipt speaks for — see the module
-/// header, § *The binding is the consumer's check*.
 pub fn verify_receipt(
     catalogue: &HashMap<String, SHACLFlow>,
     receipt: &FlowReceipt,
 ) -> ReceiptVerdict {
-    verify_receipt_within(GrantContext::root(catalogue), receipt)
-}
-
-/// [`verify_receipt`] with an explicit depth budget — the entry point for a
-/// receipt reached by following a `granted_by` edge out of material already
-/// being verified.
-///
-/// Same checks in the same order; the only difference is that the grant gates
-/// inside its fold get whatever budget is left rather than a fresh one. See
-/// [`grant`](super::grant) § *What the cap counts* for why that makes
-/// verification non-compositional past the cap, and why the direction of that
-/// is fail-closed.
-pub(crate) fn verify_receipt_within(
-    ctx: GrantContext<'_>,
-    receipt: &FlowReceipt,
-) -> ReceiptVerdict {
-    let catalogue = ctx.catalogue();
-
     // 1. Do I have the rules at all? A reader who has not synced the
     //    definition has learned nothing about the receipt.
     let Some(flow) = catalogue.get(&receipt.flow_uri) else {
@@ -265,11 +225,9 @@ pub(crate) fn verify_receipt_within(
         };
     }
 
-    // 5. The same fold, over the same ingest, that `mint` ran — and with the
-    //    same remaining grant budget, so a nested receipt gets the same answer
-    //    on both sides.
+    // 5. The same fold, over the same ingest, that `mint` ran.
     let ingested = receipt.read_set.reverified();
-    let derived = match fold_read_set(flow, &ingested, ctx) {
+    let derived = match fold_read_set(flow, &ingested) {
         Ok(derived) => derived,
         Err(e) => {
             return ReceiptVerdict::Unfoldable {

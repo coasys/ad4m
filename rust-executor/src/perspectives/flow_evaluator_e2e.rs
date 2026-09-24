@@ -248,7 +248,7 @@ impl Fixture {
         let flows = load_shacl_flows(&self.perspective).await.expect("flows");
         let records = self.instances().await;
         FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
-            .derive_state(&self.perspective, &flows)
+            .derive_state(&self.perspective)
             .await
             .expect("derive_state")
     }

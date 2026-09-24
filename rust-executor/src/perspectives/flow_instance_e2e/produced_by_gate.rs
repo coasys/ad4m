@@ -2,18 +2,20 @@ use super::produced_by::mint_honest_task_receipt;
 use super::*;
 
 // ---------------------------------------------------------------------------
-// grantedByFlow on the real store: #1076 rebuilt on produced.rs
+// producedByFlow on a role, on the real store (#1076, light version)
 // ---------------------------------------------------------------------------
 
-/// The whole `grantedByFlow` path against a real perspective: the delivery
-/// run completes with `TASK` as its output, `mint_flow_receipt` files the
-/// receipt under the flow's index, and a role gate "owns a Task that the
-/// delivery flow produced into `scoped`" reads it back through
-/// `PerspectiveInstance::flow_receipts` — `produced`'s own loader.
+/// The whole `producedByFlow` role path against a real perspective: the
+/// delivery run completes with `TASK` as its output, `mint_flow_receipt`
+/// files the receipt under the flow's index, and a role gate "owns a Task
+/// that the delivery flow produced into `scoped`" is decided while the
+/// evidence is collected, through `PerspectiveInstance::flow_receipts` —
+/// `produced`'s own loader — and `flow_catalogue`.
 ///
-/// 1. The holder is granted, dated from the receipt's quorum. The owner
-///    assignment is written **before** the run, so dating from it would be
-///    the earlier, wider answer, and the assertion can tell them apart.
+/// 1. The holder's instance carries `produced_at` = the receipt's quorum,
+///    and the grant is dated from it. The owner assignment is written
+///    **before** the run, so dating from it would be the earlier, wider
+///    answer, and the assertion can tell them apart.
 /// 2. A gate naming a state the run did not settle into grants nothing.
 /// 3. A DID that owns no task is not a member.
 /// 4. A flood of the flow's index is the typed budget error out of
@@ -23,7 +25,7 @@ use super::*;
 /// the holder is not granted), if it dates from the assignment link, or if
 /// the loader's budget error is swallowed.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
+async fn a_produced_by_flow_gate_grants_the_holder_through_the_real_store() {
     use crate::perspectives::flow_evaluator::requires_query_input;
     use crate::perspectives::flow_instance::produced::{
         ReceiptBudgetExceeded, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
@@ -51,7 +53,7 @@ async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
         serde_json::from_value(serde_json::json!({
             "className": "ns://Task",
             "didProperty": "owner",
-            "grantedByFlow": { "flow": f.flow_uri, "terminalState": state },
+            "producedByFlow": { "flow": f.flow_uri, "state": state },
         }))
         .expect("role query")
     };
@@ -60,9 +62,7 @@ async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
          did: &str,
          evidence: &[crate::perspectives::flow_instance::roles::RoleGrantEvidence]| {
             let translated = requires_query_input(role, &record, did).expect("translates");
-            evidence[0]
-                .resolve(&translated, role, GrantContext::root(&flows))
-                .expect("resolves")
+            evidence[0].resolve(&translated, role).expect("resolves")
         };
 
     // 1. The holder.
@@ -82,9 +82,10 @@ async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
         .find(|i| i.instance_id == TASK)
         .expect("the owned task is a matched role instance");
     assert_eq!(
-        instance.granting_receipts,
-        vec![receipt.clone()],
-        "the receipt is found through the flow's index and carried with the instance"
+        instance.produced_at.as_deref(),
+        Some(settled_at.as_str()),
+        "the receipt is found through the flow's index, verified, and its quorum time \
+         carried with the instance"
     );
     let assigned_at = instance.grant_links[0].timestamp.clone();
     let grant = grant_for(&scoped, &me, &evidence);
@@ -102,6 +103,15 @@ async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
 
     // 2. The same receipt does not answer for another ending.
     let identified = gate("identified");
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &identified,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect("within budget");
     let grant = grant_for(&identified, &me, &evidence);
     assert!(
         grant.windows.is_empty(),

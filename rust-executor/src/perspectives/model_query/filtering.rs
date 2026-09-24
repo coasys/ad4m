@@ -69,10 +69,10 @@ pub(super) fn matches_where(
 
         // NOT: instance must NOT match the branch. Fails closed on malformed input.
         if prop_name == "NOT" {
-            let WhereCondition::SubClause(branch) = condition else {
+            let Some(branch) = condition.as_not_clause() else {
                 return false;
             };
-            if matches_where(instance, branch, shape) {
+            if matches_where(instance, &branch, shape) {
                 return false;
             }
             continue;
@@ -127,7 +127,7 @@ pub(super) fn matches_where(
         // the same trade the `id` arm makes. See `collection_contains` for how
         // the hydrated values are compared.
         if matches!(
-            condition,
+            condition.eq_normalized(),
             WhereCondition::String(_) | WhereCondition::StringArray(_)
         ) && shape
             .properties
@@ -154,7 +154,7 @@ pub(super) fn matches_where(
 /// bool), set membership (string/number arrays), and operator-based
 /// comparisons ([`WhereOps`]).
 pub(crate) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
-    match condition {
+    match condition.eq_normalized() {
         WhereCondition::String(expected) => match val {
             Value::String(s) => s == expected,
             Value::Null => false,
@@ -235,6 +235,17 @@ pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
     // logged once, at each decline site in `compile_relation_quantifier` and
     // its caller, where they are known.
     if ops.some.is_some() || ops.none.is_some() {
+        return false;
+    }
+
+    // A nested `author` is a condition on the link that carries the value, and
+    // after hydration the links are gone: the instance has one `author`, its
+    // earliest link's. `refuse_unanswerable_link_author` refuses any query
+    // that would bring one here, so this is the second line, and it fails
+    // closed for the same reason as the quantifier arm above. `eq` reaches
+    // here only beside `author` or beside another operator, which is refused
+    // as malformed; alone it was unwrapped by `matches_condition`.
+    if ops.author.is_some() || ops.eq.is_some() {
         return false;
     }
 

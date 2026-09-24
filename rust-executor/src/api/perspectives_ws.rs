@@ -2151,16 +2151,27 @@ async fn verify_flow_receipt_handler(
     ))
 }
 
+/// The optional `state` param of `perspective.flowValidOutputs`: absent or
+/// `null` is "any terminal state", a string names one. Any other value is a
+/// bad request — read as `None` it would answer a wider question than the
+/// caller asked, and the `producedByFlow` filter refuses the same input.
+pub(crate) fn flow_valid_outputs_state(params: &Value) -> Result<Option<String>, WsRpcError> {
+    match params.get("state") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(WsRpcError::bad_request(format!(
+            "`state` must be a terminal-state name (a string), got {other}"
+        ))),
+    }
+}
+
 async fn flow_valid_outputs_handler(
     params: Value,
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     let flow = params.require_str("flow")?;
-    let state = params
-        .get("state")
-        .and_then(|v| v.as_str())
-        .map(String::from);
+    let state = flow_valid_outputs_state(&params)?;
     check_capability(
         &ctx.capabilities,
         &perspective_query_capability(vec![uuid.clone()]),
