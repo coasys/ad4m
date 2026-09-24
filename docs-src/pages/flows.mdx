@@ -40,7 +40,7 @@ Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspectiv
         ▼
   consumers: perspective.flowValidOutputs, verifyFlowReceipt,
              model queries with where: { producedByFlow },
-             role gates with grantedByFlow
+             role gates with fromRole.producedByFlow
 ```
 
 ## The one rule
@@ -310,7 +310,7 @@ One convention follows for Social DNA authors: **role instances are add-only, an
   as "the hole": a `ReviewerRoleGrant` flow over the role instance was still
   in `Proposed`, and `fromRole` matched the instance anyway. To bind
   membership to a grant *process* completing, add
-  [`grantedByFlow`](#grantedbyflow-a-role-granted-by-another-flow).
+  [`producedByFlow` to the role query](#producedbyflow-on-a-role-a-role-granted-by-another-flow).
 </Callout>
 
 ## Outputs: what a final step names
@@ -401,9 +401,9 @@ These two live surfaces apply one more check the receipt alone cannot: the insta
 
 Fail-closed rules on every surface: a `rejected` receipt is excluded, an `undecidable` receipt is excluded the same way (a payout query must not trust a receipt nobody could check), an unknown flow is an **error** rather than an empty list, and a malformed filter is an **error** rather than a filter that admits everything.
 
-## `grantedByFlow`: a role granted by another flow
+## `producedByFlow` on a role: a role granted by another flow
 
-Plain `fromRole` matches the instance. `grantedByFlow` adds the condition that the instance must be a **valid output of a completed run of another flow**:
+Plain `fromRole` matches the instance. Adding `producedByFlow` to the role query adds the condition that the instance must be a **valid output of a completed run of another flow**:
 
 ```typescript
 consensusRule: {
@@ -412,15 +412,29 @@ consensusRule: {
     className: "HandoverReviewerRole",
     where: { domain: "frontend" },
     didProperty: "agent",
-    grantedByFlow: {
+    producedByFlow: {
       flow: "handover://ReviewerRoleGrantFlow",  // `${namespace}${name}Flow`
-      terminalState: "Granted",
+      state: "Granted",
     },
   },
 }
 ```
 
-Both fields are required. The gate asks the [`producedByFlow`](#producedbyflow-querying-what-a-flow-produced) question for each candidate instance, with the className taken from your `fromRole` query, never from anything the receipt carries. The grant is dated from the receipt's `settled_at` — the moment the n-th distinct eligible voter signed the grant's final edge. No participant picks that time, and there is **no fallback** to the assignment link: if there were, writing one link would grant the role and the gate would be decorative.
+It is the same name and the same check as the [`producedByFlow` model-query filter](#producedbyflow-querying-what-a-flow-produced), with one difference: on a role, **both fields are required**. Without `state`, a run that settled into the flow's "rejected" state would grant what its "approved" state was meant to. A `producedByFlow` without `state` does not decode, and an undecodable rule refuses the edge rather than falling back to a default.
+
+<Callout type="warning" emoji="⚠️">
+  Spell the key exactly. The role query ignores keys it does not know, so a
+  misspelt key — or `grantedByFlow`, the name this gate had before it was
+  renamed — is silently dropped, and the gate falls back to plain `fromRole`.
+  That is fail-open, and it is tracked in
+  [#1144](https://github.com/coasys/ad4m/issues/1144). Until it is fixed, the
+  test that catches it is a negative one: a vote from a holder with no minted
+  receipt must **not** settle the edge (Part 3 below).
+</Callout>
+
+For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
+
+The grant is dated from the receipt's `settled_at` — the moment the n-th distinct eligible voter signed the grant's final edge. When several receipts name the instance, the earliest wins. No participant picks that time, and there is **no fallback** to the assignment link or the instance's own timestamp: if there were, writing one link would grant the role and the gate would be decorative.
 
 The full loop, from a UI, in three calls:
 
@@ -446,17 +460,21 @@ The gate is **fail-closed**, and Part 3 pins each direction:
 - A settled grant run **without a minted receipt does not grant**. Bob's vote on the gated task did not count until someone called `mintFlowReceipt`. "The run completed" is not evidence. A receipt is.
 - Once the receipt exists, votes cast before the mint count on the next derivation — the vote was always valid, the gate just could not verify the grant yet. Nothing new needs to be written.
 - The receipt is bound to its instance by `(className, id)`. Alice's own role instance — same class, same `domain` — did not pass the gate, because no receipt names *her* instance. A receipt is never "flow F completed"; it is "flow F produced *this*".
-- Receipts verify recursively when the granting flow is itself gated: a receipt for a gated flow carries the receipts that made its voters eligible. A depth budget bounds the recursion (see [Errors and limits](#errors-and-limits)).
+**Where the check runs, and what travels.** Each replica decides eligibility against its **own** graph, while it collects the evidence for a fold. The read-set then carries only the result: for each matched role instance, the grant date (`produced_at`, the granting run's `settled_at`). The granting receipt itself does not travel, and verifying a receipt never recurses into the granting flow's receipts.
+
+So a receipt minted for a *gated* flow proves that n people signed, and when. It does not, on its own, prove to a reader outside the neighbourhood that those people were allowed to sign: the minting replica decided that against its graph, and the verifier re-folds with the carried grant dates and trusts them, the same way it trusts that the carried grant links were all the links there were. Referencing the granting receipt by hash, optionally carrying it, and transitive verification are future work ([#1140](https://github.com/coasys/ad4m/issues/1140)).
 
 The gate has **three** outcomes, not two:
 
 1. **Granted.** A verified receipt names this instance.
-2. **Not granted.** No verified receipt names it.
-3. **Cannot decide.** The replica does not hold the granting flow, or the flow's receipt index is over budget. This comes back as an **error**. The error means "unknown", not "no".
+2. **Not granted.** No verified receipt names it. The instance contributes nothing, exactly as if the role query had not matched it.
+3. **Cannot decide.** The replica does not hold the granting flow, or the flow's receipt index is over budget. This comes back as an **error**, and the flow whose rule asked cannot derive a state until it is resolved. The error means "unknown", not "no".
 
 Do not write `if (granted) allow else deny` around a call that can throw. If you catch the error and deny, you bring back the silent denial that the engine refuses to give: a flood of junk index links would then deny every holder, with no signal. Show the error, or retry after sync. "Fail-closed" above means that an unproven grant never counts. It does not mean that an undecidable gate reads as "not a member".
 
-Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt.
+Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt, and undoing the granting flow does not un-grant either: retracting a settling vote moves the live flow back, while the minted receipt keeps verifying. Who may write that tombstone follows the role query's `where.author` — absent: anyone; `"$did"`: only the holder; a specific DID: only that DID, and if it is unreachable, the grant is permanent. There is no way to make a `producedByFlow` grant expire.
+
+One shape is refused outright: `producedByFlow` together with a `count` that zero instances satisfy, such as `{ max: 0 }`. That would read "eligible while no verified receipt exists", so every reason a receipt fails to verify would become a reason to grant.
 
 ## Errors and limits
 
@@ -471,9 +489,10 @@ The refusals a developer will meet, what each one means, and what to do:
 | `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
 | `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
 | `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
-| `flowValidOutputs` / `producedByFlow` / `grantedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
-| a query on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
-| a `grantedByFlow` chain nested more than 4 grant levels deep | error: `GrantDepthExceeded` (refuses the receipt one level up) | receipts verify recursively; the budget stops a planted deep chain from stalling every reader | treat it as unknown, not as not-a-member: surface it, and flatten the grant ontology (the warn log names the too-deep instance to flatten) |
+| `flowValidOutputs` / the `producedByFlow` filter / a `fromRole` with `producedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
+| a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
+| a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
+| a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
 | a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
 
 Limits that are absences, not errors — do not go looking for these:
@@ -497,12 +516,13 @@ Each claim below is enforced by a named code branch in `rust-executor/src/perspe
 - **A co-sign re-checks the evidence and the outputs on the voter's own graph** before signing, and refuses on any mismatch (`accept.rs`, `check_outputs_commitment`; Rust e2e `a_co_signer_refuses_an_output_edited_since_the_proposal`).
 - **A receipt's outputs are what the quorum committed to.** Mint refuses outputs that do not hash to the final edge's signed commitment, and verification re-hashes the carried preimages against it (`receipt.rs`, `final_edge_commitment`; `verify.rs` step 7; tested by the tampered-receipt case in `flow-produced-by.test.ts`, and Rust e2e `a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter`).
 - **Every receipt consumer fails closed** (`produced.rs`): only a `Verified` verdict counts, `Undecidable` is excluded, an unknown flow and an over-budget receipt index are errors, never empty answers (Rust e2e `an_unknown_flow_is_an_error_not_an_empty_answer`, `a_receipt_flood_is_an_error_not_an_empty_answer`).
-- **`grantedByFlow` has no fallback** to the assignment link, binds by `(className, id)` with the class from the reader's own query, and dates the grant from the quorum's `settled_at` (`grant.rs`; tested by `flow-task-handover.test.ts` Part 3, both halves).
+- **A `producedByFlow` role gate has no fallback** to the assignment link, binds by `(className, id)` with the class from the reader's own query, and dates the grant from the quorum's `settled_at` (`grant.rs`, `roles/evidence.rs` `RoleGrantEvidence::resolve`; tested by `flow-task-handover.test.ts` Part 3, both halves, and Rust e2e `a_produced_by_flow_gate_grants_the_holder_through_the_real_store`).
 
 **The engine does NOT guarantee:**
 
 - **That any voter actually ran the checks before signing.** The protocol requires each voter to recompute the seal and the outputs commitment and refuse on mismatch, and an honest client does. But the recomputation is not itself signed or carried, so a voter running modified code is indistinguishable from an honest one (`verify.rs`, the "not proven" table). The trust root of a receipt is the voter quorum, not the software.
 - **That outputs still have the committed content now.** A receipt attests to content at completion. The live-content check exists only on `flowValidOutputs` and the `producedByFlow` filter, not on `verifyFlowReceipt` and not on the grant gate — a grant keeps being honoured after the role instance accrues links.
+- **That the voters on a gated flow were eligible, to a reader outside the neighbourhood.** A `producedByFlow` gate is decided by each replica against its own graph, and the read-set carries only the resulting grant date, not the granting receipt. A receipt for a gated flow is verified with those carried dates taken on trust (`grant.rs`, § *What a receipt of a gated flow proves*; carrying the granting receipt is [#1140](https://github.com/coasys/ad4m/issues/1140)).
 - **Who authored the evidence or the instance.** Instance authorship is never checked and never carried. Guard evidence is hashed, not author-verified.
 - **A trustworthy settlement time for the first edge.** Later edges settle no earlier than the walk's arrival at their from-state, but nothing bounds the *first* edge's timestamp backward: a genesis vote back-dated to 1970 settles at 1970 (`fold.rs`, § Ordering and time). Quorum is unaffected. Do not build anything that pays out on the settlement *time* of a flow's first edge.
 - **Delivery or liveness.** The engine derives over the links a replica holds. It does not guarantee that links sync, or when.

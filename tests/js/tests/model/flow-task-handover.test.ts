@@ -70,12 +70,14 @@
  *  7. GRANTING A ROLE IS ITSELF A FLOW  (the fractal stretch)
  *     A `ReviewerRoleGrant` flow runs over a `HandoverReviewerRole` instance
  *     as its base. Completing that flow is *not* what `fromRole` reads —
- *     unless the query also carries `grantedByFlow`:
- *       grantedByFlow: { flow: "handover://ReviewerRoleGrantFlow",
- *                        terminalState: "Granted" }
+ *     unless the query also carries `producedByFlow`:
+ *       producedByFlow: { flow: "handover://ReviewerRoleGrantFlow",
+ *                         state: "Granted" }
  *     Then an instance counts only when it is a verified OUTPUT (className
  *     AND id) of a completed run of that flow, dated from the receipt's
- *     `settled_at`. The UI closes the loop in three calls:
+ *     `settled_at`. `state` is required here (unlike the model-query filter
+ *     of the same name): without it, a run settled into a "rejected" state
+ *     would grant too. The UI closes the loop in three calls:
  *       // a) the Grant clicks name the role instance as the run's output
  *       await grant.proposeTransition("Granted", undefined,
  *         [{ className: "HandoverReviewerRole", id: role.id }]);
@@ -83,7 +85,7 @@
  *       await perspective.mintFlowReceipt(grantRunUri);
  *       // c) optional: what the gate will read
  *       await perspective.flowValidOutputs(grantFlowUri, "Granted");
- *     No receipt, no membership: `grantedByFlow` is fail-closed. A settled
+ *     No receipt, no membership: `producedByFlow` is fail-closed. A settled
  *     run nobody minted does not count, and neither does a nominated
  *     instance whose own grant run never settled.
  *
@@ -91,7 +93,7 @@
  * GAPS THIS FILE NAMES rather than papers over
  * ---------------------------------------------------------------------------
  *  GAP 1 — CLOSED. It was "no JS mint API, so the positive half of
- *          `grantedByFlow` cannot be written". #1127 added
+ *          `producedByFlow` cannot be written". #1127 added
  *          `perspective.mintFlowReceipt` / `flowValidOutputs` /
  *          `verifyFlowReceipt`, and #1076 now reads grants through #1127's
  *          per-flow receipt index. Part 3 runs both halves. What a UI still
@@ -213,7 +215,7 @@ function makeGrantFlow(): SHACLFlow {
   flow.inputTypes = ["HandoverReviewerRole"];
   flow.consensusRule = { n: 1 };
   flow.interpretationHint =
-    "Grant a ReviewerRole: Proposed → Granted. Completing this flow is what grantedByFlow binds to.";
+    "Grant a ReviewerRole: Proposed → Granted. Completing this flow is what producedByFlow binds to.";
 
   flow.addState({
     name: "Proposed",
@@ -418,7 +420,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     await createUnder<ReviewNote>(ReviewNote, aliceP, task.id, { body: "Looks good" });
 
     // Bob holds the role. Alice does not. Creating the instance is enough
-    // for fromRole without grantedByFlow — that is the hole Part 3 names.
+    // for fromRole without producedByFlow — that is the hole Part 3 names.
     const role = await createUnder<ReviewerRole>(ReviewerRole, aliceP, task.id, {
       agent: bobDid,
       domain: "frontend",
@@ -446,7 +448,7 @@ describe("flow task handover — WE-facing API with roles", function () {
 
   // ── Part 3: fractal — a flow whose output is a role ──────────────────────
 
-  it("Part 3 — grant flow over a ReviewerRole; fromRole matches before Granted; grantedByFlow counts only a minted grant", async () => {
+  it("Part 3 — grant flow over a ReviewerRole; fromRole matches before Granted; producedByFlow counts only a minted grant", async () => {
     const { aliceP, bobP } = await sharedPerspective("handover-grant-flow");
     await aliceP.addFlow("ReviewerRoleGrant", makeGrantFlow());
 
@@ -463,7 +465,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     expect(grant.subject).to.equal(role.id);
 
     // ── The hole, while the grant is still Proposed ───────────────────────
-    // Done gated by fromRole WITHOUT grantedByFlow. The role instance
+    // Done gated by fromRole WITHOUT producedByFlow. The role instance
     // exists; the grant flow has not moved. fromRole matches the instance
     // anyway — that is the hole, asserted rather than discovered.
     await aliceP.addFlow(
@@ -526,13 +528,15 @@ describe("flow task handover — WE-facing API with roles", function () {
     expect((await instanceOn(aliceP, role.id)).currentStateName).to.equal("Granted");
     const grantRunUri = bobGrant.outcomes[0].instanceUri;
 
-    // ── grantedByFlow: fail-closed without a receipt ──────────────────────
+    // ── producedByFlow: fail-closed without a receipt ─────────────────────
     // Same role instance, same Bob, a fresh task whose Done carries
-    // grantedByFlow. The grant run has settled, but nobody has minted its
+    // producedByFlow. The grant run has settled, but nobody has minted its
     // receipt yet, so there is nothing for the gate to verify and Bob must
     // NOT count. "The run completed" is not evidence; a receipt is.
-    // Fail-on-old-code: if grantedByFlow is dropped on the floor, this
-    // n:1 edge fires the same way the hole did.
+    // Fail-on-old-code: if producedByFlow is dropped on the floor, this
+    // n:1 edge fires the same way the hole did. So does a misspelt key:
+    // the fromRole query ignores keys it does not know, so the pre-#1076
+    // name `grantedByFlow` silently degrades to the plain fromRole above.
     // Distinct flow name so this definition does not collide with TaskFlow
     // above. flowUri is handover://GatedTaskFlowFlow.
     await aliceP.addFlow(
@@ -544,14 +548,14 @@ describe("flow task handover — WE-facing API with roles", function () {
             className: "HandoverReviewerRole",
             where: { domain: "frontend" },
             didProperty: "agent",
-            grantedByFlow: { flow: GRANT_FLOW_URI, terminalState: "Granted" },
+            producedByFlow: { flow: GRANT_FLOW_URI, state: "Granted" },
           },
         },
         "GatedTaskFlow",
       ),
     );
 
-    const gatedTask = (await (Task as any).create(aliceP, { title: "Fail-closed grantedByFlow" })) as Task;
+    const gatedTask = (await (Task as any).create(aliceP, { title: "Fail-closed producedByFlow" })) as Task;
     await FlowInstance.start(aliceP, "GatedTaskFlow", gatedTask.id);
     await advanceToInReview(aliceP, bobP, gatedTask.id);
     await createUnder<ReviewNote>(ReviewNote, aliceP, gatedTask.id, { body: "ok" });
@@ -559,7 +563,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     const gatedDone = await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
     expect(
       gatedDone.outcomes,
-      "grantedByFlow without a receipt must not count Bob — if this fires, the field is being ignored",
+      "producedByFlow without a receipt must not count Bob — if this fires, the field is being ignored",
     ).to.have.lengthOf(0);
     expect(gatedDone.recordedVote, "the click still wrote; the fold did not count it").to.be.true;
     expect(gatedDone.derivedState).to.equal("InReview");
@@ -569,7 +573,7 @@ describe("flow task handover — WE-facing API with roles", function () {
       "no receipt yet, so the grant flow has no valid outputs",
     ).to.be.empty;
 
-    // ── grantedByFlow: the positive half — mint the receipt ───────────────
+    // ── producedByFlow: the positive half — mint the receipt ──────────────
     // Any member can mint once the run has settled. The receipt is filed
     // under the grant flow (`F --ad4m://flow/flow_receipt--> receipt`), and
     // that per-flow index is the only place the gate looks.
@@ -623,7 +627,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     expect(unminted, "a run that has not settled has nothing to mint").to.match(/no settled edge/);
 
     const positiveTask = (await (Task as any).create(aliceP, {
-      title: "Positive grantedByFlow",
+      title: "Positive producedByFlow",
     })) as Task;
     await FlowInstance.start(aliceP, "GatedTaskFlow", positiveTask.id);
     await advanceToInReview(aliceP, bobP, positiveTask.id);

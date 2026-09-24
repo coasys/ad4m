@@ -366,7 +366,7 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
 
-This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, `proposeTransition` / accept / reject, role gates including `grantedByFlow`, and a worked end-to-end example.
+This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, `proposeTransition` / accept / reject, role gates including `producedByFlow`, and a worked end-to-end example.
 
 <Callout type="info" emoji="ℹ️">
   Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
