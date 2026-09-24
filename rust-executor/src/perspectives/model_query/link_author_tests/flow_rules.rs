@@ -240,3 +240,75 @@ async fn a_pushed_or_with_nested_authors_in_each_arm_matches_per_arm() {
         expected
     );
 }
+
+/// Translate `rule` like [`eligible`], but a refused translation is `None`: a
+/// rule that does not translate grants nobody.
+async fn eligible_unless_refused(
+    store: &SparqlStore,
+    rule: &Value,
+    task: &str,
+    candidate: &str,
+) -> Option<Vec<String>> {
+    let rule: ModelQuery = serde_json::from_value(rule.clone()).unwrap();
+    let translated = requires_query_input(&rule, &record(task), candidate).ok()?;
+    Some(ids_on_every_plan(store, translated["where"].clone()).await)
+}
+
+/// The design doc's reviewer rule with the granters moved into `or` arms that
+/// do not all collapse (Lead also needs `rank: senior`). The level has no
+/// `author`, so nothing may leave its `forTask` bare while an arm names one:
+/// admin appointed Mallory for T1, she wrote `forTask -> T2` herself, and arm 1
+/// matches on admin's `agent` link. She must not be a reviewer of T2.
+///
+/// The same holds one level down (an arm with fields and no `author`, whose own
+/// arms name one). Controls: the collapsing rule (without `rank: senior`), and
+/// the non-collapsing rule with `forTask` written into each arm, both of which
+/// make Mallory a reviewer of T1 and not of T2.
+#[tokio::test]
+async fn a_level_without_an_author_does_not_leave_its_fields_bare_beside_author_arms() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/m",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(MALLORY)),
+            (ADMIN, "ns://forTask", lit("T1")),
+            (MALLORY, "ns://forTask", lit("T2")),
+        ],
+    );
+    let arms = json!([ { "className": "Reviewer", "where": { "author": ADMIN } },
+                       { "className": "Reviewer", "where": { "author": LEAD, "rank": "senior" } } ]);
+    let level = json!({ "className": "Reviewer", "didProperty": "agent",
+                        "where": { "forTask": "$flow.base" }, "or": arms });
+    let nested = json!({ "className": "Reviewer", "didProperty": "agent",
+                         "or": [ { "className": "Reviewer", "where": { "forTask": "$flow.base" },
+                                   "or": [ { "className": "Reviewer", "where": { "author": ADMIN } } ] } ] });
+    for rule in [&level, &nested] {
+        let t2 = eligible_unless_refused(&store, rule, "T2", MALLORY).await;
+        assert!(
+            t2.as_ref().is_none_or(|ids| ids.is_empty()),
+            "Mallory's own `forTask -> T2` link must not make her a reviewer of T2: {rule} gave {t2:?}"
+        );
+    }
+
+    let collapsing = json!({ "className": "Reviewer", "didProperty": "agent",
+                             "where": { "forTask": "$flow.base" },
+                             "or": [ { "className": "Reviewer", "where": { "author": ADMIN } },
+                                     { "className": "Reviewer", "where": { "author": LEAD } } ] });
+    let distributed = json!({ "className": "Reviewer", "didProperty": "agent",
+                              "or": [ { "className": "Reviewer", "where": { "author": ADMIN, "forTask": "$flow.base" } },
+                                      { "className": "Reviewer",
+                                        "where": { "author": LEAD, "rank": "senior", "forTask": "$flow.base" } } ] });
+    for rule in [&collapsing, &distributed] {
+        assert_eq!(
+            eligible(&store, rule, "T1", MALLORY).await,
+            vec!["ns://r/m"],
+            "control: admin appointed her for T1, {rule}"
+        );
+        assert!(
+            eligible(&store, rule, "T2", MALLORY).await.is_empty(),
+            "control: not for T2, {rule}"
+        );
+    }
+}
