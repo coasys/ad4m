@@ -133,7 +133,7 @@ pub(crate) fn emittable_iri(s: &str) -> bool {
 /// `FILTER(STR(…) IN (…))` test (a scan, but the only correct form for
 /// `new_unchecked` store terms).  In the filter case `?{var}` must already be
 /// bound by a triple pattern in the surrounding group.
-pub(crate) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
+pub(super) fn values_or_str_filter(var: &str, ids: &[String]) -> String {
     if ids.iter().all(|id| emittable_iri(id)) {
         let iris = ids
             .iter()

@@ -407,6 +407,31 @@ pub struct SparqlStore {
     store: Arc<Store>,
 }
 
+/// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
+/// [`SparqlStore::query_decorated_links`] decodes: each link triple, its
+/// reifier and the reifier's annotations, in the row shape that decoder reads.
+///
+/// `source_constraint` goes before the triple pattern (a `VALUES ?source {…}`
+/// block, or empty for every link). `filter` is ANDed with `isIRI(?source)`
+/// in a `FILTER`; it may use `?source`, `?predicate` and `?target`.
+pub(crate) fn decorated_links_query(source_constraint: &str, filter: &str) -> String {
+    format!(
+        r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
+SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {{
+    {source_constraint}
+    ?source ?predicate ?target .
+    ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
+    FILTER(isIRI(?source) && ({filter}))
+    ?reifier <ad4m://ontology/author> ?author .
+    ?reifier <ad4m://ontology/timestamp> ?timestamp .
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofKey> ?proofKey . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/proofValid> ?proofValid . }}
+    OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
+}}"#
+    )
+}
+
 impl SparqlStore {
     /// Create a new SparqlStore.
     ///
@@ -613,22 +638,7 @@ impl SparqlStore {
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
     pub fn get_all_links(&self) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let query = r#"
-            PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-            SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {
-                ?source ?predicate ?target .
-                ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
-                FILTER(isIRI(?source) && isIRI(?predicate))
-                ?reifier <ad4m://ontology/author> ?author .
-                ?reifier <ad4m://ontology/timestamp> ?timestamp .
-                OPTIONAL { ?reifier <ad4m://ontology/proofKey> ?proofKey . }
-                OPTIONAL { ?reifier <ad4m://ontology/proofSignature> ?proofSig . }
-                OPTIONAL { ?reifier <ad4m://ontology/proofValid> ?proofValid . }
-                OPTIONAL { ?reifier <ad4m://ontology/status> ?status . }
-            }
-        "#;
-
-        self.query_decorated_links(query)
+        self.query_decorated_links(&decorated_links_query("", "isIRI(?predicate)"))
     }
 
     /// Run a SELECT that binds the link variables `?source ?predicate ?target

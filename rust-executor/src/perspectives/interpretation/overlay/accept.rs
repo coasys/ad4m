@@ -20,10 +20,9 @@
 use super::{INFERRED_PREFIX, OVERLAY_KIND_PRED};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation::replace_link;
-use crate::perspectives::model_query::utils::{
-    emittable_iri, parse_literal_value, values_or_str_filter,
-};
+use crate::perspectives::model_query::utils::{emittable_iri, parse_literal_value};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::perspectives::sparql_store::decorated_links_query;
 use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use std::collections::BTreeMap;
 
@@ -44,7 +43,9 @@ pub(crate) struct OverlayView {
     pub inferred: Vec<(String, serde_json::Value)>,
 }
 
-/// Read the overlay on `base`, or `None` when the base carries none.
+/// Read the overlay on `base`, or `None` when the base carries none. Only the
+/// tests call it now (as the per-base reference for [`list_overlays`]).
+#[cfg(test)]
 pub(crate) async fn overlay_of(
     perspective: &PerspectiveInstance,
     base: &str,
@@ -116,23 +117,25 @@ pub(crate) async fn list_overlays(
         return Ok(Vec::new());
     }
 
-    // Bases that parse as IRIs go into a seekable `VALUES` block. The store
-    // also holds `new_unchecked` subjects that do not (Flux's
-    // `literal://string:…` ids); those need a `STR()` filter, which scans, so
-    // they get their own query and only when there are any.
+    // Bases that parse as IRIs go into one query with a seekable `VALUES`
+    // block. The store also holds `new_unchecked` subjects that do not (Flux's
+    // `literal://string:…` ids). SPARQL can only match those through a
+    // `STR()` filter, which scans every quad, so they are read one index seek
+    // each, as before. There are few of them.
     let (iri_bases, other_bases): (Vec<String>, Vec<String>) =
         bases.into_iter().partition(|b| emittable_iri(b));
     let mut by_base: BTreeMap<String, Vec<DecoratedLinkExpression>> = BTreeMap::new();
-    for group in [iri_bases, other_bases] {
-        if group.is_empty() {
-            continue;
-        }
+    if !iri_bases.is_empty() {
         let rows = perspective
             .sparql_store
-            .query_decorated_links(&overlay_links_query(&group))?;
+            .query_decorated_links(&overlay_links_query(&iri_bases))?;
         for l in rows {
             by_base.entry(l.data.source.clone()).or_default().push(l);
         }
+    }
+    for base in other_bases {
+        let links = links_from(perspective, &base).await?;
+        by_base.insert(base, links);
     }
 
     Ok(by_base
@@ -148,26 +151,19 @@ pub(crate) async fn list_overlays(
 }
 
 /// The batched read behind [`list_overlays`]: every overlay link whose
-/// source is one of `bases`, in the row shape `get_links` decodes.
+/// source is one of `bases`, in the row shape `get_links` decodes. Every base
+/// must pass [`emittable_iri`].
 fn overlay_links_query(bases: &[String]) -> String {
-    format!(
-        r#"PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>
-SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid ?status WHERE {{
-    {bases}
-    ?source ?predicate ?target .
-    FILTER(isIRI(?source) && (?predicate = <{kind}> || ?predicate = <{run}> || STRSTARTS(STR(?predicate), "{inferred}")))
-    ?reifier rdf:reifies <<( ?source ?predicate ?target )>> .
-    ?reifier <ad4m://ontology/author> ?author .
-    ?reifier <ad4m://ontology/timestamp> ?timestamp .
-    OPTIONAL {{ ?reifier <ad4m://ontology/proofKey> ?proofKey . }}
-    OPTIONAL {{ ?reifier <ad4m://ontology/proofSignature> ?proofSig . }}
-    OPTIONAL {{ ?reifier <ad4m://ontology/proofValid> ?proofValid . }}
-    OPTIONAL {{ ?reifier <ad4m://ontology/status> ?status . }}
-}}"#,
-        bases = values_or_str_filter("source", bases),
-        kind = OVERLAY_KIND_PRED,
-        run = OVERLAY_RUN_PRED,
-        inferred = INFERRED_PREFIX,
+    let values = bases
+        .iter()
+        .map(|b| format!("<{b}>"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    decorated_links_query(
+        &format!("VALUES ?source {{ {values} }}"),
+        &format!(
+            r#"?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}")"#
+        ),
     )
 }
 
@@ -929,12 +925,13 @@ mod tests {
         (old_ms, new_ms)
     }
 
-    /// #1017: with 300 pending overlays, each on a base with 20 normal links,
+    /// #1017: with 300 pending overlays, each on a base with 50 normal links,
     /// the list must equal the per-base result and take at most half the
     /// time. Runs on RocksDB, the store a running executor uses. Measured
-    /// locally at about 5x; the 2x bound leaves room for a loaded CI machine,
-    /// and still fails when `list_overlays` goes back to one read per base
-    /// (both sides then take the same time).
+    /// locally at 6.1x (see `list_overlays_scaling`). The per-base cost grows
+    /// with base size and the batched one does not, so 50 links leave room
+    /// for a loaded CI machine; the 2x bound still fails when `list_overlays`
+    /// goes back to one read per base (both sides then take the same time).
     #[tokio::test]
     async fn list_overlays_300_overlays_same_result_and_faster() {
         let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
@@ -943,12 +940,95 @@ mod tests {
             crate::perspectives::sparql_store::SparqlStore::new(Some(dir.path().to_str().unwrap()))
                 .unwrap(),
         );
-        seed_overlays(&mut p, &ctx, 300, 20).await;
+        seed_overlays(&mut p, &ctx, 300, 50).await;
         let (old_ms, new_ms) = time_both(&p, 300, 3).await;
         println!("300 overlays, RocksDB: per-base {old_ms:.1} ms, batched {new_ms:.1} ms");
         assert!(
             new_ms * 2.0 < old_ms,
             "batched list_overlays ({new_ms:.1} ms) is not at least 2x faster than per-base ({old_ms:.1} ms)"
+        );
+    }
+
+    /// Blocking review item on #1125: an overlay on a base that is not an
+    /// emittable IRI (Flux's `literal://string:` ids) must not make
+    /// `list_overlays` scan the store. SPARQL can match such a base only
+    /// through `FILTER(STR(?source) IN …)`, which leaves the triple pattern
+    /// unbound and walks every quad; `list_overlays` reads it with one
+    /// `get_links` seek instead. Here: one such overlay among 20k unrelated
+    /// links on RocksDB. The reference is the scan form the first version of
+    /// #1125 used. Measured locally: scan 111 ms, `list_overlays` 0.18 ms;
+    /// with the scan back in `list_overlays` both take ~50 ms and the 10x
+    /// bound fails.
+    #[tokio::test]
+    async fn list_overlays_non_iri_base_does_not_scan() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let dir = tempfile::tempdir().unwrap();
+        p.sparql_store = std::sync::Arc::new(
+            crate::perspectives::sparql_store::SparqlStore::new(Some(dir.path().to_str().unwrap()))
+                .unwrap(),
+        );
+        let mut links = Vec::new();
+        for i in 0..2000 {
+            for f in 0..10 {
+                links.push(Link {
+                    source: format!("soa://ext/Other/{i}"),
+                    predicate: Some(format!("soa://field{f}")),
+                    target: format!("literal:string:v{i}_{f}"),
+                });
+            }
+        }
+        let flux = "literal://string:fluxMessage1";
+        assert!(!emittable_iri(flux));
+        for (pred, target) in [
+            (OVERLAY_KIND_PRED.to_string(), "literal:string:update"),
+            (OVERLAY_RUN_PRED.to_string(), "ad4m://interp/run/r1"),
+            (format!("{INFERRED_PREFIX}soa://title"), "literal:string:Hi"),
+            ("soa://body".to_string(), "literal:string:hello"),
+        ] {
+            links.push(Link {
+                source: flux.into(),
+                predicate: Some(pred),
+                target: target.into(),
+            });
+        }
+        p.add_links(links, LinkStatus::Local, None, &ctx)
+            .await
+            .unwrap();
+
+        let new = list_overlays(&p).await.unwrap();
+        assert_eq!(json(&new), json(&list_overlays_per_base(&p).await));
+        assert_eq!(new.len(), 1);
+        assert_eq!(inferred_of(&new, flux), vec!["soa://title"]);
+
+        // The scan the non-IRI group used to run.
+        let scan = decorated_links_query(
+            "",
+            &format!(
+                r#"STR(?source) IN ("{flux}") && (?predicate = <{OVERLAY_KIND_PRED}> || ?predicate = <{OVERLAY_RUN_PRED}> || STRSTARTS(STR(?predicate), "{INFERRED_PREFIX}"))"#
+            ),
+        );
+        assert_eq!(
+            p.sparql_store.query_decorated_links(&scan).unwrap().len(),
+            3
+        );
+
+        let reps = 5;
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            p.sparql_store.query_decorated_links(&scan).unwrap();
+        }
+        let scan_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
+        let t = std::time::Instant::now();
+        for _ in 0..reps {
+            list_overlays(&p).await.unwrap();
+        }
+        let new_ms = t.elapsed().as_secs_f64() * 1000.0 / f64::from(reps);
+        println!(
+            "1 non-IRI overlay + 20k links, RocksDB: STR() scan {scan_ms:.2} ms, list_overlays {new_ms:.2} ms"
+        );
+        assert!(
+            new_ms * 10.0 < scan_ms,
+            "list_overlays ({new_ms:.2} ms) is not 10x faster than the STR() scan ({scan_ms:.2} ms)"
         );
     }
 
