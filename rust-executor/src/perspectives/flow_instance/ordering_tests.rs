@@ -13,10 +13,10 @@
 //! the fixed code's new API — so the module compiles against the unfixed
 //! sources too and the failures can be demonstrated, not just claimed.
 
-use super::atom::fixtures::{atom_of, honest_proposal, link, ALICE, BOB, T1, T2};
 use super::atom::{Vote, ACCEPTED_BY_PREDICATE, PROPOSER_PREDICATE};
 use super::fold::{fold, VouchedAtom};
 use super::roles::{RoleGrantWindow, RoleRevocation};
+use super::test_support::{atom_of, honest_proposal, link, ALICE, BOB, T1, T2};
 use crate::perspectives::shacl_parser::SHACLFlow;
 
 /// Earlier instant, later string: `'Z'` (0x5A) sorts after `'.'` (0x2E).
