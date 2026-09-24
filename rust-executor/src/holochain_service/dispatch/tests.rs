@@ -336,7 +336,10 @@ async fn request_expiring_while_waiting_for_a_permit_is_refused() {
         !h.mock.events().contains(&"start:late".to_string()),
         "a request that expired waiting for a permit must never reach the dispatcher"
     );
-    assert_eq!(h.mock.zome_calls.load(Ordering::SeqCst), ZOME_CALL_CONCURRENCY);
+    assert_eq!(
+        h.mock.zome_calls.load(Ordering::SeqCst),
+        ZOME_CALL_CONCURRENCY
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

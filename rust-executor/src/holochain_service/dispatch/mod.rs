@@ -55,11 +55,11 @@ pub(crate) trait ZomeDispatch: Send + Sync + 'static {
 ///   onto the runtime holding a `lifecycle` read guard and one of `ZOME_CALL_CONCURRENCY`
 ///   semaphore permits. Both are taken here, before the spawn, so "in flight" means exactly
 ///   "spawned and not yet finished", and the loop itself stalls when every permit is taken:
-///   a request behind a full node waits in the channel, where its deadline can still catch
-///   it, instead of piling up as tasks.
+///   requests behind a full node wait in the channel instead of piling up as tasks.
 ///
-/// Before either: the time in queue is logged (`debug`; `warn` above 1 s), and a request
-/// dequeued past its `deadline` is answered with an error and never reaches the dispatcher.
+/// Once a request has what it waited for (the drain, the write lock, or a permit), `admit`
+/// logs its time in queue (`debug`; `warn` above 1 s) and, if its `deadline` has passed,
+/// answers it with an error so it never reaches the dispatcher.
 pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
     mut receiver: UnboundedReceiver<Envelope>,
     dispatcher: Arc<D>,
@@ -76,33 +76,22 @@ pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
             queued_at,
             deadline,
         } = envelope;
-        let name = request.name();
-        let waited = queued_at.elapsed();
-        log_queue_wait(
-            name,
-            waited,
-            ZOME_CALL_CONCURRENCY - permits.available_permits(),
-        );
-
-        if deadline.is_some_and(|deadline| Instant::now() > deadline) {
-            request.refuse(anyhow!(
-                "{name} expired after {} ms in queue",
-                waited.as_millis()
-            ));
-            continue;
-        }
 
         if matches!(request, HolochainServiceRequest::Shutdown(_)) {
             while let Some(finished) = in_flight.join_next().await {
                 log_task_failure(finished);
             }
-            dispatcher.handle(request).await;
+            if let Some(request) = admit(request, queued_at, deadline, 0) {
+                dispatcher.handle(request).await;
+            }
             break;
         }
 
         if request.is_lifecycle() {
             let _exclusive = lifecycle.write().await;
-            dispatcher.handle(request).await;
+            if let Some(request) = admit(request, queued_at, deadline, 0) {
+                dispatcher.handle(request).await;
+            }
             continue;
         }
 
@@ -112,6 +101,11 @@ pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
             .await
             .expect("the semaphore is never closed");
         let shared = lifecycle.clone().read_owned().await;
+        // Not counting the permit just taken for this request.
+        let others = ZOME_CALL_CONCURRENCY - permits.available_permits() - 1;
+        let Some(request) = admit(request, queued_at, deadline, others) else {
+            continue;
+        };
         let dispatcher = dispatcher.clone();
         in_flight.spawn(async move {
             dispatcher.handle(request).await;
@@ -120,6 +114,29 @@ pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
         });
     }
     error!("Holochain service receiver closed");
+}
+
+/// Called once the request is about to run (after the drain, the write lock or the permit it
+/// waited for): logs the time in queue and refuses the request if its deadline has passed.
+/// Checking here and not on dequeue means a request that waited for a permit behind
+/// `ZOME_CALL_CONCURRENCY` slow calls is caught too.
+fn admit(
+    request: HolochainServiceRequest,
+    queued_at: Instant,
+    deadline: Option<Instant>,
+    in_flight: usize,
+) -> Option<HolochainServiceRequest> {
+    let name = request.name();
+    let waited = queued_at.elapsed();
+    log_queue_wait(name, waited, in_flight);
+    if deadline.is_some_and(|deadline| Instant::now() > deadline) {
+        request.refuse(anyhow!(
+            "{name} expired after {} ms in queue",
+            waited.as_millis()
+        ));
+        return None;
+    }
+    Some(request)
 }
 
 /// Drops finished tasks from the set so it does not grow with every request served.
