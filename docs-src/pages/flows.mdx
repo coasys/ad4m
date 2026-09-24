@@ -403,7 +403,7 @@ Fail-closed rules on every surface: a `rejected` receipt is excluded, an `undeci
 
 ## `producedByFlow` on a role: a role granted by another flow
 
-Plain `fromRole` matches the instance. Adding `producedByFlow` to the role query adds the condition that the instance must be a **valid output of a completed run of another flow**:
+Plain `fromRole` matches the instance. Adding `producedByFlow` to the role query adds the condition that the instance must be a **valid output of a completed run of another flow**. For a full walkthrough see [Writing a flow: a role granted by a flow](/developer-guides/writing-a-flow).
 
 ```typescript
 consensusRule: {
