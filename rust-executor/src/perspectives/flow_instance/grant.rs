@@ -80,24 +80,54 @@
 //! truncated read hides the witness) nor "granted". It is loud, and it
 //! stops only the flows gated on F.
 //!
-//! # The gate is existential, and that decides the failure direction
+//! # The gate is existential, but the fold is not monotone
 //!
 //! An instance is granted iff **some** carried receipt verifies for it under
-//! the named flow and terminal state. So declining to evaluate a candidate
-//! receipt — for any reason, including running out of depth budget — can only
-//! remove a possible witness. It narrows, never widens.
+//! the named flow and terminal state. So a receipt that fails to verify can
+//! only remove a possible witness, and membership can only narrow.
 //!
-//! That is why an over-deep chain refuses *the receipt* rather than aborting
-//! the fold. Aborting would be a denial-of-service handed to anybody: F's
-//! index is unsigned and anyone may write it (see
-//! [`verify`](super::verify) § *The binding is the consumer's check*), so a
-//! stranger could plant a deliberately deep chain there and stop an honest
-//! flow from deriving a state at all. Refusing the planted receipt costs the
-//! attacker nothing and buys them nothing.
+//! That does not make "not a member" a safe answer to give when the gate
+//! *could not look*. The fold's outcome is not monotone in membership:
+//! [`Contention`](super::fold) fires only while two edges out of a state are
+//! both quorate, so taking one voter away can de-quorate one edge and let the
+//! other one fire. `role_grant_views` refuses the whole fold for that reason
+//! (see [`fold_read_set`](super::fold_read_set)), and the depth cap follows the
+//! same rule below.
 //!
-//! The budget error above is different in kind. It is a bound on how much of
-//! F's index a reader will look at, not a verdict on any one receipt, and
-//! refusing to look is not the same as looking and finding nothing.
+//! # Running out of depth is undecidable
+//!
+//! At the cap, a carried receipt for F that would still need verifying is a
+//! [`GrantDepthExceeded`] error, and the fold that asked aborts. It used to
+//! be `None`, the same value as "not a member". That was quiet (Lal's note on
+//! #1076), and it was also fail-open:
+//! `at_the_cap_a_voter_dropped_for_depth_cannot_break_a_tie` builds a receipt
+//! that is `Contested` for a reader with budget left and, under the old
+//! answer, `Verified` for a reader at the cap. Nesting made it verify.
+//!
+//! **How far the error travels.** A fold only runs at the cap inside another
+//! receipt's verification. The reader's own fold starts from
+//! [`GrantContext::root`], and the only way to spend budget is
+//! [`GrantContext::deeper`] here, on the way into verifying a receipt. And
+//! [`verify_receipt_within`](super::verify::verify_receipt_within) turns a
+//! fold that aborts into an `Unfoldable` verdict for *that receipt*. So the
+//! error refuses the receipt one level up, and never aborts the fold the reader
+//! asked about. That matters, because aborting the reader's own fold would
+//! give anybody a denial of service: F's index is unsigned and anyone may
+//! write it (see [`verify`](super::verify) § *The binding is the consumer's
+//! check*), so a stranger could plant a deep chain there and stop an honest
+//! flow from deriving a state at all. As it is, the planted receipt is
+//! refused. That costs the attacker nothing and gets them nothing.
+//! `a_chain_one_deeper_than_the_budget_is_refused_not_allowed` pins both
+//! halves.
+//!
+//! The error is also logged at `warn` where it is raised, naming the instance
+//! and the flow, because the verdict that carries it up is only logged at
+//! `debug`.
+//!
+//! A receipt flood (above) is a different kind of error. It is a bound on
+//! how much of F's index a reader will look at, not a verdict on any one
+//! receipt, and it does reach the reader's own fold: refusing to look is not
+//! the same as looking and finding nothing.
 //!
 //! # Not being granted is not an error
 //!
@@ -109,9 +139,10 @@
 //! abort exists for a grant that *is* claimed and cannot be dated, while this
 //! is a membership test returning false.
 //!
-//! Two answers are errors instead, because each is "I could not decide",
-//! not "no": a granting flow whose index is over budget (above), and a
-//! granting flow this replica holds no definition for, which is the rule
+//! Three answers are errors instead, because each is "I could not decide",
+//! not "no": a granting flow whose index is over budget (above), a receipt the
+//! depth budget cannot reach (above), and a granting flow this replica holds
+//! no definition for, which is the rule
 //! [`flow_valid_outputs`](super::produced::flow_valid_outputs) applies to an
 //! unknown flow.
 //!
@@ -153,9 +184,10 @@
 //! is, the fix is memoisation by receipt URI, not a larger constant.
 //!
 //! **Open: which kind of denial that is.** Running out of budget currently
-//! surfaces as a [`Rejected`](super::verify::VerdictKind::Rejected) verdict,
-//! because the gate simply fails and the fold reports an ordinary state
-//! mismatch. It arguably belongs in
+//! surfaces as a [`Rejected`](super::verify::VerdictKind::Rejected) verdict:
+//! the receipt whose fold hit the cap is `Unfoldable`, and its reason names
+//! the [`GrantDepthExceeded`]. Further up, every level just sees a grant that
+//! did not happen. It arguably belongs in
 //! [`Undecidable`](super::verify::VerdictKind::Undecidable) instead: the same
 //! bytes verify for a reader handed the sub-receipt directly, so "I could not
 //! reach that far from where I stand" is a finding about the reader, not about
@@ -263,7 +295,7 @@ impl<'a> GrantContext<'a> {
     /// at the cap.
     ///
     /// `None` is a refusal, never a pass: the only caller
-    /// ([`granted_by_flow_at`]) treats it as "this receipt does not grant".
+    /// ([`granted_by_flow_at`]) turns it into a [`GrantDepthExceeded`] error.
     /// Returning an `Option` rather than a saturating counter is deliberate —
     /// a counter that stopped decrementing would let the recursion continue
     /// forever at zero, which is the failure this exists to prevent.
@@ -330,38 +362,49 @@ impl std::error::Error for GrantDepthExceeded {}
 /// When flow `spec` granted the role instance `output`, if a carried receipt
 /// says so.
 ///
-/// `Some(settled_at)` is the quorum-fixed moment the granting run completed —
-/// what [`RoleGrantWindow::granted_at`](super::roles::RoleGrantWindow) becomes
-/// for this instance. `None` means no carried receipt granted it, which is an
-/// ordinary "not a member" and not an error (module header).
+/// `Ok(Some(settled_at))` is the quorum-fixed moment the granting run
+/// completed — what [`RoleGrantWindow::granted_at`](super::roles::RoleGrantWindow)
+/// becomes for this instance. `Ok(None)` means no carried receipt granted it,
+/// which is an ordinary "not a member" and not an error (module header).
 ///
 /// The whole check is [`first_produced_at`]: the receipt verifies, is for
 /// `spec.flow`, settled into `spec.terminal_state`, and names `output` as
 /// `(class, id)`. Earliest wins when several receipts qualify. The only
 /// thing added here is the budget: every receipt this gate verifies is one
-/// level deeper than the material that carried it, and at the cap nothing
-/// is verified at all.
+/// level deeper than the material that carried it.
+///
+/// At the cap, a carried receipt for `spec.flow` that would need verifying is
+/// a [`GrantDepthExceeded`] error, never `Ok(None)`. With no such receipt,
+/// nothing was left unchecked, so `Ok(None)` is still a checked "no". Receipts
+/// for other flows do not count: [`first_produced_at`] skips them before it
+/// verifies anything.
 pub fn granted_by_flow_at(
     ctx: GrantContext<'_>,
     output: &OutputRef,
     spec: &GrantedByFlow,
     receipts: &[FlowReceipt],
-) -> Option<String> {
+) -> Result<Option<String>, GrantDepthExceeded> {
     let Some(deeper) = ctx.deeper() else {
-        log::debug!(
-            "grantedByFlow: `{}`: not verifying any further receipt — the chain is already \
-             {MAX_GRANT_DEPTH} deep. The grant is refused, not assumed.",
-            output.id
-        );
-        return None;
+        if !receipts.iter().any(|r| r.flow_uri == spec.flow) {
+            return Ok(None);
+        }
+        let err = GrantDepthExceeded {
+            output: output.clone(),
+            flow: spec.flow.clone(),
+        };
+        // `warn`, not `debug`: a legitimately deep ontology reaching this
+        // would otherwise be "why is nobody in this role" with nothing to pull
+        // on (Lal, #1076).
+        log::warn!("{err}");
+        return Err(err);
     };
-    first_produced_at(
+    Ok(first_produced_at(
         deeper,
         output,
         &spec.flow,
         Some(&spec.terminal_state),
         receipts,
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -1525,6 +1568,21 @@ mod tests {
             verdict.outcome(),
             VerdictKind::Verified,
             "running out of budget must DENY the grant, never allow it — got: {verdict}"
+        );
+
+        // The depth error refuses the receipt one level up. It never aborts
+        // the reader's own fold (module header, § *Running out of depth is
+        // undecidable*): if it did, anybody could plant a deep chain in F's
+        // index and stop the gated flow from deriving a state at all.
+        let own = fold_read_set(
+            deepest,
+            &hand_built.read_set.reverified(),
+            GrantContext::root(&cat),
+        )
+        .expect("an over-deep chain in the carried evidence must not abort the reader's own fold");
+        assert_eq!(
+            own.state, "open",
+            "the grant the chain claims is simply not there"
         );
 
         let inner = verify_receipt_within(GrantContext::root(&cat), &nested);

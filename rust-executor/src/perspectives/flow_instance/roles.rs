@@ -412,7 +412,9 @@ impl RoleGrantEvidence {
     ///
     /// A gate whose granting flow is not in the reader's catalogue is an
     /// `Err` for the same reason: no receipt for it can be verified, and
-    /// "I cannot check" must not read as "not a member".
+    /// "I cannot check" must not read as "not a member". So is a receipt the
+    /// depth budget cannot reach
+    /// ([`GrantDepthExceeded`](super::grant::GrantDepthExceeded)).
     ///
     /// `role` is the role query **from the reader's own flow definition**,
     /// never from the carried evidence. Its `grantedByFlow`, its `count`, and
@@ -462,7 +464,10 @@ impl RoleGrantEvidence {
                     class_name: role.class_name.clone(),
                     id: instance.instance_id.clone(),
                 };
-                match granted_by_flow_at(grants, &output, spec, &instance.granting_receipts) {
+                // `?`: running out of depth is "I could not decide", which
+                // aborts the fold like any other unresolvable evidence
+                // (`grant` § *Running out of depth is undecidable*).
+                match granted_by_flow_at(grants, &output, spec, &instance.granting_receipts)? {
                     Some(granted_at) => {
                         windows.push(RoleGrantWindow {
                             instance_id: instance.instance_id.clone(),
