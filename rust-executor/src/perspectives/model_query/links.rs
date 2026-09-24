@@ -43,7 +43,7 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-use super::sparql_builder::local_status_filter;
+use super::sparql_builder::{local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -135,6 +135,11 @@ pub(super) fn resolve_link_keys(
 /// instance query applies, so a gossiped Shared link on a local predicate is not
 /// reintroduced through this side door.
 ///
+/// Links whose signature did not verify are withheld by default, the same
+/// [`proof_valid_filter`] the instance query applies (#1113), so a forged
+/// annotation or member link is not reintroduced here either. With
+/// `include_unverified` they are returned, and the consumer verifies `proof`.
+///
 /// A link stored without a proof comes back as `"proof": {"key": "",
 /// "signature": ""}`. That is *not* "unsigned but valid":
 /// `LinkExpression::compute_proof_valid` returns `false` for it, and so must
@@ -148,6 +153,7 @@ pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
     keys: &[(String, String)],
+    include_unverified: Option<bool>,
     instances: &mut [Value],
 ) -> Result<(), Error> {
     if keys.is_empty() || instances.is_empty() {
@@ -172,6 +178,7 @@ pub(super) async fn attach_links(
             .collect::<Vec<_>>()
             .join(" ");
         let local_status = local_status_filter(shape);
+        let proof_valid = proof_valid_filter(include_unverified);
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig WHERE {{
     {source_constraint}
@@ -182,7 +189,7 @@ pub(super) async fn attach_links(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
-{local_status}}}"#
+{proof_valid}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();

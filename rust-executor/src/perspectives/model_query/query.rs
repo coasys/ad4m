@@ -581,7 +581,7 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
-                    let proof_valid = proof_valid_filter(query_input);
+                    let proof_valid = proof_valid_filter(query_input.include_unverified);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -775,7 +775,14 @@ pub(super) async fn execute_model_query_inner(
     };
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
-    attach_links(store, shape, &link_keys, &mut final_instances).await?;
+    attach_links(
+        store,
+        shape,
+        &link_keys,
+        query_input.include_unverified,
+        &mut final_instances,
+    )
+    .await?;
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {

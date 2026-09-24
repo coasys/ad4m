@@ -238,6 +238,45 @@ async fn proof_valid_applies_to_includes_and_reverse_relations() {
     );
 }
 
+/// #1113 on `__links` (#1117): the per-link rows get the same default. A
+/// consumer reading members or tombstones through `links` sees only links
+/// that verified, unless it opts in and checks `proof` itself.
+#[tokio::test]
+async fn proof_valid_applies_to_links_rows() {
+    let store = SparqlStore::new(None).unwrap();
+    pv_seed(&store);
+    let targets = |include_unverified: Option<bool>| {
+        let store = &store;
+        async move {
+            let result = execute_model_query_from_json(
+                store,
+                "Recipe",
+                &ModelQueryInput {
+                    links: Some(vec!["name".to_string()]),
+                    include_unverified,
+                    ..Default::default()
+                },
+                PV_SHAPE_JSON,
+            )
+            .await
+            .unwrap();
+            result.instances[0]["__links"]["name"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["data"]["target"].as_str().unwrap().to_string())
+                .collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(targets(None).await, vec!["literal:string:real"]);
+    assert_eq!(
+        targets(Some(true)).await,
+        vec!["literal:string:real", "literal:string:forged"],
+        "the opt-in returns the unverified row, oldest first"
+    );
+}
+
 /// Instance *selection* still matches unverified links — #1120.
 ///
 /// #1113 filters the rows that hydrate an instance, not the patterns that
@@ -428,6 +467,11 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
             ids(&second),
             vec!["pv://r/c"],
             "order {order:?}: an unverified link changed page 2"
+        );
+        assert_eq!(
+            counts(&second),
+            vec![json!(0)],
+            "order {order:?}: `$n` on page 2 counts unverified links"
         );
 
         let all = pv_page(&dirty, &shape, &resolver, query(order, None, None, None)).await;

@@ -17,6 +17,7 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+use super::sparql_builder::verified_link_exists;
 use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
@@ -113,6 +114,12 @@ pub(super) async fn resolve_projections(
 
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
+        let verified = projection_verified_pattern(
+            proj.transitive,
+            !reifier_patterns.is_empty(),
+            &safe_pred,
+            include_unverified,
+        );
 
         // A transitive projection counts (or lists) everything reachable, which
         // is what "42 replies" on a collapsed branch means to a reader. The
@@ -142,6 +149,7 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}} GROUP BY ?parent"
                 ),
                 parent_constraint = parent_constraint,
@@ -149,6 +157,7 @@ pub(super) async fn resolve_projections(
                 path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
             );
 
             let result_json = store.query(&sparql)?;
@@ -186,6 +195,7 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}}{order_clause}"
                 ),
                 parent_constraint = parent_constraint,
@@ -193,6 +203,7 @@ pub(super) async fn resolve_projections(
                 path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
                 order_clause = order_clause,
             );
 
@@ -576,6 +587,36 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     } else {
         let joined = terms.join(" ");
         format!("\nORDER BY {joined}")
+    }
+}
+
+/// The #1113 verdict for one projection's `?parent <predicate> ?t` link.
+///
+/// With an `author` / `timestamp` filter the query already joins that link's
+/// reifier as `?_prj_reif`, so the verdict is read off the same reifier: a
+/// verified link by someone else must not stand in for the one the filter
+/// matched. Without one, [`verified_link_exists`] keeps the target when some
+/// link asserting it verified, which also keeps `COUNT(DISTINCT ?t)` from
+/// counting a target twice.
+///
+/// Empty for a transitive projection: a property path has no single link per
+/// hop to read a verdict from, so those still count unverified links (#1120).
+/// Empty as well when the query opts in with `include_unverified`.
+pub(super) fn projection_verified_pattern(
+    transitive: bool,
+    joins_reifier: bool,
+    safe_pred: &str,
+    include_unverified: Option<bool>,
+) -> String {
+    if transitive || include_unverified.unwrap_or(false) {
+        String::new()
+    } else if joins_reifier {
+        "    ?_prj_reif <ad4m://ontology/proofValid> \"true\" .\n".to_string()
+    } else {
+        format!(
+            "   {}\n",
+            verified_link_exists("?parent", safe_pred, "?t", include_unverified)
+        )
     }
 }
 

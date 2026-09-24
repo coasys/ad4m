@@ -9142,7 +9142,7 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     let member = "did:key:zMember";
     seed_role(&store, role, member, true);
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&[REVOKED]),
@@ -9181,7 +9181,7 @@ async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
     let role = "role://instance/1";
     seed_role(&store, role, "did:key:zMember", true);
 
-    let plain = execute_model_query_from_json(
+    let plain = fixture_query_from_json(
         &store,
         "Reviewer",
         &ModelQueryInput::default(),
@@ -9189,7 +9189,7 @@ async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
     )
     .await
     .unwrap();
-    let with_links = execute_model_query_from_json(
+    let with_links = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&[REVOKED]),
@@ -9240,7 +9240,7 @@ async fn a_member_is_dated_and_attributed_by_its_own_link() {
         .add_link(&link_by(mallory, role, "role://member", bob, ROLE_T2))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&["members"]),
@@ -9292,7 +9292,7 @@ async fn links_on_the_paginated_plan_with_a_property_selection() {
         limit: Some(10),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2);
@@ -9338,7 +9338,7 @@ async fn links_on_a_local_property_withhold_a_shared_link() {
         ))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Cache",
         &links_query(&["state"]),
@@ -9356,7 +9356,7 @@ async fn links_on_a_local_property_withhold_a_shared_link() {
 async fn links_rejects_a_key_it_cannot_resolve() {
     let store = SparqlStore::new(None).unwrap();
     seed_role(&store, "role://instance/1", "did:key:zA", true);
-    let err = execute_model_query_from_json(
+    let err = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&["role_grant_revoked"]),
@@ -9400,7 +9400,7 @@ async fn links_rejects_a_reverse_relation_name() {
     }"#;
 
     // Control: the forward relation on the same shape is read.
-    let ok = execute_model_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+    let ok = fixture_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
         .await
         .unwrap();
     assert_eq!(
@@ -9411,7 +9411,7 @@ async fn links_rejects_a_reverse_relation_name() {
         1
     );
 
-    let err = execute_model_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+    let err = fixture_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
         .await
         .expect_err("a reverse relation must not resolve to an empty list");
     let msg = format!("{err}");
@@ -9467,10 +9467,9 @@ async fn links_inside_an_include_sub_query() {
         )])),
         ..Default::default()
     };
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
     let child = &result.instances[0]["children"][0];
     assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
     let rows = child["__links"]["we://note"]
