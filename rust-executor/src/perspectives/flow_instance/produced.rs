@@ -63,13 +63,23 @@
 //!
 //! # Discovery is not trust
 //!
-//! Receipts are found by enumerating `ad4m://flow/receipt_content` links —
-//! any member can write one, and a forged or damaged body proves nothing:
-//! everything above re-derives from the receipt's own contents. The caps and
-//! the deterministic ordering in [`load_flow_receipts`] exist so an attacker
-//! writing many junk bodies costs bounded work, and dropping candidates at
-//! the cap can only remove a witness — the fail-closed direction for an
-//! existential question (same argument as `granting_receipts` in #1076).
+//! Receipts for flow F are found through F's index — `F -->
+//! ad4m://flow/flow_receipt --> receipt` links, written at mint — and each
+//! receipt's `ad4m://flow/receipt_content` body. Any member can write either
+//! link, and a forged or damaged body proves nothing: everything above
+//! re-derives from the receipt's own contents.
+//!
+//! The read is **scoped to the flow before it is budgeted**, so other flows'
+//! receipts (and stray bodies nobody indexed) never spend F's budget — a busy
+//! perspective is the normal case, not an attack. And the budget
+//! ([`MAX_FLOW_RECEIPTS`]) **refuses** rather than truncates: a read that
+//! would exceed it is a [`ReceiptBudgetExceeded`] error on every surface.
+//! Truncating would let anyone who writes enough low-sorting candidates
+//! evict every genuine receipt and have every surface answer a confident
+//! "no valid outputs" (Lal's review of #1127). "I could not read every
+//! receipt" is not "there are none" — the same rule that makes an unknown
+//! flow an error. A flood under F's index can still make F's question
+//! unanswerable, but loudly, and only F's.
 //!
 //! # What is deliberately NOT here
 //!
@@ -227,13 +237,12 @@ pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class
     output.class_name == queried_name || output.class_name == target_class
 }
 
-/// How many receipt bodies one enumeration reads. The
-/// `ad4m://flow/receipt_content` links are writable by anyone, so without a
-/// cap a member could hang thousands of junk bodies on the perspective and
-/// make every `producedByFlow` query verify them all. Dropping candidates
-/// removes possible witnesses from an existential question, so the cap
-/// fails closed; the URI sort makes which ones survive it the same on every
-/// replica.
+/// How many receipt candidates one flow's read may carry — index entries,
+/// and bodies under them. The links are writable by anyone, so without a
+/// bound a member could make every `producedByFlow` query parse and verify
+/// thousands of junk bodies. Over the budget the read **errors**
+/// ([`ReceiptBudgetExceeded`]); it never drops candidates, because a dropped
+/// candidate could be the one genuine witness (see the module header).
 pub const MAX_FLOW_RECEIPTS: usize = 256;
 
 /// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
@@ -269,53 +278,83 @@ impl std::fmt::Display for ReceiptBudgetExceeded {
 
 impl std::error::Error for ReceiptBudgetExceeded {}
 
-/// Every receipt carried by the perspective, optionally pre-filtered to one
-/// claimed `flow_uri` (a *claim* — verification comes later and is the
-/// caller's job).
+/// The receipts filed under `flow_uri`'s index, parsed — every candidate a
+/// question about that flow has to consider. Each is a *claim* to be about
+/// the flow; verification comes later and is the caller's job.
 ///
-/// A body that does not parse as a receipt is warned about and skipped, not
-/// an error: anyone can write these links, and failing the whole read would
-/// hand every reader a denial of service. A receipt that cannot be read
-/// proves nothing anyway.
+/// Scoped before it is budgeted: only `flow_uri`'s index entries, and only
+/// the bodies under them, count toward [`MAX_FLOW_RECEIPTS`]. Over the
+/// budget the whole read is a [`ReceiptBudgetExceeded`] error — never a
+/// shorter list (see the module header).
+///
+/// A body that does not parse as a receipt, or parses as another flow's, is
+/// warned about and skipped, not an error: it proves nothing for this flow,
+/// and failing on it would hand every writer a veto the budget already
+/// bounds. Deterministic: entries and bodies are read in sorted order.
 pub async fn load_flow_receipts(
     perspective: &PerspectiveInstance,
-    flow_uri: Option<&str>,
+    flow_uri: &str,
 ) -> anyhow::Result<Vec<FlowReceipt>> {
-    let mut bodies = perspective
+    let over_budget = |found: usize| -> anyhow::Error {
+        ReceiptBudgetExceeded {
+            flow: flow_uri.to_string(),
+            found,
+            cap: MAX_FLOW_RECEIPTS,
+        }
+        .into()
+    };
+
+    let mut uris: Vec<String> = perspective
         .get_links(&LinkQuery {
-            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            source: Some(flow_uri.to_string()),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
             ..Default::default()
         })
-        .await?;
-    // Deterministic before the cap: sorted by (node, body) so two replicas
-    // whose stores enumerate links differently read the same survivors.
-    bodies.sort_by(|a, b| (&a.data.source, &a.data.target).cmp(&(&b.data.source, &b.data.target)));
-    bodies.dedup_by(|a, b| a.data.source == b.data.source && a.data.target == b.data.target);
+        .await?
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    uris.sort();
+    uris.dedup();
+    if uris.len() > MAX_FLOW_RECEIPTS {
+        return Err(over_budget(uris.len()));
+    }
+
+    let mut bodies: Vec<(String, String)> = Vec::new();
+    for uri in &uris {
+        let mut under: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(uri.clone()),
+                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        under.sort();
+        under.dedup();
+        bodies.extend(under.into_iter().map(|body| (uri.clone(), body)));
+    }
     if bodies.len() > MAX_FLOW_RECEIPTS {
-        log::warn!(
-            "load_flow_receipts: this perspective carries {} receipt bodies; reading only the \
-             first {MAX_FLOW_RECEIPTS} by URI. An output proven only by a dropped receipt will \
-             NOT be listed.",
-            bodies.len()
-        );
-        bodies.truncate(MAX_FLOW_RECEIPTS);
+        return Err(over_budget(bodies.len()));
     }
 
     let mut receipts = Vec::new();
-    for body in bodies {
-        let uri = body.data.source;
-        let parsed = Literal::from_url(body.data.target)
+    for (uri, body) in bodies {
+        let parsed = Literal::from_url(body)
             .and_then(|l| l.get())
             .and_then(|v| match v {
                 LiteralValue::Json(json) => Ok(serde_json::from_value::<FlowReceipt>(json)?),
                 other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
             });
         match parsed {
-            Ok(receipt) => {
-                if flow_uri.is_none_or(|f| receipt.flow_uri == f) {
-                    receipts.push(receipt);
-                }
-            }
+            Ok(receipt) if receipt.flow_uri == flow_uri => receipts.push(receipt),
+            Ok(receipt) => log::warn!(
+                "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is a receipt \
+                 for `{}`; skipped",
+                receipt.flow_uri
+            ),
             Err(e) => log::warn!(
                 "load_flow_receipts: the body under `{uri}` does not read as a FlowReceipt and \
                  proves nothing: {e:#}"
@@ -351,7 +390,7 @@ pub async fn flow_valid_outputs(
              its outputs can be decided here"
         );
     }
-    let receipts = load_flow_receipts(perspective, Some(flow_uri)).await?;
+    let receipts = load_flow_receipts(perspective, flow_uri).await?;
     let candidates = valid_outputs(&catalogue, flow_uri, state, &receipts);
 
     let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
@@ -425,9 +464,10 @@ pub fn verdict_wire(verdict: &ReceiptVerdict) -> serde_json::Value {
 }
 
 /// Mint the receipt for a completed run and write it to the perspective:
-/// the content-addressed receipt node with its body, plus the two discovery
-/// edges (`instance → receipt`, `output → receipt` — an index, never an
-/// input; see [`receipt`](super::receipt)).
+/// the content-addressed receipt node with its body, plus the discovery
+/// edges (`instance → receipt`, `output → receipt`, and the flow's own
+/// index `flow → receipt` that [`load_flow_receipts`] reads — indexes,
+/// never inputs; see [`receipt`](super::receipt)).
 ///
 /// Everything a receipt claims is derived here the way [`FlowReceipt::mint`]
 /// demands: the read-set is collected live, the outputs are the ones the
@@ -528,6 +568,11 @@ pub async fn mint_flow_receipt(
         Link {
             source: instance_uri.to_string(),
             predicate: Some(FLOW_RECEIPT_PREDICATE.to_string()),
+            target: uri.clone(),
+        },
+        Link {
+            source: receipt.flow_uri.clone(),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
             target: uri.clone(),
         },
     ];

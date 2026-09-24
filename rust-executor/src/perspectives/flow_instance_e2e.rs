@@ -3789,7 +3789,7 @@ async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
         cap: MAX_FLOW_RECEIPTS,
     };
 
-    let err = load_flow_receipts(&f.perspective, Some(&flow))
+    let err = load_flow_receipts(&f.perspective, &flow)
         .await
         .expect_err("the loader must not hand back a truncated list");
     assert_eq!(over(&err), Some(expected.clone()), "loader: {err:#}");

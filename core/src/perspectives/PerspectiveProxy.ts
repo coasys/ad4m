@@ -909,6 +909,11 @@ export class PerspectiveProxy {
      * edited since its run completed, is not listed. The same predicate is
      * available as a model-query filter:
      * `where: { producedByFlow: { flow, state? } }`.
+     *
+     * Rejects — never resolves to `[]` — when the flow is not on this
+     * perspective, or when it carries more receipt candidates than the
+     * executor's per-flow budget (256): "could not read every receipt" is not
+     * "no valid outputs". The filter rejects the same way.
      */
     async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
         return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
