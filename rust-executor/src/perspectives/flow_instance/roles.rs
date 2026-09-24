@@ -975,11 +975,18 @@ mod tests {
     /// Query-aware stub: a call whose JSON mentions one of `member_dids`
     /// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
     /// `undated_instances`); `unconditional_instances` (for DID-independent queries)
-    /// wins over matching when set; `error` fails every call. `histories`
-    /// is what the store says about each DID's instances, answered the way
-    /// `model_query` answers `links`: under `__links`, one array per
-    /// requested key — the tombstone predicate gets `revocation_links`, any
-    /// other key `grant_links`.
+    /// wins over matching when set; `error` fails every call.
+    ///
+    /// `histories` holds each **instance's** links, keyed by instance id, the
+    /// way the real store holds them. A history can hold links about several
+    /// DIDs. Picking out the candidate's links is `RoleGrantLinks::from_instance`'s
+    /// job, not the stub's. An instance with no entry has no links.
+    ///
+    /// It answers `links` the way `model_query` does: under `__links`, one
+    /// array per requested key. [`STUB_GRANT_KEY`] gets `grant_links`, the
+    /// tombstone predicate gets `revocation_links`, and any other key gets
+    /// `[]`. A key nobody wrote has no links in the real store, so a
+    /// misspelled or unexpected key reads as "none" here too.
     #[derive(Default)]
     struct RoleStub {
         member_dids: Vec<String>,
@@ -990,6 +997,11 @@ mod tests {
         calls: Mutex<Vec<String>>,
         histories: HashMap<String, RoleGrantLinks>,
     }
+
+    /// The `didProperty` every stubbed role query uses, and so the one `links`
+    /// key the stub answers with grant links. [`grant_link`] writes it as the
+    /// predicate.
+    const STUB_GRANT_KEY: &str = "agent";
 
     #[async_trait]
     impl RequiresQueryable for RoleStub {
@@ -1010,36 +1022,36 @@ mod tests {
                 }
             });
             let query: Value = serde_json::from_str(query_json)?;
-            let history = self
-                .histories
-                .iter()
-                .find(|(did, _)| query_json.contains(did.as_str()))
-                .map(|(_, h)| h.clone())
-                .unwrap_or_default();
-            let links: Option<Map<String, Value>> = query["links"].as_array().map(|keys| {
+            let keys: Option<Vec<&str>> = query["links"]
+                .as_array()
+                .map(|keys| keys.iter().filter_map(Value::as_str).collect());
+            let links_of = |id: &str, keys: &[&str]| -> Map<String, Value> {
+                let history = self.histories.get(id).cloned().unwrap_or_default();
                 keys.iter()
-                    .filter_map(Value::as_str)
-                    .map(|key| {
+                    .map(|&key| {
                         let rows = if key
                             == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
                         {
-                            &history.revocation_links
+                            json!(history.revocation_links)
+                        } else if key == STUB_GRANT_KEY {
+                            json!(history.grant_links)
                         } else {
-                            &history.grant_links
+                            json!([])
                         };
-                        (key.to_string(), json!(rows))
+                        (key.to_string(), rows)
                     })
                     .collect()
-            });
+            };
             let instances: Vec<Value> = (0..n)
                 .map(|i| {
+                    let id = format!("r{i}");
                     let mut inst = if self.undated_instances {
-                        json!({ "id": format!("r{i}") })
+                        json!({ "id": id })
                     } else {
-                        json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
+                        json!({ "id": id, "timestamp": T0, "author": ADMIN() })
                     };
-                    if let Some(links) = &links {
-                        inst["__links"] = Value::Object(links.clone());
+                    if let Some(keys) = &keys {
+                        inst["__links"] = Value::Object(links_of(&id, keys));
                     }
                     inst
                 })
@@ -1330,7 +1342,7 @@ mod tests {
             let mut stub = members(&[ALICE()]);
             let revokers: Vec<(&str, &str)> =
                 accepted.iter().chain(rejected.iter()).map(|by| (*by, T2)).collect();
-            stub.histories.insert(ALICE().into(), history(ALICE(), Some(T1), &revokers));
+            stub.histories.insert("r0".into(), history(ALICE(), Some(T1), &revokers));
             let role = role(role_json);
             let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
                 .await
@@ -1358,12 +1370,16 @@ mod tests {
             rows_per_match: 2,
             ..members(&[ALICE(), BOB()])
         };
-        stub.histories.insert(
-            ALICE().into(),
-            history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]),
-        );
-        // Bob's instances have no `didProperty` link the store could date: they
-        // date from the instances themselves (T0), and nothing revoked them.
+        for id in ["r0", "r1"] {
+            stub.histories.insert(
+                id.into(),
+                history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]),
+            );
+        }
+        // Bob's instances are the same two, and every link on them is about
+        // Alice. None of it speaks for Bob, so he has no `didProperty` link the
+        // store could date: his windows date from the instances themselves
+        // (T0), and nothing revoked them.
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let evidence = resolve_role_grants(
             &stub,
@@ -1401,11 +1417,86 @@ mod tests {
         assert!(!alice.eligible_at(NOW, None));
     }
 
+    /// Two instances of one role, each with its own history: Alice's grant
+    /// on `r0` was revoked at T2, and she was granted again on `r1` at T3.
+    /// Each window is dated and closed by its own instance's links, and the
+    /// live one keeps her eligible.
+    ///
+    /// The stub could not express this before #1129's review. It handed every
+    /// matched instance the same `__links`, so both windows came out revoked.
+    #[tokio::test]
+    async fn each_instance_is_resolved_from_its_own_history() {
+        let mut stub = RoleStub {
+            rows_per_match: 2,
+            ..members(&[ALICE()])
+        };
+        stub.histories
+            .insert("r0".into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
+        stub.histories
+            .insert("r1".into(), history(ALICE(), Some(T3), &[]));
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
+            .await
+            .unwrap();
+        let carried: Vec<(&str, usize, usize)> = evidence[0]
+            .instances
+            .iter()
+            .map(|i| {
+                (
+                    i.instance_id.as_str(),
+                    i.grant_links.len(),
+                    i.revocation_links.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            carried,
+            vec![("r0", 1, 1), ("r1", 1, 0)],
+            "each instance carries its own links"
+        );
+
+        let grants = views(&evidence, &role);
+        let mut windows: Vec<(&str, Option<&str>)> = grants[0]
+            .windows
+            .iter()
+            .map(|w| (w.granted_at.as_str(), w.revoked_at()))
+            .collect();
+        windows.sort();
+        assert_eq!(windows, vec![(T1, Some(T2)), (T3, None)]);
+        assert!(
+            grants[0].eligible_at(NOW, None),
+            "the live grant on r1 keeps her a member"
+        );
+    }
+
+    /// The stub is total over `links` keys: a key it has no links for
+    /// answers `[]`, as the real store does for a predicate nobody wrote.
+    /// Before #1129's review, any key that was not the tombstone predicate got
+    /// grant links, so a misspelled key in `query_keys` passed every test.
+    #[tokio::test]
+    async fn the_stub_answers_an_unknown_links_key_with_nothing() {
+        let mut stub = members(&[ALICE()]);
+        stub.histories.insert(
+            "r0".into(),
+            history(ALICE(), Some(T1), &[(ADMIN(), T2)]),
+        );
+        let tomb = crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
+        let query = json!({ "where": { "agent": ALICE() }, "links": [STUB_GRANT_KEY, tomb, "agnet"] });
+        let raw = stub
+            .model_query("ns://Reviewer", &query.to_string())
+            .await
+            .unwrap();
+        let links = &serde_json::from_str::<Value>(&raw).unwrap()["instances"][0]["__links"];
+        assert_eq!(links[STUB_GRANT_KEY].as_array().map(Vec::len), Some(1));
+        assert_eq!(links[tomb].as_array().map(Vec::len), Some(1));
+        assert_eq!(links["agnet"], json!([]), "a key nobody wrote has no links");
+    }
+
     /// What `resolve_role_grants` carries for Alice's one `agent` role
     /// instance when the store's `__links` rows are `history`.
     async fn carried_for_alice(history: RoleGrantLinks) -> RoleInstanceHistory {
         let mut stub = members(&[ALICE()]);
-        stub.histories.insert(ALICE().into(), history);
+        stub.histories.insert("r0".into(), history);
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let mut evidence =
             resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
