@@ -816,6 +816,48 @@ mod tests {
         );
     }
 
+    // ---- the API verdict ---------------------------------------------------
+
+    /// `perspective.verifyFlowReceipt` hands out `verdict_wire`, and a client
+    /// branches on its `outcome` string — so each of the three kinds must
+    /// reach the wire as itself. A `Rejected` spelled `"verified"` is a
+    /// forged receipt vouched for; an `Undecidable` spelled `"rejected"` is
+    /// the boolean trap [`VerdictKind`](super::super::verify::VerdictKind)
+    /// exists to close, slandering a receipt this replica merely could not
+    /// check. What was verified travels only with a verified verdict.
+    ///
+    /// Red if any arm of the `outcome` mapping names another kind, or if the
+    /// verified details leak onto a non-verified verdict.
+    #[test]
+    fn the_wire_verdict_names_each_kind_as_itself() {
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let honest = honest();
+        let mut forged = honest.clone();
+        forged.outputs = out_items(&[ATTACKER]);
+
+        let verified = verdict_wire(&verify_receipt(&cat, &honest));
+        assert_eq!(verified["outcome"], "verified", "{verified}");
+        assert_eq!(verified["terminalState"], "done", "{verified}");
+        assert!(
+            verified["outputs"].as_array().is_some_and(|o| o.len() == 1),
+            "{verified}"
+        );
+
+        let rejected = verdict_wire(&verify_receipt(&cat, &forged));
+        assert_eq!(rejected["outcome"], "rejected", "{rejected}");
+        assert!(
+            rejected.get("outputs").is_none() && rejected.get("terminalState").is_none(),
+            "a rejected verdict carries nothing a client could act on: {rejected}"
+        );
+
+        let undecidable = verdict_wire(&verify_receipt(&catalogue(Vec::new()), &honest));
+        assert_eq!(undecidable["outcome"], "undecidable", "{undecidable}");
+        assert!(
+            undecidable.get("outputs").is_none(),
+            "an undecidable verdict vouches for nothing either: {undecidable}"
+        );
+    }
+
     // ---- determinism -------------------------------------------------------
 
     /// Two mints of the same completion collapse to one entry, and the list

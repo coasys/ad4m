@@ -3394,8 +3394,14 @@ async fn an_output_edited_after_completion_stops_being_a_valid_output() {
 /// place a valid one should have had.
 ///
 /// Red if the filter were applied after pagination — the window would then
-/// hold forged-but-planted ids and the valid second output would fall off
-/// the page.
+/// hold forged-but-planted ids and the valid outputs would fall off the
+/// page. That only holds if the planted rows really come first in the
+/// unfiltered order, so the order is explicit (`title DESC` puts "Planted
+/// too" and "Planted" ahead) and pinned as a precondition — the default
+/// timestamp order ties within a millisecond, and an earlier version of this
+/// test let a post-pagination mutant pass on that tie-break. `limit: 1` must
+/// also still report the full total, which no page-then-filter
+/// implementation can, whatever the order.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
     use super::flow_instance::produced::mint_flow_receipt;
@@ -3431,10 +3437,24 @@ async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
         plant_receipt(&mut f, &forged).await;
     }
 
+    // Precondition: unfiltered, the first page of 2 is exactly the planted
+    // pair — so a filter applied to that page would leave nothing.
+    let (ids, _) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "order": { "title": "DESC" }, "limit": 2 }),
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec![T4.to_string(), T2.to_string()],
+        "precondition: the planted rows lead the unfiltered order"
+    );
+
     let (ids, total) = tasks_produced_by(
         &f,
         serde_json::json!({
             "where": { "producedByFlow": { "flow": f.flow_uri } },
+            "order": { "title": "DESC" },
             "limit": 2,
         }),
     )
@@ -3447,6 +3467,23 @@ async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
         "a page of 2 is 2 VALID outputs — got {ids:?}"
     );
     assert_eq!(total, 2, "and the total counts only what verified");
+
+    // A page smaller than the valid set still reports the whole valid set.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({
+            "where": { "producedByFlow": { "flow": f.flow_uri } },
+            "order": { "title": "DESC" },
+            "limit": 1,
+        }),
+    )
+    .await;
+    assert_eq!(ids.len(), 1, "got {ids:?}");
+    assert!(
+        ids[0] == TASK || ids[0] == T3,
+        "the one row is a valid output — got {ids:?}"
+    );
+    assert_eq!(total, 2, "the total counts the filtered set, not the page");
 }
 
 /// A second class the fixture's Task node also conforms to: it asks for a
@@ -3524,4 +3561,209 @@ async fn an_output_committed_as_a_task_is_not_produced_by_the_flow_as_a_role() {
         "committed as a Task, so not a valid Role output — got {ids:?}"
     );
     assert_eq!(total, 0, "and the total agrees");
+}
+
+/// An output that is no longer an instance of the class it was committed as
+/// is not a valid output as it stands — the `None` arm of the live check.
+/// Distinct from the edited-content arm: here there is no content to compare
+/// at all, and the failure direction must still exclude.
+///
+/// Pins which guard answered: the receipt itself keeps verifying, so it is
+/// the live re-read that drops the output, not the verifier.
+///
+/// Red if `flow_valid_outputs` keeps a candidate it cannot re-read.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_that_is_no_longer_its_class_stops_being_a_valid_output() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .len(),
+        1,
+        "precondition: at completion the output is listed"
+    );
+
+    // Drop the `ns://type` marker the Task shape requires: the node is no
+    // longer loadable as a `ns://Task`.
+    let marker: Vec<LinkExpression> = links_of(&f, TASK)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some("ns://type"))
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!marker.is_empty(), "the type marker exists to remove");
+    f.perspective
+        .remove_links(marker, None)
+        .await
+        .expect("de-type the output");
+    assert!(
+        load_outputs(&f.perspective, &[task_ref(TASK)])
+            .await
+            .expect("load")
+            .is_empty(),
+        "precondition: the output no longer reads as a Task"
+    );
+
+    assert!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "an output that cannot be re-read is not returned"
+    );
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    assert!(
+        verdict.is_verified(),
+        "the receipt still verifies; only the live re-read excludes — got: {verdict}"
+    );
+}
+
+/// "No such flow here" and "no valid outputs" are different answers. A flow
+/// URI the perspective's catalogue does not hold is an error — through the
+/// enumeration and through the model-query filter — while the real flow
+/// with no receipts is an honest empty list.
+///
+/// Red if `flow_valid_outputs` answers an unknown flow with `Ok([])`: a
+/// typo'd flow URI in a payout query would then read as "nobody delivered".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_flow_is_an_error_not_an_empty_answer() {
+    use super::flow_instance::produced::flow_valid_outputs;
+
+    let f = seed_satisfied_fixture(None).await;
+    const UNKNOWN: &str = "delivery://NoSuchFlow";
+
+    // Control: the real flow, nothing minted — an honest, successful empty.
+    assert!(flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+        .await
+        .expect("a known flow with no receipts answers")
+        .is_empty());
+
+    let err = flow_valid_outputs(&f.perspective, UNKNOWN, None)
+        .await
+        .expect_err("an unknown flow must not answer with an empty list");
+    assert!(
+        err.to_string().contains("not on this perspective"),
+        "the error names the reason — got: {err:#}"
+    );
+
+    let query = serde_json::json!({ "where": { "producedByFlow": { "flow": UNKNOWN } } });
+    assert!(
+        f.perspective
+            .model_query("ns://Task", &query.to_string())
+            .await
+            .is_err(),
+        "the model-query filter surfaces the same error"
+    );
+}
+
+/// The receipt-body cap: `ad4m://flow/receipt_content` links are writable by
+/// anyone, so one enumeration reads at most `MAX_FLOW_RECEIPTS` of them,
+/// first by URI. Pinned at the boundary: with `MAX - 1` junk bodies sorting
+/// ahead of it the honest receipt is still read; with `MAX` of them it is
+/// dropped — and its output with it, the documented fail-closed cost (a
+/// dropped candidate only removes a witness).
+///
+/// Pins which guard answered: the dropped receipt still verifies on its
+/// own, so the cap — not the verifier — is what excluded it.
+///
+/// Red if the cap is removed or loosened, or applied before the sort.
+#[tokio::test(flavor = "multi_thread")]
+async fn at_most_max_flow_receipts_bodies_are_read_per_enumeration() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+    let honest_uri = honest.uri().expect("uri");
+
+    // `-` sorts before every hex digit and letter, so each junk node leads
+    // the honest one under the same prefix.
+    let junk = |i: usize| Link {
+        source: format!("{RECEIPT_URI_PREFIX}-junk-{i:04}"),
+        predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+        target: literal(&format!("not a receipt {i}")),
+    };
+    assert!(
+        junk(0).source < honest_uri,
+        "precondition: junk sorts first"
+    );
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS - 1).map(junk).collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("plant MAX - 1 junk bodies");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .len(),
+        1,
+        "MAX - 1 junk bodies leave room for the honest receipt"
+    );
+
+    f.perspective
+        .add_links(
+            vec![junk(MAX_FLOW_RECEIPTS - 1)],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("plant the MAX-th junk body");
+    assert!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "with MAX junk bodies ahead of it, the honest receipt is not read"
+    );
+    let verdict = verify_flow_receipt(&f.perspective, &honest)
+        .await
+        .expect("verify");
+    assert!(
+        verdict.is_verified(),
+        "the dropped receipt is fine on its own — the cap excluded it, got: {verdict}"
+    );
 }
