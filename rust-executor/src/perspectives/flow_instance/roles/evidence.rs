@@ -607,6 +607,8 @@ mod tests {
     /// answers `[]`, as the real store does for a predicate nobody wrote.
     /// Before #1129's review, any key that was not the tombstone predicate got
     /// grant links, so a misspelled key in `query_keys` passed every test.
+    /// `GateStore` in `flow_instance::grant` is pinned the same way
+    /// (`the_gate_store_answers_an_unknown_links_key_with_nothing`).
     #[tokio::test]
     async fn the_stub_answers_an_unknown_links_key_with_nothing() {
         let mut stub = members(&[ALICE()]);

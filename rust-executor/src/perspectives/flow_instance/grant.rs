@@ -212,6 +212,10 @@ mod tests {
     const ROLE_INSTANCE_2: &str = "ad4m://role/reviewer/r1";
     const SOMEBODY_ELSE: &str = "ad4m://role/reviewer/somebody-else";
     const ROLE: &str = "coasys://Reviewer";
+    /// The role's `didProperty`, and so the one `links` key [`GateStore`]
+    /// answers with Alice's assignment link. [`assignment`] writes it as the
+    /// predicate.
+    const GRANT_KEY: &str = "agent";
     /// Another class a flow might commit the very same node as.
     const TASK_CLASS: &str = "coasys://Task";
     const ALICE: &str = "alice";
@@ -251,7 +255,7 @@ mod tests {
     /// The `Reviewer` role query, gated on `spec` when given. `None` is the
     /// same query as an ordinary `didProperty` role.
     fn role(spec: Option<&ProducedByFlow>) -> ModelQuery {
-        let mut query = json!({ "className": ROLE, "didProperty": "agent" });
+        let mut query = json!({ "className": ROLE, "didProperty": GRANT_KEY });
         if let Some(spec) = spec {
             query["producedByFlow"] = serde_json::to_value(spec).expect("spec serialises");
         }
@@ -370,7 +374,7 @@ mod tests {
     fn assignment(id: &str) -> LinkExpression {
         signed_link(
             id,
-            "agent",
+            GRANT_KEY,
             did_of(ALICE),
             "admin",
             true,
@@ -414,8 +418,14 @@ mod tests {
     /// index. Records which flows' receipts were asked for.
     ///
     /// The history comes back the way `model_query` answers `links` (#1103):
-    /// under `__links`, one array per requested key — the tombstone
-    /// predicate gets no rows, any other key Alice's assignment link.
+    /// under `__links`, one array per requested key. [`GRANT_KEY`] gets
+    /// Alice's assignment link, and every other key, the tombstone predicate
+    /// included, gets no rows.
+    ///
+    /// The store is total over `links` keys, like the roles module's
+    /// `RoleStub`: a key nobody wrote answers `[]`, as the real store does.
+    /// It used to hand the assignment link to any key but the tombstone, so a
+    /// misspelled key in `query_keys` passed every test here.
     struct GateStore {
         instances: Vec<&'static str>,
         catalogue: HashMap<String, SHACLFlow>,
@@ -441,10 +451,10 @@ mod tests {
                         let links: serde_json::Map<String, Value> = keys
                             .iter()
                             .map(|key| {
-                                let rows = if key == ROLE_GRANT_REVOKED_PREDICATE {
-                                    Vec::new()
-                                } else {
+                                let rows = if key == GRANT_KEY {
                                     vec![assignment(id)]
+                                } else {
+                                    Vec::new()
                                 };
                                 (key.clone(), json!(rows))
                             })
@@ -501,6 +511,27 @@ mod tests {
             .expect("evidence for Alice")
             .resolve(&translated(did_of(ALICE)), &gate)
             .expect("resolves")
+    }
+
+    /// [`GateStore`] is total over `links` keys: a key it has no links for
+    /// answers `[]`, as the real store does for a predicate nobody wrote.
+    ///
+    /// This pins the double, not the gate. Every other test here asks for the
+    /// right keys, so a store that handed the assignment link to any key but
+    /// the tombstone passed them all, and a misspelled key in `query_keys`
+    /// would have passed with it. The roles module's `RoleStub` is pinned the
+    /// same way (`the_stub_answers_an_unknown_links_key_with_nothing`). The
+    /// two doubles answer the same question and must not drift apart.
+    #[tokio::test]
+    async fn the_gate_store_answers_an_unknown_links_key_with_nothing() {
+        let db = store(&[], Vec::new());
+        let mut query = translated(did_of(ALICE));
+        query["links"] = json!([GRANT_KEY, ROLE_GRANT_REVOKED_PREDICATE, "agnet"]);
+        let raw = db.model_query(ROLE, &query.to_string()).await.unwrap();
+        let links = &serde_json::from_str::<Value>(&raw).unwrap()["instances"][0]["__links"];
+        assert_eq!(links[GRANT_KEY].as_array().map(Vec::len), Some(1));
+        assert_eq!(links[ROLE_GRANT_REVOKED_PREDICATE], json!([]));
+        assert_eq!(links["agnet"], json!([]), "a key nobody wrote has no links");
     }
 
     // ---- the grant itself, through the loader ------------------------------
