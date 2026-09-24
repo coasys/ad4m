@@ -13,6 +13,9 @@
  * public model API (`findAll`, `findOne`, the query builder) that a client
  * uses.
  *
+ * The same default covers the rows under `__links` and the order behind
+ * `limit`: a forged link must not reorder a page.
+ *
  * Not covered here, and still open: which instances are *selected* (`where`,
  * the class's flags, `count`) still matches unverified links. See the
  * `#[ignore]`d Rust test `proof_valid_where_does_not_select_on_a_forged_value`.
@@ -137,6 +140,56 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
       .includeUnverified()
       .get();
     expect(viaBuilder[0]?.name).to.equal("forged");
+  });
+
+  it("leaves the forged link out of __links by default", async () => {
+    const targets = async (includeUnverified?: boolean) => {
+      const [found] = await UnverifiedRecipe.findAll(perspective, {
+        where: { id: recipeId },
+        links: ["name"],
+        includeUnverified,
+      });
+      return found.__links!.name.map((row) => row.data.target);
+    };
+    expect(await targets()).to.deep.equal([Literal.from("real").toUrl()]);
+    expect(await targets(true)).to.deep.equal([
+      Literal.from("real").toUrl(),
+      Literal.from("forged").toUrl(),
+    ]);
+  });
+
+  it("does not let a forged link reorder a page", async () => {
+    // A second recipe with no name of its own. Unnamed sorts last, so page 1
+    // of `order: { name: "ASC" }, limit: 1` is the first recipe. A forged
+    // name that sorts first would put the second recipe there instead.
+    const other = new UnverifiedRecipe(perspective);
+    other.cuisine = "greek";
+    await other.save();
+    const [cuisine] = await perspective.get(
+      new LinkQuery({ source: other.id, predicate: "uvr://cuisine" })
+    );
+    await perspective.addLinkExpression({
+      author: cuisine.author,
+      timestamp: cuisine.timestamp,
+      data: {
+        source: other.id,
+        predicate: "uvr://name",
+        target: Literal.from("aaa").toUrl(),
+      },
+      proof: { key: cuisine.proof.key, signature: cuisine.proof.signature },
+    } as LinkExpression);
+
+    const page = (includeUnverified?: boolean) =>
+      UnverifiedRecipe.findAll(perspective, {
+        order: { name: "ASC" },
+        limit: 1,
+        includeUnverified,
+      });
+    expect((await page()).map((r) => r.id)).to.deep.equal([recipeId]);
+    expect(
+      (await page(true)).map((r) => r.id),
+      "the opt-in sorts on the forged name"
+    ).to.deep.equal([other.id]);
   });
 
   it("an explicit includeUnverified: false is the default", async () => {

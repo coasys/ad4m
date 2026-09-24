@@ -316,10 +316,11 @@ export type Query = {
    *
    * Included relations inherit the setting unless their sub-query sets its own.
    *
-   * Scope: this filters the links that hydrate an instance. Which instances
-   * are *selected*, and in what order (`where`, the class's flags, `count`,
-   * `$` projection counts, the order behind `limit`), still matches unverified
-   * links, see https://github.com/coasys/ad4m/issues/1120.
+   * The same applies to the rows under `__links`, to the order behind
+   * `limit`/`offset` and to `$` projections. Which instances are *selected*
+   * (`where`, the class's flags, `count`/`totalCount`, `transitive`
+   * projections) still matches unverified links, see
+   * https://github.com/coasys/ad4m/issues/1120.
    */
   includeUnverified?: boolean;
    * Return the individual links behind each instance, with their own author,

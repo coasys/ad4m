@@ -851,7 +851,7 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
-- **Rows** have the shape of a `LinkExpression` (`LinkRow` in the SDK), so you can verify `proof` yourself. A link stored without a proof arrives with an empty `key` and `signature`. Treat that as unverifiable, not as valid. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Rows** have the shape of a `LinkExpression` (`LinkRow` in the SDK), so you can verify `proof` yourself. A link stored without a proof arrives with an empty `key` and `signature`. Treat that as unverifiable, not as valid. Links whose signature did not verify are left out unless the query sets `includeUnverified` (see [Unverified Links](#unverified-links)). Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
 - **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
 - **Additive:** the rows are read by a separate query over the returned page. Asking for them never changes `createdAt`, `updatedAt` or any property value. `links` works with `where`, `order`, pagination, `properties` and inside an `include` sub-query (`include: { comments: { links: ["app://flag"] } }`).
@@ -884,7 +884,7 @@ const comments = await Comment.query(perspective)
 
 ### Unverified Links
 
-Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win.
+Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
 
 To *show* an unverified claim, for example a UI that marks a value as unverified, opt in:
 
@@ -897,11 +897,11 @@ const recipes = await Recipe.query(perspective).includeUnverified().get();
 
 Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
 
-> **Current limit:** this filters the links that *hydrate* an instance. It does not yet filter the links that decide *which* instances come back. `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount`, `$` projection counts and the sort order behind `limit`/`offset` all still match unverified links. The consequences:
+> **Current limit:** unverified links are skipped by what *hydrates* an instance, by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
 >
-> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back. A node with no verified links at all cannot be conjured this way.
+> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back, and on a page it takes a slot like any other instance. A node with no verified links at all cannot be conjured this way.
 > - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
-> - **Silent omission.** A forged link can reorder a page and push a genuine instance past `limit`. Nothing in the result shows that a row is missing.
+> - **Counts.** `count` and `totalCount` include instances matched only through unverified links, so they can be larger than the rows you can page through.
 >
 > Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
 
