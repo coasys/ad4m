@@ -357,7 +357,9 @@ pub(crate) fn requires_query_input(
 /// granter (`where: { author: X }`) with plain DIDs collapse into one author
 /// list on the outer DID property: `{ agent: { eq: did, author: [A, B] } }`.
 /// Branches that say more keep their own `OR` arm, with the author nested
-/// under each of the arm's fields.
+/// under each of the arm's fields. An arm that inherits an author does not
+/// collapse: the granters would become its own author and replace the
+/// inherited one on its fields, where they only scope the DID property.
 ///
 /// A level's `where` and its `or` are ANDed, so an arm's fields are links the
 /// rule filters on too. An arm with no `author` of its own therefore takes the
@@ -415,9 +417,12 @@ fn requires_where(
         }
     }
 
-    // `or` branches that only name a granter fold into one author list.
+    // `or` branches that only name a granter fold into one author list,
+    // unless that list would replace an author this level inherits.
     let granters = match (did_property, &author, alts) {
-        (Some(_), None, Some(alts)) if query.did_property.is_some() => {
+        (Some(_), None, Some(alts))
+            if query.did_property.is_some() && inherited_author.is_none() =>
+        {
             granter_only_branches(alts, record, acting_did)?
         }
         _ => None,
