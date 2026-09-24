@@ -149,6 +149,11 @@ pub(super) fn resolve_link_keys(
 /// link stored without a proof comes back as `{"key": "", "signature": "",
 /// "valid": false, "invalid": true}`.
 ///
+/// `data.target` is the target the link was signed over (the store's
+/// `wireTarget` annotation when a literal was written in another encoding
+/// than the store's canonical one), and the verdict was computed over those
+/// same bytes, so the verdict and a consumer's own re-verification agree.
+///
 /// Not viewer-scoped: like the rest of `model_query` on `dev`, this read does
 /// not take a `viewer_did`. When #1058 threads `viewer_author_filter` through
 /// `model_query`, this query needs it too, after `{local_status}`. It accepts
@@ -182,7 +187,7 @@ pub(super) async fn attach_links(
             .join(" ");
         let local_status = local_status_filter(shape);
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -192,6 +197,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 {local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
@@ -211,7 +217,12 @@ pub(super) async fn attach_links(
                 "data": {
                     "source": source,
                     "predicate": predicate,
-                    "target": s(row, "target"),
+                    // The signed bytes when the store keeps them apart
+                    // from its canonical literal rendering.
+                    "target": match s(row, "wireTarget") {
+                        w if w.is_empty() => s(row, "target"),
+                        w => w,
+                    },
                 },
                 "proof": {
                     "key": s(row, "proofKey"),
@@ -430,5 +441,69 @@ mod tests {
                 ("did:key:b", "s2")
             ]
         );
+    }
+
+    /// A `__links` row is documented as a signed link a consumer can verify
+    /// itself, so its target must be the signed bytes, not the store's
+    /// canonical rendering of a literal written in another encoding.
+    #[tokio::test]
+    async fn a_links_row_carries_the_signed_target() {
+        use super::super::test_helpers::execute_model_query_from_json;
+        use crate::agent::signatures::TestSigner;
+        use crate::types::{Link, LinkExpression, LinkStatus};
+
+        let signer = TestSigner::generate();
+        let store = SparqlStore::new(None).unwrap();
+        let sign = |predicate: &str, target: &str| {
+            let e = signer.sign(Link {
+                source: "we://i".into(),
+                predicate: Some(predicate.into()),
+                target: target.into(),
+            });
+            LinkExpression {
+                author: e.author,
+                timestamp: e.timestamp,
+                data: e.data,
+                proof: e.proof,
+                status: Some(LinkStatus::Shared),
+            }
+        };
+        let raw = "literal:string:Write the guide";
+        store.add_link(&sign("ad4m://type", "we://Note")).unwrap();
+        store.add_link(&sign("we://name", raw)).unwrap();
+
+        let shape = r#"{
+            "className": "Note",
+            "properties": {
+                "type": { "predicate": "ad4m://type", "required": true, "flag": true,
+                          "initial": "we://Note" },
+                "name": { "predicate": "we://name", "required": false }
+            }
+        }"#;
+        let result = execute_model_query_from_json(
+            &store,
+            "Note",
+            &ModelQueryInput {
+                links: Some(vec!["name".into()]),
+                ..Default::default()
+            },
+            shape,
+        )
+        .await
+        .unwrap();
+        let rows = result.instances[0][LINKS_KEY]["name"].as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(row["data"]["target"], raw);
+        assert_eq!(row["proof"]["valid"], true, "the stored verdict");
+        assert_eq!(row["proof"]["invalid"], false);
+        let link = LinkExpression {
+            author: row["author"].as_str().unwrap().into(),
+            timestamp: row["timestamp"].as_str().unwrap().into(),
+            data: serde_json::from_value(row["data"].clone()).unwrap(),
+            proof: serde_json::from_value(row["proof"].clone()).unwrap(),
+            status: None,
+        };
+        assert!(link.compute_proof_valid(), "the row verifies as returned");
     }
 }
