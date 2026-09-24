@@ -309,7 +309,10 @@ export type Query = {
    *
    * By default the executor withholds every link whose stored signature
    * verdict is not valid, so a forged or tampered link never becomes a
-   * property value, a relation target, `author` or `updatedAt`. Set this to
+   * property value, a relation target, `author` or `updatedAt`. That
+   * includes a typed relation's generated conformance getter. A `getter` you
+   * write yourself runs as written, so it reads unverified links unless it
+   * joins the link's `ad4m://ontology/proofValid` itself. Set this to
    * `true` only to *display* an unverified claim, e.g. a UI that marks a value
    * as unverified. Anything that acts on the data, such as a vote counter or a
    * role check, must leave it off.

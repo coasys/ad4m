@@ -886,6 +886,19 @@ const comments = await Comment.query(perspective)
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
 
+This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
+
+```typescript
+@HasMany({
+  getter: `SELECT ?target WHERE {
+    <Base> <recipe://comment> ?target .
+    ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <Base> <recipe://comment> ?target )>> ;
+       <ad4m://ontology/proofValid> "true" .
+  }`,
+})
+comments: string[] = [];
+```
+
 To *show* an unverified claim, for example a UI that marks a value as unverified, opt in:
 
 ```typescript
@@ -897,7 +910,7 @@ const recipes = await Recipe.query(perspective).includeUnverified().get();
 
 Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
 
-> **Current limit:** unverified links are skipped by what *hydrates* an instance, by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
+> **Current limit:** unverified links are skipped by what *hydrates* an instance (except a hand-written `getter`, see above), by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
 >
 > - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back, and on a page it takes a slot like any other instance. A node with no verified links at all cannot be conjured this way.
 > - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
