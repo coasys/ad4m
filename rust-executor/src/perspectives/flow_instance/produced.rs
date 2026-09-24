@@ -81,12 +81,28 @@
 //! flow an error. A flood under F's index can still make F's question
 //! unanswerable, but loudly, and only F's.
 //!
+//! # The quorum time, and nested receipts
+//!
+//! The role gate needs one thing the enumeration does not: **when** the
+//! instance was produced. [`first_produced_at`] answers it from the same
+//! verified set as [`valid_outputs`], as the earliest
+//! [`settled_at`](super::verify::ReceiptVerdict::Verified) among the
+//! receipts that name the instance. That is the moment the n-th distinct
+//! eligible voter signed, which no single party picks.
+//!
+//! A receipt's read-set may itself carry role evidence with receipts inside
+//! it, when the flow it completed was gated by another flow. So verification
+//! can recurse, and every function here has a `_within` form that takes the
+//! caller's remaining depth budget ([`GrantContext`]). The plain forms start
+//! from a full budget over the reader's catalogue.
+//!
 //! # What is deliberately NOT here
 //!
 //! - **A rename of `ad4m://flow/granted_by`.** The edge name is
-//!   role-flavoured for a general mechanism, but #1076 (open) follows and
-//!   documents that predicate throughout; renaming it underneath that PR
-//!   would conflict for no behavioural gain. Raised in the PR instead.
+//!   role-flavoured for a general mechanism. Nothing in the engine reads it
+//!   any more: #1076's gate finds receipts through F's index like every
+//!   other consumer here. [`mint_flow_receipt`] still writes it for per-node
+//!   discovery. Rename or drop it is an open question on the PR.
 //! - **Automatic minting on completion.** [`mint_flow_receipt`] is an
 //!   explicit call; nothing here mints as a side effect of a vote. Whether
 //!   the engine should is a design question for the flow plan, not this PR.
@@ -97,7 +113,7 @@ use super::receipt::{
     is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE, FLOW_RECEIPT_CONTENT_PREDICATE,
     FLOW_RECEIPT_PREDICATE,
 };
-use super::verify::{verify_receipt, ReceiptVerdict};
+use super::verify::{verify_receipt, verify_receipt_within, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{load_all_flow_instances, load_shacl_flows};
@@ -148,7 +164,48 @@ pub fn valid_outputs(
     state: Option<&str>,
     receipts: &[FlowReceipt],
 ) -> Vec<ValidOutput> {
-    let mut out: Vec<ValidOutput> = Vec::new();
+    valid_outputs_within(GrantContext::root(catalogue), flow_uri, state, receipts)
+}
+
+/// [`valid_outputs`] with the caller's remaining depth budget, for a receipt
+/// reached from inside another receipt's fold (module header, § *The quorum
+/// time, and nested receipts*).
+pub(crate) fn valid_outputs_within(
+    ctx: GrantContext<'_>,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+) -> Vec<ValidOutput> {
+    let mut out: Vec<ValidOutput> = verified_outputs(ctx, flow_uri, state, receipts)
+        .into_iter()
+        .map(|(output, _)| output)
+        .collect();
+    out.sort_by(|a, b| {
+        (&a.output, &a.terminal_state, &a.content, &a.receipt_uri).cmp(&(
+            &b.output,
+            &b.terminal_state,
+            &b.content,
+            &b.receipt_uri,
+        ))
+    });
+    out.dedup_by(|a, b| {
+        a.output == b.output && a.terminal_state == b.terminal_state && a.content == b.content
+    });
+    out
+}
+
+/// Every output a verified receipt for `flow_uri` \[in `state`\] speaks for,
+/// each with the quorum time of the run that produced it. Not sorted, not
+/// deduplicated. The one place the verdict is taken, so [`valid_outputs`],
+/// [`produced_by_flow`] and [`first_produced_at`] cannot disagree about
+/// which receipts count.
+fn verified_outputs(
+    ctx: GrantContext<'_>,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+) -> Vec<(ValidOutput, String)> {
+    let mut out = Vec::new();
     for receipt in receipts {
         // Cheap pre-check, but also a correctness one: a receipt for another
         // flow may legitimately verify, and must still not answer a question
@@ -156,8 +213,13 @@ pub fn valid_outputs(
         if receipt.flow_uri != flow_uri {
             continue;
         }
-        let verdict = verify_receipt(catalogue, receipt);
-        let ReceiptVerdict::Verified { terminal_state, .. } = &verdict else {
+        let verdict = verify_receipt_within(ctx, receipt);
+        let ReceiptVerdict::Verified {
+            terminal_state,
+            settled_at,
+            ..
+        } = &verdict
+        else {
             log::debug!(
                 "valid_outputs: a receipt for `{flow_uri}` does not verify and speaks for \
                  nothing here — {verdict}"
@@ -179,25 +241,17 @@ pub fn valid_outputs(
             }
         };
         for item in &receipt.outputs {
-            out.push(ValidOutput {
-                output: OutputRef::of(item),
-                content: item.content.clone(),
-                terminal_state: terminal_state.clone(),
-                receipt_uri: receipt_uri.clone(),
-            });
+            out.push((
+                ValidOutput {
+                    output: OutputRef::of(item),
+                    content: item.content.clone(),
+                    terminal_state: terminal_state.clone(),
+                    receipt_uri: receipt_uri.clone(),
+                },
+                settled_at.clone(),
+            ));
         }
     }
-    out.sort_by(|a, b| {
-        (&a.output, &a.terminal_state, &a.content, &a.receipt_uri).cmp(&(
-            &b.output,
-            &b.terminal_state,
-            &b.content,
-            &b.receipt_uri,
-        ))
-    });
-    out.dedup_by(|a, b| {
-        a.output == b.output && a.terminal_state == b.terminal_state && a.content == b.content
-    });
     out
 }
 
@@ -219,6 +273,58 @@ pub fn produced_by_flow(
     valid_outputs(catalogue, flow_uri, state, receipts)
         .iter()
         .any(|v| &v.output == output)
+}
+
+/// When `output` first became a valid output of `flow_uri` \[in `state`\]:
+/// the earliest quorum time among the verified receipts that name it, or
+/// `None` when none does. `Some` exactly when [`produced_by_flow`] is true.
+///
+/// This is what the `grantedByFlow` role gate dates a grant from
+/// ([`grant`](super::grant)). **Earliest wins** when several runs produced
+/// the same instance: the membership began at the first of them. Preferring
+/// the earlier, wider window is safe here because every candidate has been
+/// verified, so widening it costs a whole quorum under the reader's own
+/// rules, not a link write.
+///
+/// Like [`valid_outputs`] it applies no live-content check: a grant dated
+/// from a quorum stays granted after the role instance gains links (module
+/// header, § *The live-content check*).
+pub(crate) fn first_produced_at(
+    ctx: GrantContext<'_>,
+    output: &OutputRef,
+    flow_uri: &str,
+    state: Option<&str>,
+    receipts: &[FlowReceipt],
+) -> Option<String> {
+    verified_outputs(ctx, flow_uri, state, receipts)
+        .into_iter()
+        .filter(|(v, _)| &v.output == output)
+        .map(|(_, settled_at)| settled_at)
+        .reduce(earlier_of)
+}
+
+/// The earlier of two settle times **by parsed instant**, never by string:
+/// they are client-asserted RFC 3339 and clients disagree on flavour, so
+/// string order diverges from instant order inside a second (#1000).
+///
+/// An unparseable settle time sorts **first** and therefore wins, which is the
+/// fail-closed direction and not an accident: `granted_at` runs through
+/// [`parse_link_timestamp`](super::time::parse_link_timestamp) in
+/// [`RoleGrantWindow::open_at`](super::roles::RoleGrantWindow::open_at), where
+/// a value that cannot be placed in time means the window never opens. So one
+/// undatable receipt among several closes the grant rather than letting a
+/// datable sibling carry it — the same rule
+/// [`RoleGrantWindow::revoked_at`](super::roles::RoleGrantWindow::revoked_at)
+/// applies to tombstones. The string tiebreaker keeps two equally unparseable
+/// values resolving identically on every replica.
+fn earlier_of(a: String, b: String) -> String {
+    use super::time::parse_link_timestamp;
+    let key = |s: &String| (parse_link_timestamp(s), s.clone());
+    if key(&b) < key(&a) {
+        b
+    } else {
+        a
+    }
 }
 
 /// Is a committed output named as the class a `model_query` asks about?

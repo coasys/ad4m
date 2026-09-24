@@ -599,14 +599,7 @@ fn role_grant_views(
             continue;
         };
         let view = requires_query_input(role, &record, &evidence.did)
-            .and_then(|input| {
-                evidence.resolve(
-                    &input,
-                    role.granted_by_flow.as_ref(),
-                    role.count.as_ref(),
-                    ctx,
-                )
-            })
+            .and_then(|input| evidence.resolve(&input, role, ctx))
             .map_err(|e| {
                 e.context(format!(
                     "flow instance {}: role evidence for `{}` on `{}` does not resolve, so no \

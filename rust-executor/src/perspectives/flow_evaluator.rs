@@ -37,9 +37,7 @@ use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
-use crate::perspectives::flow_instance::receipt::{
-    FlowReceipt, FLOW_GRANTED_BY_PREDICATE, FLOW_RECEIPT_CONTENT_PREDICATE,
-};
+use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -598,20 +596,24 @@ pub trait RequiresQueryable: Send + Sync {
         Ok(RoleGrantLinks::default())
     }
 
-    /// The receipts on `node --ad4m://flow/granted_by--> receipt`, read whole
-    /// so the caller can verify them itself.
+    /// Every receipt filed under `flow_uri`'s index, read whole so the caller
+    /// can verify them itself.
     ///
-    /// Called only for a role query that declares `grantedByFlow`. The edges
-    /// are unsigned multi-edges anyone may write, and this call filters
-    /// nothing by authorship: collecting a receipt decides nothing, and every
-    /// check that matters — including that the receipt names `node` among its
-    /// own outputs — runs on the reading side (see
+    /// Called only for a role query that declares `grantedByFlow`. The index
+    /// is writable by anyone and this call trusts nothing in it: collecting a
+    /// receipt decides nothing, and every check that matters runs on the
+    /// reading side (see
     /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
+    ///
+    /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
+    /// this is an `Err` carrying
+    /// [`ReceiptBudgetExceeded`](crate::perspectives::flow_instance::produced::ReceiptBudgetExceeded),
+    /// never a shorter list.
     ///
     /// The default knows nothing, which is the fail-closed answer here: no
     /// receipts means no grant, so a stub that stays on this default never
     /// turns into "granted by something I could not see".
-    async fn granting_receipts(&self, _node: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+    async fn flow_receipts(&self, _flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
         Ok(Vec::new())
     }
 }
@@ -828,84 +830,13 @@ impl RequiresQueryable for PerspectiveInstance {
         })
     }
 
-    async fn granting_receipts(&self, node: &str) -> anyhow::Result<Vec<FlowReceipt>> {
-        use ad4m_client::literal::{Literal, LiteralValue};
-
-        let edges = self
-            .get_links(&LinkQuery {
-                source: Some(node.to_string()),
-                predicate: Some(FLOW_GRANTED_BY_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await?;
-
-        // Deterministic and bounded. The edges are writable by anyone, so
-        // without a cap a stranger could hang a thousand of them off a role
-        // instance and make every state read walk them all. Sorting by
-        // receipt URI first — which is the hash of the receipt's content —
-        // makes which ones survive the cap the same on every replica, so two
-        // replicas do not disagree about a grant because their stores
-        // enumerate links in different orders.
-        //
-        // Dropping candidates can only remove a possible witness from an
-        // existential gate, so the cap fails closed; see
-        // `flow_instance::grant`.
-        let mut uris: Vec<String> = edges.into_iter().map(|l| l.data.target).collect();
-        uris.sort();
-        uris.dedup();
-        if uris.len() > MAX_GRANTING_RECEIPTS {
-            log::warn!(
-                "granting_receipts: `{node}` carries {} `granted_by` edges; reading only the \
-                 first {MAX_GRANTING_RECEIPTS} by URI. A grant backed only by one of the \
-                 dropped receipts will NOT be counted.",
-                uris.len()
-            );
-            uris.truncate(MAX_GRANTING_RECEIPTS);
-        }
-
-        let mut receipts = Vec::with_capacity(uris.len());
-        for uri in uris {
-            let bodies = self
-                .get_links(&LinkQuery {
-                    source: Some(uri.clone()),
-                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-                    ..Default::default()
-                })
-                .await?;
-            // One malformed or missing body must not stop the flow from
-            // deriving a state: anyone can write these edges, so failing the
-            // read here would hand every reader a denial of service. Warn and
-            // move on — a receipt that cannot be read grants nothing.
-            for body in bodies {
-                // `literal:json:` and nothing else — the spelling
-                // `FLOW_RECEIPT_CONTENT_PREDICATE` documents. A body in any
-                // other encoding is not a receipt this reader knows how to
-                // check, and guessing at one would be inventing material.
-                let parsed = Literal::from_url(body.data.target.clone())
-                    .and_then(|l| l.get())
-                    .and_then(|v| match v {
-                        LiteralValue::Json(json) => {
-                            Ok(serde_json::from_value::<FlowReceipt>(json)?)
-                        }
-                        other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
-                    });
-                match parsed {
-                    Ok(receipt) => receipts.push(receipt),
-                    Err(e) => log::warn!(
-                        "granting_receipts: `{node}`: the body of receipt `{uri}` does not read \
-                         as a FlowReceipt and grants nothing: {e:#}"
-                    ),
-                }
-            }
-        }
-        Ok(receipts)
+    /// `produced`'s loader, unchanged: scoped to the flow before it is
+    /// budgeted, and an error over budget. One reader of F's receipts for
+    /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
+    async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
     }
 }
-
-/// How many `granted_by` edges one node is read through. See
-/// [`PerspectiveInstance::granting_receipts`] for why a cap is needed at all
-/// and why truncating fails closed.
-const MAX_GRANTING_RECEIPTS: usize = 8;
 
 /// Tri-state seal result for one target state's guard, used by the manual
 /// proposal path and by `accept.rs` when re-verifying a co-sign.

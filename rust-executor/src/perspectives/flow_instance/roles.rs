@@ -140,7 +140,7 @@
 //! author filter. See <https://github.com/coasys/ad4m/issues/1063>, which
 //! also waits on the `proof.valid` tri-state (#1046).
 
-use super::atom::{TransitionAtom, Vote};
+use super::atom::{OutputRef, TransitionAtom, Vote};
 use super::grant::{granted_by_flow_at, GrantContext};
 use super::receipt::FlowReceipt;
 use super::time::parse_link_timestamp;
@@ -151,9 +151,7 @@ use crate::perspectives::flow_evaluator::{
     revocation_link_counts_for_did, run_query, EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
-use crate::perspectives::shacl_parser::{
-    ConsensusRule, GrantedByFlow, ModelQuery, ModelQueryCount,
-};
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
 use crate::types::LinkExpression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -307,15 +305,19 @@ pub struct RoleInstanceHistory {
     /// audit-grade until `model_query` results carry per-link signatures.
     /// Flows whose role queries use `didProperty` never need it.
     pub asserted_instance_timestamp: Option<String>,
-    /// The receipts found on this instance's `ad4m://flow/granted_by` edges,
-    /// carried whole so a reader can verify them itself. Only collected for a
-    /// role query that declares `grantedByFlow`; empty for every other role,
-    /// and omitted from the serialised form when empty.
+    /// The granting flow's receipts that claim to name this instance, carried
+    /// whole so a reader can verify them itself. Only collected for a role
+    /// query that declares `grantedByFlow`; empty for every other role, and
+    /// omitted from the serialised form when empty.
     ///
-    /// Carried **unfiltered**, exactly like `revocation_links`: the edges are
-    /// unsigned multi-edges anyone may write, so collecting them decides
-    /// nothing, and every check that matters — the signatures inside, the DNA
-    /// hash, the replay, and the binding back to `instance_id` — happens in
+    /// Found through the granting flow's index
+    /// ([`load_flow_receipts`](super::produced::load_flow_receipts)) and
+    /// narrowed to the receipts whose `outputs` claim `(role class,
+    /// instance_id)`. That narrowing is **discovery, not trust**: it reads the
+    /// carried list before anything is verified. Every check that matters —
+    /// the signatures inside, the DNA hash, the re-fold, the outputs
+    /// commitment, and the `(class, id)` binding again, this time on verified
+    /// material — happens in
     /// [`grant::granted_by_flow_at`](super::grant::granted_by_flow_at) on the
     /// reading side.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -407,14 +409,22 @@ impl RoleGrantEvidence {
     /// the depth cap — becomes a reason to *grant*. Fail-closed has to mean
     /// the same thing at both ends of the rule, so this combination is an
     /// error rather than a subtlety.
+    ///
+    /// `role` is the role query **from the reader's own flow definition**,
+    /// never from the carried evidence. Its `grantedByFlow`, its `count`, and
+    /// its `className` all decide the answer, and a minter who could name any
+    /// of them would be naming the rule its own receipt is judged by. The
+    /// class matters because the receipt must name the instance as
+    /// `(className, id)` ([`grant`](super::grant)); [`Self::role_class`] is
+    /// carried and is not consulted.
     pub fn resolve(
         &self,
         translated_role_query: &Value,
-        granted_by: Option<&GrantedByFlow>,
-        count: Option<&ModelQueryCount>,
+        role: &ModelQuery,
         grants: GrantContext<'_>,
     ) -> anyhow::Result<RoleGrant> {
-        if granted_by.is_some() && cardinality_satisfied(count, 0) {
+        let granted_by = role.granted_by_flow.as_ref();
+        if granted_by.is_some() && cardinality_satisfied(role.count.as_ref(), 0) {
             anyhow::bail!(
                 "RoleGrantEvidence::resolve: the `{}` role gate combines `grantedByFlow` with a `count` satisfied by zero instances, so a receipt that FAILS to verify would make `{}` eligible rather than ineligible; refusing to gate (fail-closed)",
                 self.role_class,
@@ -431,12 +441,11 @@ impl RoleGrantEvidence {
             // instance no receipt grants is simply not a member, so it is
             // skipped rather than raised.
             if let Some(spec) = granted_by {
-                match granted_by_flow_at(
-                    grants,
-                    &instance.instance_id,
-                    spec,
-                    &instance.granting_receipts,
-                ) {
+                let output = OutputRef {
+                    class_name: role.class_name.clone(),
+                    id: instance.instance_id.clone(),
+                };
+                match granted_by_flow_at(grants, &output, spec, &instance.granting_receipts) {
                     Some(granted_at) => {
                         windows.push(RoleGrantWindow {
                             instance_id: instance.instance_id.clone(),
@@ -654,6 +663,24 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     // through the class's shape before querying links — see
     // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
     let did_property = role.did_property.as_deref();
+
+    // A `grantedByFlow` gate reads the granting flow's receipts once, up
+    // front, through `produced`'s budgeted loader. Over budget is an ERROR
+    // that propagates from here — see `grant` § *A receipt flood is an
+    // error*. It is never an empty list, because an empty list reads as
+    // "not a member" for every candidate. Every other role pays nothing: no
+    // read, no bytes in the read-set.
+    let flow_receipts = match &role.granted_by_flow {
+        Some(spec) => perspective.flow_receipts(&spec.flow).await.map_err(|e| {
+            e.context(format!(
+                "resolve_role_grants: the `{}` role gate's granting flow `{}` could not be read, \
+                 so no candidate's membership can be decided",
+                role.class_name, spec.flow
+            ))
+        })?,
+        None => Vec::new(),
+    };
+
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
@@ -664,12 +691,17 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
             let links = perspective
                 .role_grant_links(&role.class_name, &item.id, did_property, did)
                 .await?;
-            // Only for a gate that asks for them. Every other role pays
-            // nothing: no query, no bytes in the read-set.
-            let granting_receipts = match role.granted_by_flow.is_some() {
-                true => perspective.granting_receipts(&item.id).await?,
-                false => Vec::new(),
+            // Discovery narrowing only: the receipts that CLAIM this
+            // instance. Verification happens on the reading side.
+            let this = OutputRef {
+                class_name: role.class_name.clone(),
+                id: item.id.clone(),
             };
+            let granting_receipts: Vec<FlowReceipt> = flow_receipts
+                .iter()
+                .filter(|r| r.speaks_for(&this))
+                .cloned()
+                .collect();
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
@@ -898,7 +930,7 @@ mod tests {
         evidence
             .iter()
             .map(|e| {
-                e.resolve(&translated(role, &e.did), None, None, GrantContext::empty())
+                e.resolve(&translated(role, &e.did), role, GrantContext::empty())
                     .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
             })
             .collect()
@@ -1061,7 +1093,7 @@ mod tests {
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE()), None, None, GrantContext::empty()).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated, GrantContext::empty()).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.
@@ -1365,7 +1397,7 @@ mod tests {
                 granting_receipts: Vec::new(),
             }],
         }
-        .resolve(&query, None, None, GrantContext::empty())
+        .resolve(&query, &role, GrantContext::empty())
         .expect("resolves");
         assert!(
             grant.windows[0].revocations.is_empty(),
@@ -1395,12 +1427,7 @@ mod tests {
                 granting_receipts: Vec::new(),
             }],
         }
-        .resolve(
-            &translated(&role, ALICE()),
-            None,
-            None,
-            GrantContext::empty(),
-        )
+        .resolve(&translated(&role, ALICE()), &role, GrantContext::empty())
         .expect("resolves");
         assert_eq!(
             grant.windows[0].granted_at, T3,
