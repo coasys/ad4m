@@ -85,6 +85,11 @@ describe("p-diff-sync getOnlineAgents", () => {
         started[1].deferred.reject(new Error("conductor gone"));
 
         await assert.rejects(pending, /conductor gone/);
+
+        // The lookup has already failed, so settling the rest starts no new calls.
+        for (const s of started) s.deferred.resolve({ did: s.agent });
+        await flush();
+        assert.equal(started.length, CAP);
     });
 
     it("rejects the whole lookup when one get_agents_status call fails", async () => {
