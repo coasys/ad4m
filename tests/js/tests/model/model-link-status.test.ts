@@ -134,4 +134,24 @@ describe("Ad4mModel — linkStatus reads", function () {
     expect(card.note).to.equal("local note");
     expect(card.title).to.not.equal("shared title");
   });
+
+  it("restricts the `__links` rows to the same status", async () => {
+    const targets = (card: LinkStatusCard, key: string) =>
+      (card.__links?.[key] ?? []).map((l) => l.data.target);
+    const note = Literal.from("local note").toUrl();
+
+    const both = await find({ links: ["note"] });
+    expect(targets(both, "note")).to.deep.equal([note]);
+
+    const shared = await find({ linkStatus: "shared", links: ["note", "title"] });
+    expect(targets(shared, "note"), "the Local note link must not be listed").to.deep.equal([]);
+    expect(targets(shared, "title")).to.have.length(1);
+
+    const viaBuilder = await LinkStatusCard.query(perspective)
+      .where({ id: cardId })
+      .linkStatus("shared")
+      .links(["note"])
+      .get();
+    expect(targets(viaBuilder[0], "note")).to.deep.equal([]);
+  });
 });

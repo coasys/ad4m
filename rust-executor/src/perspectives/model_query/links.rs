@@ -43,10 +43,11 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-use super::sparql_builder::local_status_filter;
+use super::sparql_builder::{link_status_filter, local_status_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
 /// name in `shacl_parser`, so a class cannot declare a property it would
@@ -133,7 +134,8 @@ pub(super) fn resolve_link_keys(
 ///
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
 /// instance query applies, so a gossiped Shared link on a local predicate is not
-/// reintroduced through this side door.
+/// reintroduced through this side door. The query's `linkStatus` (#1116)
+/// applies here too, so a Shared-only read lists only Shared links.
 ///
 /// A link stored without a proof comes back as `"proof": {"key": "",
 /// "signature": ""}`. That is *not* "unsigned but valid":
@@ -148,6 +150,7 @@ pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
     keys: &[(String, String)],
+    link_status: Option<&LinkStatus>,
     instances: &mut [Value],
 ) -> Result<(), Error> {
     if keys.is_empty() || instances.is_empty() {
@@ -172,6 +175,7 @@ pub(super) async fn attach_links(
             .collect::<Vec<_>>()
             .join(" ");
         let local_status = local_status_filter(shape);
+        let link_status = link_status_filter(link_status);
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp ?proofKey ?proofSig WHERE {{
     {source_constraint}
@@ -182,7 +186,7 @@ pub(super) async fn attach_links(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
-{local_status}}}"#
+{link_status}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();

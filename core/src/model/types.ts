@@ -316,6 +316,7 @@ export type Query = {
    * `local: true` still reads only its Local links.
    *
    * Included relations inherit the setting unless their sub-query sets its own.
+   * The `__links` rows (see {@link Query.links}) are restricted the same way.
    *
    * Scope: this restricts the links that hydrate an instance. Which instances
    * are *selected* (`where`, the class's flags, `count`, `$` projection

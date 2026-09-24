@@ -897,7 +897,7 @@ const cards = await Card.query(perspective).linkStatus("shared").get();
 const drafts = await Card.findAll(perspective, { linkStatus: "local" });
 ```
 
-Use `linkStatus: "shared"` when the result is shown to another user, so nothing executor-private leaks into it. Under `"shared"`, a `local: true` property always comes back empty. Included relations inherit the setting unless their own sub-query sets `linkStatus`.
+Use `linkStatus: "shared"` when the result is shown to another user, so nothing executor-private leaks into it. Under `"shared"`, a `local: true` property always comes back empty. Included relations inherit the setting unless their own sub-query sets `linkStatus`. The [`__links` rows](#per-link-rows-with-links) are restricted the same way: under `"shared"` they list only Shared links.
 
 > **Current limit:** `linkStatus` restricts the links that *hydrate* an instance. It does not yet restrict the links that *select* instances: `where` conditions pushed into SPARQL, the class's flags, and `count`/`totalCount` and `$` projection counts still match links of any status. So a `"shared"` read with `where: { note: "x" }` can return an instance whose only `note` link is Local, with `note` left empty. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
 

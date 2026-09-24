@@ -775,7 +775,14 @@ pub(super) async fn execute_model_query_inner(
     };
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
-    attach_links(store, shape, &link_keys, &mut final_instances).await?;
+    attach_links(
+        store,
+        shape,
+        &link_keys,
+        query_input.link_status.as_ref(),
+        &mut final_instances,
+    )
+    .await?;
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {

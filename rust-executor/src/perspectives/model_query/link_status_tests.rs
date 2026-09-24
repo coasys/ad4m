@@ -282,6 +282,62 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
     );
 }
 
+/// The `__links` rows (#1117's `links` option) are read by their own query
+/// after hydration, so they need the same restriction. Otherwise a Shared-only
+/// read that asks for `links: ["note"]` returns the Local note link there,
+/// while `note` itself is withheld. Both plans, and an absolute IRI entry as
+/// well as a property name.
+#[tokio::test]
+async fn link_status_restricts_links_rows() {
+    let store = SparqlStore::new(None).unwrap();
+    ls_seed(&store);
+    let targets = |inst: &Value, key: &str| -> Vec<String> {
+        inst["__links"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("`__links.{key}` missing: {inst}"))
+            .iter()
+            .map(|r| r["data"]["target"].as_str().unwrap().to_string())
+            .collect()
+    };
+    for limit in [None, Some(10)] {
+        let read = |link_status: Option<LinkStatus>| {
+            let store = &store;
+            async move {
+                execute_model_query_from_json(
+                    store,
+                    "Card",
+                    &ModelQueryInput {
+                        limit,
+                        link_status,
+                        links: Some(vec!["title".to_string(), "ls://note".to_string()]),
+                        ..Default::default()
+                    },
+                    LS_SHAPE_JSON,
+                )
+                .await
+                .unwrap()
+                .instances[0]
+                    .clone()
+            }
+        };
+
+        let both = read(None).await;
+        assert_eq!(targets(&both, "title"), vec!["literal:string:shared"]);
+        assert_eq!(targets(&both, "ls://note"), vec!["literal:string:local"]);
+
+        let shared = read(Some(LinkStatus::Shared)).await;
+        assert_eq!(targets(&shared, "title"), vec!["literal:string:shared"]);
+        assert!(
+            targets(&shared, "ls://note").is_empty(),
+            "limit {limit:?}: a Shared-only read must not return the Local note link: {shared}"
+        );
+
+        let local = read(Some(LinkStatus::Local)).await;
+        assert!(targets(&local, "title").is_empty(), "{local}");
+        assert_eq!(targets(&local, "ls://note"), vec!["literal:string:local"]);
+    }
+}
+
 /// Instance *selection* is not restricted by `linkStatus` — #1120.
 ///
 /// `where: {note: "local"}` is pushed into SPARQL and matches the bare triple,
