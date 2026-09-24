@@ -1401,6 +1401,105 @@ mod tests {
         assert!(!alice.eligible_at(NOW, None));
     }
 
+    /// What `resolve_role_grants` carries for Alice's one `agent` role
+    /// instance when the store's `__links` rows are `history`.
+    async fn carried_for_alice(history: RoleGrantLinks) -> RoleInstanceHistory {
+        let mut stub = members(&[ALICE()]);
+        stub.histories.insert(ALICE().into(), history);
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let mut evidence =
+            resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
+                .await
+                .expect("resolve_role_grants");
+        evidence.remove(0).instances.remove(0)
+    }
+
+    /// The collection-side filters run on the `__links` rows (#1103), and
+    /// what they drop never reaches the read-set.
+    ///
+    /// These assert on the **carried** evidence, not on a verdict: `resolve`
+    /// re-applies the target and signature filters itself, so a verdict test
+    /// passes whether or not collection filtered. Before #1103 the same
+    /// filters sat in the raw `get_links` impl, which no test reached.
+    #[tokio::test]
+    async fn collection_carries_only_links_that_speak_for_the_candidate() {
+        let genuine = grant_link(ALICE(), T1);
+        let mut undatable = grant_link(ALICE(), T0);
+        undatable.timestamp = "not a time".into();
+        let about_bob = grant_link(BOB(), T0);
+        let forged_tombstone = role_link(
+            crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
+            ALICE(),
+            ADMIN(),
+            false,
+            T2,
+        );
+        let signed_tombstone = tombstone(ALICE(), ADMIN(), T3);
+        let tombstone_for_bob = tombstone(BOB(), ADMIN(), T2);
+
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links: vec![undatable, about_bob, genuine.clone()],
+            revocation_links: vec![
+                forged_tombstone,
+                tombstone_for_bob,
+                signed_tombstone.clone(),
+            ],
+        })
+        .await;
+        assert_eq!(
+            carried.grant_links,
+            vec![genuine],
+            "a grant link with no parseable timestamp can date nothing, and one naming Bob \
+             says nothing about Alice: neither travels"
+        );
+        assert_eq!(
+            carried.revocation_links,
+            vec![signed_tombstone],
+            "a tombstone whose signature fails, or that names Bob, does not travel"
+        );
+    }
+
+    /// At most [`MAX_GRANT_LINKS`] grant links travel, the earliest — and a
+    /// link whose signature verifies claims a slot before one that does not,
+    /// so forged early links cannot evict the genuine assignment. Evicted,
+    /// the reader would fall back to the instance's own, earlier timestamp
+    /// once #1063 drops unverified grant links: fail-open.
+    #[tokio::test]
+    async fn the_grant_link_cap_keeps_the_earliest_and_prefers_verified_links() {
+        use crate::perspectives::flow_evaluator::MAX_GRANT_LINKS;
+
+        let early = |i: usize| format!("2025-12-31T00:00:{i:02}.000Z");
+        let genuine = grant_link(ALICE(), T1);
+        let mut grant_links: Vec<LinkExpression> = (0..MAX_GRANT_LINKS)
+            .map(|i| role_link("agent", ALICE(), ADMIN(), false, &early(i)))
+            .collect();
+        grant_links.push(genuine.clone());
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links,
+            revocation_links: Vec::new(),
+        })
+        .await;
+        assert_eq!(carried.grant_links.len(), MAX_GRANT_LINKS, "capped");
+        assert!(
+            carried.grant_links.contains(&genuine),
+            "{MAX_GRANT_LINKS} forged earlier links must not evict the signed assignment"
+        );
+
+        let signed: Vec<LinkExpression> = (0..=MAX_GRANT_LINKS)
+            .map(|i| grant_link(ALICE(), &early(i)))
+            .collect();
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links: signed.clone(),
+            revocation_links: Vec::new(),
+        })
+        .await;
+        assert_eq!(
+            carried.grant_links,
+            signed[..MAX_GRANT_LINKS].to_vec(),
+            "all verified: the earliest {MAX_GRANT_LINKS}, earliest first"
+        );
+    }
+
     /// A tombstone whose signature does not check out is not a revocation —
     /// the vote-layer rule (`atom::signed_by`: a link whose verdict is not
     /// `valid` is not a link anyone wrote), applied to tombstones by
