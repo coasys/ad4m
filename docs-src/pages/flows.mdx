@@ -320,7 +320,7 @@ These are **absent, not stubbed**. Do not go looking for them:
 | --- | --- |
 | `FlowInstance.fireAction()` | no direct fire — an edge fires only by reaching quorum |
 | `onStateChange` / `onProposalAdded` / `onProposalResolved` | no flow subscriptions — poll `findAll` / `proposals()` / `currentStateName` |
-| `FlowInstance.mintReceipt()` | receipts exist in the engine (`grantedByFlow` reads them) but there is no client mint API yet — see [Roles](#roles-who-is-allowed-to-sign) |
+| automatic receipt minting | a settled run gets a receipt only when someone calls `perspective.mintFlowReceipt(instanceUri)` — see [Roles](#roles-who-is-allowed-to-sign) |
 
 `FlowTransition.actions` is on the type and nothing executes it.
 
@@ -513,9 +513,26 @@ consensusRule: {
 }
 ```
 
-Both fields are required. The engine follows `role --ad4m://flow/granted_by--> receipt`, verifies the receipt against **this replica's** catalogue, and counts the instance only if some receipt names it as an output, is for `flow`, and settled into `terminalState`. There is no fallback to the assignment link — if there were, writing that link would grant the role and the gate would be decorative.
+Both fields are required. The engine reads the receipts filed under `flow` (`flow --ad4m://flow/flow_receipt--> receipt`), verifies each against **this replica's** catalogue, and counts the instance only if a receipt is for `flow`, settled into `terminalState`, and names the instance as an output by **className and id**. The className is the one in your `fromRole` query, never one the receipt carries. The grant is dated from that receipt's `settled_at`, the moment the grant reached quorum. There is no fallback to the assignment link — if there were, writing that link would grant the role and the gate would be decorative.
 
-Without a receipt, the gate is fail-closed: the instance does not count. That half is what the handover test can run today. The other half — minting the receipt when the grant flow completes — has no client API yet (`FlowInstance.mintReceipt` is absent, not stubbed). Retracting a settling vote on the grant flow moves the *live* flow back; a verifying receipt keeps verifying. Un-grant is a signed `ad4m://flow/role_grant_revoked` tombstone, not an invalidation of the receipt.
+Closing the loop from a UI takes two calls:
+
+```typescript
+// 1. The Grant clicks name the role instance as the run's output. `Granted`
+//    is terminal, so the proposal signs a hash over that instance's content.
+//    The run's subject is NOT an output unless you name it.
+await grant.proposeTransition("Granted", undefined, [
+  { className: "HandoverReviewerRole", id: role.id },
+]);
+
+// 2. Once the run has settled, any member mints its receipt.
+await perspective.mintFlowReceipt(grantRunUri);
+
+// Optional: what the gate will read.
+await perspective.flowValidOutputs("handover://ReviewerRoleGrantFlow", "Granted");
+```
+
+Every co-signer must name the same outputs; a click naming different ones is refused rather than joined. Nothing mints automatically: a run that settled but was never minted does not grant, and the gate is fail-closed until the receipt exists. Part 3 of the handover test runs both halves. Retracting a settling vote on the grant flow moves the *live* flow back; a verifying receipt keeps verifying. Un-grant is a signed `ad4m://flow/role_grant_revoked` tombstone, not an invalidation of the receipt.
 
 ## Contention
 

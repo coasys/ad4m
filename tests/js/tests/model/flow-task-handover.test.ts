@@ -70,22 +70,33 @@
  *  7. GRANTING A ROLE IS ITSELF A FLOW  (the fractal stretch)
  *     A `ReviewerRoleGrant` flow runs over a `HandoverReviewerRole` instance
  *     as its base. Completing that flow is *not* what `fromRole` reads —
- *     unless the query also carries `grantedByFlow`. Without a receipt
- *     linking the role instance to that completed run, `grantedByFlow` is
- *     fail-closed: the instance does not count. There is no JS mint-receipt
- *     API yet, so a UI cannot close the loop from "grant flow reached
- *     Granted" to "this DID is now eligible" without writing raw receipt
- *     links. Named below as GAP 1.
+ *     unless the query also carries `grantedByFlow`:
+ *       grantedByFlow: { flow: "handover://ReviewerRoleGrantFlow",
+ *                        terminalState: "Granted" }
+ *     Then an instance counts only when it is a verified OUTPUT (className
+ *     AND id) of a completed run of that flow, dated from the receipt's
+ *     `settled_at`. The UI closes the loop in three calls:
+ *       // a) the Grant clicks name the role instance as the run's output
+ *       await grant.proposeTransition("Granted", undefined,
+ *         [{ className: "HandoverReviewerRole", id: role.id }]);
+ *       // b) once it has settled, any member mints the receipt
+ *       await perspective.mintFlowReceipt(grantRunUri);
+ *       // c) optional: what the gate will read
+ *       await perspective.flowValidOutputs(grantFlowUri, "Granted");
+ *     No receipt, no membership: `grantedByFlow` is fail-closed. A settled
+ *     run nobody minted does not count, and neither does a nominated
+ *     instance whose own grant run never settled.
  *
  * ---------------------------------------------------------------------------
  * GAPS THIS FILE NAMES rather than papers over
  * ---------------------------------------------------------------------------
- *  GAP 1 — no `FlowInstance.mintReceipt()` / `perspective.mintFlowReceipt`.
- *          `grantedByFlow` is live in the engine (#1076) and this file
- *          proves the fail-closed half. The positive half (a completed grant
- *          flow makes the DID eligible) needs a receipt on
- *          `role --ad4m://flow/granted_by--> receipt`, and minting that is
- *          still Rust-only.
+ *  GAP 1 — CLOSED. It was "no JS mint API, so the positive half of
+ *          `grantedByFlow` cannot be written". #1127 added
+ *          `perspective.mintFlowReceipt` / `flowValidOutputs` /
+ *          `verifyFlowReceipt`, and #1076 now reads grants through #1127's
+ *          per-flow receipt index. Part 3 runs both halves. What a UI still
+ *          has to do by hand: call `mintFlowReceipt` after the grant settles.
+ *          Nothing mints automatically.
  *  GAP 2 — no flow subscriptions (`onStateChange` / `onProposalAdded`).
  *          Poll `findAll` / `proposals()` / `currentStateName`.
  *  GAP 3 — `FlowTransition.actions` exists on the type and nothing executes it.
@@ -432,7 +443,7 @@ describe("flow task handover — WE-facing API with roles", function () {
 
   // ── Part 3: fractal — a flow whose output is a role ──────────────────────
 
-  it("Part 3 — grant flow over a ReviewerRole; fromRole matches before Granted; grantedByFlow does not", async () => {
+  it("Part 3 — grant flow over a ReviewerRole; fromRole matches before Granted; grantedByFlow counts only a minted grant", async () => {
     const { aliceP, bobP } = await sharedPerspective("handover-grant-flow");
     await aliceP.addFlow("ReviewerRoleGrant", makeGrantFlow());
 
@@ -479,26 +490,44 @@ describe("flow task handover — WE-facing API with roles", function () {
     ).to.have.lengthOf(1);
     expect(openDone.derivedState).to.equal("Done");
 
-    // Completing the grant flow is still a real WE call — two clicks on
-    // Grant. It does not change the hole above; it is the run a receipt
-    // would later speak for (GAP 1).
+    // Completing the grant flow is a real WE call — two clicks on Grant.
+    // It does not change the hole above. Each click names the run's OUTPUT:
+    // the role instance itself. `Granted` is terminal, so the proposal signs
+    // a hash over that instance's content, and a receipt for this run can
+    // speak for exactly that instance and nothing else. The run's subject is
+    // never an output by default — name it, or the receipt grants nothing.
+    // Both clicks must name the same outputs: a press naming different ones
+    // is refused rather than joined (it would sign what the clicker did not
+    // name).
+    const grantOutputs = [{ className: "HandoverReviewerRole", id: role.id }];
     await createUnder<GrantEndorsement>(GrantEndorsement, aliceP, role.id, {
       reason: "Bob reviewed the last three frontend tasks.",
     });
-    const aliceGrant = await (await instanceOn(aliceP, role.id)).proposeTransition("Granted");
+    const aliceGrant = await (await instanceOn(aliceP, role.id)).proposeTransition(
+      "Granted",
+      undefined,
+      grantOutputs,
+    );
     expect(aliceGrant.outcomes, "grant is n:2 — Alice alone does not grant").to.have.lengthOf(0);
     expect(aliceGrant.recordedVote).to.be.true;
     expect(aliceGrant.derivedState).to.equal("Proposed");
 
-    const bobGrant = await (await instanceOn(bobP, role.id)).proposeTransition("Granted");
+    const bobGrant = await (await instanceOn(bobP, role.id)).proposeTransition(
+      "Granted",
+      undefined,
+      grantOutputs,
+    );
     expect(bobGrant.outcomes, "two DIDs settle the grant flow").to.have.lengthOf(1);
+    expect(bobGrant.minted, "Bob co-signed Alice's proposal, outputs and all").to.be.false;
     expect(bobGrant.derivedState).to.equal("Granted");
     expect((await instanceOn(aliceP, role.id)).currentStateName).to.equal("Granted");
+    const grantRunUri = bobGrant.outcomes[0].instanceUri;
 
     // ── grantedByFlow: fail-closed without a receipt ──────────────────────
     // Same role instance, same Bob, a fresh task whose Done carries
-    // grantedByFlow. No receipt is on the graph (GAP 1 — no JS mint API),
-    // so Bob must NOT count.
+    // grantedByFlow. The grant run has settled, but nobody has minted its
+    // receipt yet, so there is nothing for the gate to verify and Bob must
+    // NOT count. "The run completed" is not evidence; a receipt is.
     // Fail-on-old-code: if grantedByFlow is dropped on the floor, this
     // n:1 edge fires the same way the hole did.
     // Distinct flow name so this definition does not collide with TaskFlow
@@ -532,5 +561,92 @@ describe("flow task handover — WE-facing API with roles", function () {
     expect(gatedDone.recordedVote, "the click still wrote; the fold did not count it").to.be.true;
     expect(gatedDone.derivedState).to.equal("InReview");
     expect((await instanceOn(aliceP, gatedTask.id)).currentStateName).to.equal("InReview");
+    expect(
+      await aliceP.flowValidOutputs(GRANT_FLOW_URI, "Granted"),
+      "no receipt yet, so the grant flow has no valid outputs",
+    ).to.be.empty;
+
+    // ── grantedByFlow: the positive half — mint the receipt ───────────────
+    // Any member can mint once the run has settled. The receipt is filed
+    // under the grant flow (`F --ad4m://flow/flow_receipt--> receipt`), and
+    // that per-flow index is the only place the gate looks.
+    const minted = await aliceP.mintFlowReceipt(grantRunUri);
+    expect(minted.receiptUri).to.match(/^ad4m:\/\/flow\/receipt\//);
+
+    // What the gate will read, asked the way a UI would: the role instance
+    // is a valid output of a completed ReviewerRoleGrant run in `Granted`.
+    const granted = await aliceP.flowValidOutputs(GRANT_FLOW_URI, "Granted");
+    expect(granted).to.have.lengthOf(1);
+    expect(granted[0].output).to.deep.equal({ className: "HandoverReviewerRole", id: role.id });
+    expect(granted[0].receiptUri).to.equal(minted.receiptUri);
+    const verdict = await bobP.verifyFlowReceipt(minted.receipt);
+    expect(verdict.outcome, verdict.detail).to.equal("verified");
+    expect(verdict.voters).to.have.members([aliceDid, bobDid]);
+
+    // THE ONE RULE, on the gated task from the negative half: Bob's vote is
+    // unchanged, but a receipt is on the graph now, so the same vote counts.
+    // The grant is dated from the receipt's `settled_at` (when Bob's grant
+    // reached quorum), and Bob voted after that. Re-pressing writes nothing
+    // and re-derives.
+    const reDerived = await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
+    expect(reDerived.recordedVote, "Bob had already voted; nothing new is written").to.be.false;
+    expect(
+      reDerived.derivedState,
+      "the vote Bob cast before the mint counts once the receipt exists",
+    ).to.equal("Done");
+
+    // A fresh gated task, and a sharper non-holder: Alice now has her OWN
+    // ReviewerRole instance (same class, same domain), nominated through the
+    // same grant flow — but her run is still `Proposed`, so it has no
+    // completion to mint and no receipt names her instance.
+    const aliceRole = (await (ReviewerRole as any).create(aliceP, {
+      agent: aliceDid,
+      domain: "frontend",
+    })) as ReviewerRole;
+    const aliceNomination = await FlowInstance.start(aliceP, "ReviewerRoleGrant", aliceRole.id);
+    expect(aliceNomination.currentStateName).to.equal("Proposed");
+    let unminted = "";
+    try {
+      await aliceP.mintFlowReceipt(aliceNomination.uri);
+    } catch (e: any) {
+      unminted = String(e?.message ?? e);
+    }
+    expect(unminted, "a run that has not settled has nothing to mint").to.match(/no settled edge/);
+
+    const positiveTask = (await (Task as any).create(aliceP, {
+      title: "Positive grantedByFlow",
+    })) as Task;
+    await FlowInstance.start(aliceP, "GatedTaskFlow", positiveTask.id);
+    await advanceToInReview(aliceP, bobP, positiveTask.id);
+    await createUnder<ReviewNote>(ReviewNote, aliceP, positiveTask.id, { body: "ok" });
+
+    // Alice first. She matches `fromRole`'s where-clause through her own
+    // instance, so only the grant binding keeps her out.
+    // Fail-on-old-code: if the gate stops binding a receipt to the instance
+    // it names — reads "F completed" rather than "F produced THIS
+    // (className, id)" — Bob's receipt admits Alice's instance and this n:1
+    // edge fires on her click.
+    const aliceDone = await (await instanceOn(aliceP, positiveTask.id)).proposeTransition("Done");
+    expect(
+      aliceDone.outcomes,
+      "Alice's instance was never granted — if this fires, the receipt is not bound to its instance",
+    ).to.have.lengthOf(0);
+    expect(aliceDone.recordedVote).to.be.true;
+    expect(aliceDone.derivedState).to.equal("InReview");
+
+    // Bob, the holder. Fail-on-old-code: every earlier version of this file
+    // ran against a gate that could not grant from TS (no mint API), and a
+    // gate that never reads F's receipt index fails here the same way.
+    const bobDone = await (await instanceOn(bobP, positiveTask.id)).proposeTransition("Done");
+    expect(
+      bobDone.outcomes,
+      "Bob's role instance is a verified output of a completed grant run — he counts",
+    ).to.have.lengthOf(1);
+    expect(bobDone.outcomes[0].toState).to.equal("Done");
+    expect(bobDone.outcomes[0].voters).to.include(bobDid);
+    expect(bobDone.outcomes[0].voters, "Alice's earlier click still does not count").to.not.include(
+      aliceDid,
+    );
+    expect(bobDone.derivedState).to.equal("Done");
   });
 });
