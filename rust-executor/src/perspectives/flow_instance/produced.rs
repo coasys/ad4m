@@ -259,7 +259,10 @@ pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
 pub struct ReceiptBudgetExceeded {
     /// The flow whose receipts were being read.
     pub flow: String,
-    /// How many candidates the read found — more than `cap`.
+    /// A lower bound on the candidates: the count when the read stopped,
+    /// always more than `cap`. For the index it is exact; for bodies the
+    /// read stops as soon as the running count passes the budget, so it is
+    /// "at least this many" — which is all a refusal needs.
     pub found: usize,
     /// [`MAX_FLOW_RECEIPTS`].
     pub cap: usize,
@@ -269,7 +272,7 @@ impl std::fmt::Display for ReceiptBudgetExceeded {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "flow `{}` has {} receipt candidates, over the receipt budget of {}; its valid \
+            "flow `{}` has at least {} receipt candidates, over the receipt budget of {}; its valid \
              outputs cannot be decided without reading them all, so none are reported",
             self.flow, self.found, self.cap
         )
@@ -364,7 +367,9 @@ pub async fn load_flow_receipts(
 
 /// The bodies under each of `uris`, in order, as `(uri, body)` — one
 /// `fetch` (a store read) per URI, each URI's bodies sorted and deduplicated.
-/// Over [`MAX_FLOW_RECEIPTS`] bodies the read is `over_budget`'s error.
+/// The moment the running count passes [`MAX_FLOW_RECEIPTS`] the read stops
+/// with `over_budget`'s error — at worst one read past the budget, so a
+/// flood cannot make the reader visit every remaining entry first.
 async fn read_bodies_within_budget<F, Fut>(
     uris: &[String],
     mut fetch: F,
@@ -380,9 +385,11 @@ where
         under.sort();
         under.dedup();
         bodies.extend(under.into_iter().map(|body| (uri.clone(), body)));
-    }
-    if bodies.len() > MAX_FLOW_RECEIPTS {
-        return Err(over_budget(bodies.len()));
+        // Inside the loop: the budget bounds the reading, not just the
+        // answer — at worst one store read past it, never one per entry.
+        if bodies.len() > MAX_FLOW_RECEIPTS {
+            return Err(over_budget(bodies.len()));
+        }
     }
     Ok(bodies)
 }
