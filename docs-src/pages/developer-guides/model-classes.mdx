@@ -886,7 +886,7 @@ const comments = await Comment.query(perspective)
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
 
-This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
+This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A relation `where`, as in `@HasMany(() => Comment, { through: "recipe://comment", where: { status: "approved" } })`, reads each target's values through the same filter, so an unverified `status` link neither admits a comment nor drops one. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
 
 ```typescript
 @HasMany({

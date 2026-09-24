@@ -421,7 +421,7 @@ pub(super) fn evaluate_getters(
             (Some(wf), Some(wp)) => (wf, wp),
             _ => continue,
         };
-        apply_where_filter_to_relation(store, instances, &prop.name, wf, wp)?;
+        apply_where_filter_to_relation(store, instances, &prop.name, wf, wp, include_unverified)?;
     }
 
     // Unconditional, and here rather than at the end of the pipeline: the stash
@@ -460,12 +460,16 @@ fn strip_stashed_entries(instances: &mut [Value]) {
 /// the target instances' property values (via batched `VALUES` queries) and
 /// filters out targets that don't match the where conditions.  The relation
 /// arrays on each parent instance are updated in-place.
+///
+/// The values are read through the #1113 proof filter, so an unverified link
+/// on a target neither admits it nor, as the last row read, drops it.
 pub(super) fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
     where_filter: &BTreeMap<String, super::types::WhereCondition>,
     where_predicates: &HashMap<String, String>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let all_targets: Vec<String> = instances
         .iter()
@@ -519,8 +523,10 @@ pub(super) fn apply_where_filter_to_relation(
         }
 
         let query = format!(
-            "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val . }}",
-            target_constraint, predicate
+            "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val .{} }}",
+            target_constraint,
+            predicate,
+            verified_link_exists("?source", predicate, "?val", include_unverified)
         );
 
         let result_json = store.query(&query)?;
@@ -637,6 +643,46 @@ mod decode_getter_target_tests {
         assert_eq!(
             decode_getter_target("ad4m://Foo/instance/1", Some("xsd://string")),
             Value::String("ad4m://Foo/instance/1".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod verify_relation_getter_tests {
+    use super::*;
+
+    /// The exact getter `buildConformanceFilter` (`core/src/model/decorators.ts`)
+    /// emits for `FlaggedTarget` in `core/src/model/relation-filtering.test.ts`,
+    /// which asserts the same string. `verify_relation_getter` only filters a
+    /// getter of this form and passes any other through, so an SDK change to
+    /// the form would silently drop the #1113 filter from typed relations.
+    const SDK_GETTER: &str = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }";
+
+    #[test]
+    fn verify_relation_getter_rewrites_the_sdk_conformance_getter() {
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None);
+        assert!(!filter.is_empty());
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None),
+            SDK_GETTER.replacen(
+                "<Base> <test://has_flagged> ?target",
+                &format!("<Base> <test://has_flagged> ?target{filter}"),
+                1
+            )
+        );
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", Some(true)),
+            SDK_GETTER,
+            "the opt-in leaves the getter as written"
+        );
+    }
+
+    #[test]
+    fn verify_relation_getter_leaves_a_hand_written_getter_alone() {
+        let getter = "SELECT ?target WHERE { ?target <test://custom> <Base> . }";
+        assert_eq!(
+            verify_relation_getter(getter, "test://custom", None),
+            getter
         );
     }
 }

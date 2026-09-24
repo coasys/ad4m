@@ -15,7 +15,7 @@
  *
  * The same default covers the rows under `__links`, the order behind
  * `limit` (a forged link must not reorder a page), and a typed relation, whose
- * generated conformance getter the executor filters too.
+ * generated conformance getter and `where` the executor filters too.
  *
  * Not covered here, and still open: which instances are *selected* (`where`,
  * the class's flags, `count`) still matches unverified links. See the
@@ -63,6 +63,9 @@ class UnverifiedComment extends Ad4mModel {
 
   @Property({ through: "uvc://body" })
   body: string = "";
+
+  @Property({ through: "uvc://status" })
+  status: string = "";
 }
 
 /** A typed relation: the SDK gives it a generated conformance getter. */
@@ -73,6 +76,19 @@ class UnverifiedPost extends Ad4mModel {
 
   @HasMany(() => UnverifiedComment, { through: "uvp://comment" })
   comments: string[] = [];
+}
+
+/** A typed relation with a `where`, read after the getter fills it. */
+@Model({ name: "UnverifiedModeratedPost" })
+class UnverifiedModeratedPost extends Ad4mModel {
+  @Flag({ through: "uvm://type", value: "uvm://post" })
+  type = "uvm://post";
+
+  @HasMany(() => UnverifiedComment, {
+    through: "uvm://comment",
+    where: { status: "approved" },
+  })
+  approved: string[] = [];
 }
 
 describe("Ad4mModel — unverified links are withheld by default", function () {
@@ -97,6 +113,7 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
     await UnverifiedRecipe.register(perspective);
     await UnverifiedComment.register(perspective);
     await UnverifiedPost.register(perspective);
+    await UnverifiedModeratedPost.register(perspective);
 
     const recipe = new UnverifiedRecipe(perspective);
     recipe.name = "real";
@@ -250,6 +267,58 @@ describe("Ad4mModel — unverified links are withheld by default", function () {
     expect(await comments()).to.deep.equal([realId]);
     expect(await comments(true), "the opt-in returns the unverified target").to.deep.equal(
       [realId, otherId].sort()
+    );
+  });
+
+  it("does not let a forged value pass a typed relation's where", async () => {
+    // Two genuine comments, each only its signed type link, so neither has a
+    // `status` from `save()`'s initializers. One gets a signed "approved"; the
+    // other's only `status` link is a forged "approved", re-targeted from its
+    // signed type link.
+    const comment = async (id: string) => {
+      const typeLink = await perspective.add(
+        new Link({ source: id, predicate: "uvc://type", target: "uvc://comment" })
+      );
+      return typeLink;
+    };
+    const signedId = "uvc://comment/approved-signed";
+    const forgedId = "uvc://comment/approved-forged";
+    await comment(signedId);
+    const forgedType = await comment(forgedId);
+    await perspective.add(
+      new Link({
+        source: signedId,
+        predicate: "uvc://status",
+        target: Literal.from("approved").toUrl(),
+      })
+    );
+    await perspective.addLinkExpression({
+      author: forgedType.author,
+      timestamp: forgedType.timestamp,
+      data: {
+        source: forgedId,
+        predicate: "uvc://status",
+        target: Literal.from("approved").toUrl(),
+      },
+      proof: { key: forgedType.proof.key, signature: forgedType.proof.signature },
+    } as LinkExpression);
+
+    const post = new UnverifiedModeratedPost(perspective);
+    await post.save();
+    for (const target of [signedId, forgedId]) {
+      await perspective.add(new Link({ source: post.id, predicate: "uvm://comment", target }));
+    }
+
+    const approved = async (includeUnverified?: boolean) => {
+      const [found] = await UnverifiedModeratedPost.findAll(perspective, {
+        where: { id: post.id },
+        includeUnverified,
+      });
+      return [...found.approved].sort();
+    };
+    expect(await approved()).to.deep.equal([signedId]);
+    expect(await approved(true), "the opt-in reads the unverified status").to.deep.equal(
+      [signedId, forgedId].sort()
     );
   });
 
