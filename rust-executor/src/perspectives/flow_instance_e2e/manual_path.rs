@@ -486,6 +486,86 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     );
 }
 
+/// #1111 + #1112: everything `role_grant_links` reads through raw `get_links`
+/// is reachable through `model_query`, on the real store with real signatures.
+///
+/// `role_grant_links` exists because the class layer could see neither half of
+/// a role's history: the assignment link's *own* timestamp (only the
+/// instance's `createdAt` was exposed) and the revocation tombstone (a
+/// predicate the class does not declare, so never fetched). With `links` both
+/// come back as the stored `LinkExpression`s, and the same collection-side
+/// predicates the evaluator applies select the same links. That is the
+/// precondition for #1103 replacing the raw read; the replacement itself is
+/// out of scope here.
+///
+/// Fails on `dev`: `__links` is absent — the `links` option does not exist.
+#[tokio::test(flavor = "multi_thread")]
+async fn role_grant_evidence_is_reachable_through_model_query() {
+    use crate::perspectives::flow_evaluator::{
+        did_literal_url, grant_link_names_did, revocation_link_counts_for_did, RequiresQueryable,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    tick().await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+    let me = acting_did(&f);
+    let me_literal = did_literal_url(&me).expect("literal");
+
+    let raw = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .await
+        .expect("role_grant_links");
+    assert_eq!(raw.grant_links.len(), 1, "fixture: one assignment");
+    assert_eq!(raw.revocation_links.len(), 1, "fixture: one tombstone");
+
+    let query = serde_json::json!({ "links": ["owner", ROLE_GRANT_REVOKED_PREDICATE] });
+    let result: serde_json::Value = serde_json::from_str(
+        &RequiresQueryable::model_query(&f.perspective, "ns://Task", &query.to_string())
+            .await
+            .expect("model_query with links"),
+    )
+    .expect("result json");
+    let task = result["instances"]
+        .as_array()
+        .and_then(|a| a.iter().find(|i| i["id"] == serde_json::json!(TASK)))
+        .unwrap_or_else(|| panic!("TASK among the instances: {result}"))
+        .clone();
+    let carried = |key: &str| -> Vec<LinkExpression> {
+        task["__links"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{key}` rows through model_query: {task}"))
+            .iter()
+            .map(|r| serde_json::from_value(r.clone()).expect("row is a LinkExpression"))
+            .collect()
+    };
+
+    let grants: Vec<LinkExpression> = carried("owner")
+        .into_iter()
+        .filter(|l| grant_link_names_did(l, &me, &me_literal))
+        .collect();
+    let revocations: Vec<LinkExpression> = carried(ROLE_GRANT_REVOKED_PREDICATE)
+        .into_iter()
+        .filter(|l| revocation_link_counts_for_did(l, &me, &me_literal))
+        .collect();
+    assert_eq!(grants, raw.grant_links, "the assignment, byte for byte");
+    assert_eq!(
+        revocations, raw.revocation_links,
+        "the tombstone, with a signature that still verifies"
+    );
+
+    // #1112: the assignment is dated by its own link, later than the instance.
+    let created_at = task["createdAt"].as_str().expect("createdAt");
+    assert!(
+        grants[0].timestamp.as_str() > created_at,
+        "grant at {} must postdate the instance's createdAt {created_at}",
+        grants[0].timestamp
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The manual path: two candidates on one dedup key, foreign one first
 // ---------------------------------------------------------------------------

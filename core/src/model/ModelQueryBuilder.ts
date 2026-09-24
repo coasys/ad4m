@@ -225,6 +225,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Asks for the individual links behind each instance — author, timestamp
+   * and proof per link — under `instance.__links`. See `Query.links`.
+   *
+   * @param keys - Property / relation names, or absolute predicate IRIs
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const [post] = await Post.query(perspective).links(["comments"]).get();
+   * post.__links!.comments.map((l) => l.timestamp); // when each comment was attached
+   * ```
+   */
+  links(keys: string[]): ModelQueryBuilder<T> {
+    this.queryParams.links = keys;
+    return this;
+  }
+
+  /**
    * Controls whether SPARQL property getters are evaluated during hydration.
    *
    * By default, collection queries evaluate property getters (deepQuery=true).

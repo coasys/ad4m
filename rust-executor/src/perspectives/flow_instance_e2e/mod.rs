@@ -311,6 +311,18 @@ async fn grant_owner_role(f: &mut Fixture) {
         .await;
 }
 
+/// This replica's agent tombstones its own grant on `role_instance`.
+async fn revoke_own_role(f: &mut Fixture, role_instance: &str) {
+    let me = acting_did(f);
+    f.link(
+        role_instance,
+        ROLE_GRANT_REVOKED_PREDICATE,
+        &literal(&me),
+        LinkStatus::Shared,
+    )
+    .await;
+}
+
 /// Whether this replica's agent has an `acceptedBy` on `proposal`.
 async fn we_voted_on(f: &Fixture, proposal: &str) -> bool {
     let me = acting_did(f);

@@ -238,18 +238,6 @@ async fn seed_owner_gated_review_flow(rule: &str) -> Fixture {
     f
 }
 
-/// This replica's agent tombstones its own grant on `role_instance`.
-async fn revoke_own_role(f: &mut Fixture, role_instance: &str) {
-    let me = acting_did(f);
-    f.link(
-        role_instance,
-        ROLE_GRANT_REVOKED_PREDICATE,
-        &literal(&me),
-        LinkStatus::Shared,
-    )
-    .await;
-}
-
 /// A peer's tombstone revoking `revoked` on `role_instance`, delivered as sync would
 /// deliver it: signed by the peer's real key.
 async fn sync_revocation_from(

@@ -5813,8 +5813,21 @@ impl PerspectiveInstance {
     ) -> Vec<String> {
         let mut predicates = Vec::new();
 
-        if let Ok(shape) = self.get_shape(class_name) {
+        let shape = self.get_shape(class_name).ok();
+        if let Some(shape) = &shape {
             predicates.extend(shape.predicates());
+        }
+
+        // `links` reaches predicates the shape does not declare (a revocation
+        // tombstone); a subscription asking for one must re-run when it lands.
+        if let (Some(shape), Some(qj)) = (&shape, query_json) {
+            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
+                predicates.extend(super::model_query::links_trigger_predicates(
+                    shape,
+                    &query,
+                    &self.shape_resolver(),
+                ));
+            }
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -8295,6 +8308,41 @@ mod tests {
             ns = namespace,
             class = class
         )
+    }
+
+    /// A subscription's trigger set covers the predicates its `links` read,
+    /// including ones the shape does not declare and ones asked for inside an
+    /// `include` sub-query. Before, it held only the shape's predicates, so a
+    /// subscription asking for a revocation tombstone never re-ran when the
+    /// tombstone landed and kept reporting `[]`.
+    #[tokio::test]
+    async fn test_model_trigger_predicates_cover_links_iris() {
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(cache_test_shacl("Recipe", "ns://")),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let query = r#"{
+            "links": ["name", "ad4m://flow/role_grant_revoked"],
+            "include": { "steps": { "links": ["ns://nested_note"] } }
+        }"#;
+        let predicates = perspective.build_model_trigger_predicates("Recipe", Some(query));
+        for expected in [
+            "ns://name",
+            "ad4m://flow/role_grant_revoked",
+            "ns://nested_note",
+        ] {
+            assert!(
+                predicates.iter().any(|p| p == expected),
+                "trigger set {predicates:?} is missing {expected}"
+            );
+        }
     }
 
     #[tokio::test]
