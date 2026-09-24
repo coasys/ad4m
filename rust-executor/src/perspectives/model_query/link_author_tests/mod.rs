@@ -14,12 +14,14 @@
 //! - [`nested`]: `{ agent: { eq: X, author: A } }` and its operator forms.
 //! - [`side_by_side`]: `{ agent: X, author: A }`, both halves, and the bare form.
 //! - [`refusals`]: what the store cannot answer is an `Err`, never a guess.
+//! - [`flow_rules`]: social-DNA role rules, through the flow translator.
 //!
 //! Every positive and negative runs through the single-phase, the paginated
 //! and the COUNT plan and asserts they agree. Each negative that stands for the
 //! forgery makes the forged link the **sole** link on its predicate, so no
 //! ordering can pass it by luck.
 
+mod flow_rules;
 mod nested;
 mod refusals;
 mod side_by_side;
@@ -42,13 +44,16 @@ const BOB: &str = "did:key:zBob";
 
 /// `agent` as a literal property (a TS `@Property` holding a DID) and
 /// `member` as a relation to the DID itself (a TS `@HasOne`/`@HasMany`).
-/// A role query can name either one as its `didProperty`.
+/// A role query can name either one as its `didProperty`. `forTask` and `rank`
+/// are the other fields a social-DNA role rule filters on ([`flow_rules`]).
 const REVIEWER_SHAPE_JSON: &str = r#"{
     "className": "Reviewer",
     "properties": {
         "role": { "predicate": "ns://role", "required": true, "flag": true, "initial": "ns://reviewer" },
         "agent": { "predicate": "ns://agent", "required": false, "resolveLanguage": "literal" },
-        "note": { "predicate": "ns://note", "required": false, "resolveLanguage": "literal" }
+        "note": { "predicate": "ns://note", "required": false, "resolveLanguage": "literal" },
+        "forTask": { "predicate": "ns://forTask", "required": false, "resolveLanguage": "literal" },
+        "rank": { "predicate": "ns://rank", "required": false, "resolveLanguage": "literal" }
     },
     "relations": {
         "member": { "predicate": "ns://member" }

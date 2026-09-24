@@ -1,0 +1,158 @@
+//! Social-DNA role rules, translated by the flow engine
+//! (`flow_evaluator::requires_query_input`) and run through the store.
+//!
+//! A role rule's `author` names who may grant the role, so every link the rule
+//! filters on at that level must be one that author wrote: the DID property's
+//! link and every other field beside it. A translation table can only mirror
+//! the translator; these tests pin what the translated query *matches*.
+
+use super::*;
+use crate::perspectives::flow_context::FlowInstanceRecord;
+use crate::perspectives::flow_evaluator::requires_query_input;
+use crate::perspectives::shacl_parser::ModelQuery;
+
+/// The flow instance a role rule is evaluated for; `$flow.base` is `task`.
+fn record(task: &str) -> FlowInstanceRecord {
+    FlowInstanceRecord {
+        flow_uri: "ns://ReviewFlow".into(),
+        instance_uri: "ns://flow/1".into(),
+        subject: task.into(),
+        current_state: "open".into(),
+        created_at: None,
+    }
+}
+
+/// Translate `rule` for `candidate` on `task`, then run its `where` on every plan.
+async fn eligible(store: &SparqlStore, rule: &Value, task: &str, candidate: &str) -> Vec<String> {
+    let rule: ModelQuery = serde_json::from_value(rule.clone()).unwrap();
+    let translated = requires_query_input(&rule, &record(task), candidate).unwrap();
+    ids_on_every_plan(store, translated["where"].clone()).await
+}
+
+/// The design doc's reviewer rule
+/// (`docs/flow-interpretation-hints-design.md`): admin appoints a reviewer
+/// *for a task*. Admin appointed Mallory for T1; Mallory then added her own
+/// `forTask -> T2` link to that instance. Admin wrote the `agent` link, but not
+/// the `forTask` one, so she is a reviewer of T1 and not of T2.
+#[tokio::test]
+async fn a_granted_members_own_field_link_does_not_extend_the_grant() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/m",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(MALLORY)),
+            (ADMIN, "ns://forTask", lit("T1")),
+            (MALLORY, "ns://forTask", lit("T2")),
+        ],
+    );
+    let rule = json!({ "className": "Reviewer", "didProperty": "agent",
+                       "where": { "forTask": "$flow.base", "author": ADMIN } });
+
+    assert_eq!(
+        eligible(&store, &rule, "T1", MALLORY).await,
+        vec!["ns://r/m"],
+        "control: admin appointed her for T1"
+    );
+    assert!(
+        eligible(&store, &rule, "T2", MALLORY).await.is_empty(),
+        "Mallory's own `forTask -> T2` link must not make her a reviewer of T2"
+    );
+}
+
+/// The same hole inside an `or` branch: a member whose `agent` link admin
+/// wrote adds `rank -> lead` herself. The branch `{ rank: lead, author: admin }`
+/// must need admin's `rank` link too, or any member can promote herself.
+#[tokio::test]
+async fn a_member_cannot_promote_herself_through_an_or_branch() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/self",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(MALLORY)),
+            (MALLORY, "ns://rank", lit("lead")),
+        ],
+    );
+    role_instance(
+        &store,
+        "ns://r/lead",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(ALICE)),
+            (ADMIN, "ns://rank", lit("lead")),
+        ],
+    );
+    let plain = json!({ "className": "Reviewer", "didProperty": "agent",
+                        "where": { "rank": "lead", "author": ADMIN } });
+    let branched = json!({ "className": "Reviewer", "didProperty": "agent",
+                           "or": [ { "className": "Reviewer", "where": { "rank": "lead", "author": ADMIN } },
+                                   { "className": "Reviewer", "where": { "author": LEAD } } ] });
+
+    for rule in [&plain, &branched] {
+        assert!(
+            eligible(&store, rule, "T1", MALLORY).await.is_empty(),
+            "self-promotion through {rule}"
+        );
+        assert_eq!(
+            eligible(&store, rule, "T1", ALICE).await,
+            vec!["ns://r/lead"],
+            "control: admin made Alice lead, {rule}"
+        );
+    }
+}
+
+/// A positive `OR` whose arms each carry nested authors, the shape the
+/// translator emits for a branched rule. It has to be pushed into SPARQL (a
+/// per-link author in a declined clause is refused), so a result at all means
+/// the UNION of reifier joins ran. One instance per arm, and one whose links
+/// Mallory wrote, which matches neither.
+#[tokio::test]
+async fn a_pushed_or_with_nested_authors_in_each_arm_matches_per_arm() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/by-admin",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(ALICE)),
+            (ADMIN, "ns://rank", lit("lead")),
+        ],
+    );
+    role_instance(
+        &store,
+        "ns://r/by-lead",
+        LEAD,
+        &[(LEAD, "ns://agent", lit(ALICE))],
+    );
+    role_instance(
+        &store,
+        "ns://r/by-mallory",
+        ADMIN,
+        &[
+            (MALLORY, "ns://agent", lit(ALICE)),
+            (MALLORY, "ns://rank", lit("lead")),
+        ],
+    );
+    let expected = vec!["ns://r/by-admin", "ns://r/by-lead"];
+
+    let rule = json!({ "className": "Reviewer", "didProperty": "agent",
+                       "or": [ { "className": "Reviewer", "where": { "rank": "lead", "author": ADMIN } },
+                               { "className": "Reviewer", "where": { "author": LEAD } } ] });
+    assert_eq!(eligible(&store, &rule, "T1", ALICE).await, expected);
+
+    // The same shape written out, so it stays covered whatever the translator emits.
+    assert_eq!(
+        ids_on_every_plan(
+            &store,
+            json!({ "agent": ALICE, "OR": [
+                { "rank": { "eq": "lead", "author": ADMIN }, "agent": { "eq": ALICE, "author": ADMIN } },
+                { "agent": { "eq": ALICE, "author": LEAD } },
+            ] })
+        )
+        .await,
+        expected
+    );
+}
