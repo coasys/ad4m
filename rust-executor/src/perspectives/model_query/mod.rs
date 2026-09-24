@@ -81,6 +81,8 @@
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
 
+#[cfg(test)]
+mod collection_provenance_tests;
 mod eval_transform;
 mod filtering;
 mod getters;
@@ -110,8 +112,9 @@ pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::load_shape_from_store;
 pub use types::{
-    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput,
-    Scope, ShapeResolver, WhereCondition, WhereOps,
+    constrain_ids, take_produced_by_flow, IncludeValue, ModelQueryInput, ModelQueryResult,
+    ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
+    WhereCondition, WhereOps,
 };
 /// Re-export the shared IRI-safety predicate so write-side callers
 /// (e.g. `perspective_instance::resolve_property_value`,
