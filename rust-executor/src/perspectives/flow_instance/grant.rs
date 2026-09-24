@@ -1497,6 +1497,42 @@ mod tests {
         );
     }
 
+    // ---- a gate this replica cannot evaluate --------------------------------
+
+    /// **A gate naming a flow this replica does not hold is an error**, the
+    /// rule `flow_valid_outputs` already applies (#1127): "I do not have F's
+    /// rules" is not "no receipt grants this". Answering "not a member"
+    /// instead would let a replica that has not synced F silently derive a
+    /// different state for the gated flow than one that has.
+    ///
+    /// The control is the same evidence and the same gate over a catalogue
+    /// that holds F: granted. So the error is the missing definition.
+    ///
+    /// Red while `resolve` lets every carried receipt come back
+    /// `FlowUnknown` and answers `Ok` with no window.
+    #[test]
+    fn a_gate_naming_a_flow_this_replica_does_not_hold_is_an_error() {
+        let (receipt, _gated, cat) = one_level();
+        let granting_uri = receipt.flow_uri.clone();
+        let ev = evidence(vec![receipt], Vec::new());
+
+        let unsynced = catalogue(Vec::new());
+        let err = resolve(&ev[0], Some(&spec(&granting_uri, "done")), &unsynced)
+            .expect_err("a gate on a flow this replica does not hold cannot be decided");
+        assert!(
+            format!("{err:#}").contains(&granting_uri),
+            "the error names the missing flow, got: {err:#}"
+        );
+
+        assert_eq!(
+            resolve(&ev[0], Some(&spec(&granting_uri, "done")), &cat)
+                .expect("with the definition synced, it resolves")
+                .windows
+                .len(),
+            1
+        );
+    }
+
     // ---- the inversion that must never be configurable ---------------------
 
     /// `grantedByFlow` with a `count` satisfied by zero instances inverts the
