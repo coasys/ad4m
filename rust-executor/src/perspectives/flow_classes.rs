@@ -59,16 +59,16 @@ pub(crate) async fn ensure_flow_model_classes(
         context,
     )
     .await?;
-    // `outputs_hash` is the newest path (#1104). A perspective that
-    // registered the shape before it would silently drop the outputs a
-    // proposal into a terminal state writes, so its presence forces a
-    // re-register.
+    // `nonce` is the newest path (#1108; `outputs_hash` was #1104's). A
+    // perspective that registered the shape before it would silently drop
+    // the nonce every proposal now writes — and without a nonce no proposal
+    // is an atom — so its presence forces a re-register.
     ensure_subject_class(
         perspective,
         FLOW_TRANSITION_PROPOSAL_CLASS,
         FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
         FLOW_TRANSITION_PROPOSAL_SDNA,
-        Some(crate::perspectives::flow_instance::atom::OUTPUTS_HASH_PREDICATE),
+        Some(crate::perspectives::flow_instance::atom::PROPOSAL_NONCE_PREDICATE),
         context,
     )
     .await
@@ -169,10 +169,15 @@ pub(crate) async fn mint_flow_instance(
     Ok(uri)
 }
 
-/// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
+/// Mint one `FlowTransitionProposal` at its **content-addressed** URI:
+/// `ad4m://flow/proposal/{hash}`, where the hash covers the instance, the
+/// edge, the seal, the outputs commitment, the proposer and `nonce`
+/// ([`crate::perspectives::flow_instance::atom::proposal_uri`] — the one
+/// definition; a co-signer's vote signs the URI, so it must cover the
+/// fields, #1108).
 ///
-/// `proposal_id` and `batch_id` are caller-supplied, as in
-/// [`mint_flow_instance`], so the caller controls id generation and atomic
+/// `nonce` and `batch_id` are caller-supplied, as in
+/// [`mint_flow_instance`], so the caller controls uniqueness and atomic
 /// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
 /// `evidence` is a collection: it is passed as a JSON array and
@@ -195,7 +200,7 @@ pub(crate) async fn mint_flow_instance(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_flow_transition_proposal(
     perspective: &mut PerspectiveInstance,
-    proposal_id: &str,
+    nonce: &str,
     proposer_did: &str,
     flow_instance_uri: &str,
     from_state: &str,
@@ -207,9 +212,22 @@ pub(crate) async fn write_flow_transition_proposal(
     batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
+    use crate::perspectives::flow_instance::atom::{normalised_outputs, outputs_hash, OutputRef};
+
     ensure_flow_model_classes(perspective, context).await?;
 
-    let uri = flow_transition_proposal_uri(proposal_id);
+    // The commitment is part of the URI preimage, so it is computed before
+    // the URI. `Some(&[])` commits to "no outputs"; `None` commits to none.
+    let committed = outputs.map(outputs_hash);
+    let uri = crate::perspectives::flow_instance::atom::proposal_uri(
+        flow_instance_uri,
+        from_state,
+        to_state,
+        evidence_hash,
+        committed.as_deref(),
+        proposer_did,
+        nonce,
+    );
 
     let mut values = serde_json::json!({
         "flowInstance": flow_instance_uri,
@@ -217,6 +235,7 @@ pub(crate) async fn write_flow_transition_proposal(
         "toState": to_state,
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
+        "nonce": nonce,
     });
     if let Some(text) = rationale {
         if !text.is_empty() {
@@ -229,10 +248,10 @@ pub(crate) async fn write_flow_transition_proposal(
     }
 
     if let Some(items) = outputs {
-        use crate::perspectives::flow_instance::atom::{
-            normalised_outputs, outputs_hash, OutputRef,
-        };
-        values["outputsHash"] = outputs_hash(items).into();
+        values["outputsHash"] = committed
+            .clone()
+            .expect("committed is Some exactly when outputs is")
+            .into();
         let refs: Vec<OutputRef> = items.iter().map(OutputRef::of).collect();
         let encoded: Vec<String> = normalised_outputs(&refs)
             .iter()
@@ -411,6 +430,7 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
+            "nonce",
         ] {
             assert!(
                 names.contains(&expected),
@@ -544,6 +564,10 @@ mod tests {
             "evidenceHashes",
             "outputs",
             "outputsHash",
+            // The URI salt (#1108). Dropping this write silently makes every
+            // freshly-minted proposal a non-atom (`MissingField(nonce)`), so
+            // the alignment guard matters as much as for the scalars above.
+            "nonce",
             // Optional LLM-attribution field. Same alignment guard as
             // the required scalars — a rename in the SDNA that did not
             // land here would silently drop the rationale from the
@@ -603,7 +627,9 @@ mod tests {
         // If the two drift, a proposal into a terminal state is written with
         // outputs no voter can see, and every co-sign refuses it as
         // `Uncommitted`.
-        use crate::perspectives::flow_instance::atom::{OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE};
+        use crate::perspectives::flow_instance::atom::{
+            OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
+        };
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let path_of = |name: &str| {
             v["properties"]
@@ -619,6 +645,9 @@ mod tests {
             path_of("outputsHash").as_deref(),
             Some(OUTPUTS_HASH_PREDICATE)
         );
+        // Same drift guard for the nonce (#1108): the writer stores it via
+        // the SDNA, the atom re-reads it raw to recompute the URI.
+        assert_eq!(path_of("nonce").as_deref(), Some(PROPOSAL_NONCE_PREDICATE));
     }
 
     #[test]

@@ -7,17 +7,41 @@
 //!
 //! # What a verified receipt says
 //!
-//! > *n distinct eligible DIDs each signed a vote on an atom carrying this
-//! > seal and this outputs commitment, and here is the material the seal was
-//! > taken over and the outputs the commitment hashes.*
+//! > *n distinct eligible DIDs each signed a vote naming a proposal URI that
+//! > is the content address of this seal and this outputs commitment (and
+//! > the instance, the edge and the proposer), and here is the material the
+//! > seal was taken over and the outputs the commitment hashes.*
 //!
-//! Every word of that is cryptographic or re-derivable: n distinct DIDs
-//! signed `acceptedBy` links on an atom carrying seal S ([`atom::signed_by`],
-//! over verdicts this replica recomputed); each was eligible under the
-//! carried role evidence **as of its own vote's timestamp**; S rehashes
-//! from the carried preimage; and the receipt's output preimages (class,
-//! id, content) hash to the `outputs_hash` every counted atom on the final
-//! edge carries (#1104), checked here, never read on trust.
+//! Every word of that is cryptographic or re-derivable. A vote is the link
+//! `uri --acceptedBy--> did`; its signature covers that link (the URI, the
+//! predicate, the voter's DID, the timestamp) and **none of the proposal's
+//! fields directly**. The seal and the outputs commitment are signed only
+//! by the proposer. What ties them to the vote is the URI: it is the
+//! SHA-256 content address of `(instance, from_state, to_state, seal,
+//! outputs_hash-or-none)` under the proposer's DID and a proposer-signed
+//! nonce ([`atom::proposal_uri`](super::atom::proposal_uri)), recomputed
+//! from the proposer-signed fields on every read in
+//! `TransitionAtom::from_links` (#1108). A proposal whose fields do not
+//! hash to its URI is not an atom, and none of its votes count. So a vote
+//! binds the seal and the commitment exactly as far as SHA-256 is
+//! collision-resistant. The proposer picks every input, nonce included, so
+//! collision resistance is the property that matters, not second-preimage
+//! resistance.
+//!
+//! So: n distinct DIDs signed `acceptedBy` links ([`atom::signed_by`], over
+//! verdicts this replica recomputed) on an atom whose URI addresses seal S
+//! and outputs hash H; each was eligible under the carried role evidence
+//! **as of its own vote's timestamp**; S rehashes from the carried
+//! preimage; and the receipt's output preimages (class, id, content) hash
+//! to H, checked here, never read on trust (#1104). H is the one commitment
+//! every counted atom on the final edge carries. The fold makes that so
+//! by pooling terminal-edge votes per commitment, and step 7 below
+//! re-checks it.
+//!
+//! The URI does **not** cover the proposer's `output` links (the list of
+//! named refs). It does not need to. A receipt's outputs are checked
+//! against H, not against those links, so re-signing them after the votes
+//! changes nothing a verifier accepts.
 //!
 //! The protocol *requires* each of those voters to have recomputed the seal
 //! and the outputs commitment against their own graph and refused to sign on
@@ -49,7 +73,7 @@
 //!
 //! | Not proven | Why |
 //! | --- | --- |
-//! | **That any voter actually recomputed the seal before signing** | Compliance with a protocol obligation, not a property of the artifact — see above. What a signature proves is that the signer signed *that atom, carrying that seal*. |
+//! | **That any voter actually recomputed the seal before signing** | Compliance with a protocol obligation, not a property of the artifact — see above. What a signature proves is that the signer signed *that URI*, which addresses that seal and that outputs commitment (#1108). |
 //! | **That every counted atom's seal is inspectable** | `mint` accepts an empty `evidence_preimage`, so a receipt may carry none. Verification checks every preimage it *is* given and requires none. Demanding one per counted seal would reject receipts mint produced — the asymmetry that makes receipts fail their own verification. Tightening it belongs on the mint side first. |
 //! | **That the named outputs existed, with that content** | A voter loads every named output through its class on its own graph and recomputes the content hash before co-signing ([`check_outputs_commitment`](super::atom::check_outputs_commitment)). Like the seal recompute, that is a protocol obligation the receipt records and cannot evidence, and a pure verifier has no graph to look in. |
 //! | **That the outputs still look like that** | A receipt attests to the content at completion. An output edited later does not invalidate it: the carried preimages still hash to the signed commitment. A consumer that cares about the current content compares it itself. |
@@ -520,10 +544,15 @@ impl FlowReceipt {
     /// refuses any receipt whose `outputs` do not hash to the commitment the
     /// final edge's quorum signed ([`ReceiptVerdict::OutputsNotCommitted`],
     /// #1104), so on a verified receipt `true` here means the proposer named
-    /// `node` as an output, of some class, and every counted voter signed a
-    /// commitment to its content at completion.
-    pub fn speaks_for(&self, node: &str) -> bool {
-        self.outputs.iter().any(|o| o.id == node)
+    /// exactly this `(class, id)` as an output and every counted voter signed
+    /// a commitment to its content at completion.
+    pub fn speaks_for(&self, output: &OutputRef) -> bool {
+        // The whole ref, never the id alone: the same node read through
+        // another class is other content, and the quorum committed to the
+        // content as read through THIS class (#1108 review). An id-only
+        // answer would let a #1076 grant check accept a receipt whose
+        // voters saw the node through a class that shows almost nothing.
+        self.outputs.iter().any(|o| &OutputRef::of(o) == output)
     }
 }
 
@@ -594,39 +623,46 @@ mod tests {
     /// One proposal out of `open` into a terminal state, self-proposed and
     /// therefore self-voted, naming [`OUTPUT`] and committing to it.
     /// `proposer` is a persona name; the links carry that persona's real
-    /// signature.
-    fn proposal(uri: &str, proposer: &str, to: &str, at: &str) -> ProposalLinks {
-        ProposalLinks {
-            uri: uri.to_string(),
-            links: final_links(uri, proposer, "open", to, at),
-        }
+    /// signature. `nonce` salts the content-addressed URI the fixture
+    /// computes — the old per-fixture URI strings serve as nonces now.
+    fn proposal(nonce: &str, proposer: &str, to: &str, at: &str) -> ProposalLinks {
+        let (uri, links) = final_links(nonce, proposer, "open", to, at);
+        ProposalLinks { uri, links }
     }
 
-    /// The links of an honest proposal into terminal `to`, committing to
-    /// [`OUTPUT`].
+    /// An honest proposal into terminal `to`, committing to [`OUTPUT`]:
+    /// its content-addressed URI and its links.
     fn final_links(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        committed_links(uri, proposer, from, to, &[OUTPUT], &hash_of(&[OUTPUT]), at)
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        committed_links(
+            nonce,
+            proposer,
+            from,
+            to,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            at,
+        )
     }
 
     /// A proposal into terminal `to` naming `outputs` and signing
     /// `committed` as their hash. Honest when `committed ==
     /// hash_of(outputs)`.
     fn committed_links(
-        uri: &str,
+        nonce: &str,
         proposer: &str,
         from: &str,
         to: &str,
         outputs: &[&str],
         committed: &str,
         at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        signed_terminal_proposal(uri, proposer, from, to, &seal(), outputs, committed, at)
+    ) -> (String, Vec<DecoratedLinkExpression>) {
+        signed_terminal_proposal(nonce, proposer, from, to, &seal(), outputs, committed, at)
     }
 
     /// Each id's preimage as the fixture graph holds it ([`out_items`]).
@@ -716,11 +752,11 @@ mod tests {
             "got: {verdict}"
         );
         assert!(
-            receipt.speaks_for(OUTPUT),
+            receipt.speaks_for(&out_ref(OUTPUT)),
             "the binding a `granted_by` edge is checked against"
         );
         assert!(
-            !receipt.speaks_for(BASE),
+            !receipt.speaks_for(&out_ref(BASE)),
             "the run's subject is not an output unless the proposer named it"
         );
     }
@@ -1112,19 +1148,14 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
+        let proposal_uri = final_links("ad4m://p/1", ALICE, "open", "done", T1).0;
         let with_bobs_vote = |vote: DecoratedLinkExpression| {
-            let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+            let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
             links.push(vote);
-            read_set(
-                vec![ProposalLinks {
-                    uri: "ad4m://p/1".into(),
-                    links,
-                }],
-                Vec::new(),
-            )
+            read_set(vec![ProposalLinks { uri, links }], Vec::new())
         };
 
-        let receipt = mint(&flow, with_bobs_vote(signed_vote("ad4m://p/1", BOB, T2)));
+        let receipt = mint(&flow, with_bobs_vote(signed_vote(&proposal_uri, BOB, T2)));
         let reader = catalogue(vec![flow]);
         assert!(
             verify_receipt(&reader, &receipt).is_verified(),
@@ -1133,7 +1164,7 @@ mod tests {
 
         let mut tampered = receipt;
         tampered.read_set = with_bobs_vote(signed_link(
-            "ad4m://p/1",
+            &proposal_uri,
             ACCEPTED_BY_PREDICATE,
             did_of(BOB),
             BOB,
@@ -1167,7 +1198,7 @@ mod tests {
         let mut with_a_genuine_third = tampered;
         with_a_genuine_third.read_set.proposals[0]
             .links
-            .push(signed_vote("ad4m://p/1", CAROL, T2));
+            .push(signed_vote(&proposal_uri, CAROL, T2));
         let verdict = verify_receipt(&reader, &with_a_genuine_third);
         assert!(
             verdict.is_verified(),
@@ -1209,9 +1240,9 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
-        let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+        let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
         links.push(signed_link(
-            "ad4m://p/1",
+            &uri,
             ACCEPTED_BY_PREDICATE,
             did_of(BOB),
             BOB,
@@ -1219,13 +1250,7 @@ mod tests {
             Some(true),
             T2,
         ));
-        let forged = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links,
-            }],
-            Vec::new(),
-        );
+        let forged = read_set(vec![ProposalLinks { uri, links }], Vec::new());
 
         let err = FlowReceipt::mint(&flow, forged, outs(&[OUTPUT]), vec![delivered()])
             .expect_err("a quorum resting on a forged signature is not a quorum");
@@ -1239,15 +1264,9 @@ mod tests {
         // and it has no positive control of its own to say otherwise. The
         // same material with Bob's link genuinely signed must mint, so what
         // the refusal above turns on is the signature and nothing else.
-        let mut links = final_links("ad4m://p/1", ALICE, "open", "done", T1);
-        links.push(signed_vote("ad4m://p/1", BOB, T2));
-        let honest = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links,
-            }],
-            Vec::new(),
-        );
+        let (uri, mut links) = final_links("ad4m://p/1", ALICE, "open", "done", T1);
+        links.push(signed_vote(&uri, BOB, T2));
+        let honest = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         FlowReceipt::mint(&flow, honest, outs(&[OUTPUT]), vec![delivered()])
             .expect("the same material, honestly signed, must mint");
     }
@@ -1349,17 +1368,18 @@ mod tests {
         assert!(format!("{err:#}").contains("committed to"), "got: {err:#}");
 
         let mut with_twin = swapped;
+        let (twin_uri, twin_links) = committed_links(
+            "ad4m://p/attacker",
+            "mallory",
+            "open",
+            "done",
+            &[ATTACKER],
+            &hash_of(&[ATTACKER]),
+            T2,
+        );
         with_twin.read_set.proposals.push(ProposalLinks {
-            uri: "ad4m://p/attacker".into(),
-            links: committed_links(
-                "ad4m://p/attacker",
-                "mallory",
-                "open",
-                "done",
-                &[ATTACKER],
-                &hash_of(&[ATTACKER]),
-                T2,
-            ),
+            uri: twin_uri,
+            links: twin_links,
         });
         assert_eq!(
             verify_receipt(&reader, &with_twin),
@@ -1430,22 +1450,17 @@ mod tests {
                 { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
             ]),
         );
-        let rs = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links: signed_terminal_proposal(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &evidence_hash(&[], &[]),
-                    &[OUTPUT],
-                    &hash_of(&[OUTPUT]),
-                    T1,
-                ),
-            }],
-            Vec::new(),
+        let (uri, links) = signed_terminal_proposal(
+            "ad4m://p/1",
+            ALICE,
+            "open",
+            "done",
+            &evidence_hash(&[], &[]),
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            T1,
         );
+        let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         let receipt =
             FlowReceipt::mint(&unguarded, rs, outs(&[OUTPUT]), Vec::new()).expect("mints");
 
@@ -1463,13 +1478,20 @@ mod tests {
 
     /// **Required test (e).** Quorum belongs to an edge, so the counted votes
     /// into `done` can sit on twin atoms. Here Alice's atom commits to d1 and
-    /// Bob's to d1 and d2, and `{n: 2}` counts both. No set of outputs was
-    /// agreed by the whole quorum, so the receipt is refused whichever set it
-    /// names. Strict: there is no intersection (d1 alone does not verify).
+    /// Bob's to d1 and d2. No set of outputs was agreed by the whole quorum,
+    /// so the receipt is refused whichever set it names. Strict: there is no
+    /// intersection (d1 alone does not verify).
     ///
-    /// Red if `final_edge_commitment` reads only the first counted atom's
-    /// hash (the receipt naming d1 then verifies), or if it takes the
-    /// intersection or union of the named outputs.
+    /// Since #1108/#1118 the refusal is the fold's: a terminal edge pools
+    /// votes per commitment, each commitment here has one voter, `{n: 2}` is
+    /// met in neither group, and the run derives `open` — a `StateMismatch`
+    /// before any commitment is read. The `OutputsCommitmentConflict` arm
+    /// is pinned directly in `receipt::tests` against a hand-built settled
+    /// edge.
+    ///
+    /// Red if the fold pools terminal votes across commitments and
+    /// `final_edge_commitment` then reads only the first counted atom's hash
+    /// (the receipt naming d1 verifies), or takes the intersection or union.
     #[test]
     fn twin_final_edge_atoms_with_different_outputs_hashes_are_refused() {
         let n2 = || {
@@ -1500,29 +1522,29 @@ mod tests {
         );
 
         let mut conflicting = receipt;
+        let (rival_uri, rival_links) = committed_links(
+            "ad4m://p/2",
+            BOB,
+            "open",
+            "done",
+            &[OUTPUT, D2],
+            &hash_of(&[OUTPUT, D2]),
+            T2,
+        );
         conflicting.read_set.proposals[1] = ProposalLinks {
-            uri: "ad4m://p/2".into(),
-            links: committed_links(
-                "ad4m://p/2",
-                BOB,
-                "open",
-                "done",
-                &[OUTPUT, D2],
-                &hash_of(&[OUTPUT, D2]),
-                T2,
-            ),
+            uri: rival_uri,
+            links: rival_links,
         };
-        let mut expected = vec![hash_of(&[OUTPUT]), hash_of(&[OUTPUT, D2])];
-        expected.sort();
         for named in [outs(&[OUTPUT]), outs(&[OUTPUT, D2])] {
             let mut arrived = conflicting.clone();
             arrived.outputs = named.clone();
             assert_eq!(
                 verify_receipt(&reader, &arrived),
-                ReceiptVerdict::OutputsCommitmentConflict {
-                    hashes: expected.clone()
+                ReceiptVerdict::StateMismatch {
+                    claimed: "done".into(),
+                    derived: "open".into(),
                 },
-                "naming {named:?}"
+                "one voter per commitment settles nothing; naming {named:?}"
             );
         }
         let err = FlowReceipt::mint(
@@ -1533,7 +1555,7 @@ mod tests {
         )
         .expect_err("mint refuses what verify refuses");
         assert!(
-            format!("{err:#}").contains("commit to different outputs"),
+            format!("{err:#}").contains("can still transition out"),
             "got: {err:#}"
         );
     }
@@ -1543,21 +1565,37 @@ mod tests {
     /// have refused to co-sign it (`OutputsRefusal::Uncommitted`); a receipt
     /// is checked as if one did not.
     ///
-    /// Red if `final_edge_commitment` skips an atom with no `outputs_hash`
-    /// instead of reporting it.
+    /// The uncommitted proposal is honest about being uncommitted — its URI
+    /// addresses the field's absence. Stripping the `outputs_hash` links off
+    /// a committed proposal stopped being this test's shape with #1108: that
+    /// no longer un-commits the proposal, it un-atoms it (`UriMismatch`).
+    ///
+    /// Since #1108/#1118 an uncommitted terminal atom contributes no votes,
+    /// so the run derives `open` and the verdict is a `StateMismatch` before
+    /// any commitment is read. The `OutputsUncommitted` arm is pinned
+    /// directly in `receipt::tests` against a hand-built settled edge.
+    ///
+    /// Red if the fold counts an uncommitted terminal atom again and
+    /// `final_edge_commitment` then skips it instead of reporting it.
     #[test]
     fn a_final_edge_that_committed_to_no_outputs_is_refused() {
         let flow = two_state_flow();
         let mut receipt = mint(&flow, completed());
-        receipt.read_set.proposals[0].links.retain(|l| {
-            l.data.predicate.as_deref()
-                != Some(crate::perspectives::flow_instance::atom::OUTPUTS_HASH_PREDICATE)
-        });
+        let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+            "p-uncommitted",
+            ALICE,
+            "open",
+            "done",
+            &seal(),
+            T1,
+        );
+        receipt.read_set.proposals[0] = ProposalLinks { uri, links };
 
         assert_eq!(
             verify_receipt(&catalogue(vec![flow]), &receipt),
-            ReceiptVerdict::OutputsUncommitted {
-                proposal_uri: "ad4m://p/1".into()
+            ReceiptVerdict::StateMismatch {
+                claimed: "done".into(),
+                derived: "open".into(),
             }
         );
     }
@@ -1573,21 +1611,16 @@ mod tests {
     fn the_commitment_is_over_the_outputs_in_any_order_and_nothing_else() {
         let flow = two_state_flow();
         let three = [OUTPUT, "ad4m://deliverable/d2", "ad4m://deliverable/d3"];
-        let rs = read_set(
-            vec![ProposalLinks {
-                uri: "ad4m://p/1".into(),
-                links: committed_links(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &three,
-                    &hash_of(&three),
-                    T1,
-                ),
-            }],
-            Vec::new(),
+        let (uri, links) = committed_links(
+            "ad4m://p/1",
+            ALICE,
+            "open",
+            "done",
+            &three,
+            &hash_of(&three),
+            T1,
         );
+        let rs = read_set(vec![ProposalLinks { uri, links }], Vec::new());
         let receipt = FlowReceipt::mint(&flow, rs, outs(&three), vec![delivered()]).expect("mints");
         let reader = catalogue(vec![flow]);
 
@@ -1699,26 +1732,28 @@ mod tests {
                 { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
             ]),
         );
-        let final_edge = || ProposalLinks {
-            uri: "ad4m://p/2".into(),
-            links: final_links("ad4m://p/2", BOB, "doing", "done", T2),
+        let final_edge = || {
+            let (uri, links) = final_links("ad4m://p/2", BOB, "doing", "done", T2);
+            ProposalLinks { uri, links }
         };
         // The honest run walks both edges…
+        let (first_uri, first_links) =
+            crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+                "ad4m://p/1",
+                ALICE,
+                "open",
+                "doing",
+                "seal-1",
+                T1,
+            );
         let full = ReadSet {
             instance_uri: INSTANCE.to_string(),
             subject: BASE.to_string(),
             genesis: "open".to_string(),
             proposals: vec![
                 ProposalLinks {
-                    uri: "ad4m://p/1".into(),
-                    links: crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
-                        "ad4m://p/1",
-                        ALICE,
-                        "open",
-                        "doing",
-                        "seal-1",
-                        T1,
-                    ),
+                    uri: first_uri,
+                    links: first_links,
                 },
                 final_edge(),
             ],
@@ -1827,6 +1862,204 @@ mod tests {
         };
         assert_eq!(from_state, "open");
         assert_eq!(candidates.len(), 2, "both settled edges are named");
+    }
+
+    // ---- the post-co-sign swap (#1108, @lal-bot-coasys's blocker) -----------
+
+    /// **Lal's attack, end to end.** Alice proposes the final edge naming
+    /// [`OUTPUT`], Bob co-signs — his vote names only the proposal URI — and
+    /// Alice then re-signs `outputs_hash`/`output` naming [`ATTACKER`] under
+    /// that same URI, withholding the originals from the read-set she hands
+    /// a verifier. Bob's genuine signature sits on the swapped material.
+    ///
+    /// With a random URI this verified: nothing tied Bob's vote to what
+    /// Alice's links said. With a content-addressed URI the swapped fields
+    /// no longer address the voted URI, so the proposal is not an atom, the
+    /// vote does not count, and no receipt for [`ATTACKER`] can mint or
+    /// verify.
+    ///
+    /// Red while `from_links` skips the URI recompute — the swapped read-set
+    /// then folds to `done` and the receipt for [`ATTACKER`] verifies. Also
+    /// red for the mutation that drops `outputs_hash` from the URI preimage.
+    #[test]
+    fn a_post_co_sign_outputs_swap_cannot_mint_or_verify_a_receipt() {
+        use crate::perspectives::flow_instance::atom::fixtures::signed_terminal_links_at;
+        let flow = two_state_flow();
+
+        // The proposal Bob actually co-signed: committing to OUTPUT.
+        let (uri, honest_links) = final_links("p-swap", ALICE, "open", "done", T1);
+        let bobs_vote = signed_vote(&uri, BOB, T2);
+        let mut control_links = honest_links;
+        control_links.push(bobs_vote.clone());
+        let control = read_set(
+            vec![ProposalLinks {
+                uri: uri.clone(),
+                links: control_links,
+            }],
+            Vec::new(),
+        );
+        let receipt = FlowReceipt::mint(&flow, control, outs(&[OUTPUT]), vec![delivered()])
+            .expect("control: the co-signed proposal mints for the outputs it named");
+        assert!(
+            verify_receipt(&catalogue(vec![two_state_flow()]), &receipt).is_verified(),
+            "control: and verifies"
+        );
+
+        // The swap: the same URI, Alice's fields re-signed naming ATTACKER,
+        // the original outputs links withheld. Bob's vote carried over.
+        let mut swapped_links = signed_terminal_links_at(
+            &uri,
+            ALICE,
+            "open",
+            "done",
+            &seal(),
+            &[ATTACKER],
+            &hash_of(&[ATTACKER]),
+            "p-swap",
+            T1,
+        );
+        swapped_links.push(bobs_vote);
+        let swapped = read_set(
+            vec![ProposalLinks {
+                uri: uri.clone(),
+                links: swapped_links,
+            }],
+            Vec::new(),
+        );
+
+        assert!(
+            swapped.reverified().atoms().is_empty(),
+            "the swapped fields do not address the voted URI, so the proposal \
+             is not an atom and Bob's vote counts for nothing"
+        );
+        let err = FlowReceipt::mint(&flow, swapped.clone(), outs(&[ATTACKER]), vec![delivered()])
+            .expect_err("no receipt for the swapped output can mint");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "the fold must stay in `open` over the swapped read-set, got: {err:#}"
+        );
+        let mut arrived = receipt;
+        arrived.read_set = swapped;
+        arrived.outputs = outs(&[ATTACKER]);
+        let verdict = verify_receipt(&catalogue(vec![flow]), &arrived);
+        assert!(
+            !verdict.is_verified(),
+            "a hand-built receipt over the swapped read-set must not verify, got: {verdict}"
+        );
+    }
+
+    /// The same swap against the **evidence seal**: Bob co-signs Alice's
+    /// proposal sealed over the evidence he checked, and Alice re-signs
+    /// `evidence_hashes` under the same URI with a seal for other material,
+    /// naming the same outputs. Same answer for the same reason: the
+    /// re-signed fields no longer address the voted URI.
+    ///
+    /// Red while `from_links` skips the URI recompute, and red for the
+    /// mutation that drops the seal from the URI preimage.
+    #[test]
+    fn a_post_co_sign_seal_swap_cannot_mint_or_verify_a_receipt() {
+        use crate::perspectives::flow_instance::atom::fixtures::signed_terminal_links_at;
+        let flow = two_state_flow();
+
+        let (uri, _) = final_links("p-seal-swap", ALICE, "open", "done", T1);
+        // The re-signed material: same outputs, another seal — the preimage
+        // a dishonest proposer would carry for it. The receipt's own
+        // preimage check passes; the URI is what has to refuse.
+        let reframed = deliverables(&[OUTPUT, ATTACKER]);
+        let mut swapped_links = signed_terminal_links_at(
+            &uri,
+            ALICE,
+            "open",
+            "done",
+            &reframed.seal,
+            &[OUTPUT],
+            &hash_of(&[OUTPUT]),
+            "p-seal-swap",
+            T1,
+        );
+        swapped_links.push(signed_vote(&uri, BOB, T2));
+        let swapped = read_set(
+            vec![ProposalLinks {
+                uri,
+                links: swapped_links,
+            }],
+            Vec::new(),
+        );
+
+        assert!(
+            swapped.reverified().atoms().is_empty(),
+            "a re-signed seal does not address the voted URI"
+        );
+        let err = FlowReceipt::mint(&flow, swapped, outs(&[OUTPUT]), vec![reframed])
+            .expect_err("no receipt over the swapped seal can mint");
+        assert!(
+            format!("{err:#}").contains("can still transition out"),
+            "got: {err:#}"
+        );
+    }
+
+    /// Twins — same edge, same fields, different **nonces** — are different
+    /// content addresses and stay separate atoms, and the fold still pools
+    /// their votes on a non-terminal edge exactly as before (#1108 must not
+    /// re-break what `quorum_is_counted_across_twin_proposals_on_one_edge`
+    /// pinned at the fold layer; this pins it through `from_links`).
+    #[test]
+    fn twins_with_distinct_nonces_still_pool_their_votes_on_one_edge() {
+        let flow = flow_json(
+            json!([
+                { "name": "open", "value": 0.0 },
+                { "name": "doing", "value": 0.5, "consensusRule": { "n": 2 } },
+                { "name": "done", "value": 1.0, "requires": [{ "className": DELIVERABLE }] },
+            ]),
+            json!([
+                { "action_name": "Start", "from_state": "open", "to_state": "doing", "actions": [] },
+                { "action_name": "Finish", "from_state": "doing", "to_state": "done", "actions": [] },
+            ]),
+        );
+        let twin = |nonce: &str, proposer: &str, at: &str| {
+            let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+                nonce, proposer, "open", "doing", "seal-1", at,
+            );
+            ProposalLinks { uri, links }
+        };
+        let rs = read_set(
+            vec![twin("twin-a", ALICE, T1), twin("twin-b", BOB, T2)],
+            Vec::new(),
+        );
+        let atoms = rs.reverified().atoms();
+        assert_eq!(atoms.len(), 2, "two nonces, two atoms");
+        assert_ne!(atoms[0].uri, atoms[1].uri, "two nonces, two addresses");
+        let derived = fold_read_set(&flow, &rs.reverified()).expect("folds");
+        assert_eq!(
+            derived.state, "doing",
+            "one vote on each twin still reaches `n: 2` on the shared edge"
+        );
+    }
+
+    /// **`speaks_for` takes the class, not just the id** (#1108 review,
+    /// should-fix). An output is an instance *of a class* — the same node
+    /// read through another class is other content, which is the PR's own
+    /// argument for hashing `(class, id, content)`. A receipt whose quorum
+    /// agreed to `(Deliverable, X)` must not answer for X as an instance of
+    /// anything else, or a #1076 grant check could be satisfied by a receipt
+    /// whose voters saw X through a narrow class that shows almost nothing.
+    ///
+    /// Red while `speaks_for` compares ids only.
+    #[test]
+    fn speaks_for_requires_the_class_not_just_the_id() {
+        let receipt = mint(&two_state_flow(), completed());
+        assert!(
+            receipt.speaks_for(&out_ref(OUTPUT)),
+            "control: the committed (class, id) is spoken for"
+        );
+        assert!(
+            !receipt.speaks_for(&OutputRef {
+                class_name: "coasys://Role".to_string(),
+                id: OUTPUT.to_string(),
+            }),
+            "the same id under another class is other content, and the quorum \
+             never agreed to it"
+        );
     }
 
     /// Helper for the FlowUnknown fixture: a second flow whose URI differs.

@@ -165,17 +165,21 @@ async fn sync_committed_proposal_from(
     committed: Option<&str>,
 ) -> String {
     use super::flow_instance::atom::{
-        EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
-        OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSER_PREDICATE,
+        proposal_uri, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
+        OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE, PROPOSER_PREDICATE,
     };
-    let uri = format!("ad4m://flow/proposal/{id}");
+    // The peer computes the content-addressed URI exactly as the engine does
+    // (#1108); `id` is their nonce. A peer that did not would sync a
+    // proposal no replica reads as an atom.
     let instance_uri = f.instance_uri.clone();
+    let uri = proposal_uri(&instance_uri, from, to, seal, committed, &signer.did, id);
     let mut links = vec![
         (PROPOSER_PREDICATE, signer.did.clone()),
         (FLOW_INSTANCE_PREDICATE, instance_uri),
         (FROM_STATE_PREDICATE, literal(from)),
         (TO_STATE_PREDICATE, literal(to)),
         (EVIDENCE_HASHES_PREDICATE, literal(seal)),
+        (PROPOSAL_NONCE_PREDICATE, literal(id)),
     ];
     links.extend(
         outputs
@@ -1114,17 +1118,16 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
     )
     .await;
     let seal = seal_for(&f, "scoped").await;
-    // write_proposal takes a short ID; the full URI is ad4m://flow/proposal/<id>.
-    let proposal_id = "revoke-timing";
-    let proposal_uri = format!("ad4m://flow/proposal/{proposal_id}");
-    f.write_proposal(
-        proposal_id,
-        "identified",
-        "scoped",
-        &[TASK.to_string()],
-        &seal,
-    )
-    .await;
+    // write_proposal takes a nonce; the content-addressed URI comes back.
+    let proposal_uri = f
+        .write_proposal(
+            "revoke-timing",
+            "identified",
+            "scoped",
+            &[TASK.to_string()],
+            &seal,
+        )
+        .await;
     assert_eq!(
         f.derived().await.state,
         "identified",
@@ -1560,9 +1563,9 @@ async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_with_the_same_links_derive_the_same_state() {
     let mut a = seed_review_flow().await;
-    settle(&mut a, "h1", "review", "changes_requested").await;
-    settle(&mut a, "h2", "changes_requested", "review").await;
-    settle(&mut a, "h3", "review", "approved").await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
     let derived_a = a.derived().await;
     assert_eq!(derived_a.state, "approved");
     assert_eq!(
@@ -1580,11 +1583,7 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
     // deliver them in whatever order the network chose.
     let mut b = seed_review_flow().await;
     let mut proposal_links = Vec::new();
-    for uri in [
-        "ad4m://flow/proposal/h1",
-        "ad4m://flow/proposal/h2",
-        "ad4m://flow/proposal/h3",
-    ] {
+    for uri in [&h1, &h2, &h3] {
         proposal_links.extend(links_of(&a, uri).await);
     }
     proposal_links.reverse();
@@ -2439,6 +2438,162 @@ async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
     assert!(!joined.minted && joined.recorded_vote);
 }
 
+/// The "different outputs" refusal above is reserved for a proposal a voter
+/// COULD sign. Bob's terminal proposal here commits to a hash its named
+/// outputs do not produce, so `accept_flow_proposal` refuses it and
+/// `reject_flow_proposal` only retracts the caller's own links — telling the
+/// caller to "co-sign one or reject it" would let one peer block the manual
+/// path into the terminal state for everyone. An honest propose mints its
+/// own proposal instead, does not sign Bob's, and the run completes once a
+/// second voter co-signs it (Bob's vote does not pool with ours: its
+/// commitment is a different group, #1108/#1118).
+///
+/// Red if `live_proposal_role` compares commitments without first validating
+/// the live atom the way a co-signer would.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_with_a_bad_commitment() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    // Bob names the Task but signs a hash the Task's content does not produce.
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a proposal no voter could sign must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert_ne!(out.proposal_uri, bobs);
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the invalid proposal was not co-signed"
+    );
+    // Since #1108/#1118 a terminal edge pools votes per commitment, so Bob's
+    // proposer vote on a commitment nobody can sign does not count toward
+    // ours: one vote, short of `{n: 2}`. It used to pool — which is what let
+    // an early foreign proposal land in the settled edge and make the run
+    // unreceiptable.
+    assert_eq!(out.derived_state, "identified");
+    // The run is not wedged: a second voter co-signing our proposal settles
+    // the edge.
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// As above, with the other invalid shape: Bob names an output that does not
+/// load on this replica (never written), under a commitment that matches
+/// nothing. No voter could sign it, so it must not block; the honest propose
+/// mints and, once co-signed, the run completes.
+///
+/// Red if `live_proposal_role` reads the commitment mismatch before asking
+/// whether the proposal is signable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_whose_output_does_not_load() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref("ad4m://task/never-written")],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("an output that does not load must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the unloadable proposal was not co-signed"
+    );
+    // Bob's vote sits in its own commitment group (#1108/#1118): ours alone
+    // is short of `{n: 2}` until a second voter co-signs it.
+    assert_eq!(out.derived_state, "identified");
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// Outputs are a terminal-edge concern: a co-signer ignores them anywhere
+/// else (`check_outputs_commitment` is a no-op off the final edge). So a
+/// non-terminal proposal carrying a stray `outputs_hash` stays joinable —
+/// comparing commitments there would refuse to join a proposal `accept`
+/// happily signs, since our own `committed` is always `None` off the final
+/// edge.
+///
+/// Red if `live_proposal_role` compares commitments on a non-terminal
+/// target.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_joins_a_non_terminal_proposal_carrying_a_stray_outputs_hash() {
+    let mut f = seed_review_flow().await;
+    set_consensus_rule(&mut f, "review://Review.changes_requested", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "changes_requested").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "review",
+        "changes_requested",
+        &seal,
+        &[],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let joined = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a stray outputs_hash on a non-terminal proposal must not stop a join");
+    assert_eq!(joined.proposal_uri, bobs, "joined Bob's, not a twin");
+    assert!(!joined.minted && joined.recorded_vote);
+    assert_eq!(
+        joined.derived_state, "changes_requested",
+        "the join fires the {{n:2}} edge"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The other side of the proposer-less key: the engine must NOT reach quorum
 // ---------------------------------------------------------------------------
@@ -2731,11 +2886,31 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
 
     // Scan order is `find_live_proposals`' sort, which is by URI — NOT the
     // write order, and not the store's own iteration order, which is
-    // arbitrary. So the ids are what put the foreign proposal first.
+    // arbitrary. URIs are content addresses now (#1108), so the sort is hash
+    // order over per-run random keys — no fixed nonce can pin it. The nonce
+    // search below is what puts the foreign proposal first: `proposal_uri`
+    // is pure, so Carol's nonce is picked until her URI sorts below Bob's.
     let carol = TestSigner::generate();
-    let foreign =
-        sync_proposal_from(&mut f, &carol, "foreign-1", "elsewhere", "merged", &seal).await;
     let bob = TestSigner::generate();
+    let empty = outputs_hash(&[]);
+    let uri_for = |signer: &TestSigner, from: &str, nonce: &str| {
+        super::flow_instance::atom::proposal_uri(
+            &instance,
+            from,
+            "merged",
+            &seal,
+            Some(&empty),
+            &signer.did,
+            nonce,
+        )
+    };
+    let joinable_uri = uri_for(&bob, "here", "joinable-1");
+    let foreign_nonce = (0..)
+        .map(|i| format!("foreign-{i}"))
+        .find(|nonce| uri_for(&carol, "elsewhere", nonce) < joinable_uri)
+        .expect("some nonce hashes below Bob's URI");
+    let foreign =
+        sync_proposal_from(&mut f, &carol, &foreign_nonce, "elsewhere", "merged", &seal).await;
     let joinable = sync_proposal_from(&mut f, &bob, "joinable-1", "here", "merged", &seal).await;
 
     assert!(
@@ -2807,6 +2982,130 @@ async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
     assert_eq!(
         derived.settled[0].voters, expected,
         "both DIDs on the `here → merged` edge are counted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The content-addressed URI on the live graph (#1108)
+// ---------------------------------------------------------------------------
+
+/// **Lal's attack, live-graph variant.** Alice proposes the final edge
+/// committing to [`TASK`], Bob co-signs, the edge settles — and Alice then
+/// deletes her `outputs_hash`/`output` links and re-signs new ones under the
+/// same URI. On a random URI the fold re-read the proposal with the swapped
+/// commitment and both votes intact. The URI is a content address now, so
+/// the re-signed fields no longer address it: the proposal stops being an
+/// atom, both votes stop counting, and the instance falls back to genesis —
+/// a run whose committed material was tampered with mid-air settles nothing.
+///
+/// Red while `from_links` skips the URI recompute: the state stays `scoped`
+/// with the swapped commitment under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_graph_outputs_swap_after_the_co_sign_uncounts_the_votes() {
+    use super::flow_instance::atom::{OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    let bob = TestSigner::generate();
+    sync_vote_from(&mut f, &bob, &out.proposal_uri).await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "precondition: the co-signed commitment settles the edge"
+    );
+
+    // The swap: withdraw the committed outputs, re-sign a different
+    // commitment under the settled URI. Both writes are Alice's own.
+    let stale: Vec<LinkExpression> = links_of(&f, &out.proposal_uri)
+        .await
+        .into_iter()
+        .filter(|l| {
+            l.data.predicate.as_deref() == Some(OUTPUTS_HASH_PREDICATE)
+                || l.data.predicate.as_deref() == Some(OUTPUT_PREDICATE)
+        })
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!stale.is_empty(), "the commitment links exist to remove");
+    f.perspective
+        .remove_links(stale, None)
+        .await
+        .expect("retract the committed outputs");
+    f.link(
+        &out.proposal_uri,
+        OUTPUTS_HASH_PREDICATE,
+        &literal(&outputs_hash(&[])),
+        LinkStatus::Shared,
+    )
+    .await;
+
+    assert_eq!(
+        f.derived().await.state,
+        "identified",
+        "the swapped fields no longer address the voted URI, so the proposal \
+         is not an atom and neither vote counts"
+    );
+    assert!(
+        f.read_set().await.atoms().is_empty(),
+        "the tampered proposal is dropped, not re-read with the new commitment"
+    );
+}
+
+/// The honest control for everything above: a run completed through the
+/// REAL co-sign path — a peer's committed proposal, this replica's
+/// `accept_flow_proposal` (which re-derives the seal and recomputes the
+/// outputs commitment before signing) — still mints a receipt that
+/// verifies, content-addressed URIs and all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt() {
+    use super::flow_instance::receipt::FlowReceipt;
+    use super::flow_instance::verify::verify_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-honest",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&committed),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &bobs, &f.ctx)
+        .await
+        .expect("the real co-sign path signs the committed proposal");
+    assert_eq!(f.derived().await.state, "scoped", "n = 2 settled");
+
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
+    let loaded = load_outputs(&f.perspective, &[task_ref(TASK)])
+        .await
+        .expect("load outputs");
+    let outputs: Vec<_> = loaded.into_values().collect();
+    let receipt = FlowReceipt::mint(flow, f.read_set().await, outputs, Vec::new())
+        .expect("the completed run mints");
+    let verdict = verify_receipt(&flows, &receipt);
+    assert!(
+        verdict.is_verified(),
+        "the honest end-to-end receipt verifies, got: {verdict}"
     );
 }
 
