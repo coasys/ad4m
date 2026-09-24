@@ -539,7 +539,10 @@ mod tests {
             .resolve(&translated(did_of(ALICE)), &role(Some(&gate_spec)))
             .expect("resolves");
         assert_eq!(
-            view.windows.iter().map(|w| w.granted_at.as_str()).collect::<Vec<_>>(),
+            view.windows
+                .iter()
+                .map(|w| w.granted_at.as_str())
+                .collect::<Vec<_>>(),
             vec![T1],
             "the grant begins at the granting run's QUORUM time, not at the assignment link \
              ({ASSIGNMENT_LINK_AT}) that sits on the same instance"
@@ -817,7 +820,10 @@ mod tests {
         ] {
             let view = alice_grant(&store(&[&granting], receipts), &gate_spec).await;
             assert_eq!(
-                view.windows.iter().map(|w| w.granted_at.as_str()).collect::<Vec<_>>(),
+                view.windows
+                    .iter()
+                    .map(|w| w.granted_at.as_str())
+                    .collect::<Vec<_>>(),
                 vec![T1],
                 "{label}: one membership, beginning at the first run that granted it"
             );
@@ -930,9 +936,12 @@ mod tests {
             view.windows.first().map(|w| &w.granted_at)
         );
         assert_eq!(
-            fold_read_set(&gated_flow(&gate_spec), &gated_run(vec![ev.clone()]).reverified())
-                .expect("an ungranted candidate is not a fold error")
-                .state,
+            fold_read_set(
+                &gated_flow(&gate_spec),
+                &gated_run(vec![ev.clone()]).reverified()
+            )
+            .expect("an ungranted candidate is not a fold error")
+            .state,
             "open",
             "and the gated edge does not settle"
         );
@@ -1017,7 +1026,10 @@ mod tests {
         assert_eq!(view.windows.len(), 1, "a tombstone ends a membership");
         assert_eq!(view.windows[0].granted_at, T1, "which began at the quorum");
         assert_eq!(view.windows[0].revoked_at(), Some(T2));
-        assert!(!view.windows[0].open_at(T3), "a vote after it is not eligible");
+        assert!(
+            !view.windows[0].open_at(T3),
+            "a vote after it is not eligible"
+        );
         assert!(view.windows[0].open_at(T1));
 
         assert_eq!(
