@@ -599,7 +599,7 @@ mod tests {
     /// timestamp, to force timestamp ties and out-of-order inserts.
     fn put(p: &PerspectiveInstance, base: &str, pred: &str, target: &str, author: &str, ts: &str) {
         p.sparql_store
-            .add_link(&DecoratedLinkExpression {
+            .add_link(&LinkExpression {
                 author: author.into(),
                 timestamp: ts.into(),
                 data: Link {
@@ -607,11 +607,9 @@ mod tests {
                     predicate: Some(pred.into()),
                     target: target.into(),
                 },
-                proof: crate::types::DecoratedExpressionProof {
+                proof: crate::types::ExpressionProof {
                     key: "k".into(),
                     signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
                 },
                 status: Some(LinkStatus::Shared),
             })
