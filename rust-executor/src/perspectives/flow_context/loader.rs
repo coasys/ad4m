@@ -323,6 +323,11 @@ pub fn scope_subject(scope: &Scope) -> &str {
     match scope {
         Scope::Model { id, .. } => id.as_str(),
         Scope::Raw { id, .. } => id.as_str(),
+        // A traversal can name several anchors where this wants one subject.
+        // The first is the useful answer for the single-anchor spelling, which
+        // is what any caller reaching here would have written; a traversal with
+        // no anchors has no subject at all.
+        Scope::Traverse { ids, .. } => ids.first().map(|id| id.as_str()).unwrap_or(""),
     }
 }
 
@@ -701,6 +706,7 @@ mod tests {
             requires: None,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         };
         let transition = |from: &str, to: &str| FlowTransition {
             action_name: format!("{from}->{to}"),
@@ -737,6 +743,7 @@ mod tests {
                 n: 1,
                 from_role: None,
             }),
+            consensus_rule_malformed: false,
         }
     }
 

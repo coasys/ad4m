@@ -140,7 +140,7 @@
 //! author filter. See <https://github.com/coasys/ad4m/issues/1063>, which
 //! also waits on the `proof.valid` tri-state (#1046).
 
-use super::atom::{TransitionAtom, Vote};
+use super::atom::{OutputRef, TransitionAtom, Vote};
 use super::grant::{granted_by_flow_at, GrantContext};
 use super::receipt::FlowReceipt;
 use super::time::parse_link_timestamp;
@@ -151,10 +151,8 @@ use crate::perspectives::flow_evaluator::{
     revocation_link_counts_for_did, run_query, EvidenceItem, RequiresQueryable,
 };
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
-use crate::perspectives::shacl_parser::{
-    ConsensusRule, GrantedByFlow, ModelQuery, ModelQueryCount,
-};
-use crate::types::DecoratedLinkExpression;
+use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery, ModelQueryCount};
+use crate::types::LinkExpression;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -286,31 +284,40 @@ impl RoleGrant {
 pub struct RoleInstanceHistory {
     /// URI of the instance the role query matched for this DID.
     pub instance_id: String,
-    /// Every `instance --<didProperty>--> did` link, as read from the store.
+    /// Every `instance --<didProperty>--> did` link, as read from the store —
+    /// carried as plain [`LinkExpression`]: the decorated form's
+    /// `proof.valid` / `status` are one executor's read-model flags, and on
+    /// carried material they would be the minter's claims, so the type
+    /// refuses to carry them (see
+    /// [`RoleGrantLinks`](crate::perspectives::flow_evaluator::RoleGrantLinks)).
     /// Not signature-filtered — see the module header and #1063. May be empty:
     /// non-`didProperty` queries, or membership acquired without a dated
     /// assignment link.
-    pub grant_links: Vec<DecoratedLinkExpression>,
+    pub grant_links: Vec<LinkExpression>,
     /// Every signed tombstone on the instance naming this DID, carried
     /// **before** authority filtering so the reader applies
     /// [`revocation_authorised`] itself against the flow definition it holds.
     /// Never truncated: dropping a tombstone can only widen a window.
-    pub revocation_links: Vec<DecoratedLinkExpression>,
+    pub revocation_links: Vec<LinkExpression>,
     /// Fallback dating when `grant_links` yields nothing: the instance's
     /// hydrated timestamp. **Asserted** by the minter — a hydration product
     /// with no single link behind it, and the one field here that stays
     /// audit-grade until `model_query` results carry per-link signatures.
     /// Flows whose role queries use `didProperty` never need it.
     pub asserted_instance_timestamp: Option<String>,
-    /// The receipts found on this instance's `ad4m://flow/granted_by` edges,
-    /// carried whole so a reader can verify them itself. Only collected for a
-    /// role query that declares `grantedByFlow`; empty for every other role,
-    /// and omitted from the serialised form when empty.
+    /// The granting flow's receipts that claim to name this instance, carried
+    /// whole so a reader can verify them itself. Only collected for a role
+    /// query that declares `grantedByFlow`; empty for every other role, and
+    /// omitted from the serialised form when empty.
     ///
-    /// Carried **unfiltered**, exactly like `revocation_links`: the edges are
-    /// unsigned multi-edges anyone may write, so collecting them decides
-    /// nothing, and every check that matters — the signatures inside, the DNA
-    /// hash, the replay, and the binding back to `instance_id` — happens in
+    /// Found through the granting flow's index
+    /// ([`load_flow_receipts`](super::produced::load_flow_receipts)) and
+    /// narrowed to the receipts whose `outputs` claim `(role class,
+    /// instance_id)`. That narrowing is **discovery, not trust**: it reads the
+    /// carried list before anything is verified. Every check that matters —
+    /// the signatures inside, the DNA hash, the re-fold, the outputs
+    /// commitment, and the `(class, id)` binding again, this time on verified
+    /// material — happens in
     /// [`grant::granted_by_flow_at`](super::grant::granted_by_flow_at) on the
     /// reading side.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -359,21 +366,20 @@ impl RoleGrantEvidence {
     /// collection side and the pre-#1027 behaviour; see the module header and
     /// <https://github.com/coasys/ad4m/issues/1063>.
     ///
-    /// A tombstone counts only when its signature verifies, and `resolve`
-    /// **recomputes that verdict itself** instead of reading the carried
-    /// `proof.valid`: every revocation link is re-decorated with
-    /// [`DecoratedLinkExpression::verify_signature`] before
-    /// [`revocation_link_counts_for_did`] sees it. `proof.valid` is a claim
-    /// made by whoever serialised the read-set, so on a receipt that arrived
-    /// from elsewhere it is worth exactly as much as the sender — and a forged
-    /// `"valid": true` on a tombstone ends a grant early, changing who counted
-    /// toward quorum. Doing it here rather than asking the caller to
-    /// re-decorate first makes it **unskippable**: there is no path from
-    /// carried evidence to a [`RoleGrantWindow`] that does not go through this
-    /// function, so a future ingest seam cannot forget the step.
+    /// A tombstone counts only when its signature verifies, and that verdict
+    /// is **computed, never carried**: the evidence types hold plain
+    /// [`LinkExpression`], whose proof has no verdict field, so a read-set
+    /// cannot even state one — and [`revocation_link_counts_for_did`] runs
+    /// the check itself, from the signature, on every call. A forged
+    /// `"valid": true` on a tombstone would have ended a grant early,
+    /// changing who counted toward quorum; that attack is now unrepresentable
+    /// rather than filtered. Doing the check inside the shared predicate
+    /// makes it **unskippable**: there is no path from carried evidence to a
+    /// [`RoleGrantWindow`] that does not go through it, so a future ingest
+    /// seam cannot forget the step.
     ///
-    /// This keeps `resolve` pure — `verify_signature` is SHA256 plus an
-    /// Ed25519 check against the author's own `did:key`: no store, no clock,
+    /// This keeps `resolve` pure — the check is SHA256 plus an Ed25519
+    /// verification against the author's own `did:key`: no store, no clock,
     /// no network — at a cost bounded by the number of tombstones carried.
     ///
     /// Grant links get no such treatment because they are not
@@ -403,23 +409,49 @@ impl RoleGrantEvidence {
     /// the depth cap — becomes a reason to *grant*. Fail-closed has to mean
     /// the same thing at both ends of the rule, so this combination is an
     /// error rather than a subtlety.
+    ///
+    /// A gate whose granting flow is not in the reader's catalogue is an
+    /// `Err` for the same reason: no receipt for it can be verified, and
+    /// "I cannot check" must not read as "not a member". So is a receipt the
+    /// depth budget cannot reach
+    /// ([`GrantDepthExceeded`](super::grant::GrantDepthExceeded)).
+    ///
+    /// `role` is the role query **from the reader's own flow definition**,
+    /// never from the carried evidence. Its `grantedByFlow`, its `count`, and
+    /// its `className` all decide the answer, and a minter who could name any
+    /// of them would be naming the rule its own receipt is judged by. The
+    /// class matters because the receipt must name the instance as
+    /// `(className, id)` ([`grant`](super::grant)); [`Self::role_class`] is
+    /// carried and is not consulted.
     pub fn resolve(
         &self,
         translated_role_query: &Value,
-        granted_by: Option<&GrantedByFlow>,
-        count: Option<&ModelQueryCount>,
+        role: &ModelQuery,
         grants: GrantContext<'_>,
     ) -> anyhow::Result<RoleGrant> {
-        if granted_by.is_some() && cardinality_satisfied(count, 0) {
+        let granted_by = role.granted_by_flow.as_ref();
+        if granted_by.is_some() && cardinality_satisfied(role.count.as_ref(), 0) {
             anyhow::bail!(
                 "RoleGrantEvidence::resolve: the `{}` role gate combines `grantedByFlow` with a `count` satisfied by zero instances, so a receipt that FAILS to verify would make `{}` eligible rather than ineligible; refusing to gate (fail-closed)",
                 self.role_class,
                 self.did
             );
         }
+        if let Some(spec) = granted_by {
+            // The same rule `produced::flow_valid_outputs` applies to an
+            // unknown flow: without F's definition no receipt for F can be
+            // verified, and "I cannot check" must not read as "not a member".
+            if !grants.catalogue().contains_key(&spec.flow) {
+                anyhow::bail!(
+                    "RoleGrantEvidence::resolve: the `{}` role gate is granted by flow `{}`, which is not in this replica's catalogue, so no receipt for it can be verified and `{}`'s membership cannot be decided (fail-closed)",
+                    role.class_name,
+                    spec.flow,
+                    self.did
+                );
+            }
+        }
         let did_literal = did_literal_url(&self.did)?;
-        let grant_counts =
-            |l: &&DecoratedLinkExpression| grant_link_names_did(l, &self.did, &did_literal);
+        let grant_counts = |l: &&LinkExpression| grant_link_names_did(l, &self.did, &did_literal);
 
         let mut windows = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
@@ -428,12 +460,14 @@ impl RoleGrantEvidence {
             // instance no receipt grants is simply not a member, so it is
             // skipped rather than raised.
             if let Some(spec) = granted_by {
-                match granted_by_flow_at(
-                    grants,
-                    &instance.instance_id,
-                    spec,
-                    &instance.granting_receipts,
-                ) {
+                let output = OutputRef {
+                    class_name: role.class_name.clone(),
+                    id: instance.instance_id.clone(),
+                };
+                // `?`: running out of depth is "I could not decide", which
+                // aborts the fold like any other unresolvable evidence
+                // (`grant` § *Running out of depth is undecidable*).
+                match granted_by_flow_at(grants, &output, spec, &instance.granting_receipts)? {
                     Some(granted_at) => {
                         windows.push(RoleGrantWindow {
                             instance_id: instance.instance_id.clone(),
@@ -525,17 +559,11 @@ impl RoleGrantEvidence {
         translated_role_query: &Value,
         did_literal: &str,
     ) -> Vec<RoleRevocation> {
-        let reverified = |l: &DecoratedLinkExpression| {
-            let mut l = l.clone();
-            l.verify_signature();
-            l
-        };
         // Sorted here, not by the store: the view must not depend on the
         // order a store happens to return links in.
         let mut revocations: Vec<RoleRevocation> = instance
             .revocation_links
             .iter()
-            .map(reverified)
             .filter(|l| revocation_link_counts_for_did(l, &self.did, did_literal))
             .filter(|l| revocation_authorised(translated_role_query, &l.author))
             .map(|l| RoleRevocation {
@@ -657,6 +685,24 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     // through the class's shape before querying links — see
     // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
     let did_property = role.did_property.as_deref();
+
+    // A `grantedByFlow` gate reads the granting flow's receipts once, up
+    // front, through `produced`'s budgeted loader. Over budget is an ERROR
+    // that propagates from here — see `grant` § *A receipt flood is an
+    // error*. It is never an empty list, because an empty list reads as
+    // "not a member" for every candidate. Every other role pays nothing: no
+    // read, no bytes in the read-set.
+    let flow_receipts = match &role.granted_by_flow {
+        Some(spec) => perspective.flow_receipts(&spec.flow).await.map_err(|e| {
+            e.context(format!(
+                "resolve_role_grants: the `{}` role gate's granting flow `{}` could not be read, \
+                 so no candidate's membership can be decided",
+                role.class_name, spec.flow
+            ))
+        })?,
+        None => Vec::new(),
+    };
+
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
@@ -667,12 +713,17 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
             let links = perspective
                 .role_grant_links(&role.class_name, &item.id, did_property, did)
                 .await?;
-            // Only for a gate that asks for them. Every other role pays
-            // nothing: no query, no bytes in the read-set.
-            let granting_receipts = match role.granted_by_flow.is_some() {
-                true => perspective.granting_receipts(&item.id).await?,
-                false => Vec::new(),
+            // Discovery narrowing only: the receipts that CLAIM this
+            // instance. Verification happens on the reading side.
+            let this = OutputRef {
+                class_name: role.class_name.clone(),
+                id: item.id.clone(),
             };
+            let granting_receipts: Vec<FlowReceipt> = flow_receipts
+                .iter()
+                .filter(|r| r.speaks_for(&this))
+                .cloned()
+                .collect();
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
@@ -815,24 +866,24 @@ mod tests {
         }
     }
 
-    /// One link as `get_links` returns it. Author, target, signature validity
-    /// and timestamp are all inputs the filters read, so every fixture states
-    /// them explicitly.
+    /// One link as the evidence types carry it. Author, target, signature
+    /// validity and timestamp are all inputs the filters read, so every
+    /// fixture states them explicitly.
     ///
-    /// `valid` is honoured **cryptographically**, not by setting `proof.valid`:
-    /// a valid link is signed by `author`'s own key over its own data and
-    /// timestamp, and a forged one carries a signature from a key that is not
-    /// `author`'s. `proof.valid` is still pre-set to match, because that is
-    /// what a store hands back — but `resolve` recomputes it, so a fixture
-    /// whose claim and signature disagree gets ruled on by the signature.
+    /// `valid` is honoured **cryptographically** — the carried form has no
+    /// `proof.valid` a fixture could set: a valid link is signed by
+    /// `author`'s own key over its own data and timestamp, and a forged one
+    /// carries a signature from a key that is not `author`'s. The filters
+    /// compute the verdict from the signature, so that is the only lever a
+    /// fixture has.
     fn role_link(
         predicate: &str,
         target: &str,
         author: &str,
         valid: bool,
         timestamp: &str,
-    ) -> DecoratedLinkExpression {
-        use crate::types::{Link as CoreLink, LinkExpression, LinkStatus};
+    ) -> LinkExpression {
+        use crate::types::Link as CoreLink;
         let at = chrono::DateTime::parse_from_rfc3339(timestamp)
             .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
             .with_timezone(&chrono::Utc);
@@ -852,20 +903,16 @@ mod tests {
         );
         expr.author = author.to_string();
         expr.proof.key = format!("{author}#key");
-        let mut link =
-            DecoratedLinkExpression::from((LinkExpression::from(expr), LinkStatus::Shared));
-        link.proof.valid = Some(valid);
-        link.proof.invalid = Some(!valid);
-        link
+        LinkExpression::from(expr)
     }
 
     /// A signed `instance --agent--> did` grant link at `at`.
-    fn grant_link(did: &str, at: &str) -> DecoratedLinkExpression {
+    fn grant_link(did: &str, at: &str) -> LinkExpression {
         role_link("agent", did, ADMIN(), true, at)
     }
 
     /// A signed tombstone by `by` at `at`.
-    fn tombstone(did: &str, by: &str, at: &str) -> DecoratedLinkExpression {
+    fn tombstone(did: &str, by: &str, at: &str) -> LinkExpression {
         role_link(
             crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
             did,
@@ -905,7 +952,7 @@ mod tests {
         evidence
             .iter()
             .map(|e| {
-                e.resolve(&translated(role, &e.did), None, None, GrantContext::empty())
+                e.resolve(&translated(role, &e.did), role, GrantContext::empty())
                     .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
             })
             .collect()
@@ -1068,7 +1115,7 @@ mod tests {
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE()), None, None, GrantContext::empty()).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated, GrantContext::empty()).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.
@@ -1096,6 +1143,8 @@ mod tests {
             proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
             proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
             evidence_hash: "seal".into(),
+            outputs_hash: None,
+            outputs: Vec::new(),
             votes,
         }
     }
@@ -1335,13 +1384,13 @@ mod tests {
     /// moved the filter from the store boundary into the pure reader, and this
     /// is the assertion that says it survived the move.
     ///
-    /// The second half is the stronger claim, and the reason `resolve`
-    /// re-derives `proof.valid` instead of reading it: the carried verdict is
-    /// the *minter's* word about a link, and a read-set that arrived from
-    /// elsewhere can say anything it likes. A tombstone with a bad signature
-    /// and `"valid": true` written on it must not end a grant — otherwise a
-    /// sender could shrink anyone's eligibility window and change who counted
-    /// toward quorum, using nothing but a boolean.
+    /// This test used to have a second half: the same bad signature with
+    /// `"valid": true` written on it, pinning that `resolve` re-derives the
+    /// verdict instead of reading the carried one. That attack is now
+    /// **unrepresentable**: the evidence carries plain [`LinkExpression`],
+    /// whose proof has no verdict field, so a read-set cannot state a verdict
+    /// at all — the signature is the only thing a sender controls, and it is
+    /// exactly what this test forges (r4076927995).
     ///
     /// Grant links deliberately have no such check yet; see #1063.
     #[test]
@@ -1349,50 +1398,36 @@ mod tests {
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let query = translated(&role, ALICE());
 
-        let open_with = |revocation: DecoratedLinkExpression| {
-            RoleGrantEvidence {
-                to_state: "approved".into(),
-                role_class: "ns://Reviewer".into(),
-                did: ALICE().into(),
-                instances: vec![RoleInstanceHistory {
-                    instance_id: "r0".into(),
-                    grant_links: vec![grant_link(ALICE(), T1)],
-                    revocation_links: vec![revocation],
-                    asserted_instance_timestamp: None,
-                    granting_receipts: Vec::new(),
-                }],
-            }
-            .resolve(&query, None, None, GrantContext::empty())
-            .expect("resolves")
-        };
-
-        // Signature genuinely does not verify, and the link says so.
-        let honest_verdict = role_link(
+        // Signature genuinely does not verify: stated author ADMIN, signed by
+        // the forger persona's key.
+        let forged = role_link(
             crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
             ALICE(),
             ADMIN(),
             false,
             T2,
         );
-        let grant = open_with(honest_verdict.clone());
+        let grant = RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE().into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links: vec![grant_link(ALICE(), T1)],
+                revocation_links: vec![forged],
+                asserted_instance_timestamp: None,
+                granting_receipts: Vec::new(),
+            }],
+        }
+        .resolve(&query, &role, GrantContext::empty())
+        .expect("resolves");
         assert!(
             grant.windows[0].revocations.is_empty(),
             "an unsigned tombstone is not a link anyone wrote"
         );
-        assert!(grant.eligible_at(NOW, None), "so the grant is still open");
-
-        // Same bad signature, but the read-set claims it verified.
-        let mut lying_verdict = honest_verdict;
-        lying_verdict.proof.valid = Some(true);
-        lying_verdict.proof.invalid = Some(false);
-        let grant = open_with(lying_verdict);
-        assert!(
-            grant.windows[0].revocations.is_empty(),
-            "`proof.valid` is the sender's claim; resolve re-derives it from the signature"
-        );
         assert!(
             grant.eligible_at(NOW, None),
-            "a forged verdict must not shrink the window"
+            "a forged tombstone must not shrink the window"
         );
     }
 
@@ -1414,12 +1449,7 @@ mod tests {
                 granting_receipts: Vec::new(),
             }],
         }
-        .resolve(
-            &translated(&role, ALICE()),
-            None,
-            None,
-            GrantContext::empty(),
-        )
+        .resolve(&translated(&role, ALICE()), &role, GrantContext::empty())
         .expect("resolves");
         assert_eq!(
             grant.windows[0].granted_at, T3,

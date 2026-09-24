@@ -107,8 +107,9 @@ pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::load_shape_from_store;
 pub use types::{
-    IncludeValue, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, ProjectionInput,
-    Scope, ShapeResolver, WhereCondition, WhereOps,
+    constrain_ids, take_produced_by_flow, IncludeValue, ModelQueryInput, ModelQueryResult,
+    ModelShape, OrderDirection, ProducedByFlowFilter, ProjectionInput, Scope, ShapeResolver,
+    WhereCondition, WhereOps,
 };
 /// Re-export the shared IRI-safety predicate so write-side callers
 /// (e.g. `perspective_instance::resolve_property_value`,

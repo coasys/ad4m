@@ -37,9 +37,7 @@ use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
-use crate::perspectives::flow_instance::receipt::{
-    FlowReceipt, FLOW_GRANTED_BY_PREDICATE, FLOW_RECEIPT_CONTENT_PREDICATE,
-};
+use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -49,7 +47,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::{DecoratedLinkExpression, LinkQuery};
+use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -80,6 +78,14 @@ pub struct SatisfiedTransition {
     pub evidence_hash: String,
     /// The target state's `semanticCheck` hint, if it declares one.
     pub semantic_check: Option<String>,
+    /// `Some` exactly when `to_state` is terminal: the instances the
+    /// proposer names as the run's outputs, each with the content this
+    /// replica's `model_query` returned for it. The proposal names their
+    /// `(class, id)` and signs `outputs_hash` over the content next to the
+    /// evidence seal (#1104); see
+    /// `flow_instance::atom::check_outputs_commitment` for what a voter
+    /// checks.
+    pub outputs: Option<Vec<EvidenceItem>>,
 }
 
 /// One hydrated piece of guard evidence: an instance a `requires` query
@@ -162,10 +168,28 @@ pub(crate) fn canonical_json(v: &Value) -> String {
 /// hash regardless of result order; **editing a cited instance changes the
 /// hash**, which is what lets a voter detect a stale seal before co-signing.
 pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
-    fn frame(hasher: &mut Sha256, field: &str) {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
+    for name in class_names {
+        frame(&mut hasher, name);
     }
+    frame_items(&mut hasher, evidence);
+    hex::encode(hasher.finalize())
+}
+
+/// Length-prefix one field, so no field's content can shift bytes across a
+/// boundary. The one framing [`evidence_hash`], [`tagged_items_hash`] and
+/// [`super::content_address::content_address`] share.
+pub(crate) fn frame(hasher: &mut Sha256, field: &str) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field.as_bytes());
+}
+
+/// Each item's `(class, id, canonical_json(content))` triple, sorted and
+/// framed. Sorting makes the result independent of the order `model_query`
+/// returned the instances in; [`canonical_json`] makes it independent of
+/// their key order. Non-JSON content is framed verbatim.
+fn frame_items(hasher: &mut Sha256, evidence: &[EvidenceItem]) {
     let mut items: Vec<(String, String, String)> = evidence
         .iter()
         .map(|e| {
@@ -176,16 +200,28 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         })
         .collect();
     items.sort();
-    let mut hasher = Sha256::new();
-    hasher.update((class_names.len() as u64).to_le_bytes());
-    for name in class_names {
-        frame(&mut hasher, name);
-    }
     for (class, id, content) in &items {
-        frame(&mut hasher, class);
-        frame(&mut hasher, id);
-        frame(&mut hasher, content);
+        frame(hasher, class);
+        frame(hasher, id);
+        frame(hasher, content);
     }
+}
+
+/// The [`evidence_hash`] item framing under a domain `tag`, for a hash that
+/// must never be read as an evidence seal (the flow outputs commitment,
+/// `flow_instance::atom::outputs_hash`).
+///
+/// The digest input opens with `u64::MAX` where an evidence seal has its
+/// class-name count. No evidence seal can open that way: it would need
+/// 2^64 − 1 class names. The framed `tag` follows, then the items exactly as
+/// [`evidence_hash`] frames them. So the two hashes share one
+/// canonicalisation and one item framing, and cannot collide by
+/// construction.
+pub(crate) fn tagged_items_hash(tag: &str, items: &[EvidenceItem]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(u64::MAX.to_le_bytes());
+    frame(&mut hasher, tag);
+    frame_items(&mut hasher, items);
     hex::encode(hasher.finalize())
 }
 
@@ -433,6 +469,14 @@ pub struct RoleRevocation {
 /// serialised read-set. Carrying links rather than verdicts is what lets that
 /// reader check the chronology instead of believing the minter's summary.
 ///
+/// Carried as plain [`LinkExpression`], not `DecoratedLinkExpression`: the
+/// decorated form's `proof.valid` / `status` are one executor's read-model
+/// flags for its own clients, and on material that travels they would be
+/// claims. Every signature check on these links —
+/// [`revocation_link_counts_for_did`], here and in the pure reader — computes
+/// the verdict from the signature itself, so there is deliberately no carried
+/// verdict to read (review r4076927995).
+///
 /// What is carried differs by kind, and the asymmetry is on purpose *for now*:
 ///
 /// - **Tombstones** must be signed ([`revocation_link_counts_for_did`]),
@@ -462,11 +506,11 @@ pub struct RoleGrantLinks {
     /// Empty when the role query has no `didProperty` or no such link exists;
     /// the reader then dates the grant from the instance itself, never from
     /// "always".
-    pub grant_links: Vec<DecoratedLinkExpression>,
+    pub grant_links: Vec<LinkExpression>,
     /// Every signed tombstone on this instance naming this DID, any author,
     /// **before** the authority filter. Never truncated: dropping a tombstone
     /// can only widen a window.
-    pub revocation_links: Vec<DecoratedLinkExpression>,
+    pub revocation_links: Vec<LinkExpression>,
 }
 
 /// At most this many grant links are carried per `(instance, DID)`, earliest
@@ -489,23 +533,26 @@ pub(crate) const MAX_GRANT_LINKS: usize = 8;
 /// mints receipts that fail their own verification, and — the direction that
 /// actually costs — a link the verifier counts and the minter dropped lets
 /// forged material widen a window. One predicate per kind, both sites.
-pub(crate) fn grant_link_names_did(
-    link: &DecoratedLinkExpression,
-    did: &str,
-    did_literal: &str,
-) -> bool {
+pub(crate) fn grant_link_names_did(link: &LinkExpression, did: &str, did_literal: &str) -> bool {
     target_names_did(&link.data.target, did, did_literal)
 }
 
 /// Whether a **revocation** tombstone counts for this DID: its signature
-/// verified, and its target names the DID. Same both-sites rule as
+/// verifies, and its target names the DID. Same both-sites rule as
 /// [`grant_link_names_did`], plus the vote-layer signature check.
+///
+/// The verdict is **computed here from the signature**
+/// ([`LinkExpression::compute_proof_valid`]), never read from a carried flag
+/// — the carried form has none. That makes the both-sites symmetry exact:
+/// collection boundary and pure reader run the same crypto on the same
+/// material, so a verdict cannot differ between them and cannot be forged
+/// into either.
 pub(crate) fn revocation_link_counts_for_did(
-    link: &DecoratedLinkExpression,
+    link: &LinkExpression,
     did: &str,
     did_literal: &str,
 ) -> bool {
-    link.proof.valid == Some(true) && grant_link_names_did(link, did, did_literal)
+    link.compute_proof_valid() && grant_link_names_did(link, did, did_literal)
 }
 
 /// `literal:string:`-encode a DID for target matching — the form the SDNA
@@ -549,20 +596,24 @@ pub trait RequiresQueryable: Send + Sync {
         Ok(RoleGrantLinks::default())
     }
 
-    /// The receipts on `node --ad4m://flow/granted_by--> receipt`, read whole
-    /// so the caller can verify them itself.
+    /// Every receipt filed under `flow_uri`'s index, read whole so the caller
+    /// can verify them itself.
     ///
-    /// Called only for a role query that declares `grantedByFlow`. The edges
-    /// are unsigned multi-edges anyone may write, and this call filters
-    /// nothing by authorship: collecting a receipt decides nothing, and every
-    /// check that matters — including that the receipt names `node` among its
-    /// own outputs — runs on the reading side (see
+    /// Called only for a role query that declares `grantedByFlow`. The index
+    /// is writable by anyone and this call trusts nothing in it: collecting a
+    /// receipt decides nothing, and every check that matters runs on the
+    /// reading side (see
     /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
+    ///
+    /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
+    /// this is an `Err` carrying
+    /// [`ReceiptBudgetExceeded`](crate::perspectives::flow_instance::produced::ReceiptBudgetExceeded),
+    /// never a shorter list.
     ///
     /// The default knows nothing, which is the fail-closed answer here: no
     /// receipts means no grant, so a stub that stays on this default never
     /// turns into "granted by something I could not see".
-    async fn granting_receipts(&self, _node: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+    async fn flow_receipts(&self, _flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
         Ok(Vec::new())
     }
 }
@@ -669,9 +720,18 @@ impl RequiresQueryable for PerspectiveInstance {
         let grant_predicate = grant_predicate.as_deref();
         let did_literal = did_literal_url(did)
             .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
-        let grant_counts = |l: &DecoratedLinkExpression| grant_link_names_did(l, did, &did_literal);
+        let grant_counts = |l: &LinkExpression| grant_link_names_did(l, did, &did_literal);
         let revocation_counts =
-            |l: &DecoratedLinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+            |l: &LinkExpression| revocation_link_counts_for_did(l, did, &did_literal);
+        // Decorated → plain at the boundary: `proof.valid` and `status` are
+        // this executor's read-model flags, not link material — carrying them
+        // would carry claims, and every consumer computes the verdict from
+        // the signature itself (see `RoleGrantLinks`).
+        let as_carried = |l: DecoratedLinkExpression| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        };
 
         // Sorted by parsed instant, not by string — grant links are
         // client-stamped and clients disagree on RFC 3339 flavour (#1000).
@@ -679,18 +739,20 @@ impl RequiresQueryable for PerspectiveInstance {
         // is not worth carrying; when none parses this stays empty and the
         // reader falls back to the instance's own timestamp or fails closed.
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        let raw_grant_links: Vec<DecoratedLinkExpression> = match grant_predicate {
-            Some(pred) => {
-                self.get_links(&LinkQuery {
+        let raw_grant_links: Vec<LinkExpression> = match grant_predicate {
+            Some(pred) => self
+                .get_links(&LinkQuery {
                     source: Some(instance_id.to_string()),
                     predicate: Some(pred.to_string()),
                     ..Default::default()
                 })
                 .await?
-            }
+                .into_iter()
+                .map(as_carried)
+                .collect(),
             None => Vec::new(),
         };
-        let mut grant_links: Vec<DecoratedLinkExpression> = raw_grant_links
+        let mut grant_links: Vec<LinkExpression> = raw_grant_links
             .iter()
             .filter(|l| grant_counts(l) && parse_link_timestamp(&l.timestamp).is_some())
             .cloned()
@@ -735,20 +797,22 @@ impl RequiresQueryable for PerspectiveInstance {
         // filter meant to fail closed.
         //
         // So the cap is applied to a signature-preferred ordering: links whose
-        // carried proof already verifies claim slots first. This is a
-        // *preference*, never a filter — an unverified link is still carried
-        // while there is room, which is what keeps #1064 and #1063 out of this
-        // PR. Under the cap nothing changes; at the cap a forger cannot evict
-        // a genuine link, and dropping an unverified *earlier* link can only
-        // move `granted_at` later, which is the fail-closed direction.
-        grant_links.sort_by_key(|l| l.proof.valid != Some(true));
+        // signature verifies claim slots first — computed from the signature
+        // here, since the carried form deliberately has no verdict flag to
+        // read. This is a *preference*, never a filter — an unverified link
+        // is still carried while there is room, which is what keeps #1064 and
+        // #1063 out of this PR. Under the cap nothing changes; at the cap a
+        // forger cannot evict a genuine link, and dropping an unverified
+        // *earlier* link can only move `granted_at` later, which is the
+        // fail-closed direction.
+        grant_links.sort_by_cached_key(|l| !l.compute_proof_valid());
         grant_links.truncate(MAX_GRANT_LINKS);
         grant_links.sort_by(|a, b| {
             (parse_link_timestamp(&a.timestamp), &a.timestamp)
                 .cmp(&(parse_link_timestamp(&b.timestamp), &b.timestamp))
         });
 
-        let revocation_links: Vec<DecoratedLinkExpression> = self
+        let revocation_links: Vec<LinkExpression> = self
             .get_links(&LinkQuery {
                 source: Some(instance_id.to_string()),
                 predicate: Some(ROLE_GRANT_REVOKED_PREDICATE.to_string()),
@@ -756,6 +820,7 @@ impl RequiresQueryable for PerspectiveInstance {
             })
             .await?
             .into_iter()
+            .map(as_carried)
             .filter(revocation_counts)
             .collect();
 
@@ -765,84 +830,13 @@ impl RequiresQueryable for PerspectiveInstance {
         })
     }
 
-    async fn granting_receipts(&self, node: &str) -> anyhow::Result<Vec<FlowReceipt>> {
-        use ad4m_client::literal::{Literal, LiteralValue};
-
-        let edges = self
-            .get_links(&LinkQuery {
-                source: Some(node.to_string()),
-                predicate: Some(FLOW_GRANTED_BY_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await?;
-
-        // Deterministic and bounded. The edges are writable by anyone, so
-        // without a cap a stranger could hang a thousand of them off a role
-        // instance and make every state read walk them all. Sorting by
-        // receipt URI first — which is the hash of the receipt's content —
-        // makes which ones survive the cap the same on every replica, so two
-        // replicas do not disagree about a grant because their stores
-        // enumerate links in different orders.
-        //
-        // Dropping candidates can only remove a possible witness from an
-        // existential gate, so the cap fails closed; see
-        // `flow_instance::grant`.
-        let mut uris: Vec<String> = edges.into_iter().map(|l| l.data.target).collect();
-        uris.sort();
-        uris.dedup();
-        if uris.len() > MAX_GRANTING_RECEIPTS {
-            log::warn!(
-                "granting_receipts: `{node}` carries {} `granted_by` edges; reading only the \
-                 first {MAX_GRANTING_RECEIPTS} by URI. A grant backed only by one of the \
-                 dropped receipts will NOT be counted.",
-                uris.len()
-            );
-            uris.truncate(MAX_GRANTING_RECEIPTS);
-        }
-
-        let mut receipts = Vec::with_capacity(uris.len());
-        for uri in uris {
-            let bodies = self
-                .get_links(&LinkQuery {
-                    source: Some(uri.clone()),
-                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-                    ..Default::default()
-                })
-                .await?;
-            // One malformed or missing body must not stop the flow from
-            // deriving a state: anyone can write these edges, so failing the
-            // read here would hand every reader a denial of service. Warn and
-            // move on — a receipt that cannot be read grants nothing.
-            for body in bodies {
-                // `literal:json:` and nothing else — the spelling
-                // `FLOW_RECEIPT_CONTENT_PREDICATE` documents. A body in any
-                // other encoding is not a receipt this reader knows how to
-                // check, and guessing at one would be inventing material.
-                let parsed = Literal::from_url(body.data.target.clone())
-                    .and_then(|l| l.get())
-                    .and_then(|v| match v {
-                        LiteralValue::Json(json) => {
-                            Ok(serde_json::from_value::<FlowReceipt>(json)?)
-                        }
-                        other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
-                    });
-                match parsed {
-                    Ok(receipt) => receipts.push(receipt),
-                    Err(e) => log::warn!(
-                        "granting_receipts: `{node}`: the body of receipt `{uri}` does not read \
-                         as a FlowReceipt and grants nothing: {e:#}"
-                    ),
-                }
-            }
-        }
-        Ok(receipts)
+    /// `produced`'s loader, unchanged: scoped to the flow before it is
+    /// budgeted, and an error over budget. One reader of F's receipts for
+    /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
+    async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
     }
 }
-
-/// How many `granted_by` edges one node is read through. See
-/// [`PerspectiveInstance::granting_receipts`] for why a cap is needed at all
-/// and why truncating fails closed.
-const MAX_GRANTING_RECEIPTS: usize = 8;
 
 /// Tri-state seal result for one target state's guard, used by the manual
 /// proposal path and by `accept.rs` when re-verifying a co-sign.
@@ -971,6 +965,16 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             match evaluate_requires(perspective, requires, record, acting_did).await {
                 RequiresResult::Satisfied(class_names, evidence) => {
                     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
+                    // The engine has no user to ask what a run produced, so
+                    // into a terminal state it names what the guard matched.
+                    // That is this proposer's choice, not a rule: a receipt
+                    // is checked against the signed commitment, never
+                    // against `requires` (#1104).
+                    let outputs = crate::perspectives::flow_instance::receipt::is_terminal_state(
+                        flow,
+                        &state.name,
+                    )
+                    .then(|| evidence.clone());
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -980,6 +984,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
+                        outputs,
                     })
                 }
                 RequiresResult::Unmet => {}
@@ -1008,6 +1013,12 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// bag, by definition) and for `Unmet` (there is nothing to cite).
 pub(crate) struct SealedEvidence {
     pub seal: EvidenceSeal,
+    /// The guard's class names, in the order [`evidence_hash`] framed them
+    /// into the seal. Carried because they are not recoverable from the
+    /// items: a negative guard contributes a class name and no item, so a
+    /// preimage of items alone could not be re-hashed (see
+    /// `flow_instance::receipt::EvidencePreimage`).
+    pub class_names: Vec<String>,
     pub evidence: Vec<EvidenceItem>,
 }
 
@@ -1043,6 +1054,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
 ) -> Result<SealedEvidence> {
     let unmet = |seal| SealedEvidence {
         seal,
+        class_names: Vec::new(),
         evidence: Vec::new(),
     };
     let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
@@ -1059,6 +1071,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
     match evaluate_requires(perspective, requires, record, acting_did).await {
         RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
             seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            class_names,
             evidence,
         }),
         RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
@@ -1340,6 +1353,15 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
 /// whole contract — so it does not. Narrow (it needs two guard-identical edges
 /// into one state) and pre-existing, but real: prefer widening the key here
 /// over re-flattening the manual path onto it.
+///
+/// **The validity-blind match bites the same way.** A live terminal proposal
+/// no voter could sign — a bad or missing outputs commitment, an output that
+/// does not load — still matches the key, so it suppresses the engine mint
+/// on that edge for as long as it stays open. The manual path validates the
+/// atom as a co-signer would and mints past it (`live_proposal_role`); doing
+/// the same here needs `load_outputs`, which [`ProposalLookup`] cannot
+/// answer. Same remedy when it matters: a human proposes manually, or the
+/// invalid proposal's author rejects it.
 pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
@@ -1398,6 +1420,7 @@ pub(crate) async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
+        transition.outputs.as_deref(),
         rationale,
         Some(batch_id.clone()),
         context,
@@ -1602,12 +1625,15 @@ mod tests {
     /// would fail open (#1014).
     ///
     /// They differ on signatures, and that difference is the tested contract,
-    /// not an accident: a tombstone needs a verified signature, a grant link
-    /// does not (yet — #1063). For tombstones, `valid: None` is "not
-    /// evaluated", never "fine": the option-conflation direction that would
-    /// make an unverified link count.
+    /// not an accident: a tombstone needs a signature that verifies, a grant
+    /// link does not (yet — #1063). The verdict is **computed** from the
+    /// signature — the carried form has no verdict flag a fixture could set —
+    /// so a fixture that wants a tombstone to count has to sign it for real,
+    /// and a forged one is one signed by a key that is not its stated
+    /// author's.
     #[test]
     fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
+        use crate::agent::signatures::TestSigner;
         use ad4m_client::literal::Literal;
         let did = "did:key:alice";
         let did_literal = did_literal_url(did).unwrap();
@@ -1615,47 +1641,53 @@ mod tests {
             .to_url()
             .unwrap();
         let legacy = did_literal.replace("literal:string:", "literal://string:");
-        let signed = |target: &str, valid: Option<bool>| DecoratedLinkExpression {
-            author: "did:key:admin".into(),
-            timestamp: "2026-01-01T00:00:00.000Z".into(),
-            data: crate::types::Link {
-                source: "r0".into(),
-                predicate: Some("agent".into()),
-                target: target.into(),
-            },
-            proof: crate::types::DecoratedExpressionProof {
-                key: String::new(),
-                signature: "sig".into(),
-                valid,
-                invalid: valid.map(|v| !v),
-            },
-            status: None,
+        let admin = TestSigner::generate();
+        let forger = TestSigner::generate();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        // A valid link is signed by its stated author's own key; a forged one
+        // states the same author but carries somebody else's signature.
+        let signed = |target: &str, valid: bool| -> LinkExpression {
+            let signing_key = if valid { &admin } else { &forger };
+            let mut expr = signing_key.sign_at(
+                crate::types::Link {
+                    source: "r0".into(),
+                    predicate: Some("agent".into()),
+                    target: target.into(),
+                }
+                .normalize(),
+                at,
+            );
+            expr.author = admin.did.clone();
+            expr.proof.key = admin.key_id.clone();
+            LinkExpression::from(expr)
         };
 
         for target in [did, did_literal.as_str(), legacy.as_str()] {
             assert!(
-                revocation_link_counts_for_did(&signed(target, Some(true)), did, &did_literal),
+                revocation_link_counts_for_did(&signed(target, true), did, &did_literal),
                 "a signed tombstone naming the DID as `{target}` counts"
             );
-            for verdict in [Some(false), None] {
+            assert!(
+                !revocation_link_counts_for_did(&signed(target, false), did, &did_literal),
+                "a tombstone whose signature does not verify never counts, whatever it names"
+            );
+            for valid in [true, false] {
                 assert!(
-                    !revocation_link_counts_for_did(&signed(target, verdict), did, &did_literal),
-                    "an unverified tombstone ({verdict:?}) never counts, whatever it names"
-                );
-                assert!(
-                    grant_link_names_did(&signed(target, verdict), did, &did_literal),
-                    "a grant link is carried on target match alone ({verdict:?}); \
+                    grant_link_names_did(&signed(target, valid), did, &did_literal),
+                    "a grant link is carried on target match alone (valid={valid}); \
                      signature-filtering it is #1063, not this PR"
                 );
             }
         }
-        for verdict in [Some(true), Some(false), None] {
+        for valid in [true, false] {
             assert!(
-                !revocation_link_counts_for_did(&signed(&other, verdict), did, &did_literal),
+                !revocation_link_counts_for_did(&signed(&other, valid), did, &did_literal),
                 "a tombstone naming another DID is not this DID's history"
             );
             assert!(
-                !grant_link_names_did(&signed(&other, verdict), did, &did_literal),
+                !grant_link_names_did(&signed(&other, valid), did, &did_literal),
                 "a grant link naming another DID is not this DID's history"
             );
         }
@@ -2030,6 +2062,7 @@ mod tests {
             requires,
             semantic_check: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -2051,6 +2084,7 @@ mod tests {
             creation_hint: None,
             context: None,
             consensus_rule: None,
+            consensus_rule_malformed: false,
         }
     }
 
@@ -2195,6 +2229,13 @@ mod tests {
                     }],
                 ),
                 semantic_check: Some("Agreed?".into()),
+                // `scoped` is terminal, so the engine names what the guard
+                // matched as the run's outputs, with its content (#1104).
+                outputs: Some(vec![EvidenceItem {
+                    id: "ad4m://task/1".into(),
+                    class_name: "ns://Task".into(),
+                    content: json!({ "id": "ad4m://task/1" }).to_string(),
+                }]),
             }]
         );
     }
@@ -2396,6 +2437,7 @@ mod tests {
                 evidence: Vec::new(),
                 evidence_hash: "hash".into(),
                 semantic_check: None,
+                outputs: None,
             }
         }
 

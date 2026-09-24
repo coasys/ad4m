@@ -1,4 +1,8 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback, FlowFireOutcome, FlowProposeResult } from "./PerspectiveClient";
+import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -868,8 +872,15 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
-    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string): Promise<FlowProposeResult> {
-        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale)
+    /**
+     * `outputs` names the instances a run produces, as `{ className, id }`
+     * pairs, for a transition into a terminal state. The proposal signs a
+     * hash over their content, and a receipt for the run can only speak for
+     * exactly these instances, as they stood at completion. Naming outputs
+     * for a non-terminal state is refused.
+     */
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
+        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
     }
 
     async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
@@ -879,6 +890,38 @@ export class PerspectiveProxy {
     /** Withdraw our own links from a proposal; resolves to how many went. */
     async rejectFlowProposal(proposalUri: string): Promise<number> {
         return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /**
+     * Re-decide a flow receipt under this perspective's own flow catalogue.
+     * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
+     * `outcome`, never on a boolean you derive from it.
+     */
+    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+        return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
+    }
+
+    /**
+     * Which instances are, as they stand, valid outputs of `flow`?
+     *
+     * Backed by receipt verification executor-side (see
+     * {@link FlowValidOutput}); an instance without a verifying receipt, or
+     * edited since its run completed, is not listed. The same predicate is
+     * available as a model-query filter:
+     * `where: { producedByFlow: { flow, state? } }`.
+     *
+     * Rejects — never resolves to `[]` — when the flow is not on this
+     * perspective, or when it carries more receipt candidates than the
+     * executor's per-flow budget (256): "could not read every receipt" is not
+     * "no valid outputs". The filter rejects the same way.
+     */
+    async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /** Mint and store the receipt for a completed flow run. */
+    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
+        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */
