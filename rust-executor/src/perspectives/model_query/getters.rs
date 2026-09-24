@@ -25,6 +25,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
+use super::sparql_builder::verified_link_exists;
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
@@ -101,7 +102,7 @@ pub fn evaluate_getters_batch(
         })
         .collect();
 
-    evaluate_getters(store, &mut instances, &filtered_shape, None, true)?;
+    evaluate_getters(store, &mut instances, &filtered_shape, None, true, None)?;
 
     let mut result = Map::new();
     for inst in &instances {
@@ -160,6 +161,41 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) 
     }
 }
 
+/// Add the #1113 proof filter to a relation getter that opens with the
+/// relation's own triple, `<Base> <predicate> ?target`.
+///
+/// That is the form of the conformance getter the SDK generates for a typed
+/// relation (`buildConformanceFilter` in `core/src/model/decorators.ts`). A
+/// relation with a getter is filled here instead of by the filtered hydration
+/// read, so without this a forged link would add a target to it. The filter
+/// goes on that first triple only; the conformance patterns after it select
+/// the target, which is #1120's scope.
+///
+/// Any other getter is the model author's own SPARQL and runs as written.
+/// Unchanged as well when the query opts in with `includeUnverified`.
+pub(super) fn verify_relation_getter(
+    getter: &str,
+    predicate: &str,
+    include_unverified: Option<bool>,
+) -> String {
+    let filter = match validate_iri(predicate) {
+        Ok(pred) => verified_link_exists("<Base>", pred, "?target", include_unverified),
+        Err(_) => return getter.to_string(),
+    };
+    if filter.is_empty() {
+        return getter.to_string();
+    }
+    let own_triple = regex::Regex::new(&format!(
+        r"(?is)^\s*SELECT\s+\?target\s+WHERE\s*\{{\s*<Base>\s+<{}>\s+\?target\b",
+        regex::escape(predicate)
+    ))
+    .expect("escaped predicate");
+    match own_triple.find(getter) {
+        Some(m) => format!("{}{filter}{}", &getter[..m.end()], &getter[m.end()..]),
+        None => getter.to_string(),
+    }
+}
+
 /// Inject a `?source` batching constraint into a `SELECT` getter.
 ///
 /// Performs three transformations:
@@ -205,6 +241,7 @@ pub(super) fn evaluate_getters(
     shape: &ModelShape,
     _include: Option<&HashMap<String, IncludeValue>>,
     deep_query: bool,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
@@ -268,7 +305,12 @@ pub(super) fn evaluate_getters(
                 }
             }
         } else if upper.starts_with("SELECT") {
-            let batched = inject_values_into_select(getter, &source_constraint);
+            let getter = if prop.is_collection || prop.is_scalar_relation {
+                verify_relation_getter(getter, &prop.predicate, include_unverified)
+            } else {
+                getter.clone()
+            };
+            let batched = inject_values_into_select(&getter, &source_constraint);
 
             match store.query(&batched) {
                 Ok(result_json) => {

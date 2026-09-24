@@ -369,7 +369,9 @@ pub(super) fn build_instance_sparql(
 /// keys of the two-phase plan's pagination subquery, and the non-transitive
 /// projections. So an unverified link cannot reorder a page, push a genuine
 /// instance past `limit`, or change a `$` count. The timestamp order key reads
-/// the verdict off its own reifier in [`build_timestamp_probe`].
+/// the verdict off its own reifier in [`build_timestamp_probe`]. A typed
+/// relation's generated getter gets it on its own triple in
+/// `getters::verify_relation_getter`; a hand-written getter runs as written.
 ///
 /// What decides *which* instances match still reads the bare triple, which
 /// exists as soon as any link asserts it, so it still matches unverified
