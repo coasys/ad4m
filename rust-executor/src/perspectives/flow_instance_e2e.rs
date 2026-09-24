@@ -3889,6 +3889,122 @@ async fn other_flows_receipts_do_not_spend_this_flows_budget() {
     assert_eq!(total, 1);
 }
 
+/// The budget counts flow F's **bodies** on their own: many bodies hung
+/// under one indexed receipt URI — even the honest receipt's own — must hit
+/// the budget, not be parsed without bound or silently cut. Pinned at the
+/// boundary (`MAX` bodies answer, `MAX + 1` refuse) with the index holding a
+/// single entry throughout, so only the body check can answer.
+///
+/// Red if the body check is removed (every body is parsed and the honest
+/// receipt answers) or truncates instead of refusing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_flood_under_one_indexed_receipt_is_over_budget() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, load_flow_receipts, ReceiptBudgetExceeded, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::FLOW_RECEIPT_CONTENT_PREDICATE;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+    let junk_body = |i: usize| Link {
+        source: honest_uri.clone(),
+        predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+        target: literal(&format!("not a receipt {i}")),
+    };
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS - 1).map(junk_body).collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("hang MAX - 1 junk bodies beside the honest one");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &flow, None)
+            .await
+            .expect("MAX bodies are exactly the budget")
+            .len(),
+        1
+    );
+
+    f.perspective
+        .add_links(
+            vec![junk_body(MAX_FLOW_RECEIPTS - 1)],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("hang the MAX-th junk body");
+    let err = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect_err("MAX + 1 bodies under one entry are over budget");
+    assert_eq!(
+        err.downcast_ref::<ReceiptBudgetExceeded>().cloned(),
+        Some(ReceiptBudgetExceeded {
+            flow,
+            found: MAX_FLOW_RECEIPTS + 1,
+            cap: MAX_FLOW_RECEIPTS,
+        }),
+        "{err:#}"
+    );
+}
+
+/// And on the **index** on its own: flow F's index entries bound how many
+/// receipt nodes one read visits, whether or not anything hangs under them.
+/// An index flood with no bodies at all — the flood that costs the reader
+/// one lookup per entry and costs the attacker one link each — must hit the
+/// budget, while the bodies stay far below it.
+///
+/// Red if the index check is removed: the bodies-only count (one, the
+/// honest body) would let the read visit every entry and answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_flood_without_bodies_is_over_budget() {
+    use super::flow_instance::produced::{
+        load_flow_receipts, ReceiptBudgetExceeded, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::RECEIPT_URI_PREFIX;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    mint_honest_task_receipt(&mut f).await;
+    let flow = f.flow_uri.clone();
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS)
+                .map(|i| Link {
+                    source: flow.clone(),
+                    predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                    target: format!("{RECEIPT_URI_PREFIX}-empty-{i:04}"),
+                })
+                .collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("file MAX body-less entries under the flow");
+
+    let err = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect_err("MAX + 1 index entries are over budget, bodies or not");
+    assert_eq!(
+        err.downcast_ref::<ReceiptBudgetExceeded>().cloned(),
+        Some(ReceiptBudgetExceeded {
+            flow,
+            found: MAX_FLOW_RECEIPTS + 1,
+            cap: MAX_FLOW_RECEIPTS,
+        }),
+        "{err:#}"
+    );
+}
+
 /// The TS SDK registers its own `FlowTransitionProposal` shape
 /// (`FlowInstance.start` → `Ad4mModel.registerAll`), and there `evidence` and
 /// `outputs` are `@HasMany` relations: an `ad4m://adder`, no `ad4m://setter`.
