@@ -2,12 +2,8 @@
 
 use super::{DerivedState, VouchedAtom};
 use crate::perspectives::flow_instance::atom::{TransitionAtom, Vote};
+pub(super) use crate::perspectives::flow_instance::test_support::{ALICE, BOB, T1, T2, T3};
 use crate::perspectives::shacl_parser::SHACLFlow;
-pub(super) const ALICE: &str = "did:key:alice";
-pub(super) const BOB: &str = "did:key:bob";
-pub(super) const T1: &str = "2026-01-01T00:00:00.000Z";
-pub(super) const T2: &str = "2026-01-02T00:00:00.000Z";
-pub(super) const T3: &str = "2026-01-03T00:00:00.000Z";
 
 /// `review ⇄ changes_requested`, plus `review → approved` whose `{n}` is
 /// configurable, so every quorum case fits one fixture.

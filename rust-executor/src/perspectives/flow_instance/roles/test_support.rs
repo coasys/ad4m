@@ -12,25 +12,15 @@ use crate::types::LinkExpression;
 use async_trait::async_trait;
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
+
 /// Test personas hold **real** Ed25519 keypairs, not `did:key:alice`
 /// placeholders, because [`RoleGrantEvidence::resolve`] recomputes every
 /// tombstone's signature rather than reading its carried `proof.valid`.
 /// A fixture that merely *claims* `valid: true` is precisely the minter's
 /// word the reader no longer takes, so a fixture that wants a tombstone to
 /// count has to sign it for real.
-///
-/// Leaked on first use so the DIDs are `&'static str` and read like the
-/// constants they replaced. One keypair per persona per process.
-pub(super) fn persona(name: &str) -> &'static TestSigner {
-    static SIGNERS: LazyLock<Mutex<HashMap<String, &'static TestSigner>>> =
-        LazyLock::new(|| Mutex::new(HashMap::new()));
-    *SIGNERS
-        .lock()
-        .expect("persona registry")
-        .entry(name.to_string())
-        .or_insert_with(|| Box::leak(Box::new(TestSigner::generate())))
-}
+pub(super) use crate::perspectives::flow_instance::test_support::persona;
 
 /// The signer behind a DID one of the fixtures produced, for re-signing.
 pub(super) fn persona_for_did(did: &str) -> Option<&'static TestSigner> {
