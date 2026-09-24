@@ -12,6 +12,11 @@
  * whose only link was written Local. Neither is declared `local`, so the
  * pre-#1116 read returns both, whoever asks.
  *
+ * A typed relation is read from links of the same status. `remarks` below is a
+ * `@HasMany` to a flagged class, so the SDK gives it a generated conformance
+ * getter, and the relation is filled by that getter rather than by the
+ * filtered hydration read. Its only link is Local.
+ *
  * The last case pins how `linkStatus` combines with #1113's
  * `includeUnverified`: both apply to the same link, so a Local link whose
  * signature does not verify is read only with `includeUnverified`, and never
@@ -31,6 +36,7 @@ import {
   Ad4mClient,
   Ad4mModel,
   Flag,
+  HasMany,
   Link,
   LinkExpression,
   LinkQuery,
@@ -41,6 +47,15 @@ import {
 } from "@coasys/ad4m";
 import { startAgent } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
+
+@Model({ name: "LinkStatusRemark" })
+class LinkStatusRemark extends Ad4mModel {
+  @Flag({ through: "lsc://type", value: "lsc://remark" })
+  type = "lsc://remark";
+
+  @Property({ through: "lsc://body" })
+  body: string = "";
+}
 
 @Model({ name: "LinkStatusCard" })
 class LinkStatusCard extends Ad4mModel {
@@ -53,6 +68,10 @@ class LinkStatusCard extends Ad4mModel {
   /** Not declared `local`: its link is Local only because it was written so. */
   @Property({ through: "lsc://note" })
   note: string = "";
+
+  /** Typed relation: filled by its generated conformance getter. */
+  @HasMany(() => LinkStatusRemark, { through: "lsc://remark" })
+  remarks: string[] = [];
 }
 
 describe("Ad4mModel — linkStatus reads", function () {
@@ -62,6 +81,7 @@ describe("Ad4mModel — linkStatus reads", function () {
   let ad4m: Ad4mClient;
   let perspective: PerspectiveProxy;
   let cardId: string;
+  let remarkId: string;
 
   before(async () => {
     const shared = getSharedAgent();
@@ -73,6 +93,7 @@ describe("Ad4mModel — linkStatus reads", function () {
       ownStop = agent.stop;
     }
     perspective = await ad4m.perspective.add("model-link-status-test");
+    await LinkStatusRemark.register(perspective);
     await LinkStatusCard.register(perspective);
 
     const card = new LinkStatusCard(perspective);
@@ -96,13 +117,25 @@ describe("Ad4mModel — linkStatus reads", function () {
       "local"
     );
 
-    // Precondition: one Shared and one Local property link.
+    // A conforming remark (its own links Shared), related to the card only by
+    // a Local link.
+    const remark = new LinkStatusRemark(perspective);
+    remark.body = "shared body";
+    await remark.save();
+    remarkId = remark.id;
+    await perspective.add(
+      new Link({ source: cardId, predicate: "lsc://remark", target: remarkId }),
+      "local"
+    );
+
+    // Precondition: one Shared and one Local property link, one Local relation link.
     const status = async (predicate: string) =>
       (await perspective.get(new LinkQuery({ source: cardId, predicate }))).map((l) =>
         String(l.status ?? "shared").toLowerCase()
       );
     expect(await status("lsc://title")).to.deep.equal(["shared"]);
     expect(await status("lsc://note")).to.deep.equal(["local"]);
+    expect(await status("lsc://remark")).to.deep.equal(["local"]);
   });
 
   after(async () => {
@@ -159,6 +192,32 @@ describe("Ad4mModel — linkStatus reads", function () {
       .links(["note"])
       .get();
     expect(targets(viaBuilder[0], "note")).to.deep.equal([]);
+  });
+
+  it("reads a typed relation from links of the same status", async () => {
+    const both = await find({});
+    expect(both.remarks).to.deep.equal([remarkId]);
+
+    const local = await find({ linkStatus: "local" });
+    expect(local.remarks).to.deep.equal([remarkId]);
+
+    const shared = await find({ linkStatus: "shared" });
+    expect(shared.remarks ?? [], "the Local relation link must not be read").to.not.include(
+      remarkId
+    );
+
+    const sharedIncluded = await find({ linkStatus: "shared", include: { remarks: true } });
+    const included = (sharedIncluded.remarks ?? []) as unknown[];
+    expect(
+      included.map((r) => (typeof r === "string" ? r : (r as LinkStatusRemark).id)),
+      "nor hydrate its target through `include`"
+    ).to.not.include(remarkId);
+
+    const viaBuilder = await LinkStatusCard.query(perspective)
+      .where({ id: cardId })
+      .linkStatus("shared")
+      .get();
+    expect(viaBuilder[0]?.remarks ?? []).to.not.include(remarkId);
   });
 
   // Runs last: it adds a forged Local `note` link the cases above must not see.

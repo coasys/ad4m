@@ -18,7 +18,7 @@ use crate::types::{Link, LinkExpression, LinkStatus};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-const LS_SHAPE_JSON: &str = r#"{
+pub(super) const LS_SHAPE_JSON: &str = r#"{
     "className": "Card",
     "properties": {
         "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"ls://Card"},
@@ -31,7 +31,7 @@ const LS_SHAPE_JSON: &str = r#"{
     }
 }"#;
 
-const LS_REMARK_SHAPE_JSON: &str = r#"{
+pub(super) const LS_REMARK_SHAPE_JSON: &str = r#"{
     "className": "Remark",
     "properties": {
         "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"ls://Remark"},
@@ -41,14 +41,14 @@ const LS_REMARK_SHAPE_JSON: &str = r#"{
     "relations": {}
 }"#;
 
-fn ls_at(second: u32) -> chrono::DateTime<chrono::Utc> {
+pub(super) fn ls_at(second: u32) -> chrono::DateTime<chrono::Utc> {
     use chrono::TimeZone;
     chrono::Utc
         .with_ymd_and_hms(2026, 9, 24, 12, 0, second)
         .unwrap()
 }
 
-fn ls_link(
+pub(super) fn ls_link(
     signer: &TestSigner,
     source: &str,
     predicate: &str,
@@ -69,7 +69,7 @@ fn ls_link(
 }
 
 /// Card `ls://c/1`: its type and `title` are Shared, its `note` is Local.
-fn ls_seed(store: &SparqlStore) -> TestSigner {
+pub(super) fn ls_seed(store: &SparqlStore) -> TestSigner {
     let signer = TestSigner::generate();
     let c = "ls://c/1";
     for l in [
@@ -104,7 +104,7 @@ fn ls_seed(store: &SparqlStore) -> TestSigner {
 }
 
 /// `true` when `key` did not hydrate: absent or null.
-fn unset(instance: &Value, key: &str) -> bool {
+pub(super) fn unset(instance: &Value, key: &str) -> bool {
     instance.get(key).map_or(true, Value::is_null)
 }
 
