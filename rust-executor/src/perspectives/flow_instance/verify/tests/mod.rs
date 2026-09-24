@@ -131,6 +131,7 @@ fn an_honest_receipt_verifies_and_names_the_quorum_that_settled_it() {
         verdict,
         ReceiptVerdict::Verified {
             terminal_state: "done".into(),
+            settled_at: T1.into(),
             outputs: refs(&[OUTPUT]),
             voters: vec![did_of(ALICE).to_string()],
         },
@@ -181,4 +182,140 @@ impl Rename for SHACLFlow {
         self.name = name.to_string();
         self
     }
+}
+
+// ---- (0a) the settle time --------------------------------------------
+
+/// `settled_at` is the quorum time of the edge that **completed** the run,
+/// not of the one that started it.
+///
+/// The single-edge fixture above cannot tell those apart — its first
+/// settled edge is also its last — so a walk with two hops at different
+/// times is the only shape that pins it. It matters because this value
+/// becomes `granted_at` for a `producedByFlow` role: reporting the first
+/// hop would date a grant from the moment the run *began* to be decided,
+/// opening an eligibility window over a stretch in which the run had not
+/// completed and the grant did not exist.
+///
+/// Red with `derived.settled.first()` in `verify_receipt`, which the
+/// happy-path test above is blind to.
+#[test]
+fn a_multi_hop_run_settles_at_the_edge_that_completed_it() {
+    let flow = flow_json(
+        json!([
+            { "name": "open", "value": 0.0 },
+            { "name": "mid", "value": 0.5 },
+            { "name": "done", "value": 1.0 },
+        ]),
+        json!([
+            { "action_name": "Start", "from_state": "open", "to_state": "mid", "actions": [] },
+            { "action_name": "Finish", "from_state": "mid", "to_state": "done", "actions": [] },
+        ]),
+    );
+    let (start_uri, start_links) =
+        crate::perspectives::flow_instance::test_support::signed_proposal(
+            "ad4m://p/2",
+            ALICE,
+            "open",
+            "mid",
+            &seal(),
+            T1,
+        );
+    let (finish_uri, finish_links) = final_links("ad4m://p/1", ALICE, "mid", "done", T2);
+    let two_hops = read_set(
+        vec![
+            ProposalLinks {
+                uri: finish_uri,
+                links: finish_links,
+            },
+            ProposalLinks {
+                uri: start_uri,
+                links: start_links,
+            },
+        ],
+        Vec::new(),
+    );
+    let receipt = mint(&flow, two_hops);
+
+    let verdict = verify_receipt(&catalogue(vec![flow]), &receipt);
+    let ReceiptVerdict::Verified { settled_at, .. } = &verdict else {
+        panic!("the two-hop walk completes — got: {verdict}");
+    };
+    assert_eq!(
+        settled_at, T2,
+        "the run completed when the SECOND hop reached quorum, not the first"
+    );
+}
+
+// ---- (0b) a walk that took no edge ------------------------------------
+
+/// A flow whose genesis state has no transitions out of it is terminal
+/// from the moment an instance exists. The fold "reaches" that state by
+/// standing still: no atom, no vote, no quorum, nobody deciding anything.
+///
+/// Both sides refuse it, and the test asserts both — an asymmetric rule is
+/// the defect this arc keeps guarding against, and here it would be
+/// invisible until a receipt minted cleanly on one replica and failed
+/// everywhere it was presented.
+///
+/// The hand-built receipt is the only way to reach the verify side at all,
+/// which is the point: that arm exists for material `mint` would not have
+/// produced.
+///
+/// Both sides answer through #1108's final-edge commitment check
+/// ([`OutputsCommitment::NoFinalEdge`]): a walk with no settled edge has no
+/// final edge, so nothing committed to any output. Red if that arm is
+/// dropped on either side: the fold reaches `done`, `done` is terminal, and
+/// a receipt asserting a completion with an empty voter list verifies.
+#[test]
+fn a_run_in_which_nobody_voted_is_not_a_completion() {
+    let standing_still = flow_json(json!([{ "name": "done", "value": 1.0 }]), json!([]));
+    // Genesis is this flow's own initial state, so `fold_read_set`'s
+    // genesis check passes and the zero-edge refusal is what answers.
+    let empty = ReadSet {
+        genesis: "done".into(),
+        ..read_set(Vec::new(), Vec::new())
+    };
+    assert_eq!(
+        fold_read_set(&standing_still, &empty.reverified())
+            .expect("a stateless walk folds")
+            .settled
+            .len(),
+        0,
+        "precondition: the walk takes no edge, and `done` is terminal anyway"
+    );
+
+    let err = FlowReceipt::mint(
+        &standing_still,
+        ReadSet {
+            genesis: "done".into(),
+            ..empty.clone()
+        },
+        outs(&[OUTPUT]),
+        Vec::new(),
+    )
+    .expect_err("a completion nobody voted on is not a completion");
+    assert!(
+        format!("{err:#}").contains("the walk settled no edge"),
+        "the refusal must name the missing quorum, got: {err:#}"
+    );
+
+    // The same material as a receipt that arrived from elsewhere, which is
+    // the only way to reach the verifier's arm.
+    let hand_built = FlowReceipt {
+        flow_uri: standing_still.flow_uri(),
+        flow_dna_hash: flow_dna_hash(&standing_still).expect("hash"),
+        terminal_state: "done".into(),
+        outputs: outs(&[OUTPUT]),
+        read_set: ReadSet {
+            genesis: "done".into(),
+            ..empty
+        },
+        evidence_preimage: Vec::new(),
+    };
+    assert_eq!(
+        verify_receipt(&catalogue(vec![standing_still]), &hand_built),
+        ReceiptVerdict::NoFinalEdge,
+        "and the verifier refuses exactly what mint refuses"
+    );
 }

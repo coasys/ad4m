@@ -112,6 +112,50 @@ export interface ModelQuery {
    * §7.4). Ignored when the query is used as a state guard or context.
    */
   or?: ModelQuery[];
+  /**
+   * When this query is used as a `ConsensusRule.fromRole`, require each
+   * matched instance to be a valid output of a completed run of another
+   * flow, and date the grant from that run's quorum instead of from an
+   * assignment link.
+   *
+   * The same name and the same check as the model-query filter
+   * `where: { producedByFlow }`: a receipt filed under `flow`'s index must
+   * verify against this replica's own flow definitions, be for `flow`, have
+   * settled into `state`, and name this instance (as this query's
+   * `className`) among its outputs. Each replica checks this against its
+   * own graph; the read-set carries only the resulting grant date.
+   *
+   * Two things to know before configuring one:
+   * - An instance no verified receipt produced is simply not a member.
+   *   There is no fallback to the assignment link — if there were, writing
+   *   that link would grant the role and this gate would be decorative.
+   * - **A granted role is not un-granted by undoing the flow.** Retracting
+   *   a settling vote moves the live flow back; the receipt keeps
+   *   verifying. The only un-grant is a new signed
+   *   `ad4m://flow/role_grant_revoked` tombstone on the instance, from an
+   *   author this query's own `where.author` accepts — so a query with no
+   *   author condition can be revoked by anyone, and one naming an author
+   *   who is not around cannot be revoked at all.
+   *
+   * Ignored when the query is used as a state guard (`requires`) or
+   * background `context`.
+   */
+  producedByFlow?: ProducedByFlow;
+}
+
+/**
+ * The granting-flow reference on a `fromRole` query's `producedByFlow`.
+ *
+ * The same shape as the model-query filter's `{ flow, state? }`, except
+ * that `state` is required here: without it, a run that settled into a
+ * flow's `rejected` state would grant what its `approved` state was meant
+ * to.
+ */
+export interface ProducedByFlow {
+  /** The granting flow's URI — `{namespace}{name}Flow`. */
+  flow: string;
+  /** The state that run must have settled into. */
+  state: string;
 }
 
 /**

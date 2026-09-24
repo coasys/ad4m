@@ -63,7 +63,11 @@
 //!   (`flow_evaluator::PerspectiveInstance::did_property_predicate`); the
 //!   sentence above is true from that commit forward and from no earlier one.
 //!   Receipts minted before it date their grants from the instance.
-//! - `revoked_at` is the tombstone's link timestamp.
+//! - `granted_at` is **the granting run's quorum time** when the role query
+//!   declares `producedByFlow`, and then nothing else may date it — not the
+//!   assignment link, not the instance timestamp, not even as a fallback. See
+//!   [`grant`](super::grant).
+//! - `revoked_at` is the tombstone's link timestamp, for both kinds.
 //!
 //! Timestamps are compared as **parsed instants** ([`super::time`]), never
 //! as strings: they are client-asserted RFC 3339 and clients disagree on
@@ -105,10 +109,16 @@
 //! escalation of *timing* only, within an authority the social DNA already
 //! grants: the admin controls membership, and a back-dated revocation
 //! achieves nothing a genuinely earlier one would not have. Documented, not
-//! engineered around, in v1 (#1027). Roles granted as flow outputs — the
-//! planned recursive composition — will carry a quorum-fixed time no single
-//! party can back-date, shrinking the residual to the admin-authored base
-//! case.
+//! engineered around, in v1 (#1027).
+//!
+//! The half of this that *is* engineered around is the **grant** side, for
+//! roles granted as flow outputs: a `producedByFlow` grant is dated from
+//! [`SettledEdge::settled_at`](super::fold::SettledEdge) — the moment the
+//! n-th distinct eligible voter signed — which no single party picks and
+//! nobody can back-date without producing a different quorum. The replica
+//! that collects the evidence checks that against the receipt in its own
+//! graph; a reader of a serialised read-set trusts the carried date (see
+//! [`grant`](super::grant) § *What a receipt of a gated flow proves*).
 //!
 //! ## History
 //!
@@ -206,6 +216,19 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     // through the class's shape before querying links — see
     // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
     let did_property = role.did_property.as_deref();
+
+    // A `producedByFlow` gate is decided here, against this replica's own
+    // graph, once for the whole role: every receipt fully verified, bound to
+    // `(role.class_name, id)`. Over budget, or a flow this replica does not
+    // hold, is an ERROR that propagates — see `grant`. Every other role pays
+    // nothing.
+    let produced = match &role.produced_by_flow {
+        Some(spec) => {
+            Some(super::grant::produced_at_by_instance(perspective, &role.class_name, spec).await?)
+        }
+        None => None,
+    };
+
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         let input = requires_query_input(role, record, did)?;
@@ -221,6 +244,9 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
                 grant_links: links.grant_links,
                 revocation_links: links.revocation_links,
                 asserted_instance_timestamp: instance_timestamp(item),
+                produced_at: produced
+                    .as_ref()
+                    .and_then(|by_id| by_id.get(&item.id).cloned()),
             });
         }
         // Stable by instance URI: the read-set must not depend on the order a
@@ -352,7 +378,7 @@ mod tests {
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE())).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.

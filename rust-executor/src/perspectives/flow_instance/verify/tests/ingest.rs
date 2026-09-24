@@ -50,6 +50,7 @@ fn reviewer_evidence_from(grant_links: Vec<LinkExpression>) -> RoleGrantEvidence
             // Earlier than the assignment link — the widening the
             // suppression rule exists to prevent.
             asserted_instance_timestamp: Some(INSTANCE_CREATED.into()),
+            produced_at: None,
         }],
     }
 }
