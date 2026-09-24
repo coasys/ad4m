@@ -366,7 +366,7 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
 
-This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, the accept/reject write surface, and a worked end-to-end example.
+This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, `proposeTransition` / accept / reject, role gates including `grantedByFlow`, and a worked end-to-end example.
 
 <Callout type="info" emoji="ℹ️">
   Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
@@ -441,14 +441,14 @@ const proposals = await instance.proposals();
 ```
 
 <Callout type="info" emoji="ℹ️">
-  The above is the read surface. The consensus engine has since landed, so
-  voting on a proposal and firing it once a `ConsensusRule` is met are now
-  supported: `instance.acceptProposal(p)` adds the caller's signature and
-  returns whatever fired, and `instance.rejectProposal(p)` withdraws the links
-  that caller signed. Proposals are minted by the engine's evaluator pass after
-  an extraction run. A client-side `proposeTransition` and flow subscriptions
-  are not yet implemented. See [Flows](/flows) for the on-graph objects, the
-  accept/reject semantics, and a worked end-to-end example.
+  That is the read surface. The write surface is on the same wrapper:
+  `instance.proposeTransition(toState, rationale?)` is the button click
+  (mint or co-sign), `instance.acceptProposal(p)` adds a signature to a
+  listed proposal, `instance.rejectProposal(p)` withdraws the links you
+  signed. Reject is not a cancel — retracting a settling vote moves the
+  flow back. See [Flows](/flows) for `FlowProposeResult`, role gates, and
+  a worked end-to-end example. The executable twin is
+  `tests/js/tests/model/flow-task-handover.test.ts`.
 </Callout>
 
 ### Adding Flows to a Perspective

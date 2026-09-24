@@ -437,7 +437,7 @@ roles:
 
 /// Reinstall the alliance DNA (uninstall old, install new).
 pub async fn reinstall() -> Result<(), AnyError> {
-    let hc = match maybe_get_holochain_service().await {
+    let hc = match crate::holochain_service::holochain_service_once_started().await {
         Some(hc) => hc,
         None => {
             return Err(deno_core::anyhow::anyhow!(
@@ -521,7 +521,7 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
         warn!("Stored Unyt agent key is in invalid format, regenerating...");
     }
 
-    let hc = match maybe_get_holochain_service().await {
+    let hc = match crate::holochain_service::holochain_service_once_started().await {
         Some(hc) => hc,
         None => {
             return Err(deno_core::anyhow::anyhow!(

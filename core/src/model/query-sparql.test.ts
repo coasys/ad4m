@@ -623,3 +623,46 @@ describe('looksLikeUri', () => {
     expect(looksLikeUri('1abc:foo')).toBe(false);
   });
 });
+
+describe('buildSPARQLQuery — traverse scope', () => {
+  const modelClass: any = {};
+
+  it('binds every anchor and emits a path for transitive', () => {
+    const query = {
+      parent: {
+        ids: ['flux://a', 'flux://b'],
+        predicate: 'flux://has_message',
+        transitive: true,
+      },
+    };
+    const sparql = buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass);
+    expect(sparql).toContain('VALUES ?_anchor { <flux://a> <flux://b> }');
+    expect(sparql).toContain('?_anchor <flux://has_message>+ ?source');
+  });
+
+  it('refuses limitPerAnchor, which only the executor can apply', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        limitPerAnchor: 5,
+      },
+    };
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('limitPerAnchor');
+  });
+
+  it('refuses levels, which only the executor can walk', () => {
+    const query = {
+      parent: {
+        ids: 'flux://a',
+        predicate: 'flux://has_message',
+        levels: [10, 5],
+      },
+    };
+    // Silently ignoring `levels` would return one unbounded level where a
+    // bounded walk was asked for — a wrong answer that looks like a right one.
+    expect(() => buildSPARQLQuery(richMetadata, emptyRelations, query, modelClass))
+      .toThrow('levels');
+  });
+});

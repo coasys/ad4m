@@ -9,7 +9,8 @@ use super::flow_classes::{mint_flow_instance, write_flow_transition_proposal};
 use super::flow_context::FlowInstanceRecord;
 use super::flow_context::{load_flow_instances, load_shacl_flows};
 use super::flow_evaluator::{
-    evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, SatisfiedTransition,
+    evaluate_flow_transitions, evidence_hash, run_engine_proposal_pass, EvidenceItem,
+    SatisfiedTransition,
 };
 use super::flow_instance::{fold::DerivedState, FlowInstance, ReadSet};
 use super::flow_semantic_check::SemanticCheckLlm;
@@ -38,6 +39,15 @@ pub(super) struct Fixture {
 
 pub(super) fn literal(s: &str) -> String {
     format!("literal:string:{}", urlencoding::encode(s))
+}
+
+/// A second acting identity backed by a real wallet key, so links written
+/// with the returned context carry a DID that verifies — a stub DID string
+/// would be dropped by every authorship check the fold makes.
+pub(super) fn second_agent(user_email: &str) -> AgentContext {
+    crate::agent::AgentService::ensure_user_key_exists(user_email)
+        .unwrap_or_else(|e| panic!("ensure_user_key_exists({user_email}): {e:#}"));
+    AgentContext::for_user_email(user_email.to_string())
 }
 
 /// Two-state Delivery flow (`identified → scoped`) whose `scoped` state
@@ -165,7 +175,9 @@ impl Fixture {
     }
 
     /// `write_flow_transition_proposal` with the fixture's own DID, instance
-    /// URI and context filled in.
+    /// URI and context filled in. Names `evidence_ids` as the run's outputs,
+    /// as the engine does for a proposal into a terminal state (#1104), so
+    /// a co-signer does not refuse the fixture as uncommitted.
     pub(super) async fn write_proposal(
         &mut self,
         proposal_id: &str,
@@ -176,6 +188,9 @@ impl Fixture {
     ) -> String {
         let acting_did = crate::agent::did_for_context(&self.ctx).expect("did_for_context");
         let instance_uri = self.instance_uri.clone();
+        // Committed the way the engine commits: the cited Tasks are the
+        // outputs, with the content this replica reads for them now.
+        let outputs = self.task_outputs(evidence_ids).await;
         write_flow_transition_proposal(
             &mut self.perspective,
             proposal_id,
@@ -185,12 +200,31 @@ impl Fixture {
             to_state,
             evidence_ids,
             evidence_hash,
+            Some(&outputs),
             None,
             None,
             &self.ctx,
         )
         .await
         .unwrap_or_else(|e| panic!("write `{proposal_id}` proposal: {e:#}"))
+    }
+
+    /// Each id's content as an `ns://Task`, read through the loader every
+    /// voter uses. An id that is no Task is left out.
+    pub(super) async fn task_outputs(&self, ids: &[String]) -> Vec<EvidenceItem> {
+        use crate::perspectives::flow_instance::atom::OutputRef;
+        let refs: Vec<OutputRef> = ids
+            .iter()
+            .map(|id| OutputRef {
+                class_name: "ns://Task".to_string(),
+                id: id.clone(),
+            })
+            .collect();
+        let loaded =
+            crate::perspectives::flow_instance::accept::load_outputs(&self.perspective, &refs)
+                .await
+                .expect("load outputs");
+        refs.iter().filter_map(|r| loaded.get(r).cloned()).collect()
     }
 
     pub(super) async fn instances(&self) -> Vec<FlowInstanceRecord> {
@@ -214,7 +248,7 @@ impl Fixture {
         let flows = load_shacl_flows(&self.perspective).await.expect("flows");
         let records = self.instances().await;
         FlowInstance::from_record(&records[0], &flows[&self.flow_uri])
-            .derive_state(&self.perspective)
+            .derive_state(&self.perspective, &flows)
             .await
             .expect("derive_state")
     }
@@ -261,6 +295,21 @@ impl Fixture {
             &self.ctx,
             llm_proposals,
             semantic_check,
+            None,
+        )
+        .await
+    }
+
+    /// The same pass, acting as somebody else. The engine runs on *every*
+    /// replica and each one runs it as its own DID, so this is how a test
+    /// stands in for a second replica's evaluator over one shared graph.
+    pub(super) async fn run_pass_as(&mut self, context: &AgentContext) -> Vec<String> {
+        run_engine_proposal_pass(
+            &mut self.perspective,
+            &[BASE_URI.to_string()],
+            context,
+            &[],
+            None,
             None,
         )
         .await
@@ -392,13 +441,31 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
         &t.to_state,
         &t.evidence_ids,
         &t.evidence_hash,
+        t.outputs.as_deref(),
         None,
         None,
         &f.ctx,
     )
     .await
     .expect("write_flow_transition_proposal");
-    assert_eq!(proposal_uri, "ad4m://flow/proposal/e2e-prop-1");
+    // The URI is the content address of the signed fields under the caller's
+    // nonce (#1108): the writer and `atom::proposal_uri` must agree byte for
+    // byte, or no co-signature would cover the fields it thinks it covers.
+    assert_eq!(
+        proposal_uri,
+        crate::perspectives::flow_instance::atom::proposal_uri(
+            &t.instance_uri,
+            &t.from_state,
+            &t.to_state,
+            &t.evidence_hash,
+            t.outputs
+                .as_deref()
+                .map(crate::perspectives::flow_instance::atom::outputs_hash)
+                .as_deref(),
+            "did:key:acting",
+            "e2e-prop-1",
+        )
+    );
 
     let by_pred = f.links_by_predicate(&proposal_uri).await;
     // IRIs and DIDs are stored raw; plain strings are literal-wrapped.
@@ -413,10 +480,41 @@ async fn write_flow_transition_proposal_lands_all_predicates_e2e() {
         "ad4m://flow/evidence_hashes",
         &literal(&t.evidence_hash),
     );
+    // The nonce must land on the graph, or no reader could ever recompute
+    // the URI and the proposal would be a non-atom (#1108).
+    assert_has_target(&by_pred, "ad4m://flow/nonce", &literal("e2e-prop-1"));
     assert!(
         !by_pred.contains_key("ad4m://flow/rationale"),
         "no rationale was given"
     );
+
+    // `scoped` is terminal, so the engine names the matched Tasks as the
+    // run's outputs and commits to their content (#1104): each output link
+    // carries the encoded `(class, id)`, and the hash is literal-wrapped.
+    // That the atom reads them back is pinned through the real writer in
+    // `propose_commits_to_the_named_outputs_and_refuses_a_missing_one`.
+    use crate::perspectives::flow_instance::atom::{outputs_hash, OutputRef};
+    assert_eq!(t.outputs.as_deref(), Some(&t.evidence[..]));
+    for item in &t.evidence {
+        assert_has_target(
+            &by_pred,
+            "ad4m://flow/output",
+            &literal(&OutputRef::of(item).encode()),
+        );
+    }
+    assert_has_target(
+        &by_pred,
+        "ad4m://flow/outputs_hash",
+        &literal(&outputs_hash(&t.evidence)),
+    );
+    // The guard's hydration and a voter's by-id load read the same content,
+    // or no voter could ever reproduce an engine-written commitment.
+    let mut by_id = f.task_outputs(&t.evidence_ids).await;
+    let mut guarded = t.evidence.clone();
+    let key = |i: &EvidenceItem| (i.class_name.clone(), i.id.clone());
+    by_id.sort_by_key(key);
+    guarded.sort_by_key(key);
+    assert_eq!(by_id, guarded);
 }
 
 #[tokio::test(flavor = "multi_thread")]

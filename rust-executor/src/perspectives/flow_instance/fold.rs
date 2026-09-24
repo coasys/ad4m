@@ -16,15 +16,14 @@
 //!   is by an explicit sort key.
 //! - **Re-verifiable off-perspective.** [`fold`] takes plain data and does no
 //!   I/O, so a verifier outside the neighbourhood can re-run it over a
-//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
-//!   much that verdict is worth differs by half: the proposals and votes are
-//!   signed links the verifier re-checks itself, while the `fromRole`
-//!   history — grant times and revocation tombstones, against which each
-//!   vote is gated as of its own timestamp — is what this replica read: the
-//!   read-set carries each role instance's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
-//!   values but cites the underlying links by id, author and timestamp
-//!   rather than carrying them as signed links — see
-//!   [`ReadSet`](super::ReadSet).
+//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. Both
+//!   halves are worth the same now: the proposals and votes are signed links
+//!   the verifier re-checks itself, and so is the `fromRole` history — the
+//!   read-set carries the grant links and revocation tombstones themselves,
+//!   and [`RoleGrantEvidence::resolve`](super::roles::RoleGrantEvidence::resolve)
+//!   recomputes each [`RoleGrantWindow`](super::roles::RoleGrantWindow) from
+//!   them, so no grant time or revocation is anyone's assertion. What stays
+//!   asserted is named on [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
 //!   that vote. The graph is the truth and the state follows it.
@@ -33,7 +32,11 @@
 //! edge arrive whenever two replicas mint concurrently — each dedupes only
 //! against the proposals it has seen — and asking "is *this proposal*
 //! settled?" would strand such a flow at genesis forever, while asking "did
-//! the *edge* collect `n` distinct voters?" resolves it.
+//! the *edge* collect `n` distinct voters?" resolves it. On a **terminal**
+//! edge the unit is one notch finer — the edge's *outputs commitment* — so
+//! that the votes an edge settles on always agreed to one set of outputs;
+//! see [`settle_edge`] for why anything coarser lets one early uncommitted
+//! proposal make the run unreceiptable forever (#1108/#1118).
 //!
 //! What that is *not*, as of #987: the deliberate two-bot path. The mint pass
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
@@ -120,7 +123,7 @@
 
 use super::atom::{TransitionAtom, Vote};
 use super::time::parse_link_timestamp;
-use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
+use crate::perspectives::shacl_parser::{ConsensusRule, ConsensusRuleSlot, SHACLFlow};
 use chrono::{DateTime, Utc};
 
 /// An atom whose votes have already been filtered by its rule's `fromRole`,
@@ -193,19 +196,73 @@ enum Settlement {
     Contested(Contention),
 }
 
+/// What governs entry INTO a state, once the scopes have been resolved.
+#[derive(Debug, Clone)]
+pub enum ResolvedRule {
+    /// Apply this rule. Either one the author wrote, or — when no scope
+    /// wrote one — the `{ n: 1 }` default.
+    Rule(ConsensusRule),
+    /// The governing scope wrote a `consensusRule` that did not parse. The
+    /// transition is refused: no number of votes admits the edge, and no
+    /// voter is eligible for it.
+    Refused,
+}
+
 /// The rule governing entry INTO `to_state`: the target state's own
 /// `consensusRule`, else the flow-level one, else `{ n: 1 }`.
-pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ConsensusRule {
-    flow.states
+///
+/// # Why a malformed rule refuses instead of defaulting
+///
+/// `{ n: 1, from_role: None }` means *"one signature, from anybody"* — the
+/// most permissive rule the engine can express. That is the right answer for
+/// a flow that declares no rule at all: like-button-shaped actions (§4.1.1)
+/// are the common case and must stay frictionless.
+///
+/// It is the wrong answer for a rule that failed to parse. There the author
+/// did write a gate, and all that is known is that it could not be read.
+/// Defaulting turns *"5 of N, and only from `Reviewer`"* into *"1 vote from
+/// any agent"* with no error and no observable difference at configuration
+/// time — and the substitution always runs toward less consensus, never more
+/// (#1078). So the two cases get separate answers:
+///
+/// - **absent** → `{ n: 1 }`, exactly as before this was split;
+/// - **malformed** → [`ResolvedRule::Refused`].
+///
+/// Refusing wedges the flow at that state, which is loud, local, and fixed by
+/// correcting the literal. Defaulting fails silently and is discoverable only
+/// by auditing what already advanced. This is the policy
+/// [`resolve_role_grants`](super::roles::resolve_role_grants) already applies
+/// when it cannot date a grant, and the one #1064 settled for `proof.valid`:
+/// a value meaning *"could not be determined"* must never be read as a
+/// verdict.
+///
+/// Scope precedence is unchanged, and a malformed scope does NOT fall through
+/// to the next one out: falling back would let an unreadable state-level gate
+/// be silently replaced by a weaker flow-level one, which is the very
+/// substitution this function exists to prevent.
+pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ResolvedRule {
+    let state_slot = flow
+        .states
         .iter()
         .find(|s| s.name == to_state)
-        .and_then(|s| s.consensus_rule.as_ref())
-        .or(flow.consensus_rule.as_ref())
-        .cloned()
-        .unwrap_or(ConsensusRule {
+        .map(|s| s.consensus_rule_slot())
+        .unwrap_or(ConsensusRuleSlot::Absent);
+
+    // First scope that says anything wins — including when what it says is
+    // "unreadable".
+    let governing = match state_slot {
+        ConsensusRuleSlot::Absent => flow.consensus_rule_slot(),
+        decided => decided,
+    };
+
+    match governing {
+        ConsensusRuleSlot::Rule(rule) => ResolvedRule::Rule(rule.clone()),
+        ConsensusRuleSlot::Malformed => ResolvedRule::Refused,
+        ConsensusRuleSlot::Absent => ResolvedRule::Rule(ConsensusRule {
             n: 1,
             from_role: None,
-        })
+        }),
+    }
 }
 
 /// Whether enough distinct eligible voters signed. `{n: 0}` is a
@@ -365,7 +422,9 @@ fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
 /// contention suppression needs.
 ///
 /// Failing closed here means an unconfirmed-cycle path does not silently
-/// suppress contention detection in [`settle`].
+/// suppress contention detection in [`settle`]. A hop whose target's rule
+/// is [`ResolvedRule::Refused`] is skipped for the same reason: an edge that
+/// cannot fire is not an escape route (#1078).
 ///
 /// A state is reachable from itself regardless of atoms (the two-transitions-
 /// to-the-same-target case never contends).
@@ -377,6 +436,14 @@ fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAt
     let mut frontier = vec![from.to_string()];
     while let Some(state) = frontier.pop() {
         for t in flow.transitions.iter().filter(|t| t.from_state == state) {
+            // A hop into a state whose `consensusRule` could not be read can
+            // never fire, however many votes it has collected, so it cannot
+            // carry the loser anywhere. Same argument as the phantom
+            // back-edge of #999, one step stronger: there the votes were
+            // missing, here it is the rule that would admit them (#1078).
+            if matches!(rule_for(flow, &t.to_state), ResolvedRule::Refused) {
+                continue;
+            }
             // Only traverse this hop if some atom on it carries an admitted
             // vote. A phantom hop (no atoms), a vote-less proposal, or an
             // atom voted only by excluded DIDs cannot be relied on to carry
@@ -401,9 +468,30 @@ fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAt
     false
 }
 
-/// One edge: pool the eligible votes of every not-yet-consumed atom on
+/// One edge: pool the eligible votes of the not-yet-consumed atoms on
 /// `from → to`, and if the rule's `{n}` distinct voters is met, report the
 /// edge as settled at the moment the n-th of them signed.
+///
+/// **On a terminal edge, votes pool per outputs commitment** — the fold half
+/// of #1118 option 2 (#1108 re-review, @lal-bot-coasys). A vote into a
+/// terminal state is agreement to *those outputs*: `accept` refuses to
+/// co-sign an atom whose commitment it cannot recompute, and a receipt can
+/// only speak for one commitment ([`super::receipt::final_edge_commitment`]).
+/// Pooling across commitments therefore counted votes that agreed to
+/// nothing in common: one eligible early proposal with no `outputs_hash`
+/// (or a rival one) landed in the settled edge's `atom_uris`, the
+/// commitment read back `Uncommitted`/`Conflicting`, and the run settled
+/// terminally with a receipt nobody could ever mint — permanently, since
+/// there is no proposing past a settled edge. So: atoms are grouped by
+/// their commitment, an atom with none contributes nothing, quorum must be
+/// reached **within one group**, and among quorate groups the
+/// earliest-settled wins (hash order breaks a tie, deterministically). The
+/// settled edge's atoms all share one commitment by construction.
+///
+/// A non-terminal edge keeps pooling across every atom: no run ends there,
+/// `accept` ignores outputs off the final edge, and splitting its quorum by
+/// an irrelevant field would re-open the twin-proposal wedge pooling exists
+/// to close.
 ///
 /// An edge that was already quorate when the walk arrived settles at the
 /// moment of arrival (`max(nth, after)`), so a proposal that lost an earlier
@@ -419,7 +507,67 @@ fn settle_edge(
     atoms: &[VouchedAtom],
     consumed: &[SettledEdge],
 ) -> Option<SettledEdge> {
-    let rule = rule_for(flow, to);
+    // A rule that could not be read admits no edge: return before any vote is
+    // counted, so there is no path on which an unreadable gate settles (#1078).
+    let ResolvedRule::Rule(rule) = rule_for(flow, to) else {
+        log::warn!(
+            "flow `{}`: refusing edge `{from}` → `{to}` — the `consensusRule` governing `{to}` \
+             did not parse, so the threshold it declared is unknown",
+            flow.flow_uri()
+        );
+        return None;
+    };
+    let candidates: Vec<&VouchedAtom> = atoms
+        .iter()
+        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
+        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
+        .collect();
+
+    if !super::receipt::is_terminal_state(flow, to) {
+        return settle_pool(from, to, after, &rule, &candidates);
+    }
+
+    // Terminal edge: group by commitment. BTreeMap so a tie between two
+    // quorate groups breaks by hash order on every replica alike.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&VouchedAtom>> =
+        std::collections::BTreeMap::new();
+    for v in candidates {
+        match v.atom.outputs_hash.as_deref() {
+            Some(hash) => groups.entry(hash).or_default().push(v),
+            None => log::debug!(
+                "flow: atom {} on terminal edge `{from}` → `{to}` carries no outputs \
+                 commitment; its votes bind no outputs and are not pooled",
+                v.atom.uri
+            ),
+        }
+    }
+    groups
+        .into_values()
+        .filter_map(|group| settle_pool(from, to, after, &rule, &group))
+        .min_by(|a, b| {
+            (
+                parse_link_timestamp(&a.settled_at),
+                &a.settled_at,
+                &a.atom_uris,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.settled_at),
+                    &b.settled_at,
+                    &b.atom_uris,
+                ))
+        })
+}
+
+/// The pooling half of [`settle_edge`], over one already-chosen set of
+/// atoms: sort every eligible vote by parsed instant, count distinct DIDs,
+/// and settle at the n-th — floored by `after`.
+fn settle_pool(
+    from: &str,
+    to: &str,
+    after: &str,
+    rule: &ConsensusRule,
+    atoms: &[&VouchedAtom],
+) -> Option<SettledEdge> {
     // Pool with each vote's parsed instant and sort by it — string order is
     // client-library order inside a sub-second collision (#1000). Atom
     // construction already dropped unparseable timestamps, so the
@@ -428,8 +576,6 @@ fn settle_edge(
     // all cannot be the n-th.
     let mut pooled: Vec<(DateTime<Utc>, &Vote, &str)> = atoms
         .iter()
-        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
-        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
         .flat_map(|v| {
             v.eligible_votes
                 .iter()
@@ -462,7 +608,7 @@ fn settle_edge(
         if !atom_uris.iter().any(|u| u == uri) {
             atom_uris.push(uri.to_string());
         }
-        if quorum(&rule, voters.len()) {
+        if quorum(rule, voters.len()) {
             nth = Some((instant, vote.at.clone()));
             break;
         }
@@ -497,6 +643,16 @@ mod tests {
     const T2: &str = "2026-01-02T00:00:00.000Z";
     const T3: &str = "2026-01-03T00:00:00.000Z";
 
+    /// The threshold `rule_for` resolved, for the cases that expect a rule
+    /// at all. Panics on [`ResolvedRule::Refused`] so a test asserting `n`
+    /// can never pass by way of a refusal.
+    fn n_of(flow: &SHACLFlow, to_state: &str) -> u32 {
+        match rule_for(flow, to_state) {
+            ResolvedRule::Rule(r) => r.n,
+            ResolvedRule::Refused => panic!("expected a rule for `{to_state}`, got Refused"),
+        }
+    }
+
     /// `review ⇄ changes_requested`, plus `review → approved` whose `{n}` is
     /// configurable, so every quorum case fits one fixture.
     fn review_flow(approved_n: Option<u32>) -> SHACLFlow {
@@ -522,8 +678,24 @@ mod tests {
     }
 
     /// One atom on `from → to` carrying exactly the listed `(did, at)` votes
-    /// as eligible. Fields the fold never reads carry placeholders.
+    /// as eligible. Fields the fold never reads carry placeholders. Every
+    /// fixture atom shares one outputs commitment, so on a terminal edge the
+    /// per-commitment grouping collapses to the plain pooling these tests
+    /// are about; [`vouched_committing`] is the fixture for the grouping
+    /// itself.
     fn vouched(uri: &str, from: &str, to: &str, votes: &[(&str, &str)]) -> VouchedAtom {
+        vouched_committing(uri, from, to, Some("shared-outputs-hash"), votes)
+    }
+
+    /// [`vouched`] with an explicit outputs commitment (`None`: the proposer
+    /// signed none).
+    fn vouched_committing(
+        uri: &str,
+        from: &str,
+        to: &str,
+        outputs_hash: Option<&str>,
+        votes: &[(&str, &str)],
+    ) -> VouchedAtom {
         let votes: Vec<Vote> = votes
             .iter()
             .map(|(did, at)| Vote {
@@ -539,9 +711,58 @@ mod tests {
                 proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
                 proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
                 evidence_hash: "seal".to_string(),
+                outputs_hash: outputs_hash.map(str::to_string),
+                outputs: Vec::new(),
                 votes: votes.clone(),
             },
             eligible_votes: votes,
+        }
+    }
+
+    /// Lal's terminal-edge scenario at the fold layer (#1108 re-review):
+    /// under `{n: 2}` into terminal `approved`, Mallory's early atom with no
+    /// commitment (or a rival one) must not pool with Alice's and Bob's
+    /// votes on the committed atom. Quorum is reached inside the committed
+    /// group: the settled edge names only Alice's atom, and settles at
+    /// Bob's vote — not at the Mallory+Alice pair the old pooling counted.
+    ///
+    /// Killing test for the mutation that pools terminal edges across
+    /// commitments again.
+    #[test]
+    fn a_terminal_edge_pools_votes_per_outputs_commitment() {
+        const MALLORY: &str = "did:key:mallory";
+        let flow = review_flow(Some(2));
+        for rival_commitment in [None, Some("hash-y")] {
+            let atoms = [
+                vouched_committing(
+                    "p-mallory",
+                    "review",
+                    "approved",
+                    rival_commitment,
+                    &[(MALLORY, T1)],
+                ),
+                vouched_committing(
+                    "p-alice",
+                    "review",
+                    "approved",
+                    Some("hash-x"),
+                    &[(ALICE, T2), (BOB, T3)],
+                ),
+            ];
+            let derived = fold("review", &flow, &atoms);
+            assert_eq!(derived.state, "approved", "rival: {rival_commitment:?}");
+            assert_eq!(
+                derived.settled[0].atom_uris,
+                vec!["p-alice"],
+                "only the quorate group's atoms settle, so every counted atom \
+                 shares one commitment (rival: {rival_commitment:?})"
+            );
+            assert_eq!(
+                derived.settled[0].settled_at, T3,
+                "quorum is the 2nd voter INSIDE the group — Bob at T3, not \
+                 Mallory+Alice at T2 (rival: {rival_commitment:?})"
+            );
+            assert_eq!(derived.settled[0].voters, vec![ALICE, BOB]);
         }
     }
 
@@ -727,16 +948,151 @@ mod tests {
             n: 1,
             from_role: None,
         });
+        assert_eq!(n_of(&flow, "approved"), 2, "the state's own rule wins");
         assert_eq!(
-            rule_for(&flow, "approved").n,
-            2,
-            "the state's own rule wins"
-        );
-        assert_eq!(
-            rule_for(&flow, "changes_requested").n,
+            n_of(&flow, "changes_requested"),
             1,
             "a state without one inherits the flow's"
         );
+    }
+
+    /// `review_flow(None)` with `approved`'s `consensusRule` marked
+    /// unreadable — what the parser records for a literal that did not
+    /// decode (`shacl_parser::a_state_consensus_rule_that_does_not_parse_is_recorded_as_malformed`).
+    fn review_flow_with_unreadable_approved_rule() -> SHACLFlow {
+        let mut flow = review_flow(None);
+        let approved = flow
+            .states
+            .iter_mut()
+            .find(|s| s.name == "approved")
+            .expect("fixture has an `approved` state");
+        approved.consensus_rule_malformed = true;
+        flow
+    }
+
+    /// **The defect in #1078, as behaviour.** A single unqualified vote must
+    /// not carry a flow into a state whose consensus rule could not be read.
+    /// Before the fix the unreadable rule became `{n: 1, from_role: None}`
+    /// and this exact vote settled the edge.
+    ///
+    /// Paired with `an_absent_rule_still_advances_on_one_vote`, which is the
+    /// same flow and the same vote with the rule merely absent. The pair is
+    /// the assertion: one fixture field differs, and the outcome flips. A
+    /// fold that refused everything, or one that advanced on everything,
+    /// fails one of the two.
+    ///
+    /// Killing mutation: in `settle_edge`, replace the `ResolvedRule::Rule`
+    /// let-else with `let rule = match rule_for(flow, to) { Rule(r) => r,
+    /// Refused => ConsensusRule { n: 1, from_role: None } }` — i.e. restore
+    /// the old default at the point of use.
+    #[test]
+    fn a_malformed_rule_does_not_advance_on_one_vote() {
+        let flow = review_flow_with_unreadable_approved_rule();
+        assert!(
+            matches!(rule_for(&flow, "approved"), ResolvedRule::Refused),
+            "premise: the unreadable rule must resolve to Refused"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(
+            derived.state, "review",
+            "an unreadable rule must not be answered with `one vote from anybody`"
+        );
+        assert!(
+            derived.settled.is_empty(),
+            "no edge may settle under a rule that could not be read"
+        );
+        assert!(
+            derived.contested.is_none(),
+            "a refused edge is not a contested one — refusal is not a race"
+        );
+    }
+
+    /// The positive control. Identical flow and identical vote, except that
+    /// no `consensusRule` was ever written: the `{n: 1}` default still
+    /// applies and the flow still advances.
+    ///
+    /// Killing mutation: make `rule_for` return `ResolvedRule::Refused` for
+    /// `ConsensusRuleSlot::Absent` — the fail-closed-everywhere overshoot,
+    /// which every other test in this group would still pass.
+    #[test]
+    fn an_absent_rule_still_advances_on_one_vote() {
+        let flow = review_flow(None);
+        assert_eq!(
+            n_of(&flow, "approved"),
+            1,
+            "premise: an absent rule still resolves to the {{n: 1}} default"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(derived.state, "approved");
+        assert_eq!(walked(&derived), vec![("review", "approved")]);
+    }
+
+    /// An unreadable rule at state scope does not fall through to a
+    /// readable flow-level one. The flow-level rule here is `{n: 1}` —
+    /// strictly weaker than whatever the author wrote on `approved` — so
+    /// falling back would perform the same silent downgrade the fix exists
+    /// to stop, just one scope further out.
+    ///
+    /// Killing mutation: in `rule_for`, change the scope match to
+    /// `ConsensusRuleSlot::Rule(r) => …, _ => flow.consensus_rule_slot()`,
+    /// i.e. treat `Malformed` at state scope as "nothing said here".
+    #[test]
+    fn a_malformed_state_rule_does_not_fall_back_to_the_flow_rule() {
+        let mut flow = review_flow_with_unreadable_approved_rule();
+        flow.consensus_rule = Some(ConsensusRule {
+            n: 1,
+            from_role: None,
+        });
+        assert_eq!(
+            n_of(&flow, "changes_requested"),
+            1,
+            "premise: the flow-level rule is readable and would admit one vote"
+        );
+
+        assert!(
+            matches!(rule_for(&flow, "approved"), ResolvedRule::Refused),
+            "the unreadable state rule decides; the flow-level one is not consulted"
+        );
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "approved", &[(ALICE, T1)])],
+        );
+        assert_eq!(derived.state, "review");
+    }
+
+    /// The refusal is scoped to the state whose rule is unreadable, not to
+    /// the flow. `changes_requested` is governed by its own (absent) scope
+    /// and still fires — so a single bad literal wedges one edge rather
+    /// than bricking every flow that shares the definition.
+    ///
+    /// Killing mutation: in `settle_edge`, `return None` whenever ANY state
+    /// of the flow is malformed rather than the target state.
+    #[test]
+    fn a_malformed_rule_on_one_state_leaves_the_others_alone() {
+        let flow = review_flow_with_unreadable_approved_rule();
+
+        let derived = fold(
+            "review",
+            &flow,
+            &[vouched("p1", "review", "changes_requested", &[(ALICE, T1)])],
+        );
+
+        assert_eq!(derived.state, "changes_requested");
+        assert_eq!(walked(&derived), vec![("review", "changes_requested")]);
     }
 
     /// `triage → approved | rejected`, both terminal: the shape where a
@@ -953,6 +1309,52 @@ mod tests {
             derived.state, "rejected",
             "cycle completes: approved consumed, rejected fires on revisit"
         );
+    }
+
+    /// The differential partner of `confirmed_back_edge_with_atoms_is_not_contention`:
+    /// identical flow, identical atoms, identical votes — and `triage`'s
+    /// `consensusRule` unreadable, so the back-edge into it can never fire.
+    ///
+    /// An edge that cannot fire is not an escape route. Extending #999: a
+    /// phantom back-edge had no votes, this one has a fully admitted vote
+    /// and no rule to admit it under. Suppressing contention on it would let
+    /// the earliest clock win an irreversible branch silently — the outcome
+    /// `settle` refuses by design.
+    ///
+    /// Killing mutation: drop the `ResolvedRule::Refused => continue` guard
+    /// at the top of `feasibly_reachable`'s transition loop. Note this is the
+    /// only unit-level test that reaches that guard: the parallel guard in
+    /// `fold_read_set` (which empties `eligible_votes` for a refused target)
+    /// is exercised only by the e2e suite, and a mutation of it survives —
+    /// see the PR body.
+    #[test]
+    fn a_refused_back_edge_does_not_suppress_contention() {
+        let mut flow = phantom_back_edge_flow();
+        flow.states
+            .iter_mut()
+            .find(|s| s.name == "triage")
+            .expect("fixture has a `triage` state")
+            .consensus_rule_malformed = true;
+        assert!(
+            matches!(rule_for(&flow, "triage"), ResolvedRule::Refused),
+            "premise: the back-edge's target rule must be Refused"
+        );
+
+        let atoms = vec![
+            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
+            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
+            // Same admitted vote as the confirmed-cycle test above.
+            vouched("a://reset", "approved", "triage", &[(ALICE, T3)]),
+        ];
+
+        let derived = fold("triage", &flow, &atoms);
+
+        let contention = derived
+            .contested
+            .expect("a back-edge that cannot fire must not suppress contention");
+        assert_eq!(contention.from_state, "triage");
+        assert_eq!(derived.state, "triage", "the walk stops without choosing");
+        assert!(derived.settled.is_empty());
     }
 
     /// The separating case between "someone proposed" and "the cycle is

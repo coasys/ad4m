@@ -2073,6 +2073,139 @@ async fn reject_flow_proposal_handler(
     Ok(serde_json::json!({ "retractedLinks": retracted }))
 }
 
+async fn propose_flow_transition_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let instance_uri = params.require_str("instanceUri")?;
+    let to_state = params.require_str("toState")?;
+    let rationale = params
+        .get("rationale")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // The run's outputs, named by the caller for a proposal into a terminal
+    // state as `{ className, id }` pairs (#1104). Absent means none; anything
+    // else that is not an array of such pairs is refused rather than read as
+    // none.
+    let outputs: Vec<crate::perspectives::flow_instance::atom::OutputRef> =
+        match params.get("outputs") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!(
+                    "`outputs` must be an array of {{ className, id }} objects: {e}"
+                ))
+            })?,
+        };
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
+    // whether the click queued a live proposal, re-pressed one this agent had
+    // already voted on, or landed on a stalled instance — and those want
+    // different UI. See `flow_instance::propose`.
+    let outcome = crate::perspectives::flow_instance::propose::propose_flow_transition(
+        &mut perspective,
+        &instance_uri,
+        &to_state,
+        &outputs,
+        rationale.as_deref(),
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+async fn verify_flow_receipt_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    // The receipt travels as its stored JSON body. Anything that does not
+    // parse as one is a bad request, not an "unverified receipt" — the
+    // three-kind verdict is reserved for material that could be examined.
+    let receipt: crate::perspectives::flow_instance::receipt::FlowReceipt =
+        match params.get("receipt") {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!("`receipt` does not parse as a FlowReceipt: {e}"))
+            })?,
+            None => return Err(WsRpcError::bad_request("`receipt` is required".to_string())),
+        };
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let verdict =
+        crate::perspectives::flow_instance::produced::verify_flow_receipt(&perspective, &receipt)
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(crate::perspectives::flow_instance::produced::verdict_wire(
+        &verdict,
+    ))
+}
+
+async fn flow_valid_outputs_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let flow = params.require_str("flow")?;
+    let state = params
+        .get("state")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let outputs = crate::perspectives::flow_instance::produced::flow_valid_outputs(
+        &perspective,
+        &flow,
+        state.as_deref(),
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(outputs)?)
+}
+
+async fn mint_flow_receipt_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let instance_uri = params.require_str("instanceUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let receipt = crate::perspectives::flow_instance::produced::mint_flow_receipt(
+        &mut perspective,
+        &instance_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let uri = receipt
+        .uri()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::json!({
+        "receiptUri": uri,
+        "receipt": serde_json::to_value(&receipt)?,
+    }))
+}
+
 // ── SHACL resolution endpoints ──
 //
 // These handlers move SHACL shape resolution from the TypeScript SDK (which paid
@@ -2494,6 +2627,13 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.rejectFlowProposal",
         reject_flow_proposal_handler,
     );
+    map.register(
+        "perspective.proposeFlowTransition",
+        propose_flow_transition_handler,
+    );
+    map.register("perspective.verifyFlowReceipt", verify_flow_receipt_handler);
+    map.register("perspective.flowValidOutputs", flow_valid_outputs_handler);
+    map.register("perspective.mintFlowReceipt", mint_flow_receipt_handler);
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);
     map.register("perspective.getShacl", get_shacl);

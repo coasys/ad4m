@@ -16,15 +16,19 @@
 use super::flow_classes::{advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE};
 use super::flow_context::load_shacl_flows;
 use super::flow_evaluator::recompute_evidence_hash;
-use super::flow_evaluator_e2e::{literal, seed_flow, seed_satisfied_fixture, Fixture};
-use super::flow_instance::accept::{accept_flow_proposal, reject_flow_proposal};
+use super::flow_evaluator_e2e::{
+    literal, second_agent, seed_flow, seed_satisfied_fixture, Fixture,
+};
+use super::flow_instance::accept::{accept_flow_proposal, load_outputs, reject_flow_proposal};
 use super::flow_instance::atom::{
-    ACCEPTED_BY_PREDICATE, FIRED_MARK, RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE,
-    TO_STATE_PREDICATE,
+    outputs_hash, OutputRef, OutputsRefusal, TransitionAtom, ACCEPTED_BY_PREDICATE, FIRED_MARK,
+    RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
+use super::flow_instance::grant::GrantContext;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
-use super::flow_instance::{fold_read_set, ReadSet};
+use super::flow_instance::propose::propose_flow_transition;
+use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
 
@@ -61,6 +65,7 @@ async fn seal_for(f: &Fixture, to_state: &str) -> String {
     )
     .await
     .expect("recompute_evidence_hash")
+    .hash()
     .expect("guard satisfied")
 }
 
@@ -138,19 +143,54 @@ async fn sync_proposal_from(
     to: &str,
     seal: &str,
 ) -> String {
+    // An empty outputs commitment: every fixture flow's target here is
+    // terminal, and a co-signer refuses a terminal proposal with none
+    // (#1104). Harmless on a non-terminal target, where nobody reads it.
+    let empty = outputs_hash(&[]);
+    sync_committed_proposal_from(f, signer, id, from, to, seal, &[], Some(&empty)).await
+}
+
+/// [`sync_proposal_from`] with the outputs a proposal into a terminal state
+/// names, and the `outputs_hash` it signs (`None`: it signs none). Honest
+/// when `committed` is `outputs_hash(outputs)`; anything else is a proposer
+/// whose commitment does not match what it names.
+#[allow(clippy::too_many_arguments)]
+async fn sync_committed_proposal_from(
+    f: &mut Fixture,
+    signer: &TestSigner,
+    id: &str,
+    from: &str,
+    to: &str,
+    seal: &str,
+    outputs: &[OutputRef],
+    committed: Option<&str>,
+) -> String {
     use super::flow_instance::atom::{
-        EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
-        PROPOSER_PREDICATE,
+        proposal_uri, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE, FROM_STATE_PREDICATE,
+        OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE, PROPOSER_PREDICATE,
     };
-    let uri = format!("ad4m://flow/proposal/{id}");
+    // The peer computes the content-addressed URI exactly as the engine does
+    // (#1108); `id` is their nonce. A peer that did not would sync a
+    // proposal no replica reads as an atom.
     let instance_uri = f.instance_uri.clone();
-    for (predicate, target) in [
+    let uri = proposal_uri(&instance_uri, from, to, seal, committed, &signer.did, id);
+    let mut links = vec![
         (PROPOSER_PREDICATE, signer.did.clone()),
         (FLOW_INSTANCE_PREDICATE, instance_uri),
         (FROM_STATE_PREDICATE, literal(from)),
         (TO_STATE_PREDICATE, literal(to)),
         (EVIDENCE_HASHES_PREDICATE, literal(seal)),
-    ] {
+        (PROPOSAL_NONCE_PREDICATE, literal(id)),
+    ];
+    links.extend(
+        outputs
+            .iter()
+            .map(|r| (OUTPUT_PREDICATE, literal(&r.encode()))),
+    );
+    if let Some(committed) = committed {
+        links.push((OUTPUTS_HASH_PREDICATE, literal(committed)));
+    }
+    for (predicate, target) in links {
         let signed = signer.sign(
             Link {
                 source: uri.clone(),
@@ -812,9 +852,9 @@ async fn n2_second_signer_accept_settles_and_replays() {
 
 /// The read-set travels: serialise everything the engine read, fold the JSON
 /// back on a machine with no perspective, and reach the same verdict. This is
-/// what a minted Synergy token would carry as its backing — proof for the
-/// signed proposals and votes, an audit record for the role verdicts, which
-/// is why `ReadSet::role_grants` says so on the field.
+/// what a minted Synergy token would carry as its backing — signed links for
+/// the proposals and votes, and signed links for the role history too, from
+/// which the reader recomputes the windows instead of trusting ours.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_serialised_read_set_re_derives_the_same_state() {
     let mut f = seed_satisfied_fixture(None).await;
@@ -836,23 +876,69 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     assert_eq!(derived.state, "scoped");
 
     let read_set = f.read_set().await;
+    let records = f.instances().await;
+    assert_eq!(
+        read_set.subject, records[0].subject,
+        "the run's base expression travels: without it a reader cannot substitute `$flow.base` \
+         and would apply a different authority rule than we did"
+    );
+    let evidence = read_set
+        .role_grants
+        .iter()
+        .find(|g| g.did == acting_did(&f))
+        .unwrap_or_else(|| panic!("the voter's role evidence belongs in the proof: {read_set:?}"));
+    // The reshape's whole point: what travels is raw material, not a
+    // `granted_at` the minter computed. The rule carries
+    // `didProperty: "owner"` and the fixture writes the assignment link
+    // `TASK --ns://owner--> literal(did)`, so the assignment link itself must
+    // travel. `asserted_instance_timestamp` is the *fallback* for instances
+    // that carry no assignment link, and accepting it here would let the
+    // assertion pass on a read-set where nothing travels at all — which is
+    // exactly the hole #1065's first review found: `grant_links` was empty for
+    // every `didProperty` role because the store query used the property
+    // *name* where the graph holds the RDF *predicate*. No disjunction.
     assert!(
-        read_set
-            .role_grants
+        !evidence.instances.is_empty(),
+        "the voter's role query must have matched at least one instance: {evidence:?}"
+    );
+    assert!(
+        evidence.instances.iter().all(|i| !i.grant_links.is_empty()),
+        "every role instance must carry the assignment links the reader dates the grant from: \
+         {evidence:?}"
+    );
+    // And the carried links must be real links — author, timestamp and
+    // signature material present — not default-filled shells that happen to
+    // satisfy the type. `.all()` over an empty iterator is vacuously true, so
+    // this assert only means anything because of the one above.
+    assert!(
+        evidence
+            .instances
             .iter()
-            .any(|g| g.did == acting_did(&f)
-                && !g.instances.is_empty()
-                && g.windows.iter().all(|w| !w.granted_at.is_empty())),
-        "the role instances the verdict rested on, and when they were granted, belong in the proof: {read_set:?}"
+            .flat_map(|i| i.grant_links.iter().chain(i.revocation_links.iter()))
+            .all(|l| !l.author.is_empty()
+                && !l.timestamp.is_empty()
+                && !l.proof.signature.is_empty()),
+        "the links themselves travel, author and signature intact: {evidence:?}"
     );
 
     let json = serde_json::to_string(&read_set).expect("a read-set serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("and deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(&flows[&f.flow_uri], &parsed),
+        fold_read_set(flow, &parsed, GrantContext::root(&flows))
+            .expect("the carried evidence resolves off-perspective"),
         derived,
         "an off-perspective verifier must reach the same verdict"
+    );
+
+    // The reader's own translation input must match the one this replica used
+    // — the same role query has to mean the same thing on both sides, or the
+    // authority rule diverges silently.
+    assert_eq!(
+        parsed.as_record(flow),
+        FlowInstance::from_record(&records[0], flow).as_record(),
+        "the record rebuilt from carried fields must equal the live one"
     );
 }
 
@@ -861,18 +947,27 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 // ---------------------------------------------------------------------------
 
 /// Test 12. A vote from outside the rule's `fromRole` counts for nothing, and
-/// the same vote counts the moment its author enters the role.
+/// a grant written *after* that vote does not retroactively enfranchise it —
+/// eligibility is as-of each vote's own timestamp, the same rule the
+/// revocation tests pin from the other side. A vote cast once the grant is
+/// already in place settles the edge.
+///
+/// The middle assertion used to read `scoped`, and passed only because of the
+/// bug #1065's review found: the grant-link query used the `didProperty`
+/// *name* where the graph holds the RDF predicate, so `grant_links` came back
+/// empty for every `didProperty` role and `granted_at` fell back to the
+/// instance's own (much earlier) timestamp. Under that fallback every grant
+/// looked retroactive. The assertion was a mirror of the defect, not a
+/// contract.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_non_role_member_vote_does_not_count() {
+    const OWNER_RULE_HERE: &str =
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+
     let mut f = seed_satisfied_fixture(None).await;
     // Eligible = "there is a Task this DID owns". The seeded task has no
     // owner, so nobody is in the role yet.
-    set_consensus_rule(
-        &mut f,
-        "delivery://Delivery.scoped",
-        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#,
-    )
-    .await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
     f.mint_one().await;
 
     assert_eq!(
@@ -891,8 +986,25 @@ async fn a_non_role_member_vote_does_not_count() {
     .await;
     assert_eq!(
         f.derived().await.state,
+        "identified",
+        "the grant postdates the vote, so it cannot reach back and make it count"
+    );
+
+    // Same rule, same single vote — but cast while the grant is already live.
+    let mut g = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut g, "delivery://Delivery.scoped", OWNER_RULE_HERE).await;
+    g.link(
+        TASK,
+        "ns://owner",
+        &literal(&acting_did(&g)),
+        LinkStatus::Local,
+    )
+    .await;
+    g.mint_one().await;
+    assert_eq!(
+        g.derived().await.state,
         "scoped",
-        "and inside the role, the same vote settles the edge"
+        "inside the role at the time of the vote, the same vote settles the edge"
     );
 }
 
@@ -1008,17 +1120,16 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
     )
     .await;
     let seal = seal_for(&f, "scoped").await;
-    // write_proposal takes a short ID; the full URI is ad4m://flow/proposal/<id>.
-    let proposal_id = "revoke-timing";
-    let proposal_uri = format!("ad4m://flow/proposal/{proposal_id}");
-    f.write_proposal(
-        proposal_id,
-        "identified",
-        "scoped",
-        &[TASK.to_string()],
-        &seal,
-    )
-    .await;
+    // write_proposal takes a nonce; the content-addressed URI comes back.
+    let proposal_uri = f
+        .write_proposal(
+            "revoke-timing",
+            "identified",
+            "scoped",
+            &[TASK.to_string()],
+            &seal,
+        )
+        .await;
     assert_eq!(
         f.derived().await.state,
         "identified",
@@ -1184,11 +1295,20 @@ async fn a_newcomer_deriving_after_a_revocation_converges_on_the_settled_state()
     let json = serde_json::to_string(&read_set).expect("serialises");
     let parsed: ReadSet = serde_json::from_str(&json).expect("deserialises");
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
-    assert_eq!(fold_read_set(&flows[&f.flow_uri], &parsed), before);
+    assert_eq!(
+        fold_read_set(&flows[&f.flow_uri], &parsed, GrantContext::root(&flows))
+            .expect("the carried evidence resolves"),
+        before
+    );
     assert!(
         read_set.role_grants.iter().any(|g| g.did == acting_did(&f)
-            && g.windows.iter().any(|w| !w.revocations.is_empty())),
-        "the read-set records the revocation the verdict took into account: {read_set:?}"
+            && g.instances
+                .iter()
+                .any(|i| i.revocation_links.iter().any(|l| l.compute_proof_valid()))),
+        "the read-set carries the tombstone link the verdict took into account — \
+         its signature verifying from the carried material alone (the plain form \
+         has no verdict flag to read), unfiltered by authority, so the reader \
+         applies that rule itself: {read_set:?}"
     );
 }
 
@@ -1446,9 +1566,9 @@ async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_with_the_same_links_derive_the_same_state() {
     let mut a = seed_review_flow().await;
-    settle(&mut a, "h1", "review", "changes_requested").await;
-    settle(&mut a, "h2", "changes_requested", "review").await;
-    settle(&mut a, "h3", "review", "approved").await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
     let derived_a = a.derived().await;
     assert_eq!(derived_a.state, "approved");
     assert_eq!(
@@ -1466,11 +1586,7 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
     // deliver them in whatever order the network chose.
     let mut b = seed_review_flow().await;
     let mut proposal_links = Vec::new();
-    for uri in [
-        "ad4m://flow/proposal/h1",
-        "ad4m://flow/proposal/h2",
-        "ad4m://flow/proposal/h3",
-    ] {
+    for uri in [&h1, &h2, &h3] {
         proposal_links.extend(links_of(&a, uri).await);
     }
     proposal_links.reverse();
@@ -1586,5 +1702,2571 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
             .map(Vec::len),
         Some(1),
         "the forgery is still on the graph — invisible to the fold, but not ours to delete"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The manual path: two humans, one button
+// ---------------------------------------------------------------------------
+//
+// The dedup key `(evidence_hash, instance, to_state)` carries no proposer, so
+// the second agent to press a button matches the first agent's proposal. These
+// pin what that must mean: join it, do not skip it. Before the fix the second
+// agent minted nothing, voted on nothing, and was told the empty vec the API
+// documents as "queued for other voters", so `{n: 2}` was unreachable for two
+// humans pressing one button.
+
+/// Every proposal on the graph targeting `to_state`, live or settled.
+async fn proposals_to(f: &Fixture, to_state: &str) -> Vec<String> {
+    let mut uris: Vec<String> = f
+        .perspective
+        .get_links(&LinkQuery {
+            predicate: Some(TO_STATE_PREDICATE.to_string()),
+            target: Some(literal(to_state)),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.source)
+        .collect();
+    uris.sort();
+    uris.dedup();
+    uris
+}
+
+async fn accepted_by_count(f: &Fixture, proposal: &str) -> usize {
+    f.links_by_predicate(proposal)
+        .await
+        .get(ACCEPTED_BY_PREDICATE)
+        .map_or(0, Vec::len)
+}
+
+/// Two distinct DIDs reach for the propose API on ONE edge, and nobody calls
+/// `accept`. Bob proposed on his replica and it synced in carrying his vote;
+/// this replica's agent presses the same button. Same graph ⇒ same seal ⇒ the
+/// whole dedup key matches, so this is exactly the collision that used to
+/// discard the second vote in silence.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_dids_proposing_one_edge_reach_quorum_without_anybody_accepting() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "Bob's own vote alone is 1 < n = 2"
+    );
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect("propose must land this replica's vote on the edge");
+
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "scoped",
+        "two distinct DIDs on one edge IS quorum at n = 2"
+    );
+    assert_eq!(derived.settled.len(), 1);
+    let mut expected = vec![acting_did(&f), bob.did.clone()];
+    expected.sort();
+    assert_eq!(
+        derived.settled[0].voters, expected,
+        "both agents' votes are counted"
+    );
+    assert_eq!(
+        derived.settled[0].atom_uris,
+        vec![bobs.clone()],
+        "one proposal, co-signed — not a second, unreachable twin"
+    );
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        vec![bobs.clone()],
+        "no duplicate proposal was written"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &bobs).await,
+        1,
+        "exactly one co-sign link, by this replica"
+    );
+}
+
+/// The same agent pressing the button twice stays a no-op. This is the other
+/// half of the fix: joining an existing proposal must be conditional on not
+/// having voted on it, or a re-press would append a redundant `acceptedBy`
+/// link to the agent's own proposal. It also must not become a second vote —
+/// `atom::valid_votes` dedups per DID, and this pins that from the outside.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_propose_by_the_same_did_writes_nothing_and_is_still_one_vote() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect("first propose mints");
+    let after_first = proposals_to(&f, "scoped").await;
+    assert_eq!(after_first.len(), 1, "one proposal after the first press");
+
+    propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect("second propose is a no-op, not an error");
+
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        after_first,
+        "re-pressing must not mint a twin"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &after_first[0]).await,
+        0,
+        "the proposer's own vote IS the proposal; re-pressing must add no acceptedBy link"
+    );
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "identified",
+        "one DID is 1 of 2 however many times they press"
+    );
+    assert!(derived.settled.is_empty());
+}
+
+/// Two terminal branches out of one state: whichever settles first forecloses
+/// the other, which is the shape the fold reports as contention.
+fn fork_flow() -> serde_json::Value {
+    let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
+    serde_json::json!({
+        "name": "Fork",
+        "namespace": "fork://",
+        "states": [
+            { "name": "start", "value": 0.0, "requires": guard },
+            { "name": "left", "value": 1.0, "requires": guard },
+            { "name": "right", "value": 1.0, "requires": guard },
+        ],
+        "transitions": [
+            { "action_name": "GoLeft", "from_state": "start", "to_state": "left", "actions": [] },
+            { "action_name": "GoRight", "from_state": "start", "to_state": "right", "actions": [] },
+        ],
+    })
+}
+
+/// A contested instance refuses a manual proposal, as the engine pass already
+/// refuses to mint into one (#998). Two edges out of `start` carry quorum, so
+/// the fold can never settle a third; minting would have handed the caller an
+/// empty result indistinguishable from "queued, waiting for other voters".
+#[tokio::test(flavor = "multi_thread")]
+async fn proposing_into_a_contested_instance_is_refused() {
+    let mut f = seed_flow(fork_flow(), "start").await;
+    f.seed_task(TASK, "Fork the road").await;
+    let instance = f.instance_uri.clone();
+
+    propose(&mut f, "left-1", "start", "left").await;
+    propose(&mut f, "right-1", "start", "right").await;
+    consensus_pass(&mut f).await;
+
+    let derived = f.derived().await;
+    assert!(
+        derived.contested.is_some(),
+        "fixture must actually be contested, else this test proves nothing: {derived:?}"
+    );
+    assert_eq!(derived.state, "start", "the walk stopped without choosing");
+
+    let err = propose_flow_transition(&mut f.perspective, &instance, "left", &[], None, &f.ctx)
+        .await
+        .expect_err("a contested instance must refuse a new proposal");
+    assert!(
+        format!("{err:#}").contains("contested"),
+        "the error must name the reason: {err:#}"
+    );
+}
+
+/// The return shape. `Vec<FireOutcome>` could not tell "your vote landed,
+/// waiting for others" from "you had already voted" from "it fired" — all
+/// three were the empty vec or indistinguishable from it — and it discarded
+/// the proposal URI a co-signer needs. Every branch is exercised here,
+/// including the camelCase wire shape the TS `FlowProposeResult` mirrors.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_outcome_distinguishes_fired_queued_and_no_op() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    // 1. Queued: the vote landed, the edge is short of quorum.
+    let queued =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("mint");
+    assert!(queued.minted && queued.recorded_vote);
+    assert!(queued.outcomes.is_empty(), "1 of 2 must not fire");
+    assert_eq!(queued.derived_state, "identified");
+    assert!(!queued.contested);
+    assert!(
+        proposals_to(&f, "scoped")
+            .await
+            .contains(&queued.proposal_uri),
+        "the URI names the proposal actually written — a co-signer's handle"
+    );
+
+    // 2. No-op: same agent, same button, nothing written.
+    let repeat =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("re-press");
+    assert!(
+        !repeat.minted && !repeat.recorded_vote,
+        "a re-press is distinguishable from a queued vote: {repeat:?}"
+    );
+    assert_eq!(
+        repeat.proposal_uri, queued.proposal_uri,
+        "a no-op still names the live proposal"
+    );
+
+    // 3. The wire shape the TS `FlowProposeResult` mirrors. Locked by field
+    //    count as well as by name, so a field added here without a matching
+    //    TS field fails in Rust rather than silently at a client.
+    //    (The join branch needs a second key; it is the next test.)
+    let wire = serde_json::to_value(&queued).expect("serialize");
+    let obj = wire.as_object().expect("object");
+    assert_eq!(obj.len(), 6, "unexpected field count on the wire: {obj:?}");
+    for key in [
+        "proposalUri",
+        "minted",
+        "recordedVote",
+        "outcomes",
+        "derivedState",
+        "contested",
+    ] {
+        assert!(
+            obj.contains_key(key),
+            "missing `{key}` on the wire: {obj:?}"
+        );
+    }
+}
+
+/// The join branch's return shape: `minted: false` (we did not write it) with
+/// `recordedVote: true` (we voted on it) and the fire in `outcomes`. Nothing
+/// in the old `Vec<FireOutcome>` could say the first two.
+#[tokio::test(flavor = "multi_thread")]
+async fn joining_someone_elses_proposal_reports_minted_false_and_a_recorded_vote() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    consensus_pass(&mut f).await;
+
+    let joined =
+        propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+            .await
+            .expect("join");
+    assert_eq!(joined.proposal_uri, bobs, "we joined Bob's proposal");
+    assert!(!joined.minted, "we did not write it");
+    assert!(joined.recorded_vote, "we voted on it");
+    assert_eq!(joined.outcomes.len(), 1, "quorum met in this call");
+    assert_eq!(joined.outcomes[0].to_state, "scoped");
+    assert_eq!(joined.derived_state, "scoped");
+    assert!(!joined.contested);
+}
+
+// ---------------------------------------------------------------------------
+// The outputs commitment on the live store (#1104)
+// ---------------------------------------------------------------------------
+
+/// Whether this replica's agent has an `acceptedBy` on `proposal`.
+async fn we_voted_on(f: &Fixture, proposal: &str) -> bool {
+    let me = acting_did(f);
+    f.links_by_predicate(proposal)
+        .await
+        .get(ACCEPTED_BY_PREDICATE)
+        .is_some_and(|targets| targets.iter().any(|t| *t == me))
+}
+
+/// `id` as an output of the fixture's `ns://Task` class.
+fn task_ref(id: &str) -> OutputRef {
+    OutputRef {
+        class_name: "ns://Task".to_string(),
+        id: id.to_string(),
+    }
+}
+
+/// The commitment an honest proposer signs over `refs`: their content as
+/// this replica reads it now, through the loader every voter uses.
+async fn honest_commitment(f: &Fixture, refs: &[OutputRef]) -> String {
+    let loaded = load_outputs(&f.perspective, refs)
+        .await
+        .expect("load outputs");
+    let items: Vec<_> = refs
+        .iter()
+        .map(|r| {
+            loaded
+                .get(r)
+                .cloned()
+                .unwrap_or_else(|| panic!("{r:?} is not an instance on this replica"))
+        })
+        .collect();
+    outputs_hash(&items)
+}
+
+/// Delivery with an **unguarded** terminal `scoped`: its seal is over the
+/// empty bag, so editing a Task cannot move it, and only the outputs check
+/// can tell an edit apart. One Task is seeded.
+async fn seed_unguarded_fixture() -> Fixture {
+    let mut f = seed_flow(
+        serde_json::json!({
+            "name": "Delivery",
+            "namespace": "delivery://",
+            "states": [
+                { "name": "identified", "value": 0.0 },
+                { "name": "scoped", "value": 1.0 }
+            ],
+            "transitions": [
+                { "action_name": "Scope", "from_state": "identified", "to_state": "scoped", "actions": [] }
+            ],
+        }),
+        "identified",
+    )
+    .await;
+    f.seed_task(TASK, "Onboard Ana").await;
+    f
+}
+
+/// Required test (b) through the production co-sign path: Bob names the
+/// Task as the output but signs a hash over the Task and another Task. The
+/// seal reproduces, so only the outputs check can refuse, and it does,
+/// writing nothing.
+///
+/// Red without the `check_outputs_commitment` call in
+/// `accept_flow_proposal`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_signer_refuses_an_outputs_hash_that_does_not_match_the_named_outputs() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    const OTHER: &str = "ad4m://task/other";
+    f.seed_task(OTHER, "Not an output").await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let widened = honest_commitment(&f, &[task_ref(TASK), task_ref(OTHER)]).await;
+    let proposal = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&widened),
+    )
+    .await;
+
+    let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect_err("a mismatched outputs commitment must not be co-signed");
+    let expected = OutputsRefusal::HashMismatch {
+        committed: widened,
+        recomputed: honest_commitment(&f, &[task_ref(TASK)]).await,
+    };
+    assert!(
+        format!("{err:#}").contains(&expected.to_string()),
+        "the refusal must be the hash mismatch, got: {err:#}"
+    );
+    assert!(
+        !we_voted_on(&f, &proposal).await,
+        "a refusal writes nothing"
+    );
+    assert_eq!(f.derived().await.state, "identified");
+}
+
+/// **Required test: a content edit after the proposal.** Bob commits to the
+/// Task as it stands. The Task's title is then edited on this replica, and
+/// the co-sign is refused as a hash mismatch: the id is the same, the
+/// content is not. The seal cannot answer instead, because `scoped` is
+/// unguarded. Control: a proposal committing to the edited content is
+/// co-signed and settles.
+///
+/// Red if the voter hashes ids (or refs) instead of loaded content, or if
+/// `load_outputs` reads something other than the current instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_signer_refuses_an_output_edited_since_the_proposal() {
+    let mut f = seed_unguarded_fixture().await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let as_proposed = honest_commitment(&f, &[task_ref(TASK)]).await;
+    let proposal = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&as_proposed),
+    )
+    .await;
+
+    f.link(
+        TASK,
+        "ns://title",
+        &literal("Onboard Ana, renamed"),
+        LinkStatus::Shared,
+    )
+    .await;
+    let as_edited = honest_commitment(&f, &[task_ref(TASK)]).await;
+    assert_ne!(as_edited, as_proposed, "precondition: the edit is content");
+    assert_eq!(
+        seal_for(&f, "scoped").await,
+        seal,
+        "precondition: the seal did not move"
+    );
+
+    let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect_err("an output edited since the proposal must not be co-signed");
+    let expected = OutputsRefusal::HashMismatch {
+        committed: as_proposed,
+        recomputed: as_edited.clone(),
+    };
+    assert!(
+        format!("{err:#}").contains(&expected.to_string()),
+        "the refusal must be the hash mismatch, got: {err:#}"
+    );
+    assert!(
+        !we_voted_on(&f, &proposal).await,
+        "a refusal writes nothing"
+    );
+
+    let current = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-2",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&as_edited),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &current, &f.ctx)
+        .await
+        .expect("a commitment to the current content is co-signed");
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// Required test (c) through the production co-sign path: one named output
+/// does not exist at all, and one exists but is not an instance of the
+/// class it is named as. Both are refused as `OutputNotInstance`, naming
+/// the output, before any hash is compared.
+///
+/// Red if `load_outputs` ignores the class (the Task read as a
+/// `FlowInstance` would pass), or if the instance check is dropped from
+/// `check_outputs_commitment` (the refusal becomes a hash mismatch).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_signer_refuses_a_named_output_that_is_not_an_instance_of_its_class() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let missing = task_ref("ad4m://task/never-written");
+    let wrong_class = OutputRef {
+        class_name: super::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
+        id: TASK.to_string(),
+    };
+    // Whatever these hash to, the instance check must answer first.
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+
+    for (n, bad) in [missing, wrong_class].into_iter().enumerate() {
+        let proposal = sync_committed_proposal_from(
+            &mut f,
+            &bob,
+            &format!("bob-bad-{n}"),
+            "identified",
+            "scoped",
+            &seal,
+            &[task_ref(TASK), bad.clone()],
+            Some(&committed),
+        )
+        .await;
+        let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+            .await
+            .expect_err("an output that is not an instance must not be co-signed");
+        let expected = OutputsRefusal::OutputNotInstance { output: bad };
+        assert!(
+            format!("{err:#}").contains(&expected.to_string()),
+            "the refusal must name the output, got: {err:#}"
+        );
+        assert!(
+            !we_voted_on(&f, &proposal).await,
+            "a refusal writes nothing"
+        );
+    }
+
+    // Control: the same proposal naming only the Task is co-signed.
+    let honest = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-2",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&committed),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &honest, &f.ctx)
+        .await
+        .expect("an honest commitment to an existing instance is co-signed");
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// A proposal into a terminal state that commits to no outputs is refused:
+/// co-signing it would complete a run no receipt can bind to anything.
+///
+/// Red if a missing commitment is read as the empty set.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_signer_refuses_a_terminal_proposal_with_no_outputs_commitment() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let proposal = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[],
+        None,
+    )
+    .await;
+
+    let err = accept_flow_proposal(&mut f.perspective, &proposal, &f.ctx)
+        .await
+        .expect_err("an uncommitted terminal proposal must not be co-signed");
+    assert!(
+        format!("{err:#}").contains(&OutputsRefusal::Uncommitted.to_string()),
+        "got: {err:#}"
+    );
+    assert!(!we_voted_on(&f, &proposal).await);
+}
+
+/// The proposer's side. `propose` into a terminal state writes the named
+/// outputs, sorted and deduplicated, and a hash over their content, and a
+/// voter reading the atom back finds a commitment it can recompute. Naming
+/// something that is not an instance of its class is refused before
+/// anything is written.
+///
+/// Red if `propose` does not pass `outputs` to the writer (the atom reads
+/// `outputs_hash: None`), skips its instance check, or hashes something
+/// other than what `load_outputs` reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_commits_to_the_named_outputs_and_refuses_a_missing_one() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    f.seed_task("ad4m://task/2", "Ship it").await;
+
+    for bad in [
+        task_ref("ad4m://deliverable/never-written"),
+        OutputRef {
+            class_name: super::flow_classes::FLOW_INSTANCE_CLASS.to_string(),
+            id: TASK.to_string(),
+        },
+    ] {
+        let err = propose_flow_transition(
+            &mut f.perspective,
+            &instance,
+            "scoped",
+            std::slice::from_ref(&bad),
+            None,
+            &f.ctx,
+        )
+        .await
+        .expect_err("a proposer must not name an output that is not an instance");
+        assert!(
+            format!("{err:#}")
+                .contains(&OutputsRefusal::OutputNotInstance { output: bad }.to_string()),
+            "got: {err:#}"
+        );
+        assert!(
+            f.read_set().await.proposals.is_empty(),
+            "nothing is written on refusal"
+        );
+    }
+
+    let named = vec![
+        task_ref("ad4m://task/2"),
+        task_ref(TASK),
+        task_ref("ad4m://task/2"),
+    ];
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &named,
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    assert!(out.minted);
+    let links = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(out.proposal_uri.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("links");
+    let atom = TransitionAtom::from_links(&instance, &out.proposal_uri, &links).expect("an atom");
+    let expected = vec![task_ref(TASK), task_ref("ad4m://task/2")];
+    assert_eq!(atom.outputs, expected, "written sorted and deduplicated");
+    assert_eq!(
+        atom.outputs_hash,
+        Some(honest_commitment(&f, &expected).await)
+    );
+}
+
+/// A run does not end in a non-terminal state, so `propose` refuses to name
+/// outputs there, even ones that exist, and writes nothing. The same call
+/// without outputs goes through, so the refusal is the outputs rule and not
+/// some other guard on the edge.
+///
+/// Red if `propose` drops the non-terminal branch: the call then writes a
+/// proposal with no commitment and reports `minted: true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_refuses_outputs_on_a_non_terminal_state() {
+    let mut f = seed_review_flow().await;
+    let instance = f.instance_uri.clone();
+
+    let err = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect_err("a non-terminal state has no outputs to name");
+    assert!(
+        format!("{err:#}").contains("is not terminal, so a run does not end there"),
+        "the refusal must be the non-terminal outputs rule, got: {err:#}"
+    );
+    assert!(
+        f.read_set().await.proposals.is_empty(),
+        "nothing is written on refusal"
+    );
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the same edge without outputs is proposable");
+    assert!(out.minted);
+    let links = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(out.proposal_uri.clone()),
+            ..Default::default()
+        })
+        .await
+        .expect("links");
+    let atom = TransitionAtom::from_links(&instance, &out.proposal_uri, &links).expect("an atom");
+    assert!(atom.outputs.is_empty());
+    assert_eq!(
+        atom.outputs_hash, None,
+        "no commitment on a non-terminal edge"
+    );
+}
+
+/// An open proposal on this edge that names other outputs is neither joined
+/// (that would sign outputs the caller did not name) nor twinned (the final
+/// edge would carry two commitments, and no receipt for the run could
+/// verify). The caller is told.
+///
+/// Red if `live_proposal_role` ignores the commitment: the call then joins
+/// Bob's proposal and reports `minted: false`.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_neither_joins_nor_twins_a_proposal_naming_other_outputs() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&committed),
+    )
+    .await;
+
+    let err = propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect_err("different outputs must not be joined or twinned");
+    assert!(
+        format!("{err:#}").contains(&format!("{bobs} on this edge name different outputs")),
+        "got: {err:#}"
+    );
+    assert_eq!(f.read_set().await.proposals.len(), 1, "no twin was minted");
+    assert!(!we_voted_on(&f, &bobs).await, "and Bob's was not signed");
+
+    // Control: naming the same outputs joins Bob's proposal.
+    let joined = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("join");
+    assert_eq!(joined.proposal_uri, bobs);
+    assert!(!joined.minted && joined.recorded_vote);
+}
+
+/// The "different outputs" refusal above is reserved for a proposal a voter
+/// COULD sign. Bob's terminal proposal here commits to a hash its named
+/// outputs do not produce, so `accept_flow_proposal` refuses it and
+/// `reject_flow_proposal` only retracts the caller's own links — telling the
+/// caller to "co-sign one or reject it" would let one peer block the manual
+/// path into the terminal state for everyone. An honest propose mints its
+/// own proposal instead, does not sign Bob's, and the run completes once a
+/// second voter co-signs it (Bob's vote does not pool with ours: its
+/// commitment is a different group, #1108/#1118).
+///
+/// Red if `live_proposal_role` compares commitments without first validating
+/// the live atom the way a co-signer would.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_with_a_bad_commitment() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    // Bob names the Task but signs a hash the Task's content does not produce.
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a proposal no voter could sign must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert_ne!(out.proposal_uri, bobs);
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the invalid proposal was not co-signed"
+    );
+    // Since #1108/#1118 a terminal edge pools votes per commitment, so Bob's
+    // proposer vote on a commitment nobody can sign does not count toward
+    // ours: one vote, short of `{n: 2}`. It used to pool — which is what let
+    // an early foreign proposal land in the settled edge and make the run
+    // unreceiptable.
+    assert_eq!(out.derived_state, "identified");
+    // The run is not wedged: a second voter co-signing our proposal settles
+    // the edge.
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// As above, with the other invalid shape: Bob names an output that does not
+/// load on this replica (never written), under a commitment that matches
+/// nothing. No voter could sign it, so it must not block; the honest propose
+/// mints and, once co-signed, the run completes.
+///
+/// Red if `live_proposal_role` reads the commitment mismatch before asking
+/// whether the proposal is signable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_mints_past_a_foreign_terminal_proposal_whose_output_does_not_load() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref("ad4m://task/never-written")],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("an output that does not load must not block an honest propose");
+    assert!(out.minted, "minted our own, not joined or refused: {out:?}");
+    assert!(
+        !we_voted_on(&f, &bobs).await,
+        "the unloadable proposal was not co-signed"
+    );
+    // Bob's vote sits in its own commitment group (#1108/#1118): ours alone
+    // is short of `{n: 2}` until a second voter co-signs it.
+    assert_eq!(out.derived_state, "identified");
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &carol, &out.proposal_uri).await;
+    assert_eq!(f.derived().await.state, "scoped");
+}
+
+/// Outputs are a terminal-edge concern: a co-signer ignores them anywhere
+/// else (`check_outputs_commitment` is a no-op off the final edge). So a
+/// non-terminal proposal carrying a stray `outputs_hash` stays joinable —
+/// comparing commitments there would refuse to join a proposal `accept`
+/// happily signs, since our own `committed` is always `None` off the final
+/// edge.
+///
+/// Red if `live_proposal_role` compares commitments on a non-terminal
+/// target.
+#[tokio::test(flavor = "multi_thread")]
+async fn propose_joins_a_non_terminal_proposal_carrying_a_stray_outputs_hash() {
+    let mut f = seed_review_flow().await;
+    set_consensus_rule(&mut f, "review://Review.changes_requested", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "changes_requested").await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-1",
+        "review",
+        "changes_requested",
+        &seal,
+        &[],
+        Some(&outputs_hash(&[])),
+    )
+    .await;
+
+    let joined = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "changes_requested",
+        &[],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("a stray outputs_hash on a non-terminal proposal must not stop a join");
+    assert_eq!(joined.proposal_uri, bobs, "joined Bob's, not a twin");
+    assert!(!joined.minted && joined.recorded_vote);
+    assert_eq!(
+        joined.derived_state, "changes_requested",
+        "the join fires the {{n:2}} edge"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The other side of the proposer-less key: the engine must NOT reach quorum
+// ---------------------------------------------------------------------------
+//
+// `find_live_proposals`' key carries no proposer, and the two tests above rely
+// on that: it is what lets a second human co-sign instead of minting an
+// unreachable twin. The cost of that choice is that the key is *shared* with
+// `run_engine_proposal_pass`, and this is the test that pins what the engine
+// owes in exchange.
+//
+// Nothing automated co-signs. `accept_flow_proposal` — the only production
+// writer of `acceptedBy` — has exactly two callers, `api/perspectives_ws.rs`
+// and `mcp/tools/flows.rs`, and both are a request arriving from outside. So
+// the engine contributes at most ONE vote to an edge however many replicas run
+// its pass, and `consensusRule {n: 2}` means two agents, not two machines.
+//
+// The failure this guards is silent: make the shared key proposer-aware — a
+// plausible "fix" for some future twin-mint bug — and N replicas mint N
+// proposals carrying N distinct proposer votes. `{n: 2}` is then satisfied by
+// two robots agreeing with themselves, nothing errors, and no other test in
+// this file goes red, because every one of them drives the *manual* path.
+
+/// One GUARDED edge, the engine pass run three times: twice as this replica
+/// and once as a second DID. Exactly one proposal, exactly one vote, and the
+/// `{n: 2}` edge does not move.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    // `scoped` carries `requires: [ns://Task count.min 1]` and the fixture
+    // seeded the Task, so this edge is guarded AND satisfied — the only shape
+    // the engine ever mints on.
+    let minted = f.run_pass(&[], None).await;
+    assert_eq!(
+        minted.len(),
+        1,
+        "the engine mints the first proposal: {minted:?}"
+    );
+
+    let rerun = f.run_pass(&[], None).await;
+    assert!(
+        rerun.is_empty(),
+        "the same replica re-running its pass must find its own proposal: {rerun:?}"
+    );
+
+    // A second replica's evaluator over the same graph: same guard, same
+    // evidence, same seal, so the whole dedup key matches — and a different
+    // acting DID, which is exactly what the key deliberately ignores.
+    let bob = second_agent("engine-replica-bob@example.com");
+    let bobs_did = crate::agent::did_for_context(&bob).expect("did_for_context(bob)");
+    assert_ne!(
+        bobs_did,
+        acting_did(&f),
+        "the fixture must really be two DIDs"
+    );
+    let bobs = f.run_pass_as(&bob).await;
+    assert!(
+        bobs.is_empty(),
+        "a second DID's engine pass must find the live proposal, not mint its own: {bobs:?}"
+    );
+
+    assert_eq!(
+        proposals_to(&f, "scoped").await,
+        minted,
+        "three passes, one proposal"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &minted[0]).await,
+        0,
+        "nothing automated co-signs — `accept_flow_proposal` is reached only from a client"
+    );
+
+    let derived = f.derived().await;
+    assert_eq!(
+        derived.state, "identified",
+        "one engine vote is 1 of 2; `{{n: 2}}` must mean two agents, not two machines"
+    );
+    assert!(
+        derived.settled.is_empty(),
+        "no edge settled: {:?}",
+        derived.settled
+    );
+}
+
+/// **The real `get_links` seam, not a stub of it.**
+///
+/// Every other test that touches role grants asserts on a *derived state*, and
+/// the unit suite in `flow_instance/roles.rs` hands `resolve` grant links that
+/// it constructed itself — links the production path could not have fetched.
+/// So when `didProperty` resolution was broken (a property **name** sent to
+/// `get_links`, which wants an RDF **predicate**), a fully green suite said
+/// nothing: the seam that was broken was precisely the seam the tests stubbed.
+/// Since #1027 that meant every `didProperty` role grant was dated from the
+/// instance's own timestamp instead of the assignment link — a wider
+/// eligibility window than any rule asked for.
+///
+/// This test walks the production path and pins the contract at the store
+/// boundary itself, so the next spelling drift is a red test rather than a
+/// silently widened window:
+///
+/// 1. the property **name** finds the assignment link through the class shape;
+/// 2. the predicate spelling finds the same link (a hand-written SDNA may use
+///    either, and a role rule must not gate differently depending on which);
+/// 3. a name the class does not declare is an `Err`, never an empty predicate;
+/// 4. the window `resolve` recomputes is dated from the **assignment**, and is
+///    strictly later than the fallback it used to silently take.
+///
+/// Fails on `8bb33678d~1` at assertion 1: `grant_links` comes back empty.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_property_grant_link_travels_through_the_real_store() {
+    use super::flow_evaluator::{requires_query_input, RequiresQueryable};
+    use super::flow_instance::roles::resolve_role_grants;
+    use super::flow_instance::time::parse_link_timestamp;
+    use super::shacl_parser::ModelQuery;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    // The instance's own links are written first; the assignment comes after,
+    // so the two datings are distinguishable and the fallback is the earlier.
+    tick().await;
+    grant_owner_role(&mut f).await;
+    let me = acting_did(&f);
+
+    // 1. The store boundary: `owner` is the SDNA property NAME; the graph
+    //    holds `ns://owner`. Before the fix this vector was empty.
+    let by_name = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .await
+        .expect("role_grant_links by property name");
+    assert_eq!(
+        by_name.grant_links.len(),
+        1,
+        "the assignment link must be reachable by the didProperty NAME the SDNA declares, \
+         not only by the predicate the graph stores: {:?}",
+        by_name.grant_links
+    );
+    assert_eq!(
+        by_name.grant_links[0].data.predicate.as_deref(),
+        Some("ns://owner"),
+        "and the link found must be the assignment itself"
+    );
+
+    // 2. Either spelling, one answer.
+    let by_predicate = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("ns://owner"), &me)
+        .await
+        .expect("role_grant_links by predicate");
+    assert_eq!(
+        by_predicate.grant_links, by_name.grant_links,
+        "name and predicate spellings must resolve to the same links"
+    );
+
+    // 3. Unresolvable fails closed rather than degrading to an empty
+    //    predicate — which is what "granted since forever" looked like.
+    let err = f
+        .perspective
+        .role_grant_links("ns://Task", TASK, Some("noSuchProperty"), &me)
+        .await
+        .expect_err("a didProperty the class does not declare must be an Err");
+    assert!(
+        format!("{err:#}").contains("noSuchProperty"),
+        "the error must name the property that could not be resolved: {err:#}"
+    );
+
+    // 4. End to end: the evidence that travels in a receipt carries the
+    //    assignment, and the window is dated from it.
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
+    let record = f.instances().await.remove(0);
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &role,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect("resolve_role_grants");
+
+    let instance = evidence[0]
+        .instances
+        .iter()
+        .find(|i| i.instance_id == TASK)
+        .expect("the owned task is a matched role instance");
+    assert_eq!(
+        instance.grant_links.len(),
+        1,
+        "the receipt must carry the assignment link, not just the instance's word: {:?}",
+        instance.grant_links
+    );
+
+    let translated = requires_query_input(&role, &record, &me).expect("role query translates");
+    let grant = evidence[0]
+        .resolve(&translated, &role, GrantContext::empty())
+        .expect("resolve");
+    let window = grant
+        .windows
+        .iter()
+        .find(|w| w.instance_id == TASK)
+        .expect("a window for the owned task");
+    assert_eq!(
+        window.granted_at, instance.grant_links[0].timestamp,
+        "granted_at is the assignment link's own timestamp"
+    );
+
+    let fallback = instance
+        .asserted_instance_timestamp
+        .clone()
+        .expect("the instance is datable, so the fallback exists and is the wrong answer");
+    assert!(
+        parse_link_timestamp(&window.granted_at) > parse_link_timestamp(&fallback),
+        "the assignment must date the grant STRICTLY LATER than the instance fallback \
+         ({} vs {}) — taking the fallback is what widened every didProperty window",
+        window.granted_at,
+        fallback
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The manual path: two candidates on one dedup key, foreign one first
+// ---------------------------------------------------------------------------
+
+/// Two guard-identical edges into ONE state. The dedup key
+/// `(evidence_hash, instance, to_state)` carries no `from_state`, so a
+/// proposal on `elsewhere → merged` shares the whole key of a call proposing
+/// `here → merged`. What orders the two in the store is their URIs, which say
+/// nothing about which edge either sits on.
+///
+/// Two separate things are being held apart here, and collapsing either one
+/// breaks the test:
+///
+/// * **`requires` is IDENTICAL on every state.** That is the mechanism: the
+///   seal is computed from the target state's guard, so guard-identical edges
+///   produce the same `evidence_hash` and therefore the same dedup key. Give
+///   the states different guards and the two proposals stop colliding, and
+///   the test stops covering anything.
+/// * **`value` is DISTINCT on every state.** `value` does not enter the seal
+///   — it is only the state ordering. But genesis is `states[0]`
+///   (`flow_spawn::initial_state_of`) and the parser's sort by `value` is
+///   *stable*, so equal values leave the tie to graph link-discovery order,
+///   which `shacl_parser` itself documents as arbitrary. `here` and
+///   `elsewhere` both at `0.0` therefore made the folded genesis undefined
+///   rather than `here`, and CI folded it to `elsewhere`.
+///
+/// Note that `seed_flow`'s `initial_state` argument cannot rescue this: it
+/// writes the `currentState` **cache**, and the fold never reads the cache —
+/// `read_set` takes its genesis from the flow definition alone.
+fn merge_flow() -> serde_json::Value {
+    let guard = serde_json::json!([{ "className": "ns://Task", "count": { "min": 1 } }]);
+    serde_json::json!({
+        "name": "Merge",
+        "namespace": "merge://",
+        "states": [
+            // Lowest value, so genesis is `here` — deterministically, which is
+            // the whole point of not sharing a value with `elsewhere`.
+            { "name": "here", "value": 0.0, "requires": guard },
+            { "name": "elsewhere", "value": 0.5, "requires": guard },
+            { "name": "merged", "value": 1.0, "requires": guard },
+        ],
+        "transitions": [
+            { "action_name": "FromHere", "from_state": "here", "to_state": "merged", "actions": [] },
+            { "action_name": "FromElsewhere", "from_state": "elsewhere", "to_state": "merged", "actions": [] },
+        ],
+    })
+}
+
+/// A joinable proposal sitting BEHIND a foreign one is still the one co-signed.
+///
+/// This is the ordering the fix exists for, and the only test that pins it:
+/// two live proposals share the call's dedup key, the FOREIGN one is first in
+/// scan order, and the joinable one is second. A first-match lookup — or a
+/// classification loop replaced by `.first()`, or one that `break`s on the
+/// first non-joinable candidate — classifies the foreign proposal, never
+/// reaches Bob's, and mints. That mint is invariant 4 broken in the one shape
+/// it exists to cover: the vote is split across two atoms on one edge, and the
+/// next press mints again.
+///
+/// Every other test on this path has exactly one candidate, so all of them
+/// pass on the broken code.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_joinable_proposal_behind_a_foreign_one_is_still_the_one_co_signed() {
+    let mut f = seed_flow(merge_flow(), "here").await;
+    f.seed_task(TASK, "Merge the two branches").await;
+    set_consensus_rule(&mut f, "merge://Merge.merged", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    // One seal for `merged`, so both proposals below carry the whole key.
+    let seal = seal_for(&f, "merged").await;
+
+    // Scan order is `find_live_proposals`' sort, which is by URI — NOT the
+    // write order, and not the store's own iteration order, which is
+    // arbitrary. URIs are content addresses now (#1108), so the sort is hash
+    // order over per-run random keys — no fixed nonce can pin it. The nonce
+    // search below is what puts the foreign proposal first: `proposal_uri`
+    // is pure, so Carol's nonce is picked until her URI sorts below Bob's.
+    let carol = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let empty = outputs_hash(&[]);
+    let uri_for = |signer: &TestSigner, from: &str, nonce: &str| {
+        super::flow_instance::atom::proposal_uri(
+            &instance,
+            from,
+            "merged",
+            &seal,
+            Some(&empty),
+            &signer.did,
+            nonce,
+        )
+    };
+    let joinable_uri = uri_for(&bob, "here", "joinable-1");
+    let foreign_nonce = (0..)
+        .map(|i| format!("foreign-{i}"))
+        .find(|nonce| uri_for(&carol, "elsewhere", nonce) < joinable_uri)
+        .expect("some nonce hashes below Bob's URI");
+    let foreign =
+        sync_proposal_from(&mut f, &carol, &foreign_nonce, "elsewhere", "merged", &seal).await;
+    let joinable = sync_proposal_from(&mut f, &bob, "joinable-1", "here", "merged", &seal).await;
+
+    assert!(
+        foreign < joinable,
+        "this test only exercises the ordering bug while the FOREIGN proposal is scanned \
+         first, and scan order is the URI sort; rename the two above until it is — do not \
+         drop this assertion, without it the test can pass vacuously"
+    );
+    assert_eq!(
+        f.derived().await.state,
+        "here",
+        "one vote each at n = 2 settles nothing, so the instance is still in genesis — and \
+         genesis must be `here`, because that is the edge the call below is on. If this \
+         reads `elsewhere`, `merge_flow`'s state VALUES have been collapsed back together \
+         and genesis has gone arbitrary; fix the values, do NOT flip this expectation — \
+         with genesis `elsewhere` the joinable proposal sorts FIRST and the ordering bug \
+         is no longer exercised at all"
+    );
+
+    let out = propose_flow_transition(&mut f.perspective, &instance, "merged", &[], None, &f.ctx)
+        .await
+        .expect("propose must reach past the foreign candidate");
+
+    assert_eq!(
+        out.proposal_uri, joinable,
+        "the proposal on OUR edge is the one co-signed, not the one leaving `elsewhere`"
+    );
+    assert!(
+        !out.minted,
+        "minting past a joinable proposal splits the vote and mints again on the next \
+         press: {out:?}"
+    );
+    assert!(out.recorded_vote, "our vote landed on Bob's proposal");
+    assert_eq!(
+        out.outcomes.len(),
+        1,
+        "two DIDs on one edge IS quorum at n = 2"
+    );
+    assert_eq!(out.outcomes[0].to_state, "merged");
+
+    let mut both = vec![foreign.clone(), joinable.clone()];
+    both.sort();
+    assert_eq!(
+        proposals_to(&f, "merged").await,
+        both,
+        "no third proposal was written"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &joinable).await,
+        1,
+        "exactly one co-sign, on the joinable proposal"
+    );
+    assert_eq!(
+        accepted_by_count(&f, &foreign).await,
+        0,
+        "and none on the foreign one — signing it would vote on an edge we are not on"
+    );
+
+    let derived = f.derived().await;
+    assert_eq!(derived.state, "merged", "the edge settled");
+    assert_eq!(derived.settled.len(), 1);
+    assert_eq!(
+        derived.settled[0].atom_uris,
+        vec![joinable],
+        "settled by the co-signed proposal alone"
+    );
+    let mut expected = vec![acting_did(&f), bob.did.clone()];
+    expected.sort();
+    assert_eq!(
+        derived.settled[0].voters, expected,
+        "both DIDs on the `here → merged` edge are counted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The content-addressed URI on the live graph (#1108)
+// ---------------------------------------------------------------------------
+
+/// **Lal's attack, live-graph variant.** Alice proposes the final edge
+/// committing to [`TASK`], Bob co-signs, the edge settles — and Alice then
+/// deletes her `outputs_hash`/`output` links and re-signs new ones under the
+/// same URI. On a random URI the fold re-read the proposal with the swapped
+/// commitment and both votes intact. The URI is a content address now, so
+/// the re-signed fields no longer address it: the proposal stops being an
+/// atom, both votes stop counting, and the instance falls back to genesis —
+/// a run whose committed material was tampered with mid-air settles nothing.
+///
+/// Red while `from_links` skips the URI recompute: the state stays `scoped`
+/// with the swapped commitment under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_live_graph_outputs_swap_after_the_co_sign_uncounts_the_votes() {
+    use super::flow_instance::atom::{OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let out = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    let bob = TestSigner::generate();
+    sync_vote_from(&mut f, &bob, &out.proposal_uri).await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "precondition: the co-signed commitment settles the edge"
+    );
+
+    // The swap: withdraw the committed outputs, re-sign a different
+    // commitment under the settled URI. Both writes are Alice's own.
+    let stale: Vec<LinkExpression> = links_of(&f, &out.proposal_uri)
+        .await
+        .into_iter()
+        .filter(|l| {
+            l.data.predicate.as_deref() == Some(OUTPUTS_HASH_PREDICATE)
+                || l.data.predicate.as_deref() == Some(OUTPUT_PREDICATE)
+        })
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!stale.is_empty(), "the commitment links exist to remove");
+    f.perspective
+        .remove_links(stale, None)
+        .await
+        .expect("retract the committed outputs");
+    f.link(
+        &out.proposal_uri,
+        OUTPUTS_HASH_PREDICATE,
+        &literal(&outputs_hash(&[])),
+        LinkStatus::Shared,
+    )
+    .await;
+
+    assert_eq!(
+        f.derived().await.state,
+        "identified",
+        "the swapped fields no longer address the voted URI, so the proposal \
+         is not an atom and neither vote counts"
+    );
+    assert!(
+        f.read_set().await.atoms().is_empty(),
+        "the tampered proposal is dropped, not re-read with the new commitment"
+    );
+}
+
+/// The honest control for everything above: a run completed through the
+/// REAL co-sign path — a peer's committed proposal, this replica's
+/// `accept_flow_proposal` (which re-derives the seal and recomputes the
+/// outputs commitment before signing) — still mints a receipt that
+/// verifies, content-addressed URIs and all.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt() {
+    use super::flow_instance::receipt::FlowReceipt;
+    use super::flow_instance::verify::verify_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let committed = honest_commitment(&f, &[task_ref(TASK)]).await;
+    let bobs = sync_committed_proposal_from(
+        &mut f,
+        &bob,
+        "bob-honest",
+        "identified",
+        "scoped",
+        &seal,
+        &[task_ref(TASK)],
+        Some(&committed),
+    )
+    .await;
+    accept_flow_proposal(&mut f.perspective, &bobs, &f.ctx)
+        .await
+        .expect("the real co-sign path signs the committed proposal");
+    assert_eq!(f.derived().await.state, "scoped", "n = 2 settled");
+
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let flow = &flows[&f.flow_uri];
+    let loaded = load_outputs(&f.perspective, &[task_ref(TASK)])
+        .await
+        .expect("load outputs");
+    let outputs: Vec<_> = loaded.into_values().collect();
+    let receipt = FlowReceipt::mint(
+        flow,
+        f.read_set().await,
+        outputs,
+        Vec::new(),
+        crate::perspectives::flow_instance::grant::GrantContext::empty(),
+    )
+    .expect("the completed run mints");
+    let verdict = verify_receipt(&flows, &receipt);
+    assert!(
+        verdict.is_verified(),
+        "the honest end-to-end receipt verifies, got: {verdict}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// producedByFlow: valid outputs of a completed run (produced.rs)
+// ---------------------------------------------------------------------------
+
+/// Write `receipt`'s body to the graph exactly as any member could — the
+/// receipt-content link off its content-derived node, plus the flow → receipt
+/// index link under the flow it claims. Discovery only; whether it proves
+/// anything is decided by verification, which is the point of half these
+/// tests (so the forgery must be *found*, or those tests would pass on
+/// discovery instead of on the verifier).
+async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt::FlowReceipt) {
+    let body = ad4m_client::literal::Literal::from_json(
+        serde_json::to_value(receipt).expect("receipt serialises"),
+    )
+    .to_url()
+    .expect("literal url");
+    let uri = receipt.uri().expect("uri");
+    f.link(
+        &uri,
+        super::flow_instance::receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
+        &body,
+        LinkStatus::Shared,
+    )
+    .await;
+    f.link(
+        &receipt.flow_uri,
+        super::flow_instance::produced::FLOW_RECEIPT_INDEX_PREDICATE,
+        &uri,
+        LinkStatus::Shared,
+    )
+    .await;
+}
+
+/// The ids `model_query` returns for `ns://Task` under a `producedByFlow`
+/// filter, plus the reported total.
+async fn tasks_produced_by(f: &Fixture, query: serde_json::Value) -> (Vec<String>, usize) {
+    ids_of_class(f, "ns://Task", query).await
+}
+
+/// The ids `model_query` returns for `class`, plus the reported total.
+async fn ids_of_class(f: &Fixture, class: &str, query: serde_json::Value) -> (Vec<String>, usize) {
+    let json = f
+        .perspective
+        .model_query(class, &query.to_string())
+        .await
+        .expect("model_query");
+    let result: serde_json::Value = serde_json::from_str(&json).expect("result parses");
+    let ids = result["instances"]
+        .as_array()
+        .expect("instances")
+        .iter()
+        .map(|i| i["id"].as_str().expect("id").to_string())
+        .collect();
+    let total = result["totalCount"].as_u64().expect("totalCount") as usize;
+    (ids, total)
+}
+
+/// The happy path, end to end through the production paths only: a proposer
+/// commits to the run's outputs (`propose_flow_transition`), a second real
+/// signer co-signs (`accept_flow_proposal`, `{n: 2}`), the completion is
+/// minted from the live material (`mint_flow_receipt`) — and the output
+/// answers all three consumer surfaces: the enumeration, the verdict, and
+/// the model-query filter.
+///
+/// Red if `mint_flow_receipt` cannot collect what `FlowReceipt::mint`
+/// demands from a live run (read-set, outputs content, preimages), or if any
+/// surface reads the discovery edges as trust instead of running the
+/// verifier.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cosigned_completion_mints_and_its_outputs_answer_every_produced_by_surface() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer's own production path");
+    assert!(outcome.recorded_vote, "the proposer voted");
+    assert!(outcome.outcomes.is_empty(), "one vote is short of {{n: 2}}");
+
+    let bob = second_agent("bob-produced-by@e2e.test");
+    let fired = accept_flow_proposal(&mut f.perspective, &outcome.proposal_uri, &bob)
+        .await
+        .expect("the co-signer's production path");
+    assert!(!fired.is_empty(), "the second vote settles the edge");
+    assert_eq!(f.derived().await.state, "scoped");
+
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("a settled run into a terminal state mints");
+    assert_eq!(receipt.terminal_state, "scoped");
+
+    // Surface 1: the enumeration, state-filtered and not.
+    for state in [None, Some("scoped")] {
+        let outputs = flow_valid_outputs(&f.perspective, &f.flow_uri, state)
+            .await
+            .expect("valid outputs");
+        assert_eq!(outputs.len(), 1, "state {state:?}: {outputs:?}");
+        assert_eq!(outputs[0].output, task_ref(TASK));
+        assert_eq!(outputs[0].terminal_state, "scoped");
+        assert_eq!(outputs[0].receipt_uri, receipt.uri().expect("uri"));
+    }
+
+    // Surface 2: the verdict — verified, with BOTH voters counted.
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    let super::flow_instance::verify::ReceiptVerdict::Verified { voters, .. } = &verdict else {
+        panic!("the honest completion must verify, got: {verdict}");
+    };
+    assert_eq!(voters.len(), 2, "the quorum was two distinct DIDs");
+
+    // Surface 3: the model-query filter.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": {
+            "flow": f.flow_uri, "state": "scoped",
+        }}}),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+
+    // A state the run did not settle into admits nothing — same flow, same
+    // receipt, different question.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": {
+            "flow": f.flow_uri, "state": "identified",
+        }}}),
+    )
+    .await;
+    assert!(ids.is_empty(), "got {ids:?}");
+    assert_eq!(total, 0);
+}
+
+/// The #1104 re-mint against the live surfaces. A member takes the honest
+/// receipt's public signed material and re-writes it naming their own node
+/// (with that node's real live content, so only the signature chain can
+/// catch it). It sits in the graph as a perfectly ordinary receipt body —
+/// and neither the enumeration nor the filter honours it, while the honest
+/// receipt beside it keeps answering.
+///
+/// Red if any surface trusts `receipt.outputs`, the `granted_by`/receipt
+/// discovery edges, or drops every receipt once one is bad.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
+    use super::flow_instance::verify::ReceiptVerdict;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    const SMUGGLED: &str = "ad4m://task/smuggled";
+    f.seed_task(SMUGGLED, "Never voted on").await;
+    let instance = f.instance_uri.clone();
+
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose");
+    assert!(
+        !outcome.outcomes.is_empty(),
+        "the default {{n: 1}} settles on the proposer's own vote"
+    );
+
+    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    let mut forged = honest.clone();
+    forged.outputs = f.task_outputs(&[SMUGGLED.to_string()]).await;
+    plant_receipt(&mut f, &forged).await;
+
+    let outputs = flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+        .await
+        .expect("valid outputs");
+    let ids: Vec<&str> = outputs.iter().map(|o| o.output.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![TASK],
+        "the smuggled node must not be listed, and the honest output must survive its neighbour"
+    );
+
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+
+    // And the verdict names exactly what is wrong with the forgery.
+    let verdict = verify_flow_receipt(&f.perspective, &forged)
+        .await
+        .expect("verify");
+    assert!(
+        matches!(verdict, ReceiptVerdict::OutputsNotCommitted { .. }),
+        "got: {verdict}"
+    );
+}
+
+/// The live-content check: an output edited AFTER the run completed is no
+/// longer what the quorum committed to, so the enumeration and the filter
+/// stop returning it — while the receipt itself keeps verifying, because a
+/// receipt attests to the content at completion and freezing that is the
+/// whole ratchet.
+///
+/// Red if `flow_valid_outputs` skips the live re-read, or if the filter
+/// admits by id alone.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_edited_after_completion_stops_being_a_valid_output() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .len(),
+        1,
+        "precondition: at completion the output is listed"
+    );
+
+    // The edit. `content` is the instance's model_query hydration, so a
+    // re-asserted title moves `updatedAt` even before the value differs.
+    f.seed_task(TASK, "Renamed after the vote").await;
+
+    assert!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "the live content no longer matches the commitment"
+    );
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } }),
+    )
+    .await;
+    assert!(ids.is_empty(), "got {ids:?}");
+    assert_eq!(total, 0);
+
+    // The receipt is NOT invalidated — its preimages are frozen inside it.
+    // "No longer a valid output as it stands" and "the receipt is bad" are
+    // different findings, and conflating them would slander every receipt
+    // whose output later gained a link.
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    assert!(verdict.is_verified(), "the ratchet holds — got: {verdict}");
+}
+
+/// The filter runs BEFORE the page is cut (the #1093 `limitPerAnchor`
+/// guarantee, restated for verification): with forged receipts planted for
+/// two other tasks, `limit: 2` still returns the two VALID outputs — never
+/// a page thinned down after slicing, and never a forged row occupying a
+/// place a valid one should have had.
+///
+/// Red if the filter were applied after pagination — the window would then
+/// hold forged-but-planted ids and the valid outputs would fall off the
+/// page. That only holds if the planted rows really come first in the
+/// unfiltered order, so the order is explicit (`title DESC` puts "Planted
+/// too" and "Planted" ahead) and pinned as a precondition — the default
+/// timestamp order ties within a millisecond, and an earlier version of this
+/// test let a post-pagination mutant pass on that tie-break. `limit: 1` must
+/// also still report the full total, which no page-then-filter
+/// implementation can, whatever the order.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
+    use super::flow_instance::produced::mint_flow_receipt;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    const T2: &str = "ad4m://task/planted-2";
+    const T3: &str = "ad4m://task/genuine-3";
+    const T4: &str = "ad4m://task/planted-4";
+    f.seed_task(T2, "Planted").await;
+    f.seed_task(T3, "Also delivered").await;
+    f.seed_task(T4, "Planted too").await;
+    let instance = f.instance_uri.clone();
+
+    // One run, honestly committing to TWO outputs.
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK), task_ref(T3)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    // Forged receipts for the two planted tasks sit between them.
+    for planted in [T2, T4] {
+        let mut forged = honest.clone();
+        forged.outputs = f.task_outputs(&[planted.to_string()]).await;
+        plant_receipt(&mut f, &forged).await;
+    }
+
+    // Precondition: unfiltered, the first page of 2 is exactly the planted
+    // pair — so a filter applied to that page would leave nothing.
+    let (ids, _) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "order": { "title": "DESC" }, "limit": 2 }),
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec![T4.to_string(), T2.to_string()],
+        "precondition: the planted rows lead the unfiltered order"
+    );
+
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({
+            "where": { "producedByFlow": { "flow": f.flow_uri } },
+            "order": { "title": "DESC" },
+            "limit": 2,
+        }),
+    )
+    .await;
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec![TASK.to_string(), T3.to_string()],
+        "a page of 2 is 2 VALID outputs — got {ids:?}"
+    );
+    assert_eq!(total, 2, "and the total counts only what verified");
+
+    // A page smaller than the valid set still reports the whole valid set.
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({
+            "where": { "producedByFlow": { "flow": f.flow_uri } },
+            "order": { "title": "DESC" },
+            "limit": 1,
+        }),
+    )
+    .await;
+    assert_eq!(ids.len(), 1, "got {ids:?}");
+    assert!(
+        ids[0] == TASK || ids[0] == T3,
+        "the one row is a valid output — got {ids:?}"
+    );
+    assert_eq!(total, 2, "the total counts the filtered set, not the page");
+}
+
+/// A second class the fixture's Task node also conforms to: it asks for a
+/// `title` and nothing else, so every Task is a `ns://Role` instance too —
+/// with other content, since the hydration reads through a different shape.
+const ROLE_SDNA: &str = r#"{
+  "target_class":"ns://Role",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://title","target":"value"}],
+  "properties":[
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+  ]
+}"#;
+
+/// The class dimension through the filter (#1108): a run that committed to a
+/// node **as a Task** has said nothing about that node as a Role, even when
+/// the node conforms to both. So `producedByFlow` admits it into the Task
+/// query and refuses it from the Role query — same flow, same receipt, same
+/// id.
+///
+/// Pins which guard answered: the unfiltered Role query DOES return the
+/// node, so shape conformance is not what excludes it — only the class
+/// match on the committed `(class, id)` can be.
+///
+/// Red if the filter admits by id alone (`output_matches_class` ignored, or
+/// matching on `output.id` only).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_committed_as_a_task_is_not_produced_by_the_flow_as_a_role() {
+    use super::flow_instance::produced::mint_flow_receipt;
+    use super::perspective_instance::SdnaType;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_sdna(
+            "ns://Role".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(ROLE_SDNA.to_string()),
+            &ctx,
+        )
+        .await
+        .expect("add_sdna(Role)");
+
+    // Precondition: the Task node IS a Role instance by conformance.
+    let (ids, _) = ids_of_class(&f, "ns://Role", serde_json::json!({})).await;
+    assert!(
+        ids.contains(&TASK.to_string()),
+        "precondition: the Task node conforms to ns://Role — got {ids:?}"
+    );
+
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } });
+
+    let (ids, total) = ids_of_class(&f, "ns://Task", filter.clone()).await;
+    assert_eq!(ids, vec![TASK.to_string()], "control: the committed class");
+    assert_eq!(total, 1);
+
+    let (ids, total) = ids_of_class(&f, "ns://Role", filter).await;
+    assert!(
+        ids.is_empty(),
+        "committed as a Task, so not a valid Role output — got {ids:?}"
+    );
+    assert_eq!(total, 0, "and the total agrees");
+}
+
+/// An output that is no longer an instance of the class it was committed as
+/// is not a valid output as it stands — the `None` arm of the live check.
+/// Distinct from the edited-content arm: here there is no content to compare
+/// at all, and the failure direction must still exclude.
+///
+/// Pins which guard answered: the receipt itself keeps verifying, so it is
+/// the live re-read that drops the output, not the verifier.
+///
+/// Red if `flow_valid_outputs` keeps a candidate it cannot re-read.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_that_is_no_longer_its_class_stops_being_a_valid_output() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt,
+    };
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .len(),
+        1,
+        "precondition: at completion the output is listed"
+    );
+
+    // Drop the `ns://type` marker the Task shape requires: the node is no
+    // longer loadable as a `ns://Task`.
+    let marker: Vec<LinkExpression> = links_of(&f, TASK)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some("ns://type"))
+        .map(LinkExpression::from)
+        .collect();
+    assert!(!marker.is_empty(), "the type marker exists to remove");
+    f.perspective
+        .remove_links(marker, None)
+        .await
+        .expect("de-type the output");
+    assert!(
+        load_outputs(&f.perspective, &[task_ref(TASK)])
+            .await
+            .expect("load")
+            .is_empty(),
+        "precondition: the output no longer reads as a Task"
+    );
+
+    assert!(
+        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "an output that cannot be re-read is not returned"
+    );
+    let verdict = verify_flow_receipt(&f.perspective, &receipt)
+        .await
+        .expect("verify");
+    assert!(
+        verdict.is_verified(),
+        "the receipt still verifies; only the live re-read excludes — got: {verdict}"
+    );
+}
+
+/// "No such flow here" and "no valid outputs" are different answers. A flow
+/// URI the perspective's catalogue does not hold is an error — through the
+/// enumeration and through the model-query filter — while the real flow
+/// with no receipts is an honest empty list.
+///
+/// Red if `flow_valid_outputs` answers an unknown flow with `Ok([])`: a
+/// typo'd flow URI in a payout query would then read as "nobody delivered".
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unknown_flow_is_an_error_not_an_empty_answer() {
+    use super::flow_instance::produced::flow_valid_outputs;
+
+    let f = seed_satisfied_fixture(None).await;
+    const UNKNOWN: &str = "delivery://NoSuchFlow";
+
+    // Control: the real flow, nothing minted — an honest, successful empty.
+    assert!(flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+        .await
+        .expect("a known flow with no receipts answers")
+        .is_empty());
+
+    let err = flow_valid_outputs(&f.perspective, UNKNOWN, None)
+        .await
+        .expect_err("an unknown flow must not answer with an empty list");
+    assert!(
+        err.to_string().contains("not on this perspective"),
+        "the error names the reason — got: {err:#}"
+    );
+
+    let query = serde_json::json!({ "where": { "producedByFlow": { "flow": UNKNOWN } } });
+    assert!(
+        f.perspective
+            .model_query("ns://Task", &query.to_string())
+            .await
+            .is_err(),
+        "the model-query filter surfaces the same error"
+    );
+}
+
+/// Complete the fixture's run with `TASK` as its one output and mint the
+/// receipt — the honest material the budget tests below crowd around.
+async fn mint_honest_task_receipt(f: &mut Fixture) -> super::flow_instance::receipt::FlowReceipt {
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    super::flow_instance::produced::mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint")
+}
+
+/// Lal's #1127 flood: any member can write `receipt_content` links (and the
+/// flow → receipt index links) whose URIs sort below every genuine receipt.
+/// Once flow F's read would exceed `MAX_FLOW_RECEIPTS` the answer must be an
+/// **error** on every surface — never an empty list, which a payout gate or
+/// #1076 would read as a confident "nothing was produced". Same rule as the
+/// unknown flow: "I could not read every receipt" is not "no valid outputs".
+///
+/// Pinned at the boundary: `MAX - 1` junk candidates plus the honest receipt
+/// is exactly the budget and still answers; one more is over it. The honest
+/// receipt keeps verifying throughout, and the error is the typed
+/// `ReceiptBudgetExceeded`, so it is the budget that answered.
+///
+/// Red if the read truncates silently (the pre-#1127-review behaviour: the
+/// honest receipt was evicted and every surface answered `[]`), if the
+/// budget is off by one, or if any surface swallows the error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, load_flow_receipts, verify_flow_receipt, ReceiptBudgetExceeded,
+        FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+
+    // `-` sorts before every hex digit and letter, so each junk node leads
+    // the honest one under the same prefix. The body need not be a receipt.
+    let junk = |i: usize| {
+        let uri = format!("{RECEIPT_URI_PREFIX}-junk-{i:04}");
+        vec![
+            Link {
+                source: flow.clone(),
+                predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                target: uri.clone(),
+            },
+            Link {
+                source: uri,
+                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                target: literal(&format!("not a receipt {i}")),
+            },
+        ]
+    };
+    assert!(
+        format!("{RECEIPT_URI_PREFIX}-junk-0000") < honest_uri,
+        "precondition: junk sorts first"
+    );
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": flow } } });
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS - 1).flat_map(junk).collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("plant MAX - 1 junk candidates");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &flow, None)
+            .await
+            .expect("exactly the budget still answers")
+            .len(),
+        1,
+        "MAX - 1 junk candidates leave room for the honest receipt"
+    );
+    let (ids, _) = tasks_produced_by(&f, filter.clone()).await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+
+    f.perspective
+        .add_links(junk(MAX_FLOW_RECEIPTS - 1), LinkStatus::Shared, None, &ctx)
+        .await
+        .expect("plant the MAX-th junk candidate");
+
+    let over = |e: &anyhow::Error| e.downcast_ref::<ReceiptBudgetExceeded>().cloned();
+    let expected = ReceiptBudgetExceeded {
+        flow: flow.clone(),
+        found: MAX_FLOW_RECEIPTS + 1,
+        cap: MAX_FLOW_RECEIPTS,
+    };
+
+    let err = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect_err("the loader must not hand back a truncated list");
+    assert_eq!(over(&err), Some(expected.clone()), "loader: {err:#}");
+
+    let err = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect_err("flowValidOutputs must refuse, not answer []");
+    assert_eq!(over(&err), Some(expected.clone()), "enumeration: {err:#}");
+
+    let err = f
+        .perspective
+        .model_query("ns://Task", &filter.to_string())
+        .await
+        .expect_err("the producedByFlow filter must refuse, not return an empty page");
+    assert_eq!(over(&err), Some(expected), "filter: {err:#}");
+
+    let verdict = verify_flow_receipt(&f.perspective, &honest)
+        .await
+        .expect("verify");
+    assert!(
+        verdict.is_verified(),
+        "the honest receipt is fine on its own — only the budget refused, got: {verdict}"
+    );
+}
+
+/// The no-attacker half of Lal's review: the budget is per flow. Receipts of
+/// other flows — more than `MAX_FLOW_RECEIPTS` of them, all sorting below
+/// flow F's honest receipt — plus as many stray bodies nobody indexed, must
+/// neither hide F's receipt nor push F's read over budget. A busy
+/// perspective with many flows is the normal case, not an attack.
+///
+/// Red if the read is perspective-wide (the pre-review behaviour: the other
+/// flows' bodies filled the shared cap and evicted F's receipt, answering
+/// `[]`), or if it counts candidates outside F's index.
+#[tokio::test(flavor = "multi_thread")]
+async fn other_flows_receipts_do_not_spend_this_flows_budget() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+
+    let mut links = Vec::new();
+    for i in 0..=MAX_FLOW_RECEIPTS {
+        // A receipt of another flow, indexed under that flow.
+        let mut other = honest.clone();
+        other.flow_uri = format!("other://Flow{i:04}");
+        let uri = format!("{RECEIPT_URI_PREFIX}-other-{i:04}");
+        links.push(Link {
+            source: other.flow_uri.clone(),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+            target: uri.clone(),
+        });
+        links.push(Link {
+            source: uri,
+            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            target: ad4m_client::literal::Literal::from_json(
+                serde_json::to_value(&other).expect("serialises"),
+            )
+            .to_url()
+            .expect("literal url"),
+        });
+        // A stray body under no index at all.
+        links.push(Link {
+            source: format!("{RECEIPT_URI_PREFIX}-stray-{i:04}"),
+            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            target: literal(&format!("stray {i}")),
+        });
+    }
+    assert!(
+        format!("{RECEIPT_URI_PREFIX}-other-0000") < honest_uri,
+        "precondition: the other flows' receipts sort first"
+    );
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(links, LinkStatus::Shared, None, &ctx)
+        .await
+        .expect("plant the other flows' receipts and the strays");
+
+    let outputs = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("other flows' receipts do not spend this flow's budget");
+    assert_eq!(
+        outputs.iter().map(|o| o.output.clone()).collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": flow } } }),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
+}
+
+/// The budget counts flow F's **bodies** on their own: many bodies hung
+/// under one indexed receipt URI — even the honest receipt's own — must hit
+/// the budget, not be parsed without bound or silently cut. Pinned at the
+/// boundary (`MAX` bodies answer, `MAX + 1` refuse) with the index holding a
+/// single entry throughout, so only the body check can answer.
+///
+/// Red if the body check is removed (every body is parsed and the honest
+/// receipt answers) or truncates instead of refusing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_flood_under_one_indexed_receipt_is_over_budget() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, load_flow_receipts, ReceiptBudgetExceeded, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::FLOW_RECEIPT_CONTENT_PREDICATE;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+    let junk_body = |i: usize| Link {
+        source: honest_uri.clone(),
+        predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+        target: literal(&format!("not a receipt {i}")),
+    };
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS - 1).map(junk_body).collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("hang MAX - 1 junk bodies beside the honest one");
+    assert_eq!(
+        flow_valid_outputs(&f.perspective, &flow, None)
+            .await
+            .expect("MAX bodies are exactly the budget")
+            .len(),
+        1
+    );
+
+    f.perspective
+        .add_links(
+            vec![junk_body(MAX_FLOW_RECEIPTS - 1)],
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("hang the MAX-th junk body");
+    let err = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect_err("MAX + 1 bodies under one entry are over budget");
+    assert_eq!(
+        err.downcast_ref::<ReceiptBudgetExceeded>().cloned(),
+        Some(ReceiptBudgetExceeded {
+            flow,
+            found: MAX_FLOW_RECEIPTS + 1,
+            cap: MAX_FLOW_RECEIPTS,
+        }),
+        "{err:#}"
+    );
+}
+
+/// And on the **index** on its own: flow F's index entries bound how many
+/// receipt nodes one read visits, whether or not anything hangs under them.
+/// An index flood with no bodies at all — the flood that costs the reader
+/// one lookup per entry and costs the attacker one link each — must hit the
+/// budget, while the bodies stay far below it.
+///
+/// Red if the index check is removed: the bodies-only count (one, the
+/// honest body) would let the read visit every entry and answer.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_index_flood_without_bodies_is_over_budget() {
+    use super::flow_instance::produced::{
+        load_flow_receipts, ReceiptBudgetExceeded, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::RECEIPT_URI_PREFIX;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    mint_honest_task_receipt(&mut f).await;
+    let flow = f.flow_uri.clone();
+
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(
+            (0..MAX_FLOW_RECEIPTS)
+                .map(|i| Link {
+                    source: flow.clone(),
+                    predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                    target: format!("{RECEIPT_URI_PREFIX}-empty-{i:04}"),
+                })
+                .collect(),
+            LinkStatus::Shared,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("file MAX body-less entries under the flow");
+
+    let err = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect_err("MAX + 1 index entries are over budget, bodies or not");
+    assert_eq!(
+        err.downcast_ref::<ReceiptBudgetExceeded>().cloned(),
+        Some(ReceiptBudgetExceeded {
+            flow,
+            found: MAX_FLOW_RECEIPTS + 1,
+            cap: MAX_FLOW_RECEIPTS,
+        }),
+        "{err:#}"
+    );
+}
+
+/// The TS SDK registers its own `FlowTransitionProposal` shape
+/// (`FlowInstance.start` → `Ad4mModel.registerAll`), and there `evidence` and
+/// `outputs` are `@HasMany` relations: an `ad4m://adder`, no `ad4m://setter`.
+/// That shape carries the `nonce` path, so `ensure_flow_model_classes` keeps
+/// it — and `create_subject` writes values only through setters. The
+/// engine's own proposal write must not depend on which shape a client
+/// registered: the outputs commitment it signs has to land as links, or the
+/// run completes with nothing to mint (the #1127 SDK test's CI failure).
+///
+/// Red if the writer hands the collections to `create_subject` — the
+/// relation-shaped class drops both with a "declares no setter" warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collections() {
+    use super::flow_classes::{FLOW_TRANSITION_PROPOSAL_CLASS, FLOW_TRANSITION_PROPOSAL_SDNA};
+    use super::flow_instance::atom::OUTPUT_PREDICATE;
+    use super::flow_instance::produced::mint_flow_receipt;
+    use super::perspective_instance::SdnaType;
+
+    let mut f = seed_satisfied_fixture(None).await;
+
+    // The relation-style shape: same class, same paths, but the two
+    // collections carry an adder instead of a setter — what the TS SDK's
+    // `@HasMany` generates.
+    let mut shape: serde_json::Value =
+        serde_json::from_str(FLOW_TRANSITION_PROPOSAL_SDNA).expect("hardwired SDNA parses");
+    for property in shape["properties"].as_array_mut().expect("properties") {
+        if matches!(property["name"].as_str(), Some("evidence" | "outputs")) {
+            let setter = property
+                .as_object_mut()
+                .expect("property object")
+                .remove("setter")
+                .expect("the hardwired collection has a setter");
+            property["adder"] = setter;
+        }
+    }
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_sdna(
+            FLOW_TRANSITION_PROPOSAL_CLASS.to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(shape.to_string()),
+            &ctx,
+        )
+        .await
+        .expect("register the relation-style proposal shape");
+
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+
+    let proposal_links = links_of(&f, &outcome.proposal_uri).await;
+    let with = |predicate: &str| {
+        proposal_links
+            .iter()
+            .filter(|l| l.data.predicate.as_deref() == Some(predicate))
+            .count()
+    };
+    assert_eq!(
+        with(OUTPUT_PREDICATE),
+        1,
+        "the committed output must land as a link whatever shape is registered"
+    );
+    assert_eq!(
+        with("ad4m://flow/evidence"),
+        1,
+        "and so must the cited evidence"
+    );
+
+    let receipt = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("a run whose outputs landed mints");
+    assert_eq!(
+        receipt
+            .outputs
+            .iter()
+            .map(OutputRef::of)
+            .collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// grantedByFlow on the real store: #1076 rebuilt on produced.rs
+// ---------------------------------------------------------------------------
+
+/// The whole `grantedByFlow` path against a real perspective: the delivery
+/// run completes with `TASK` as its output, `mint_flow_receipt` files the
+/// receipt under the flow's index, and a role gate "owns a Task that the
+/// delivery flow produced into `scoped`" reads it back through
+/// `PerspectiveInstance::flow_receipts` — `produced`'s own loader.
+///
+/// 1. The holder is granted, dated from the receipt's quorum. The owner
+///    assignment is written **before** the run, so dating from it would be
+///    the earlier, wider answer, and the assertion can tell them apart.
+/// 2. A gate naming a state the run did not settle into grants nothing.
+/// 3. A DID that owns no task is not a member.
+/// 4. A flood of the flow's index is the typed budget error out of
+///    `resolve_role_grants`, not "not a member".
+///
+/// Red if the gate reads anything but F's index (no receipt is found and
+/// the holder is not granted), if it dates from the assignment link, or if
+/// the loader's budget error is swallowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_granted_by_flow_gate_grants_the_holder_through_the_real_store() {
+    use super::flow_evaluator::requires_query_input;
+    use super::flow_instance::produced::{
+        ReceiptBudgetExceeded, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+    use super::flow_instance::roles::resolve_role_grants;
+    use super::flow_instance::time::parse_link_timestamp;
+    use super::flow_instance::verify::{verify_receipt, ReceiptVerdict};
+    use super::shacl_parser::ModelQuery;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    let receipt = mint_honest_task_receipt(&mut f).await;
+
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let ReceiptVerdict::Verified { settled_at, .. } = verify_receipt(&flows, &receipt) else {
+        panic!("precondition: the honest receipt verifies");
+    };
+    let me = acting_did(&f);
+    let record = f.instances().await.remove(0);
+    let gate = |state: &str| -> ModelQuery {
+        serde_json::from_value(serde_json::json!({
+            "className": "ns://Task",
+            "didProperty": "owner",
+            "grantedByFlow": { "flow": f.flow_uri, "terminalState": state },
+        }))
+        .expect("role query")
+    };
+    let grant_for =
+        |role: &ModelQuery,
+         did: &str,
+         evidence: &[super::flow_instance::roles::RoleGrantEvidence]| {
+            let translated = requires_query_input(role, &record, did).expect("translates");
+            evidence[0]
+                .resolve(&translated, role, GrantContext::root(&flows))
+                .expect("resolves")
+        };
+
+    // 1. The holder.
+    let scoped = gate("scoped");
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &scoped,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect("within budget");
+    let instance = evidence[0]
+        .instances
+        .iter()
+        .find(|i| i.instance_id == TASK)
+        .expect("the owned task is a matched role instance");
+    assert_eq!(
+        instance.granting_receipts,
+        vec![receipt.clone()],
+        "the receipt is found through the flow's index and carried with the instance"
+    );
+    let assigned_at = instance.grant_links[0].timestamp.clone();
+    let grant = grant_for(&scoped, &me, &evidence);
+    let window = grant
+        .windows
+        .iter()
+        .find(|w| w.instance_id == TASK)
+        .expect("the holder is granted");
+    assert_eq!(window.granted_at, settled_at, "dated from the quorum");
+    assert!(
+        parse_link_timestamp(&assigned_at) < parse_link_timestamp(&settled_at),
+        "precondition: the assignment ({assigned_at}) is earlier than the quorum \
+         ({settled_at}), so dating from it would be the wider, wrong answer"
+    );
+
+    // 2. The same receipt does not answer for another ending.
+    let identified = gate("identified");
+    let grant = grant_for(&identified, &me, &evidence);
+    assert!(
+        grant.windows.is_empty(),
+        "the run settled into `scoped`, not `identified`"
+    );
+
+    // 3. A DID that owns nothing.
+    let nobody = "did:key:z6MkNobodyOwnsAnything".to_string();
+    let evidence = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &scoped,
+        &record,
+        std::slice::from_ref(&nobody),
+    )
+    .await
+    .expect("within budget");
+    assert!(
+        evidence[0].instances.is_empty(),
+        "no role instance, so nothing for any receipt to grant"
+    );
+
+    // 4. The flood: the honest receipt plus MAX junk entries is one over.
+    let flow = f.flow_uri.clone();
+    let junk: Vec<Link> = (0..MAX_FLOW_RECEIPTS)
+        .flat_map(|i| {
+            let uri = format!("{RECEIPT_URI_PREFIX}-junk-{i:04}");
+            vec![
+                Link {
+                    source: flow.clone(),
+                    predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                    target: uri.clone(),
+                },
+                Link {
+                    source: uri,
+                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                    target: literal(&format!("not a receipt {i}")),
+                },
+            ]
+        })
+        .collect();
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(junk, LinkStatus::Shared, None, &ctx)
+        .await
+        .expect("plant the flood");
+    let err = resolve_role_grants(
+        &f.perspective,
+        "delivery://Delivery.scoped",
+        &scoped,
+        &record,
+        std::slice::from_ref(&me),
+    )
+    .await
+    .expect_err("an over-budget index must be an error, not a denial");
+    assert_eq!(
+        err.downcast_ref::<ReceiptBudgetExceeded>(),
+        Some(&ReceiptBudgetExceeded {
+            flow,
+            found: MAX_FLOW_RECEIPTS + 1,
+            cap: MAX_FLOW_RECEIPTS,
+        }),
+        "the typed budget error: {err:#}"
     );
 }

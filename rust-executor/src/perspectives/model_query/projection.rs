@@ -112,18 +112,39 @@ pub(super) async fn resolve_projections(
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
 
+        // A transitive projection counts (or lists) everything reachable, which
+        // is what "42 replies" on a collapsed branch means to a reader. The
+        // query is already grouped per parent and already asked of every row at
+        // once, so the whole cost is one character in the emitted path.
+        //
+        // It cannot be combined with a link-author or link-timestamp filter:
+        // those match the reification of a single link, and a path is a
+        // reachability test with no one link to reify. Refused rather than
+        // ignored — silently counting the whole subtree when the caller asked
+        // for "replies by this author" is a wrong number, not a loose one.
+        let path = if proj.transitive { "+" } else { "" };
+        if proj.transitive && !reifier_patterns.is_empty() {
+            log::warn!(
+                "IncludeProjection '{}': transitive projections cannot filter on link author or \
+                 timestamp — a property path has no single link to reify. Skipping.",
+                key
+            );
+            continue;
+        }
+
         if proj.count {
             let sparql = format!(
                 concat!(
                     "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
                     "    {parent_constraint}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}} GROUP BY ?parent"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
             );
@@ -160,13 +181,14 @@ pub(super) async fn resolve_projections(
                 concat!(
                     "SELECT ?parent ?t WHERE {{\n",
                     "    {parent_constraint}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}}{order_clause}"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
                 order_clause = order_clause,
