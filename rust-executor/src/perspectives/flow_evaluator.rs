@@ -497,7 +497,7 @@ pub struct RoleRevocation {
 ///
 /// **Authority is deliberately not checked here** — whether a tombstone's
 /// author may revoke depends on the role query, so the reader applies
-/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::evidence::revocation_authorised)
 /// itself against the definition it holds, and cannot be handed a
 /// pre-filtered set to trust.
 #[derive(Debug, Clone, Default, PartialEq)]
