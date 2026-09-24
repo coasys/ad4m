@@ -3195,7 +3195,11 @@ async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collectio
         .find(|a| a.uri == outcome.proposal_uri)
         .expect("the proposal is an atom")
         .outputs;
-    assert_eq!(named, vec![task_ref(TASK)], "the atom reads its outputs back");
+    assert_eq!(
+        named,
+        vec![task_ref(TASK)],
+        "the atom reads its outputs back"
+    );
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     let loaded = load_outputs(&f.perspective, &named)
         .await
