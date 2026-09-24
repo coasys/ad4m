@@ -731,9 +731,16 @@ async fn proof_valid_a_forged_value_does_not_pass_a_relation_where() {
 /// `sparql_store.get_all_links()` output to the link language, and every
 /// joiner ingests those copies with `add_link`. This signs one property link
 /// per `(name, target)` on store A, copies A's read-back links into store B
-/// the same way, and reads both with the default. Returns the cases that do
-/// not hydrate on B, that is, whose read-back copy no longer verifies.
-async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
+/// the same way, and reads A with the default and B with `include_unverified`.
+/// Returns the cases that do not hydrate on B, that is, with the default,
+/// whose read-back copy no longer verifies. `pre_1141` strips A's
+/// `wireTarget` annotations before the copy, as in a store written before
+/// #1141.
+async fn pv_withheld_after_read_back_with(
+    cases: &[(&str, &str)],
+    pre_1141: bool,
+    include_unverified: Option<bool>,
+) -> Vec<String> {
     let mut properties = serde_json::Map::new();
     properties.insert(
         "type".into(),
@@ -754,14 +761,12 @@ async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
     a.add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
         .unwrap();
     for (i, (name, target)) in cases.iter().enumerate() {
-        a.add_link(&pv_signed(
-            &signer,
-            r,
-            &format!("pv://{name}"),
-            target,
-            i as u32 + 1,
-        ))
-        .unwrap();
+        let link = pv_signed(&signer, r, &format!("pv://{name}"), target, i as u32 + 1);
+        a.add_link(&link).unwrap();
+        if pre_1141 {
+            // Canonical targets carry no annotation to strip.
+            let _ = a.remove_wire_target_annotation(&link);
+        }
     }
     let b = SparqlStore::new(None).unwrap();
     for decorated in a.get_all_links().unwrap() {
@@ -770,14 +775,17 @@ async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
 
     let mut withheld = Vec::new();
     for (store, label) in [(&a, "a"), (&b, "b")] {
-        let result = execute_model_query_from_json(
-            store,
-            "Recipe",
-            &ModelQueryInput::default(),
-            &shape_json,
-        )
-        .await
-        .unwrap();
+        let input = ModelQueryInput {
+            include_unverified: if label == "b" {
+                include_unverified
+            } else {
+                None
+            },
+            ..Default::default()
+        };
+        let result = execute_model_query_from_json(store, "Recipe", &input, &shape_json)
+            .await
+            .unwrap();
         assert_eq!(result.instances.len(), 1, "the type link verifies");
         let inst = &result.instances[0];
         let missing: Vec<String> = cases
@@ -795,6 +803,10 @@ async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
         }
     }
     withheld
+}
+
+async fn pv_withheld_after_read_back(cases: &[(&str, &str)]) -> Vec<String> {
+    pv_withheld_after_read_back_with(cases, false, None).await
 }
 
 /// The forms the SDK writes (`Literal.from(v).toUrl()`, which uses
@@ -837,6 +849,37 @@ async fn proof_valid_an_unencoded_literal_still_verifies_after_a_read_back() {
     ])
     .await;
     assert_eq!(withheld, Vec::<String>::new());
+}
+
+/// The case #1141 cannot fix: a store written before it kept no signed bytes,
+/// so a non-canonical literal it already holds reads back canonical. The
+/// signing node still returns it (its stored verdict is `"true"`), but the
+/// published copy does not verify, so a joiner withholds it by default and
+/// returns it with `include_unverified`. An SDK-encoded literal from the same
+/// old store is not affected. Pinned for the CHANGELOG and docs note.
+#[tokio::test]
+async fn proof_valid_a_pre_1141_non_canonical_literal_is_withheld_after_a_read_back() {
+    let cases = [
+        ("unencoded", "literal:string:Write the guide"),
+        ("unencodedJson", r#"literal:json:{"a":1}"#),
+        // `expression.create(_, "literal")` before #1141 escaped `-_.~`.
+        ("overEncoded", "literal:string:a%2Db"),
+        ("sdkString", "literal:string:Write%20the%20guide"),
+    ];
+    assert_eq!(
+        pv_withheld_after_read_back_with(&cases, true, None).await,
+        vec![
+            "unencoded (literal:string:Write the guide)".to_string(),
+            r#"unencodedJson (literal:json:{"a":1})"#.to_string(),
+            "overEncoded (literal:string:a%2Db)".to_string(),
+        ],
+        "the default withholds only the non-canonical pre-#1141 literals"
+    );
+    assert_eq!(
+        pv_withheld_after_read_back_with(&cases, true, Some(true)).await,
+        Vec::<String>::new(),
+        "`include_unverified` returns them"
+    );
 }
 
 /// #1113 when a link's reifier carries no `proofValid` quad at all. The filter

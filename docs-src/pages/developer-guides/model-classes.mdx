@@ -917,6 +917,8 @@ Included relations inherit the setting unless their own sub-query sets `includeU
 > - **Counts.** `count` and `totalCount` include instances matched only through unverified links, so they can be larger than the rows you can page through.
 >
 > Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
+>
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
 
 ### Query Engine
 
