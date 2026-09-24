@@ -190,19 +190,24 @@ pub fn valid_outputs(
     out
 }
 
-/// Is `instance_id` a valid output of `flow_uri` \[in `state`\], per
-/// `receipts`? The membership form of [`valid_outputs`] — one definition,
-/// so the two can never disagree.
+/// Is `output` a valid output of `flow_uri` \[in `state`\], per `receipts`?
+/// The membership form of [`valid_outputs`] — one definition, so the two can
+/// never disagree.
+///
+/// Takes the whole `(class, id)` ref, never the id alone, for the reason
+/// [`FlowReceipt::speaks_for`] does (#1108): the quorum committed to the
+/// node's content as read through one class, and the same node read
+/// through another is other content it never saw.
 pub fn produced_by_flow(
     catalogue: &HashMap<String, SHACLFlow>,
-    instance_id: &str,
+    output: &OutputRef,
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
 ) -> bool {
     valid_outputs(catalogue, flow_uri, state, receipts)
         .iter()
-        .any(|v| v.output.id == instance_id)
+        .any(|v| &v.output == output)
 }
 
 /// Is a committed output named as the class a `model_query` asks about?
@@ -512,7 +517,7 @@ pub async fn mint_flow_receipt(
 mod tests {
     use super::*;
     use crate::perspectives::flow_instance::atom::fixtures::{
-        hash_of, out_item, out_items, signed_terminal_proposal, T1,
+        hash_of, out_item, out_items, out_ref, signed_terminal_proposal, T1,
     };
     use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
 
@@ -544,25 +549,24 @@ mod tests {
     }
 
     /// A completed run of `flow` whose final proposal names `ids`, honestly
-    /// committed and signed for real.
+    /// committed and signed for real, under the content-addressed URI the
+    /// fixture computes from those same fields (#1108).
     fn completed(ids: &[&str]) -> ReadSet {
+        let (uri, links) = signed_terminal_proposal(
+            "p1",
+            ALICE,
+            "open",
+            "done",
+            &crate::perspectives::flow_evaluator::evidence_hash(&[], &[]),
+            ids,
+            &hash_of(ids),
+            T1,
+        );
         ReadSet {
             instance_uri: INSTANCE.to_string(),
             subject: BASE.to_string(),
             genesis: "open".to_string(),
-            proposals: vec![ProposalLinks {
-                uri: "ad4m://p/1".to_string(),
-                links: signed_terminal_proposal(
-                    "ad4m://p/1",
-                    ALICE,
-                    "open",
-                    "done",
-                    &crate::perspectives::flow_evaluator::evidence_hash(&[], &[]),
-                    ids,
-                    &hash_of(ids),
-                    T1,
-                ),
-            }],
+            proposals: vec![ProposalLinks { uri, links }],
             role_grants: Vec::new(),
         }
     }
@@ -601,16 +605,28 @@ mod tests {
         );
         assert!(produced_by_flow(
             &cat,
-            OUTPUT,
+            &out_ref(OUTPUT),
             FLOW,
             None,
             std::slice::from_ref(&receipt)
         ));
         assert!(produced_by_flow(
             &cat,
-            OUTPUT,
+            &out_ref(OUTPUT),
             FLOW,
             Some("done"),
+            std::slice::from_ref(&receipt)
+        ));
+        // The same node named through another class is not what the quorum
+        // committed to (#1108): membership is by `(class, id)`, never by id.
+        assert!(!produced_by_flow(
+            &cat,
+            &OutputRef {
+                class_name: "coasys://Role".into(),
+                id: OUTPUT.into(),
+            },
+            FLOW,
+            None,
             std::slice::from_ref(&receipt)
         ));
     }
@@ -625,7 +641,7 @@ mod tests {
             assert!(
                 !produced_by_flow(
                     &cat,
-                    not_an_output,
+                    &out_ref(not_an_output),
                     FLOW,
                     None,
                     std::slice::from_ref(&receipt)
@@ -662,7 +678,13 @@ mod tests {
             outputs.iter().any(|v| v.output.id == OUTPUT),
             "the honest receipt beside the forgery must still answer: {outputs:?}"
         );
-        assert!(!produced_by_flow(&cat, ATTACKER, FLOW, None, &receipts));
+        assert!(!produced_by_flow(
+            &cat,
+            &out_ref(ATTACKER),
+            FLOW,
+            None,
+            &receipts
+        ));
     }
 
     /// A receipt carrying an output's content other than what the quorum
