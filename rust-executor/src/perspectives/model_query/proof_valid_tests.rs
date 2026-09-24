@@ -622,3 +622,107 @@ async fn proof_valid_applies_to_getter_backed_relations() {
         "a hand-written getter that joins `proofValid` skips the unverified link"
     );
 }
+
+/// #1113 on a typed relation's `where`: `@HasMany(() => Comment, { through,
+/// where: { status: "approved" } })`. After the getter fills the relation,
+/// `apply_where_filter_to_relation` reads each target's `status` to decide
+/// membership. A forged `status` link must not make a genuine, conforming
+/// comment pass. The forged value is the target's only `status` link, so row
+/// order cannot decide the outcome. A comment with a signed `"approved"` is the
+/// control, present both ways.
+#[tokio::test]
+async fn proof_valid_a_forged_value_does_not_pass_a_relation_where() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    store
+        .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    for (second, c) in [(1, "pv://c/signed"), (2, "pv://c/forged")] {
+        for l in [
+            pv_signed(&signer, c, "ad4m://type", "pv://Comment", second),
+            pv_signed(&signer, r, "pv://comment", c, second),
+        ] {
+            store.add_link(&l).unwrap();
+        }
+    }
+    store
+        .add_link(&pv_signed(
+            &signer,
+            "pv://c/signed",
+            "pv://status",
+            "literal:string:approved",
+            3,
+        ))
+        .unwrap();
+    store
+        .add_link(&pv_forged(
+            &signer,
+            "pv://c/forged",
+            "pv://status",
+            "literal:string:approved",
+            4,
+        ))
+        .unwrap();
+
+    let shape_json = json!({
+        "className": "Recipe",
+        "properties": {
+            "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"pv://Recipe"}
+        },
+        "relations": {
+            "comments": {
+                "predicate": "pv://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment",
+                "getter": "SELECT ?target WHERE { <Base> <pv://comment> ?target . ?target <ad4m://type> <pv://Comment> . }",
+                "whereFilter": {"status": "approved"},
+                "wherePredicates": {"status": "pv://status"}
+            }
+        }
+    })
+    .to_string();
+    let comments = |include_unverified: Option<bool>| {
+        let store = &store;
+        let shape_json = &shape_json;
+        async move {
+            let mut out = Vec::new();
+            // `limit` switches to the two-phase plan.
+            for limit in [None, Some(10)] {
+                let result = execute_model_query_from_json(
+                    store,
+                    "Recipe",
+                    &ModelQueryInput {
+                        limit,
+                        include_unverified,
+                        ..Default::default()
+                    },
+                    shape_json,
+                )
+                .await
+                .unwrap();
+                let mut targets: Vec<String> = result.instances[0]["comments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                targets.sort();
+                out.push(targets);
+            }
+            assert_eq!(out[0], out[1], "both plans agree");
+            out.remove(0)
+        }
+    };
+
+    assert_eq!(
+        comments(None).await,
+        vec!["pv://c/signed"],
+        "a forged `status` must not pass the relation's `where`"
+    );
+    assert_eq!(
+        comments(Some(true)).await,
+        vec!["pv://c/forged", "pv://c/signed"],
+        "the opt-in reads the unverified `status`"
+    );
+}
