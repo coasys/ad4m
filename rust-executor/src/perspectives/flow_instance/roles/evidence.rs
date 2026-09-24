@@ -6,9 +6,6 @@ use crate::perspectives::flow_evaluator::{
     cardinality_satisfied, did_literal_url, grant_link_names_did, revocation_link_counts_for_did,
     EvidenceItem,
 };
-use crate::perspectives::flow_instance::atom::OutputRef;
-use crate::perspectives::flow_instance::grant::{granted_by_flow_at, GrantContext};
-use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::flow_instance::time::parse_link_timestamp;
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
 use crate::perspectives::shacl_parser::ModelQuery;
@@ -48,23 +45,20 @@ pub struct RoleInstanceHistory {
     /// audit-grade until `model_query` results carry per-link signatures.
     /// Flows whose role queries use `didProperty` never need it.
     pub asserted_instance_timestamp: Option<String>,
-    /// The granting flow's receipts that claim to name this instance, carried
-    /// whole so a reader can verify them itself. Only collected for a role
-    /// query that declares `grantedByFlow`; empty for every other role, and
-    /// omitted from the serialised form when empty.
+    /// For a role query that declares `producedByFlow`: when the granting
+    /// flow first produced this instance — the earliest verified receipt's
+    /// quorum time, as the collecting replica checked it against its own
+    /// graph ([`grant`](super::super::grant)). `None` when no verified
+    /// receipt names it, and for every other role. Omitted from the
+    /// serialised form when `None`.
     ///
-    /// Found through the granting flow's index
-    /// ([`load_flow_receipts`](super::produced::load_flow_receipts)) and
-    /// narrowed to the receipts whose `outputs` claim `(role class,
-    /// instance_id)`. That narrowing is **discovery, not trust**: it reads the
-    /// carried list before anything is verified. Every check that matters —
-    /// the signatures inside, the DNA hash, the re-fold, the outputs
-    /// commitment, and the `(class, id)` binding again, this time on verified
-    /// material — happens in
-    /// [`grant::granted_by_flow_at`](super::grant::granted_by_flow_at) on the
-    /// reading side.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub granting_receipts: Vec<FlowReceipt>,
+    /// **Carried, not re-derived.** The receipt behind it does not travel, so
+    /// a reader of a serialised read-set trusts this date the way it trusts
+    /// that the carried links are all the links there were. See
+    /// [`grant`](super::super::grant) § *What a receipt of a gated flow
+    /// proves*.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub produced_at: Option<String>,
 }
 
 /// The evidence behind one `(target state, candidate DID)` pair: same keying
@@ -128,105 +122,71 @@ impl RoleGrantEvidence {
     /// Grant links get no such treatment because they are not
     /// signature-filtered on either side; see above and #1063.
     ///
-    /// # `grantedByFlow`
+    /// # `producedByFlow`
     ///
-    /// When `granted_by` is set, the instance must additionally be an output
-    /// of a completed run of the named flow, and **that run's quorum time
+    /// `role` is the role query **from the reader's own flow definition**,
+    /// never from the carried evidence: a minter who could name the gate
+    /// would be naming the rule its own receipt is judged by.
+    ///
+    /// When it declares `producedByFlow`, the instance counts only when it
+    /// carries a [`RoleInstanceHistory::produced_at`], and **that date
     /// replaces every other dating**: the assignment links and
     /// `asserted_instance_timestamp` are not consulted, not even as a
     /// fallback. Were they, writing a plain assignment link would grant the
     /// role with no receipt at all and the gate would be decorative.
     ///
-    /// An instance no carried receipt grants contributes no window, exactly as
-    /// if the role query had not matched it. That is an ordinary "not a
-    /// member", distinct from the `Err` above — which exists for a grant that
-    /// *is* claimed and cannot be placed in time. Tombstones still apply, and
-    /// are the only way such a grant ever ends; see
-    /// [`grant`](super::grant) § *Revocation*.
+    /// An instance with no `produced_at` contributes no window, exactly as if
+    /// the role query had not matched it. That is an ordinary "not a member",
+    /// distinct from the `Err` above — which exists for a grant that *is*
+    /// claimed and cannot be placed in time. Tombstones still apply, and are
+    /// the only way such a grant ever ends; see [`grant`](super::super::grant)
+    /// § *Revocation*.
     ///
     /// `count` is here only to refuse one shape outright: a `count` that is
     /// satisfied by **zero** matching instances, such as `{ max: 0 }`. Paired
-    /// with `grantedByFlow` that inverts the gate into "eligible while no
-    /// verifiable receipt exists", so every reason a receipt might fail to
-    /// verify — an un-synced flow definition, a broken signature, a chain past
-    /// the depth cap — becomes a reason to *grant*. Fail-closed has to mean
-    /// the same thing at both ends of the rule, so this combination is an
-    /// error rather than a subtlety.
-    ///
-    /// A gate whose granting flow is not in the reader's catalogue is an
-    /// `Err` for the same reason: no receipt for it can be verified, and
-    /// "I cannot check" must not read as "not a member". So is a receipt the
-    /// depth budget cannot reach
-    /// ([`GrantDepthExceeded`](super::grant::GrantDepthExceeded)).
-    ///
-    /// `role` is the role query **from the reader's own flow definition**,
-    /// never from the carried evidence. Its `grantedByFlow`, its `count`, and
-    /// its `className` all decide the answer, and a minter who could name any
-    /// of them would be naming the rule its own receipt is judged by. The
-    /// class matters because the receipt must name the instance as
-    /// `(className, id)` ([`grant`](super::grant)); [`Self::role_class`] is
-    /// carried and is not consulted.
+    /// with `producedByFlow` that inverts the gate into "eligible while no
+    /// verified receipt exists", so every reason a receipt might fail to
+    /// verify — an un-synced flow definition, a broken signature — becomes a
+    /// reason to *grant*. Fail-closed has to mean the same thing at both ends
+    /// of the rule, so this combination is an error rather than a subtlety.
     pub fn resolve(
         &self,
         translated_role_query: &Value,
         role: &ModelQuery,
-        grants: GrantContext<'_>,
     ) -> anyhow::Result<RoleGrant> {
-        let granted_by = role.granted_by_flow.as_ref();
-        if granted_by.is_some() && cardinality_satisfied(role.count.as_ref(), 0) {
+        let produced_by = role.produced_by_flow.as_ref();
+        if produced_by.is_some() && cardinality_satisfied(role.count.as_ref(), 0) {
             anyhow::bail!(
-                "RoleGrantEvidence::resolve: the `{}` role gate combines `grantedByFlow` with a `count` satisfied by zero instances, so a receipt that FAILS to verify would make `{}` eligible rather than ineligible; refusing to gate (fail-closed)",
-                self.role_class,
+                "RoleGrantEvidence::resolve: the `{}` role gate combines `producedByFlow` with a `count` satisfied by zero instances, so a receipt that FAILS to verify would make `{}` eligible rather than ineligible; refusing to gate (fail-closed)",
+                role.class_name,
                 self.did
             );
-        }
-        if let Some(spec) = granted_by {
-            // The same rule `produced::flow_valid_outputs` applies to an
-            // unknown flow: without F's definition no receipt for F can be
-            // verified, and "I cannot check" must not read as "not a member".
-            if !grants.catalogue().contains_key(&spec.flow) {
-                anyhow::bail!(
-                    "RoleGrantEvidence::resolve: the `{}` role gate is granted by flow `{}`, which is not in this replica's catalogue, so no receipt for it can be verified and `{}`'s membership cannot be decided (fail-closed)",
-                    role.class_name,
-                    spec.flow,
-                    self.did
-                );
-            }
         }
         let did_literal = did_literal_url(&self.did)?;
         let grant_counts = |l: &&LinkExpression| grant_link_names_did(l, &self.did, &did_literal);
 
         let mut windows = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
-            // A `grantedByFlow` gate dates the grant from the granting run's
-            // quorum and from nothing else — see § grantedByFlow above. An
-            // instance no receipt grants is simply not a member, so it is
+            // A `producedByFlow` gate dates the grant from the granting run's
+            // quorum and from nothing else — see § producedByFlow above. An
+            // instance no receipt produced is simply not a member, so it is
             // skipped rather than raised.
-            if let Some(spec) = granted_by {
-                let output = OutputRef {
-                    class_name: role.class_name.clone(),
-                    id: instance.instance_id.clone(),
-                };
-                // `?`: running out of depth is "I could not decide", which
-                // aborts the fold like any other unresolvable evidence
-                // (`grant` § *Running out of depth is undecidable*).
-                match granted_by_flow_at(grants, &output, spec, &instance.granting_receipts)? {
-                    Some(granted_at) => {
-                        windows.push(RoleGrantWindow {
-                            instance_id: instance.instance_id.clone(),
-                            granted_at,
-                            revocations: self.revocations_on(
-                                instance,
-                                translated_role_query,
-                                &did_literal,
-                            ),
-                        });
-                    }
+            if produced_by.is_some() {
+                match &instance.produced_at {
+                    Some(granted_at) => windows.push(RoleGrantWindow {
+                        instance_id: instance.instance_id.clone(),
+                        granted_at: granted_at.clone(),
+                        revocations: self.revocations_on(
+                            instance,
+                            translated_role_query,
+                            &did_literal,
+                        ),
+                    }),
                     None => log::debug!(
-                        "grantedByFlow: `{}` does not count toward `{}` for `{}`: no carried \
-                         receipt grants it",
+                        "producedByFlow: `{}` does not count toward `{}` for `{}`: no verified \
+                         receipt produced it",
                         instance.instance_id,
-                        self.role_class,
+                        role.class_name,
                         self.did
                     ),
                 }
@@ -286,16 +246,11 @@ impl RoleGrantEvidence {
     /// The authorised, signed tombstones on one instance naming this DID,
     /// earliest first — the `revocations` half of a [`RoleGrantWindow`].
     ///
-    /// Shared by both dating branches on purpose. A `grantedByFlow` grant is
+    /// Shared by both dating branches on purpose. A `producedByFlow` grant is
     /// dated by a quorum instead of by a link, but it ends exactly the way
     /// every other role grant ends: a new signed tombstone from an author
-    /// [`revocation_authorised`] accepts. That sameness is what makes the one
-    /// revocation story in [`grant`](super::grant) § *Revocation* true of both
-    /// kinds, and splitting the two branches' revocation handling is how it
-    /// would quietly stop being true.
-    ///
-    /// Every carried link's signature is **recomputed** here rather than read;
-    /// see § *Signatures* on [`Self::resolve`].
+    /// [`revocation_authorised`] accepts. Splitting the two branches'
+    /// revocation handling is how that would quietly stop being true.
     fn revocations_on(
         &self,
         instance: &RoleInstanceHistory,
@@ -624,10 +579,10 @@ mod tests {
                 grant_links: vec![grant_link(ALICE(), T1)],
                 revocation_links: vec![forged],
                 asserted_instance_timestamp: None,
-                granting_receipts: Vec::new(),
+                produced_at: None,
             }],
         }
-        .resolve(&query, &role, GrantContext::empty())
+        .resolve(&query, &role)
         .expect("resolves");
         assert!(
             grant.windows[0].revocations.is_empty(),
@@ -654,10 +609,10 @@ mod tests {
                 grant_links: vec![grant_link(BOB(), T0), grant_link(ALICE(), T3)],
                 revocation_links: vec![tombstone(BOB(), ADMIN(), T4)],
                 asserted_instance_timestamp: None,
-                granting_receipts: Vec::new(),
+                produced_at: None,
             }],
         }
-        .resolve(&translated(&role, ALICE()), &role, GrantContext::empty())
+        .resolve(&translated(&role, ALICE()), &role)
         .expect("resolves");
         assert_eq!(
             grant.windows[0].granted_at, T3,

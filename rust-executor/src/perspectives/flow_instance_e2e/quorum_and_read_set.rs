@@ -146,8 +146,7 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     let flows = load_shacl_flows(&f.perspective).await.expect("flows");
     let flow = &flows[&f.flow_uri];
     assert_eq!(
-        fold_read_set(flow, &parsed, GrantContext::root(&flows))
-            .expect("the carried evidence resolves off-perspective"),
+        fold_read_set(flow, &parsed).expect("the carried evidence resolves off-perspective"),
         derived,
         "an off-perspective verifier must reach the same verdict"
     );

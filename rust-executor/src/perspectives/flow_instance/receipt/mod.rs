@@ -310,7 +310,6 @@ mod tests {
             completed(),
             outs(&[OUTPUT]),
             vec![delivered(), tampered],
-            GrantContext::empty(),
         )
         .expect_err("a preimage that does not re-hash to its seal must not mint");
         assert!(
@@ -328,16 +327,10 @@ mod tests {
     fn the_receipt_uri_is_derived_from_its_content() {
         let flow = two_state_flow();
         let mint = |rs: ReadSet| {
-            FlowReceipt::mint(
-                &flow,
-                rs,
-                outs(&[OUTPUT]),
-                vec![delivered()],
-                GrantContext::empty(),
-            )
-            .expect("mints")
-            .uri()
-            .expect("uri")
+            FlowReceipt::mint(&flow, rs, outs(&[OUTPUT]), vec![delivered()])
+                .expect("mints")
+                .uri()
+                .expect("uri")
         };
         let twin = mint(completed());
         let same = mint(completed());
@@ -367,7 +360,6 @@ mod tests {
             completed(),
             outs(&[OUTPUT]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect("mints");
 

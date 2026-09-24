@@ -66,7 +66,7 @@
 //!   forward and from no earlier commit. Receipts minted before it date their
 //!   grants from the instance.
 //! - `granted_at` is **the granting run's quorum time** when the role query
-//!   declares `grantedByFlow`, and then nothing else may date it — not the
+//!   declares `producedByFlow`, and then nothing else may date it — not the
 //!   assignment link, not the instance timestamp, not even as a fallback. See
 //!   [`grant`](super::grant).
 //! - `revoked_at` is the tombstone's link timestamp, for both kinds.
@@ -104,12 +104,13 @@
 //! engineered around, in v1 (#1027).
 //!
 //! The half of this that *is* engineered around is the **grant** side, for
-//! roles granted as flow outputs: a `grantedByFlow` grant is dated from
+//! roles granted as flow outputs: a `producedByFlow` grant is dated from
 //! [`SettledEdge::settled_at`](super::fold::SettledEdge) — the moment the
 //! n-th distinct eligible voter signed — which no single party picks and
-//! nobody can back-date without producing a different quorum. That shrinks
-//! the author-asserted residual to revocation timestamps and to the
-//! admin-authored base case. See [`grant`](super::grant).
+//! nobody can back-date without producing a different quorum. The replica
+//! that collects the evidence checks that against the receipt in its own
+//! graph; a reader of a serialised read-set trusts the carried date (see
+//! [`grant`](super::grant) § *What a receipt of a gated flow proves*).
 //!
 //! ## History
 //!
@@ -147,8 +148,7 @@ pub mod evidence;
 mod test_support;
 pub mod window;
 
-use super::atom::{OutputRef, TransitionAtom, Vote};
-use super::receipt::FlowReceipt;
+use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
 use crate::perspectives::flow_evaluator::{
@@ -214,21 +214,16 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     // that date the match alike — see `RoleGrantLinks::query_keys`.
     let did_property = role.did_property.as_deref();
 
-    // A `grantedByFlow` gate reads the granting flow's receipts once, up
-    // front, through `produced`'s budgeted loader. Over budget is an ERROR
-    // that propagates from here — see `grant` § *A receipt flood is an
-    // error*. It is never an empty list, because an empty list reads as
-    // "not a member" for every candidate. Every other role pays nothing: no
-    // read, no bytes in the read-set.
-    let flow_receipts = match &role.granted_by_flow {
-        Some(spec) => perspective.flow_receipts(&spec.flow).await.map_err(|e| {
-            e.context(format!(
-                "resolve_role_grants: the `{}` role gate's granting flow `{}` could not be read, \
-                 so no candidate's membership can be decided",
-                role.class_name, spec.flow
-            ))
-        })?,
-        None => Vec::new(),
+    // A `producedByFlow` gate is decided here, against this replica's own
+    // graph, once for the whole role: every receipt fully verified, bound to
+    // `(role.class_name, id)`. Over budget, or a flow this replica does not
+    // hold, is an ERROR that propagates — see `grant`. Every other role pays
+    // nothing.
+    let produced = match &role.produced_by_flow {
+        Some(spec) => {
+            Some(super::grant::produced_at_by_instance(perspective, &role.class_name, spec).await?)
+        }
+        None => None,
     };
 
     let mut evidence = Vec::with_capacity(candidates.len());
@@ -243,23 +238,14 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         for item in &matched {
             let content: Value = serde_json::from_str(&item.content)?;
             let links = RoleGrantLinks::from_instance(&content, did_property, did)?;
-            // Discovery narrowing only: the receipts that CLAIM this
-            // instance. Verification happens on the reading side.
-            let this = OutputRef {
-                class_name: role.class_name.clone(),
-                id: item.id.clone(),
-            };
-            let granting_receipts: Vec<FlowReceipt> = flow_receipts
-                .iter()
-                .filter(|r| r.speaks_for(&this))
-                .cloned()
-                .collect();
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
                 revocation_links: links.revocation_links,
                 asserted_instance_timestamp: instance_timestamp(item),
-                granting_receipts,
+                produced_at: produced
+                    .as_ref()
+                    .and_then(|by_id| by_id.get(&item.id).cloned()),
             });
         }
         // Stable by instance URI: the read-set must not depend on the order a
@@ -391,7 +377,7 @@ mod tests {
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated, GrantContext::empty()).expect_err("undated instance");
+        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated).expect_err("undated instance");
         assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
 
         // And the undeterminable rule never even runs a query.

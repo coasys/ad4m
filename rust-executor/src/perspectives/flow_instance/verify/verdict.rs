@@ -24,7 +24,7 @@ pub enum ReceiptVerdict {
         ///
         /// **The quorum-fixed time**, and the reason it is on the verdict
         /// rather than left for a caller to dig out of a re-fold: it is what
-        /// [`roles`](super::roles) dates a `grantedByFlow` grant from, and
+        /// [`roles`](super::roles) dates a `producedByFlow` grant from, and
         /// `roles`' own module doc promises a time "no single party can
         /// back-date". Every other timestamp in reach is author-asserted —
         /// a link's `timestamp` is whatever its writer stamped on it — so

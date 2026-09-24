@@ -7,7 +7,6 @@ use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_evaluator::{
     requires_query_input, RequiresQueryable, RoleGrantLinks,
 };
-pub(super) use crate::perspectives::flow_instance::grant::GrantContext;
 use crate::perspectives::shacl_parser::{ModelQuery, ModelQueryCount};
 use crate::types::LinkExpression;
 use async_trait::async_trait;
@@ -172,7 +171,7 @@ pub(super) fn views(evidence: &[RoleGrantEvidence], role: &ModelQuery) -> Vec<Ro
     evidence
         .iter()
         .map(|e| {
-            e.resolve(&translated(role, &e.did), role, GrantContext::empty())
+            e.resolve(&translated(role, &e.did), role)
                 .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
         })
         .collect()

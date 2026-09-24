@@ -8,7 +8,7 @@
 //! > *Is this instance a valid output of flow F \[settled into state S\]?*
 //!
 //! and its enumeration twin, *which instances are*. The role engine's
-//! `grantedByFlow` gate (#1076) is one consumer of this question; the
+//! `producedByFlow` gate (#1076) is one consumer of this question; the
 //! `perspective.flowValidOutputs` query and the model-query
 //! `where: { producedByFlow }` filter added here are two more. All of them
 //! answer it the same way, and that way fails closed.
@@ -81,7 +81,7 @@
 //! flow an error. A flood under F's index can still make F's question
 //! unanswerable, but loudly, and only F's.
 //!
-//! # The quorum time, and nested receipts
+//! # The quorum time
 //!
 //! The role gate needs one thing the enumeration does not: **when** the
 //! instance was produced. [`first_produced_at`] answers it from the same
@@ -90,30 +90,23 @@
 //! receipts that name the instance. That is the moment the n-th distinct
 //! eligible voter signed, which no single party picks.
 //!
-//! A receipt's read-set may itself carry role evidence with receipts inside
-//! it, when the flow it completed was gated by another flow. So verification
-//! can recurse, and every function here has a `_within` form that takes the
-//! caller's remaining depth budget ([`GrantContext`]). The plain forms start
-//! from a full budget over the reader's catalogue.
-//!
 //! # What is deliberately NOT here
 //!
 //! - **A rename of `ad4m://flow/granted_by`.** The edge name is
-//!   role-flavoured for a general mechanism. Nothing in the engine reads it
-//!   any more: #1076's gate finds receipts through F's index like every
-//!   other consumer here. [`mint_flow_receipt`] still writes it for per-node
-//!   discovery. Rename or drop it is an open question on the PR.
+//!   role-flavoured for a general mechanism. Nothing in the engine reads it:
+//!   #1076's role gate finds receipts through F's index like every other
+//!   consumer here. [`mint_flow_receipt`] still writes it for per-node
+//!   discovery. Rename or drop it is an open question.
 //! - **Automatic minting on completion.** [`mint_flow_receipt`] is an
 //!   explicit call; nothing here mints as a side effect of a vote. Whether
 //!   the engine should is a design question for the flow plan, not this PR.
 
 use super::atom::OutputRef;
-use super::grant::GrantContext;
 use super::receipt::{
     is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE, FLOW_RECEIPT_CONTENT_PREDICATE,
     FLOW_RECEIPT_PREDICATE,
 };
-use super::verify::{verify_receipt, verify_receipt_within, ReceiptVerdict};
+use super::verify::{verify_receipt, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{load_all_flow_instances, load_shacl_flows};
@@ -123,7 +116,7 @@ use crate::perspectives::shacl_parser::SHACLFlow;
 use crate::types::{Link, LinkQuery, LinkStatus};
 use ad4m_client::literal::{Literal, LiteralValue};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// One instance a verified receipt speaks for. What the "valid outputs of
 /// flow F" query returns, and what the `producedByFlow` model-query filter
@@ -164,19 +157,7 @@ pub fn valid_outputs(
     state: Option<&str>,
     receipts: &[FlowReceipt],
 ) -> Vec<ValidOutput> {
-    valid_outputs_within(GrantContext::root(catalogue), flow_uri, state, receipts)
-}
-
-/// [`valid_outputs`] with the caller's remaining depth budget, for a receipt
-/// reached from inside another receipt's fold (module header, § *The quorum
-/// time, and nested receipts*).
-pub(crate) fn valid_outputs_within(
-    ctx: GrantContext<'_>,
-    flow_uri: &str,
-    state: Option<&str>,
-    receipts: &[FlowReceipt],
-) -> Vec<ValidOutput> {
-    let mut out: Vec<ValidOutput> = verified_outputs(ctx, flow_uri, state, receipts)
+    let mut out: Vec<ValidOutput> = verified_outputs(catalogue, flow_uri, state, receipts)
         .into_iter()
         .map(|(output, _)| output)
         .collect();
@@ -200,7 +181,7 @@ pub(crate) fn valid_outputs_within(
 /// [`produced_by_flow`] and [`first_produced_at`] cannot disagree about
 /// which receipts count.
 fn verified_outputs(
-    ctx: GrantContext<'_>,
+    catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
@@ -213,7 +194,7 @@ fn verified_outputs(
         if receipt.flow_uri != flow_uri {
             continue;
         }
-        let verdict = verify_receipt_within(ctx, receipt);
+        let verdict = verify_receipt(catalogue, receipt);
         let ReceiptVerdict::Verified {
             terminal_state,
             settled_at,
@@ -275,32 +256,39 @@ pub fn produced_by_flow(
         .any(|v| &v.output == output)
 }
 
-/// When `output` first became a valid output of `flow_uri` \[in `state`\]:
-/// the earliest quorum time among the verified receipts that name it, or
-/// `None` when none does. `Some` exactly when [`produced_by_flow`] is true.
+/// When each valid output of `flow_uri` \[in `state`\] was first produced:
+/// the earliest quorum time among the verified receipts that name it. An
+/// output is a key exactly when [`produced_by_flow`] is true for it.
 ///
-/// This is what the `grantedByFlow` role gate dates a grant from
+/// This is what the `producedByFlow` role gate dates a grant from
 /// ([`grant`](super::grant)). **Earliest wins** when several runs produced
 /// the same instance: the membership began at the first of them. Preferring
 /// the earlier, wider window is safe here because every candidate has been
 /// verified, so widening it costs a whole quorum under the reader's own
 /// rules, not a link write.
 ///
+/// One map for every output, not one call per output, because verifying is
+/// the expensive part and the role gate asks about every matched instance of
+/// every candidate.
+///
 /// Like [`valid_outputs`] it applies no live-content check: a grant dated
 /// from a quorum stays granted after the role instance gains links (module
 /// header, § *The live-content check*).
 pub(crate) fn first_produced_at(
-    ctx: GrantContext<'_>,
-    output: &OutputRef,
+    catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
-) -> Option<String> {
-    verified_outputs(ctx, flow_uri, state, receipts)
-        .into_iter()
-        .filter(|(v, _)| &v.output == output)
-        .map(|(_, settled_at)| settled_at)
-        .reduce(earlier_of)
+) -> BTreeMap<OutputRef, String> {
+    let mut first: BTreeMap<OutputRef, String> = BTreeMap::new();
+    for (valid, settled_at) in verified_outputs(catalogue, flow_uri, state, receipts) {
+        let earliest = match first.remove(&valid.output) {
+            Some(seen) => earlier_of(seen, settled_at),
+            None => settled_at,
+        };
+        first.insert(valid.output, earliest);
+    }
+    first
 }
 
 /// The earlier of two settle times **by parsed instant**, never by string:
@@ -642,7 +630,7 @@ pub async fn mint_flow_receipt(
     // final settled edge. `mint` re-derives the fold and re-checks the hash,
     // so this is a collection step, not a trust step.
     let ingested = read_set.reverified();
-    let derived = super::fold_read_set(flow, &ingested, GrantContext::root(&catalogue))?;
+    let derived = super::fold_read_set(flow, &ingested)?;
     let final_edge = derived.settled.last().ok_or_else(|| {
         anyhow::anyhow!("{instance_uri} has no settled edge, so there is no completion to mint")
     })?;
@@ -661,7 +649,7 @@ pub async fn mint_flow_receipt(
     let outputs: Vec<EvidenceItem> = refs.iter().filter_map(|r| loaded.get(r).cloned()).collect();
 
     let mut preimages: Vec<EvidencePreimage> = Vec::new();
-    for counted in FlowReceipt::counted_seals(flow, &read_set, GrantContext::root(&catalogue))? {
+    for counted in FlowReceipt::counted_seals(flow, &read_set)? {
         let record_now = crate::perspectives::flow_context::FlowInstanceRecord {
             current_state: derived.state.clone(),
             ..record.clone()
@@ -693,13 +681,7 @@ pub async fn mint_flow_receipt(
         ));
     }
 
-    let receipt = FlowReceipt::mint(
-        flow,
-        read_set,
-        outputs,
-        preimages,
-        GrantContext::root(&catalogue),
-    )?;
+    let receipt = FlowReceipt::mint(flow, read_set, outputs, preimages)?;
     let uri = receipt.uri()?;
     let body = Literal::from_json(serde_json::to_value(&receipt)?).to_url()?;
 
@@ -794,14 +776,8 @@ mod tests {
     }
 
     fn mint(flow: &SHACLFlow, ids: &[&str]) -> FlowReceipt {
-        FlowReceipt::mint(
-            flow,
-            completed(ids),
-            out_items(ids),
-            Vec::new(),
-            crate::perspectives::flow_instance::grant::GrantContext::empty(),
-        )
-        .expect("the fixture read-set mints")
+        FlowReceipt::mint(flow, completed(ids), out_items(ids), Vec::new())
+            .expect("the fixture read-set mints")
     }
 
     fn honest() -> FlowReceipt {

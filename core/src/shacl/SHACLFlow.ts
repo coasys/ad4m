@@ -114,19 +114,21 @@ export interface ModelQuery {
   or?: ModelQuery[];
   /**
    * When this query is used as a `ConsensusRule.fromRole`, require each
-   * matched instance to be an output of a completed run of another flow,
-   * and date the grant from that run's quorum instead of from an
+   * matched instance to be a valid output of a completed run of another
+   * flow, and date the grant from that run's quorum instead of from an
    * assignment link.
    *
-   * The engine follows the instance's `ad4m://flow/granted_by` edges,
-   * verifies each receipt against its own flow catalogue, and counts the
-   * instance only if some receipt verifies AND names this instance among
-   * its outputs AND is for `flow` AND settled into `terminalState`.
+   * The same name and the same check as the model-query filter
+   * `where: { producedByFlow }`: a receipt filed under `flow`'s index must
+   * verify against this replica's own flow definitions, be for `flow`, have
+   * settled into `state`, and name this instance (as this query's
+   * `className`) among its outputs. Each replica checks this against its
+   * own graph; the read-set carries only the resulting grant date.
    *
    * Two things to know before configuring one:
-   * - An instance with no verifying receipt is simply not a member. There
-   *   is no fallback to the assignment link — if there were, writing that
-   *   link would grant the role and this gate would be decorative.
+   * - An instance no verified receipt produced is simply not a member.
+   *   There is no fallback to the assignment link — if there were, writing
+   *   that link would grant the role and this gate would be decorative.
    * - **A granted role is not un-granted by undoing the flow.** Retracting
    *   a settling vote moves the live flow back; the receipt keeps
    *   verifying. The only un-grant is a new signed
@@ -138,22 +140,22 @@ export interface ModelQuery {
    * Ignored when the query is used as a state guard (`requires`) or
    * background `context`.
    */
-  grantedByFlow?: GrantedByFlow;
+  producedByFlow?: ProducedByFlow;
 }
 
 /**
- * The granting-flow reference on a `fromRole` query's `grantedByFlow`.
+ * The granting-flow reference on a `fromRole` query's `producedByFlow`.
  *
- * Both fields are required and both are checked: without `flow`, completing
- * any flow would grant every such role; without `terminalState`, a run that
- * settled into a flow's `rejected` state would grant what its `approved`
- * state was meant to.
+ * The same shape as the model-query filter's `{ flow, state? }`, except
+ * that `state` is required here: without it, a run that settled into a
+ * flow's `rejected` state would grant what its `approved` state was meant
+ * to.
  */
-export interface GrantedByFlow {
+export interface ProducedByFlow {
   /** The granting flow's URI — `{namespace}{name}Flow`. */
   flow: string;
   /** The state that run must have settled into. */
-  terminalState: string;
+  state: string;
 }
 
 /**
