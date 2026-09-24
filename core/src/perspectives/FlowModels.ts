@@ -9,14 +9,14 @@
  * Querying:
  *   const pending = await FlowTransitionProposal.findAll(perspective);
  *
- * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust
- * engine does not yet mint these — that lands with the consensus firing
- * work in a later PR arc. This class defines the on-graph shape so:
- *   - clients can build UI over proposals immediately (Deliberation demo);
- *   - the SDNA-parity test locks TS/Rust drift the moment the JSON exists
- *     (`rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`);
- *   - the engine can start writing into this shape when consensus lands
- *     without touching the client-side surface.
+ * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust engine
+ * mints these as of #987 — see `flow_classes.rs` (`mint_proposal`, URIs at
+ * `ad4m://flow/proposal/{id}`) — and reads them back in
+ * `flow_instance/atom.rs`. A UI mints or joins them through
+ * `FlowInstance.proposeTransition`. This class is the client-side mirror:
+ *   - clients build UI over proposals without knowing the raw link predicates;
+ *   - the SDNA-parity test locks TS/Rust drift against
+ *     `rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`.
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";

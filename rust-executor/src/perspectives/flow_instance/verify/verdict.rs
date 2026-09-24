@@ -17,6 +17,23 @@ pub enum ReceiptVerdict {
         /// The state the reader's own fold reached — equal to
         /// `receipt.terminal_state`, re-derived rather than read.
         terminal_state: String,
+        /// When the run became complete: the
+        /// [`settled_at`](super::fold::SettledEdge::settled_at) of the last
+        /// edge the walk took, which is the moment the n-th distinct eligible
+        /// voter signed it.
+        ///
+        /// **The quorum-fixed time**, and the reason it is on the verdict
+        /// rather than left for a caller to dig out of a re-fold: it is what
+        /// [`roles`](super::roles) dates a `producedByFlow` grant from, and
+        /// `roles`' own module doc promises a time "no single party can
+        /// back-date". Every other timestamp in reach is author-asserted —
+        /// a link's `timestamp` is whatever its writer stamped on it — so
+        /// this is the only one that claim can rest on.
+        ///
+        /// Last is also latest: [`fold`](super::fold) floors every edge after
+        /// the first at the previous edge's `settled_at`, so the walk's
+        /// settle times are non-decreasing.
+        settled_at: String,
         /// The outputs this receipt speaks for, as `(class, id)`: the refs of
         /// `receipt.outputs`, whose content hashes to the `outputs_hash` the
         /// final edge's quorum signed (any difference is

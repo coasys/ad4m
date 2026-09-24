@@ -112,6 +112,19 @@ pub(super) async fn resolve_projections(
             }
         };
 
+        // A projection's `where` names the counted records' properties, and
+        // `author` there is the projected link's. A per-link `author` nested
+        // under a property has no reading here, and this builder drops
+        // operators it does not know, so it is refused rather than ignored.
+        if proj.where_clause.as_ref().is_some_and(|wc| {
+            wc.values()
+                .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
+        }) {
+            return Err(deno_core::anyhow::anyhow!(
+                "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
+                 `where`; use its top-level `author` for the projected link's author"
+            ));
+        }
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
         let verified = projection_verified_pattern(
@@ -428,7 +441,7 @@ pub(super) fn build_projection_where_patterns(
         }
 
         if prop_name == "id" || prop_name == "base" {
-            match condition {
+            match condition.eq_normalized() {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    FILTER(STR(?t) = \"{escaped}\")\n"));
@@ -462,7 +475,7 @@ pub(super) fn build_projection_where_patterns(
         let var = format!("_pw{filter_idx}");
         filter_idx += 1;
 
-        match condition {
+        match condition.eq_normalized() {
             WhereCondition::String(val) => {
                 if is_literal_prop {
                     let escaped = escape_sparql_string(val);

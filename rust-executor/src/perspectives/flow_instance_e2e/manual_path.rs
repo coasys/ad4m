@@ -462,7 +462,7 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     );
 
     let translated = requires_query_input(&role, &record, &me).expect("role query translates");
-    let grant = evidence[0].resolve(&translated).expect("resolve");
+    let grant = evidence[0].resolve(&translated, &role).expect("resolve");
     let window = grant
         .windows
         .iter()

@@ -90,9 +90,11 @@
 pub mod accept;
 pub mod atom;
 pub mod fold;
+pub mod grant;
 #[cfg(test)]
 mod ordering_tests;
 pub mod pass;
+pub mod produced;
 pub mod propose;
 pub mod read_set;
 pub mod receipt;

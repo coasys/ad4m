@@ -152,6 +152,7 @@ fn a_terminal_state_with_no_requires_still_produces_a_valid_receipt() {
         verdict,
         ReceiptVerdict::Verified {
             terminal_state: "done".into(),
+            settled_at: T1.into(),
             outputs: refs(&[OUTPUT]),
             voters: vec![did_of(ALICE).to_string()],
         },
@@ -314,6 +315,7 @@ fn the_commitment_is_over_the_outputs_in_any_order_and_nothing_else() {
         verify_receipt(&reader, &reordered),
         ReceiptVerdict::Verified {
             terminal_state: "done".into(),
+            settled_at: T1.into(),
             outputs: refs(&reordered_ids),
             voters: vec![did_of(ALICE).to_string()],
         }
