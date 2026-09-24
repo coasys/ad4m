@@ -741,9 +741,49 @@ const recipes = await Recipe.findAll(perspective, {
     category: ["Dessert", "Snack"],  // IN (array membership)
     status: { not: "archived" },     // Not equal
     tags: { contains: "vegan" },     // Contains
+    cuisine: { eq: "Italian" },      // Equality as an operator (same as "Italian")
   }
 });
 ```
+
+`eq` exists so a value can sit beside `author` in one operator object (see below). It takes a value or an array (any of), and cannot be combined with the other value operators.
+
+### Filtering by Author
+
+Every link records who wrote it. `author` in a `where` can ask about one link or about the whole instance, and where you put it decides which.
+
+| Form | Example | Matches when |
+|---|---|---|
+| Nested (per link) | `{ agent: { eq: did, author: admin } }` | admin wrote an `agent -> did` link |
+| Bare (per instance) | `{ author: admin }` | admin wrote the instance's earliest link (its `.author`) |
+| Side by side (both) | `{ agent: did, author: admin }` | admin wrote the earliest link **and** an `agent -> did` link |
+
+**Nested: ask who wrote the link.** Put `author` inside the property's operator object. The author and the value condition must hold on the same link. That link need not hold the current value: `{ agent: { eq: alice, author: admin } }` still matches after someone writes `agent -> bob`, and the returned instance then shows `agent: bob`.
+
+```typescript
+// Reviewers that admin appointed: admin must have written the `agent` link itself.
+const appointed = await Reviewer.findAll(perspective, {
+  where: { agent: { eq: candidateDid, author: adminDid } }
+});
+```
+
+This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it.
+
+- `{ agent: { author: admin } }` with no value operator: admin wrote some `agent` link, whatever its value.
+- `author` combines with the other operators: `{ note: { contains: "ok", author: admin } }` is "admin wrote a `note` link containing ok", `{ status: { not: "archived", author: admin } }` is "admin wrote a `status` link other than archived".
+- On relations it works the same way: `{ reviews: { author: admin } }` is "admin wrote some `reviews` link". Beside a quantifier it scopes the relation link: `{ reviews: { some: { verdict: "ok" }, author: admin } }` is "admin linked a review whose verdict is ok", and `{ reviews: { none: {}, author: admin } }` is "admin linked no review".
+- Author values: a DID, an array of DIDs (any of them), `{ not: did }` or `{ not: [dids] }`, and `{ contains: "..." }`.
+- Negation is explicit. `NOT: { agent: { eq: did, author: admin } }` means admin wrote no `agent -> did` link. `agent: { eq: did, author: { not: admin } }` means someone other than admin wrote one. If both admin and a peer wrote it, the first fails and the second passes.
+
+**Bare: ask who created the instance.** `{ author: me }` with no link-backed property beside it matches instances whose earliest link I wrote, the same value as the built-in `.author`. Mute lists (`{ author: { not: [...] } }`) work this way. Beside only a getter property or `timestamp` the `author` is bare too, because those have no link.
+
+**Side by side: both.** A top-level `author` beside property or relation conditions in the same object is short for the bare `author` plus the same `author` nested under each of those properties. `{ agent: did, note: "x", author: admin }` needs admin to have created the instance and written both links; `author: { not: admin }` negates both halves. For an instance one agent created and wrote alone, this gives the same answer as the bare reading. It is narrower otherwise, so it never matches more than either reading. A `none` quantifier beside it is not scoped, since "admin linked none" would be wider than "none".
+
+**Scope stays in its object.** A top-level `author` does not reach into `AND`/`OR`/`NOT` sub-clauses, and an `author` inside a sub-clause applies only to its own object's properties. `{ agent: did, OR: [{ author: admin }, { author: lead }] }` is a bare `agent` condition and a bare `author`. Write `{ agent: { eq: did, author: [admin, lead] } }` for "admin or lead wrote the `agent` link".
+
+**Where it runs, and when it is refused.** A per-link `author` (nested, or the per-link half of side by side) is checked in the store, on each link's own author, so `findAll`, `count` and paginated queries agree. If any part of the query can only be evaluated after it runs (`timestamp`, a getter property, a relation `some`/`none` whose clause the store cannot express, or an operator the store cannot express), a per-link `author` makes the query fail with an error. At that stage each instance has only its single `.author`, and the engine refuses rather than check the wrong author. `author` nested under a getter property, `timestamp` or `id` is an error too, since there is no link to check.
+
+A condition on the value alone, such as `{ agent: did }`, accepts a link from any author. The instance JSON does not change: `.author` is still the author of the earliest link, and a property still reads its latest value.
 
 ### Eager Loading with `include`
 

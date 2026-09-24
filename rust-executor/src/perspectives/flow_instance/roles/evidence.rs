@@ -284,10 +284,17 @@ impl RoleGrantEvidence {
 /// Whether `author` could have written a grant the translated role query
 /// accepts — and may therefore revoke one.
 ///
-/// Reads only the `author` conditions of the translated `where` (the top
-/// level, and each `OR` branch, of which at least one must accept), and
-/// evaluates each with `model_query`'s own [`matches_condition`], so the
-/// condition means exactly what it means for the instances. No author condition
+/// Reads only the `author` conditions of the translated `where`, level by
+/// level (the top, and each `OR` branch, of which at least one must accept),
+/// and evaluates each with `model_query`'s own [`matches_condition`], so the
+/// condition means exactly what it means for the instances. At a level, every
+/// author condition must accept: the ones the translator nests under each
+/// field of the level (`{ agent: { eq: did, author: A } }`, the grant link's
+/// author, and the same `author` under every other field, an `or` arm's fields
+/// included when the arm inherits its level's), and a top-level
+/// `author` (emitted when the level has no field to nest it under). These are
+/// the conditions the grant query itself
+/// requires, so grants and revocations stay symmetric. No author condition
 /// anywhere accepts everyone, as the query itself does. A condition that
 /// cannot be read is a refusal, never a pass.
 ///
@@ -299,12 +306,18 @@ impl RoleGrantEvidence {
 /// translator cannot produce them.
 pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
     fn accepted(where_clause: &Map<String, Value>, author: &str) -> bool {
-        let own = match where_clause.get("author") {
-            None => true,
-            Some(cond) => serde_json::from_value::<WhereCondition>(cond.clone())
+        let conditions = where_clause
+            .iter()
+            .filter_map(|(key, value)| match key.as_str() {
+                "OR" | "AND" | "NOT" => None,
+                "author" => Some(value),
+                _ => value.as_object().and_then(|ops| ops.get("author")),
+            });
+        let own = conditions.into_iter().all(|cond| {
+            serde_json::from_value::<WhereCondition>(cond.clone())
                 .map(|c| matches_condition(&Value::String(author.to_string()), &c))
-                .unwrap_or(false),
-        };
+                .unwrap_or(false)
+        });
         let branches = match where_clause.get("OR") {
             None => true,
             Some(Value::Array(alts)) => alts
@@ -337,7 +350,9 @@ mod tests {
     use super::super::resolve_role_grants;
     use super::super::test_support::*;
     use super::*;
+    use crate::perspectives::flow_evaluator::requires_query_input;
     use crate::perspectives::flow_evaluator::RoleGrantLinks;
+    use crate::perspectives::shacl_parser::ModelQuery;
     use serde_json::json;
     /// A tombstone counts only from an author the grant's own rule accepts:
     /// the role query's `author` condition is applied to the tombstone's
@@ -386,6 +401,96 @@ mod tests {
             assert_eq!(kept, expected, "{name}");
             assert_eq!(grants[0].eligible_at(T3, None), accepted.is_empty(), "{name}: revoked iff someone authorised did it");
             assert!(grants[0].eligible_at(T1, None), "{name}: the vote before any tombstone still counts");
+        }
+    }
+
+    /// The authority rule reads the author where the translator now puts it,
+    /// nested under every field of its level, and still ignores a revocation
+    /// by anyone the grant rule would not accept as a granter (#1114).
+    #[test]
+    fn a_revocation_by_a_non_admin_is_ignored_under_the_nested_translation() {
+        let role = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } }),
+        );
+        let translated = requires_query_input(&role, &record(), ALICE()).unwrap();
+        assert_eq!(
+            translated["where"]["agent"],
+            json!({ "eq": ALICE(), "author": ADMIN() }),
+            "the grant is admin's `agent` link, per link"
+        );
+        assert!(revocation_authorised(&translated, ADMIN()));
+        for revoker in [MALLORY(), ALICE(), LEAD()] {
+            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
+        }
+        // With more fields the same author sits under each, in the plain form,
+        // inside an `or` arm, and inside arms that inherit the level's author;
+        // the reader still accepts admin alone there.
+        for rule in [
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                    "where": { "forTask": "$flow.base", "author": ADMIN() } }),
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                    "or": [ { "className": "ns://Reviewer", "where": { "rank": "lead", "author": ADMIN() } } ] }),
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() },
+                    "or": [ { "className": "ns://Reviewer", "where": { "rank": "lead" } },
+                            { "className": "ns://Reviewer", "where": { "rank": "senior" } } ] }),
+        ] {
+            let translated = requires_query_input(
+                &serde_json::from_value::<ModelQuery>(rule.clone()).unwrap(),
+                &record(),
+                ALICE(),
+            )
+            .unwrap();
+            assert!(revocation_authorised(&translated, ADMIN()), "{rule}");
+            for revoker in [MALLORY(), ALICE(), LEAD()] {
+                assert!(
+                    !revocation_authorised(&translated, revoker),
+                    "{revoker}: {rule}"
+                );
+            }
+        }
+        // Every author condition at a level must accept, whichever key holds it.
+        let both = json!({ "where": { "agent": { "eq": ALICE(), "author": [ADMIN(), LEAD()] }, "author": LEAD() } });
+        assert!(revocation_authorised(&both, LEAD()));
+        assert!(!revocation_authorised(&both, ADMIN()));
+    }
+
+    /// A level with fields and no `author`, beside `or` arms that name granters
+    /// without collapsing, is refused at translation, so it grants nobody and
+    /// has no revocation rule to read: resolving the role fails for grant and
+    /// revocation alike. The same rule with the fields written into each arm
+    /// accepts a revocation from each arm's granter and nobody else, as it
+    /// accepts a grant.
+    #[tokio::test]
+    async fn a_refused_level_grants_and_revokes_nothing_and_its_distributed_form_is_symmetric() {
+        let refused = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+            "where": { "forTask": "$flow.base" },
+            "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN() } },
+                    { "className": "ns://Reviewer", "where": { "author": LEAD(), "rank": "senior" } } ] }),
+        );
+        assert!(requires_query_input(&refused, &record(), ALICE()).is_err());
+        let mut stub = members(&[ALICE()]);
+        stub.histories
+            .insert(ALICE().into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
+        assert!(
+            resolve_role_grants(&stub, "approved", &refused, &record(), &dids(&[ALICE()]))
+                .await
+                .is_err(),
+            "no grant evidence, and so no revocation, for a refused rule"
+        );
+
+        let distributed = role(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent",
+            "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN(), "forTask": "$flow.base" } },
+                    { "className": "ns://Reviewer",
+                      "where": { "author": LEAD(), "rank": "senior", "forTask": "$flow.base" } } ] }),
+        );
+        let translated = requires_query_input(&distributed, &record(), ALICE()).unwrap();
+        for revoker in [ADMIN(), LEAD()] {
+            assert!(revocation_authorised(&translated, revoker), "{revoker}");
+        }
+        for revoker in [MALLORY(), ALICE()] {
+            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
         }
     }
 
