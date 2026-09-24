@@ -518,8 +518,7 @@ pub async fn load_proposal_links(
         ));
     }
 
-    // Half 1: discover which FlowTransitionProposal instances belong to this
-    // flow instance via the subject-class query layer.
+    // Half 1: discovery through the class query.
     let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
     let raw = perspective
         .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
@@ -544,8 +543,7 @@ pub async fn load_proposal_links(
     uris.sort();
     uris.dedup();
 
-    // Half 2: raw get_links per proposal — see doc comment for why this half
-    // must stay raw rather than using model_query hydration.
+    // Half 2: raw links per proposal, never hydrated (see the doc above).
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         let links = perspective
