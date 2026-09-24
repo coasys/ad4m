@@ -23,6 +23,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).
   - A zome call still queued when its caller's 90 s timeout has passed is refused with `expired after N ms in queue` instead of being fired stale after the caller already reported a timeout.
   - Unyt's own alliance zome calls (signal handler and payment poll loop) still run one at a time, so its writes to one source chain don't race.
+- **Links read back with the exact target they were signed over** [#1141](https://github.com/coasys/ad4m/pull/1141)
+  - The store keeps `literal:*` targets as typed values and used to re-render them in the SDK's encoding on every read, so a target written any other way (a raw space, raw JSON, `-_.~` escaped) came back as different bytes and a read-back copy no longer verified. `perspective.get()`, `__links` rows and the links a Perspective publishes to its Neighbourhood now return the signed target. Targets written with `Literal.from(v).toUrl()` read back as before.
+  - `expression.create(_, "literal")` URLs now use the same percent-encoding as `Literal.toUrl()` (`-_.~` are no longer escaped).
+  - Links stored before this release did not keep the original bytes, so a non-canonical one still reads back in the canonical form.
 - Multi-user agent publishing after language controller refactor [#711](https://github.com/coasys/ad4m/pull/711)
 - Broadcast signal for managed user [#722](https://github.com/coasys/ad4m/pull/722)
 - Waker-bridge: use QuerySubscriptionProxy for SurrealDB subscriptions [#720](https://github.com/coasys/ad4m/pull/720)
