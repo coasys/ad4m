@@ -320,25 +320,23 @@ pub async fn load_flow_receipts(
         return Err(over_budget(uris.len()));
     }
 
-    let mut bodies: Vec<(String, String)> = Vec::new();
-    for uri in &uris {
-        let mut under: Vec<String> = perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.clone()),
-                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-                ..Default::default()
-            })
-            .await?
-            .into_iter()
-            .map(|l| l.data.target)
-            .collect();
-        under.sort();
-        under.dedup();
-        bodies.extend(under.into_iter().map(|body| (uri.clone(), body)));
-    }
-    if bodies.len() > MAX_FLOW_RECEIPTS {
-        return Err(over_budget(bodies.len()));
-    }
+    let bodies = read_bodies_within_budget(
+        &uris,
+        |uri| async move {
+            Ok(perspective
+                .get_links(&LinkQuery {
+                    source: Some(uri),
+                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                    ..Default::default()
+                })
+                .await?
+                .into_iter()
+                .map(|l| l.data.target)
+                .collect())
+        },
+        &over_budget,
+    )
+    .await?;
 
     let mut receipts = Vec::new();
     for (uri, body) in bodies {
@@ -362,6 +360,31 @@ pub async fn load_flow_receipts(
         }
     }
     Ok(receipts)
+}
+
+/// The bodies under each of `uris`, in order, as `(uri, body)` — one
+/// `fetch` (a store read) per URI, each URI's bodies sorted and deduplicated.
+/// Over [`MAX_FLOW_RECEIPTS`] bodies the read is `over_budget`'s error.
+async fn read_bodies_within_budget<F, Fut>(
+    uris: &[String],
+    mut fetch: F,
+    over_budget: &impl Fn(usize) -> anyhow::Error,
+) -> anyhow::Result<Vec<(String, String)>>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<Vec<String>>>,
+{
+    let mut bodies: Vec<(String, String)> = Vec::new();
+    for uri in uris {
+        let mut under = fetch(uri.clone()).await?;
+        under.sort();
+        under.dedup();
+        bodies.extend(under.into_iter().map(|body| (uri.clone(), body)));
+    }
+    if bodies.len() > MAX_FLOW_RECEIPTS {
+        return Err(over_budget(bodies.len()));
+    }
+    Ok(bodies)
 }
 
 /// The instances that are, **as they stand**, valid outputs of `flow_uri`
@@ -934,6 +957,61 @@ mod tests {
             undecidable.get("outputs").is_none(),
             "an undecidable verdict vouches for nothing either: {undecidable}"
         );
+    }
+
+    // ---- the body budget's cost -------------------------------------------
+
+    /// The body budget bounds the **reading**, not just the answer: a flood
+    /// of bodies under the index must stop the read as soon as the running
+    /// count passes the budget — at worst one store read past it — instead
+    /// of paying a read per remaining index entry and holding every body
+    /// before refusing (Lal's approval note on #1127). `found` is then "at
+    /// least this many", which is all the refusal needs.
+    ///
+    /// Red if the check sits after the loop: every one of the `MAX` entries
+    /// is fetched first.
+    #[tokio::test]
+    async fn the_body_budget_stops_reading_as_soon_as_it_is_exceeded() {
+        let uris: Vec<String> = (0..MAX_FLOW_RECEIPTS)
+            .map(|i| format!("ad4m://flow/receipt/{i:04}"))
+            .collect();
+        let mut fetched = 0usize;
+        let err = read_bodies_within_budget(
+            &uris,
+            |uri| {
+                fetched += 1;
+                // Every entry carries a full budget's worth of bodies.
+                async move {
+                    Ok((0..MAX_FLOW_RECEIPTS)
+                        .map(|j| format!("{uri}#{j:04}"))
+                        .collect())
+                }
+            },
+            &|found| {
+                ReceiptBudgetExceeded {
+                    flow: FLOW.to_string(),
+                    found,
+                    cap: MAX_FLOW_RECEIPTS,
+                }
+                .into()
+            },
+        )
+        .await
+        .expect_err("a body flood is over budget");
+
+        assert_eq!(
+            fetched, 2,
+            "the first read fills the budget exactly, the second passes it — and the read stops there"
+        );
+        let over = err
+            .downcast_ref::<ReceiptBudgetExceeded>()
+            .expect("the typed budget error");
+        assert_eq!(
+            over.found,
+            2 * MAX_FLOW_RECEIPTS,
+            "at least this many, counted so far"
+        );
+        assert!(over.found > over.cap);
     }
 
     // ---- determinism -------------------------------------------------------
