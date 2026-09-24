@@ -303,19 +303,27 @@ pub(crate) fn requires_query_input(
 
 /// Translate one level of a `ModelQuery` (the top, or an `or` branch).
 ///
-/// `author` is a per-link condition here: a role rule `{ didProperty: agent,
-/// where: { author: A } }` means "A wrote the `agent -> did` link", so it is
-/// emitted **nested** under the DID property, `{ agent: { eq: did, author: A } }`
-/// (see `model_query::link_author`). The DID property is the level's own
-/// `didProperty`, or for an `or` branch without one, the enclosing level's.
-/// `or` branches that each name only a granter (`where: { author: X }`) with
-/// plain DIDs collapse into one author list on the outer DID property:
-/// `{ agent: { eq: did, author: [A, B] } }`. Branches that say more keep their
-/// own `OR` arm, each with the author nested under the DID property.
+/// `author` is a per-link condition here: a role rule's `author` names who
+/// may grant the role, so every link the rule filters on at that level must be
+/// one that author wrote. It is emitted **nested** under every field the level
+/// emits, the DID property included (see `model_query::link_author`):
+/// `{ didProperty: agent, where: { forTask: T, author: A } }` becomes
+/// `{ forTask: { eq: T, author: A }, agent: { eq: did, author: A } }`, and an
+/// operator object takes it as one more key (`{ not: v, author: A }`). Nesting
+/// it under the DID property alone let anyone else's link satisfy the other
+/// fields (#1114). A field with no link behind it (a getter, `timestamp`) then
+/// makes `model_query` return an `Err`, which fails closed.
 ///
-/// With no DID property in reach, an `author` stays top level, where
-/// `model_query` reads it as the instance's author (and, beside property
-/// conditions, also as theirs).
+/// The DID property is the level's own `didProperty`, or for an `or` branch
+/// without one, the enclosing level's. `or` branches that each name only a
+/// granter (`where: { author: X }`) with plain DIDs collapse into one author
+/// list on the outer DID property: `{ agent: { eq: did, author: [A, B] } }`.
+/// Branches that say more keep their own `OR` arm, with the author nested
+/// under each of the arm's fields. An `author` never reaches into or out of an
+/// `OR` arm.
+///
+/// A level with no field to nest under keeps `author` top level, where
+/// `model_query` reads it as the instance's author.
 fn requires_where(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
@@ -333,7 +341,7 @@ fn requires_where(
         let value = where_condition(field, cond, record, acting_did)?;
         // A DID property named `author` is a (hand-built) property, and the
         // `where.author` beside it collides with it below.
-        if field == "author" && did_property.is_some_and(|p| p != "author") {
+        if field == "author" && did_property != Some("author") {
             author = Some(value);
         } else {
             out.insert(field.clone(), value);
@@ -368,17 +376,26 @@ fn requires_where(
         author = granters;
     }
 
-    if let Some(prop) = query.did_property.as_deref() {
+    // The level's own DID property, or an `or` branch granter's enclosing one.
+    let did_here = query
+        .did_property
+        .as_deref()
+        .or(did_property.filter(|_| author.is_some()));
+    if let Some(prop) = did_here {
         if out.contains_key(prop) {
             bail!("`didProperty` `{prop}` collides with an existing `where` field");
         }
-        out.insert(prop.to_string(), did_condition(acting_did, author.take()));
-    } else if let (Some(prop), Some(author)) = (did_property, author.take()) {
-        // An `or` branch granter, nested under the enclosing DID property.
-        if out.contains_key(prop) {
-            bail!("`didProperty` `{prop}` collides with an existing `where` field");
+        out.insert(prop.to_string(), Value::String(acting_did.to_string()));
+    }
+
+    if let Some(author) = author {
+        if out.is_empty() {
+            out.insert("author".to_string(), author);
+        } else {
+            for (field, value) in out.iter_mut() {
+                *value = with_author(field, value.take(), &author)?;
+            }
         }
-        out.insert(prop.to_string(), did_condition(acting_did, Some(author)));
     }
 
     if let Some(alts) = alts.filter(|_| !collapsed) {
@@ -393,11 +410,18 @@ fn requires_where(
     Ok(out)
 }
 
-/// `{ eq: did, author: A }`, or the bare DID when there is no author.
-fn did_condition(acting_did: &str, author: Option<Value>) -> Value {
-    match author {
-        Some(author) => json!({ "eq": acting_did, "author": author }),
-        None => Value::String(acting_did.to_string()),
+/// Nest `author` into one field's condition: `v` becomes `{ eq: v, author }`,
+/// and an operator object takes `author` as one more key.
+fn with_author(field: &str, condition: Value, author: &Value) -> Result<Value> {
+    match condition {
+        Value::Object(mut ops) => {
+            if ops.contains_key("author") {
+                bail!("`{field}` already carries an `author` beside the rule's `author`");
+            }
+            ops.insert("author".to_string(), author.clone());
+            Ok(Value::Object(ops))
+        }
+        value => Ok(json!({ "eq": value, "author": author })),
     }
 }
 
@@ -1773,12 +1797,16 @@ mod tests {
         assert_eq!(qin(&empty_or, "did:key:x"), json!({}));
     }
 
-    /// A role rule's `author` is the author of the grant link, so it is nested
-    /// under the DID property (`model_query` reads that per link, #1114), and
-    /// `or` branches that only name a granter collapse into one author list.
+    /// A role rule's `author` names who may grant the role, so it is nested
+    /// under every field the level emits, the DID property included
+    /// (`model_query` reads that per link, #1114), and `or` branches that only
+    /// name a granter collapse into one author list. What these queries match
+    /// is pinned in `model_query::link_author_tests::flow_rules`; this table
+    /// only pins the shape.
     #[test]
-    fn role_author_is_nested_under_the_did_property() {
+    fn role_author_is_nested_under_every_field_of_its_level() {
         let did = "did:key:cand";
+        let task = inst().subject;
         let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
         for (rule, expected) in [
             (
@@ -1796,6 +1824,20 @@ mod tests {
             ),
             (
                 json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "forTask": "$flow.base", "author": "did:key:admin" } }),
+                json!({ "forTask": { "eq": task, "author": "did:key:admin" },
+                        "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "tag": { "in": ["a", "b"] }, "state": { "equals": { "not": "archived" } },
+                                   "author": "did:key:admin" } }),
+                json!({ "tag": { "eq": ["a", "b"], "author": "did:key:admin" },
+                        "state": { "not": "archived", "author": "did:key:admin" },
+                        "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
                         "or": [ { "className": "ns://R", "where": { "author": "did:key:admin" } },
                                 { "className": "ns://R", "where": { "author": { "in": ["did:key:lead", "did:key:admin"] } } } ] }),
                 json!({ "agent": { "eq": did, "author": ["did:key:admin", "did:key:lead"] } }),
@@ -1805,7 +1847,8 @@ mod tests {
                         "or": [ { "className": "ns://R", "where": { "role": "lead", "author": "did:key:admin" } },
                                 { "className": "ns://R", "where": { "author": "did:key:lead" } } ] }),
                 json!({ "agent": did, "OR": [
-                    { "role": "lead", "agent": { "eq": did, "author": "did:key:admin" } },
+                    { "role": { "eq": "lead", "author": "did:key:admin" },
+                      "agent": { "eq": did, "author": "did:key:admin" } },
                     { "agent": { "eq": did, "author": "did:key:lead" } },
                 ] }),
             ),
@@ -1815,11 +1858,16 @@ mod tests {
             ),
             (
                 json!({ "className": "ns://R", "where": { "reviewer": "$did", "author": "did:key:admin" } }),
-                json!({ "reviewer": did, "author": "did:key:admin" }),
+                json!({ "reviewer": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "linkedTo": "base", "where": { "author": "$did" } }),
+                json!({ "author": did }),
             ),
         ] {
             let q = role(rule.clone());
-            assert_eq!(qin(&q, did), json!({ "where": expected }), "{rule}");
+            let got = qin(&q, did);
+            assert_eq!(got["where"], expected, "{rule}");
         }
     }
 
@@ -1937,10 +1985,9 @@ mod tests {
         assert_eq!(
             requires_query_input(&q, &rec, "did:key:acting").unwrap(),
             json!({ "where": {
-                "about": "ad4m://task/onboarding",
-                "on": "ad4m://flow/instance/1",
-                "alsoOn": ["ad4m://flow/instance/1", "other"],
-                "author": "did:key:acting",
+                "about": { "eq": "ad4m://task/onboarding", "author": "did:key:acting" },
+                "on": { "eq": "ad4m://flow/instance/1", "author": "did:key:acting" },
+                "alsoOn": { "eq": ["ad4m://flow/instance/1", "other"], "author": "did:key:acting" },
             }})
         );
     }
