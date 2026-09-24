@@ -36,6 +36,7 @@ mod content_addressed_uri;
 mod manual_path;
 mod outputs_commitment;
 mod produced_by;
+mod produced_by_gate;
 mod proposer_and_evidence;
 mod quorum_and_read_set;
 mod roles;

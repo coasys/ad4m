@@ -37,6 +37,7 @@ use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
+use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -594,6 +595,36 @@ pub trait RequiresQueryable: Send + Sync {
     ) -> anyhow::Result<RoleGrantLinks> {
         Ok(RoleGrantLinks::default())
     }
+
+    /// Every receipt filed under `flow_uri`'s index, read whole so the caller
+    /// can verify them itself.
+    ///
+    /// Called only for a role query that declares `producedByFlow`. The index
+    /// is writable by anyone and this call trusts nothing in it: collecting a
+    /// receipt decides nothing, and every check that matters runs in the
+    /// caller (see
+    /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
+    ///
+    /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
+    /// this is an `Err` carrying
+    /// [`ReceiptBudgetExceeded`](crate::perspectives::flow_instance::produced::ReceiptBudgetExceeded),
+    /// never a shorter list.
+    ///
+    /// The default knows nothing, which is the fail-closed answer here: no
+    /// receipts means no grant, so a stub that stays on this default never
+    /// turns into "granted by something I could not see".
+    async fn flow_receipts(&self, _flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        Ok(Vec::new())
+    }
+
+    /// This replica's flow definitions, keyed by `flow_uri()` — what a
+    /// `producedByFlow` gate verifies the granting flow's receipts against.
+    ///
+    /// The default is empty, which is fail-closed: a gate whose flow is not
+    /// in the catalogue is an error, never "not a member".
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        Ok(HashMap::new())
+    }
 }
 
 /// Does a link target name this DID? Accepts the raw DID (the flow's own
@@ -806,6 +837,17 @@ impl RequiresQueryable for PerspectiveInstance {
             grant_links,
             revocation_links,
         })
+    }
+
+    /// `produced`'s loader, unchanged: scoped to the flow before it is
+    /// budgeted, and an error over budget. One reader of F's receipts for
+    /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
+    async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
+    }
+
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        load_shacl_flows(self).await
     }
 }
 

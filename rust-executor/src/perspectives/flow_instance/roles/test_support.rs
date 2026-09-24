@@ -171,7 +171,7 @@ pub(super) fn views(evidence: &[RoleGrantEvidence], role: &ModelQuery) -> Vec<Ro
     evidence
         .iter()
         .map(|e| {
-            e.resolve(&translated(role, &e.did))
+            e.resolve(&translated(role, &e.did), role)
                 .unwrap_or_else(|err| panic!("evidence for {} resolves: {err:#}", e.did))
         })
         .collect()

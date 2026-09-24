@@ -584,7 +584,7 @@ async fn an_unknown_flow_is_an_error_not_an_empty_answer() {
 
 /// Complete the fixture's run with `TASK` as its one output and mint the
 /// receipt — the honest material the budget tests below crowd around.
-async fn mint_honest_task_receipt(
+pub(super) async fn mint_honest_task_receipt(
     f: &mut Fixture,
 ) -> crate::perspectives::flow_instance::receipt::FlowReceipt {
     let instance = f.instance_uri.clone();

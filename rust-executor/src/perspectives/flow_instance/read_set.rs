@@ -302,6 +302,11 @@ fn link_counts(link: &DecoratedLinkExpression) -> bool {
 /// dropping one could only widen a window, and `resolve` verifies them by
 /// construction
 /// ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)).
+///
+/// A carried `produced_at` passes through untouched: it is a date, not a
+/// link, and there is nothing here to re-check it against. What it is worth
+/// to a reader of a serialised read-set is stated in
+/// [`grant`](super::grant) § *What a receipt of a gated flow proves*.
 fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
     let grant_links: Vec<LinkExpression> = history
         .grant_links
@@ -319,6 +324,7 @@ fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstan
         } else {
             history.asserted_instance_timestamp.clone()
         },
+        produced_at: history.produced_at.clone(),
     }
 }
 
@@ -424,6 +430,11 @@ pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Der
 /// Evidence for a state whose rule carries no `fromRole` is dropped: an
 /// ungated edge admits every vote regardless, and resolving it would only
 /// invite a reader to think the gate meant something.
+///
+/// The `producedByFlow` gate, like the authority rule, is read from **the
+/// flow definition passed in here** and never from the carried evidence: a
+/// minter who could name the granting flow would be naming the rule its own
+/// receipt is judged by.
 fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<RoleGrant>> {
     let record = read_set.as_record(flow);
     let mut grants = Vec::with_capacity(read_set.role_grants.len());
@@ -438,7 +449,7 @@ fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<
             continue;
         };
         let view = requires_query_input(role, &record, &evidence.did)
-            .and_then(|input| evidence.resolve(&input))
+            .and_then(|input| evidence.resolve(&input, role))
             .map_err(|e| {
                 e.context(format!(
                     "flow instance {}: role evidence for `{}` on `{}` does not resolve, so no \
