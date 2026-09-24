@@ -675,7 +675,10 @@ describe('where `eq` and per-link `author` (#1114)', () => {
       agent: { name: 'agent', predicate: 'test://agent', required: false },
       computed: { name: 'computed', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
     },
-    relations: {},
+    relations: {
+      reviews: { name: 'reviews', predicate: 'test://review' },
+      derived: { name: 'derived', predicate: '', getter: 'SELECT ?t WHERE { ?t ?p ?o }' },
+    },
   };
 
   it('treats `{ eq: X }` as the bare value', () => {
@@ -712,11 +715,18 @@ describe('where `eq` and per-link `author` (#1114)', () => {
     ).toThrow(/`author` beside `agent`/);
   });
 
+  it('refuses a side-by-side author beside a relation, which is link-backed too', () => {
+    expect(() =>
+      buildSPARQLQuery(roleMetadata, emptyRelations, { where: { reviews: 'test://r1', author: 'did:admin' } } as any, modelClass),
+    ).toThrow(/`author` beside `reviews`/);
+  });
+
   it('keeps a bare author, including beside a getter or timestamp', () => {
     for (const where of [
       { author: 'did:admin' },
       { author: { not: ['did:m'] } },
       { computed: 'x', author: 'did:admin' },
+      { derived: 'x', author: 'did:admin' },
       { timestamp: { gt: 0 }, author: 'did:admin' },
     ]) {
       expect(() => buildSPARQLQuery(roleMetadata, emptyRelations, { where } as any, modelClass)).not.toThrow();
