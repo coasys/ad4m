@@ -496,3 +496,129 @@ async fn proof_valid_unverified_links_do_not_reorder_a_page() {
         );
     }
 }
+
+/// #1113 on getter-backed relations. `@HasMany(() => Comment, { through })`
+/// ships a generated conformance getter (`buildConformanceFilter` in
+/// `core/src/model/decorators.ts`), and a relation with a getter is filled by
+/// `evaluate_getters`, not by the filtered hydration read. So without the
+/// executor adding the verdict to the relation's own triple, a forged link
+/// makes a genuine, conforming comment a target of the typed relation.
+///
+/// A hand-written getter is the model author's SPARQL, run as written: it
+/// reads unverified links unless it joins `proofValid` itself, as the docs
+/// show. Both directions are pinned here.
+#[tokio::test]
+async fn proof_valid_applies_to_getter_backed_relations() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    store
+        .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    for (second, c) in [(1, "pv://c/real"), (2, "pv://c/forged")] {
+        store
+            .add_link(&pv_signed(
+                &signer,
+                c,
+                "ad4m://type",
+                "pv://Comment",
+                second,
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&pv_signed(&signer, r, "pv://comment", "pv://c/real", 3))
+        .unwrap();
+    store
+        .add_link(&pv_forged(&signer, r, "pv://comment", "pv://c/forged", 4))
+        .unwrap();
+
+    let shape = |getter: &str| {
+        json!({
+            "className": "Recipe",
+            "properties": {
+                "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"pv://Recipe"}
+            },
+            "relations": {
+                "comments": {
+                    "predicate": "pv://comment",
+                    "kind": "hasMany",
+                    "targetClassName": "Comment",
+                    "getter": getter
+                }
+            }
+        })
+        .to_string()
+    };
+    let comments = |shape_json: String, include_unverified: Option<bool>| {
+        let store = &store;
+        async move {
+            let mut out = Vec::new();
+            // `limit` switches to the two-phase plan.
+            for limit in [None, Some(10)] {
+                let result = execute_model_query_from_json(
+                    store,
+                    "Recipe",
+                    &ModelQueryInput {
+                        limit,
+                        include_unverified,
+                        ..Default::default()
+                    },
+                    &shape_json,
+                )
+                .await
+                .unwrap();
+                let mut targets: Vec<String> = result.instances[0]["comments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap().to_string())
+                    .collect();
+                targets.sort();
+                out.push(targets);
+            }
+            assert_eq!(out[0], out[1], "both plans agree");
+            out.remove(0)
+        }
+    };
+
+    // The generated form, as `buildConformanceFilter` writes it.
+    let generated = shape(
+        "SELECT ?target WHERE { <Base> <pv://comment> ?target . ?target <ad4m://type> <pv://Comment> . }",
+    );
+    assert_eq!(
+        comments(generated.clone(), None).await,
+        vec!["pv://c/real"],
+        "a forged link must not add a target to a typed relation"
+    );
+    assert_eq!(
+        comments(generated, Some(true)).await,
+        vec!["pv://c/forged", "pv://c/real"],
+        "the opt-in returns the unverified target"
+    );
+
+    // Hand-written: does not open with the relation's own triple, so it runs
+    // as written.
+    let hand_written = |extra: &str| {
+        shape(&format!(
+            "SELECT ?target WHERE {{ ?target <ad4m://type> <pv://Comment> . <Base> <pv://comment> ?target . {extra}}}"
+        ))
+    };
+    assert_eq!(
+        comments(hand_written(""), None).await,
+        vec!["pv://c/forged", "pv://c/real"],
+        "the executor does not rewrite a hand-written getter"
+    );
+    assert_eq!(
+        comments(
+            hand_written(
+                "?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <Base> <pv://comment> ?target )>> ; \
+                 <ad4m://ontology/proofValid> \"true\" . "
+            ),
+            None
+        )
+        .await,
+        vec!["pv://c/real"],
+        "a hand-written getter that joins `proofValid` skips the unverified link"
+    );
+}
