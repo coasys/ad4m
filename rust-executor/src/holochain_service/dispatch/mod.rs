@@ -12,9 +12,12 @@
 use async_trait::async_trait;
 use deno_core::anyhow::anyhow;
 use holochain::conductor::api::AppInfo;
-use log::error;
+use log::{debug, error, warn};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::{RwLock, Semaphore};
+use tokio::task::{JoinError, JoinSet};
 use tokio::time::timeout;
 
 use super::interface::{Envelope, HolochainServiceRequest, HolochainServiceResponse};
@@ -39,19 +42,108 @@ pub(crate) trait ZomeDispatch: Send + Sync + 'static {
 
 /// Takes requests off `receiver` and runs them against `dispatcher` until `Shutdown` is
 /// dispatched or every sender is gone.
+///
+/// Two classes of request (#1133):
+///
+/// - **Lifecycle** (`HolochainServiceRequest::is_lifecycle`: install, remove, enable,
+///   shutdown) runs inline, holding the `lifecycle` write lock. tokio's `RwLock` is
+///   write-preferring, so a lifecycle request first waits for every in-flight request to
+///   finish, and nothing new starts until it is done. `Shutdown` instead waits for the
+///   `JoinSet` to drain, is dispatched, and ends the loop; only this loop spawns, so after
+///   the drain nothing is running.
+/// - **Everything else** (zome calls, signing, agent infos, metrics, pack/unpack) is spawned
+///   onto the runtime holding a `lifecycle` read guard and one of `ZOME_CALL_CONCURRENCY`
+///   semaphore permits. Both are taken here, before the spawn, so "in flight" means exactly
+///   "spawned and not yet finished", and the loop itself stalls when every permit is taken:
+///   a request behind a full node waits in the channel, where its deadline can still catch
+///   it, instead of piling up as tasks.
+///
+/// Before either: the time in queue is logged (`debug`; `warn` above 1 s), and a request
+/// dequeued past its `deadline` is answered with an error and never reaches the dispatcher.
 pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
     mut receiver: UnboundedReceiver<Envelope>,
     dispatcher: Arc<D>,
 ) {
+    let lifecycle = Arc::new(RwLock::new(()));
+    let permits = Arc::new(Semaphore::new(ZOME_CALL_CONCURRENCY));
+    let mut in_flight: JoinSet<()> = JoinSet::new();
+
     while let Some(envelope) = receiver.recv().await {
-        let request = envelope.request;
-        let is_shutdown = matches!(request, HolochainServiceRequest::Shutdown(_));
-        dispatcher.handle(request).await;
-        if is_shutdown {
+        reap_finished(&mut in_flight);
+
+        let Envelope {
+            request,
+            queued_at,
+            deadline,
+        } = envelope;
+        let name = request.name();
+        let waited = queued_at.elapsed();
+        log_queue_wait(
+            name,
+            waited,
+            ZOME_CALL_CONCURRENCY - permits.available_permits(),
+        );
+
+        if deadline.is_some_and(|deadline| Instant::now() > deadline) {
+            request.refuse(anyhow!(
+                "{name} expired after {} ms in queue",
+                waited.as_millis()
+            ));
+            continue;
+        }
+
+        if matches!(request, HolochainServiceRequest::Shutdown(_)) {
+            while let Some(finished) = in_flight.join_next().await {
+                log_task_failure(finished);
+            }
+            dispatcher.handle(request).await;
             break;
         }
+
+        if request.is_lifecycle() {
+            let _exclusive = lifecycle.write().await;
+            dispatcher.handle(request).await;
+            continue;
+        }
+
+        let permit = permits
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("the semaphore is never closed");
+        let shared = lifecycle.clone().read_owned().await;
+        let dispatcher = dispatcher.clone();
+        in_flight.spawn(async move {
+            dispatcher.handle(request).await;
+            drop(shared);
+            drop(permit);
+        });
     }
     error!("Holochain service receiver closed");
+}
+
+/// Drops finished tasks from the set so it does not grow with every request served.
+fn reap_finished(in_flight: &mut JoinSet<()>) {
+    while let Some(finished) = in_flight.try_join_next() {
+        log_task_failure(finished);
+    }
+}
+
+fn log_task_failure(finished: Result<(), JoinError>) {
+    if let Err(e) = finished {
+        // The request's oneshot was dropped with the task, so its caller already sees a
+        // channel error; this is the only place the reason is visible.
+        error!("❌ 🐝 [hc-actor] request task did not complete: {e}");
+    }
+}
+
+fn log_queue_wait(name: &str, waited: Duration, in_flight: usize) {
+    let ms = waited.as_millis();
+    if waited > Duration::from_secs(1) {
+        warn!("⚠️ 🐝 [hc-actor] {name} waited {ms} ms in queue, {in_flight} in flight");
+    } else {
+        debug!("🐝 [hc-actor] {name} waited {ms} ms in queue, {in_flight} in flight");
+    }
 }
 
 /// The production `ZomeDispatch`: each request variant, its timeout, and the call into
