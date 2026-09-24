@@ -378,3 +378,82 @@ pub fn with_outputs(outputs: &[&str], committed: &str) -> Vec<DecoratedLinkExpre
     ));
     links
 }
+
+// -----------------------------------------------------------------------
+// The receipt fixtures, shared by the receipt and verify tests
+// -----------------------------------------------------------------------
+
+use crate::perspectives::flow_evaluator::evidence_hash;
+use crate::perspectives::flow_instance::receipt::EvidencePreimage;
+use crate::perspectives::shacl_parser::SHACLFlow;
+use serde_json::Value;
+
+/// The run's base expression.
+pub const BASE: &str = "ad4m://task/t1";
+/// What most fixture flows' terminal `done` state requires. Incidental
+/// to the outputs since #1104: they are what the final proposal names.
+pub const DELIVERABLE: &str = OUT_CLASS;
+/// The node every honest final proposal names as the run's output.
+pub const OUTPUT: &str = D1;
+
+/// A flow named `Delivery` with the given states and transitions.
+pub fn flow_json(states: Value, transitions: Value) -> SHACLFlow {
+    serde_json::from_value(serde_json::json!({
+        "name": "Delivery",
+        "namespace": "coasys://",
+        "states": states,
+        "transitions": transitions,
+    }))
+    .expect("fixture flow parses")
+}
+
+/// `open → done`, `done` terminal and guarded by [`DELIVERABLE`], default
+/// `{ n: 1 }` quorum. The guard is incidental to the outputs since #1104.
+pub fn two_state_flow() -> SHACLFlow {
+    flow_json(
+        serde_json::json!([
+            { "name": "open", "value": 0.0 },
+            { "name": "done", "value": 1.0, "requires": [{ "className": DELIVERABLE }] },
+        ]),
+        serde_json::json!([
+            { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
+        ]),
+    )
+}
+
+/// Each id's preimage as the fixture graph holds it ([`out_items`]).
+pub fn outs(ids: &[&str]) -> Vec<EvidenceItem> {
+    out_items(ids)
+}
+
+/// What `done`'s guard matched on the honest run: one deliverable.
+pub fn delivered() -> EvidencePreimage {
+    deliverables(&[OUTPUT])
+}
+
+pub fn deliverables(ids: &[&str]) -> EvidencePreimage {
+    preimage(
+        &[DELIVERABLE],
+        ids.iter()
+            .map(|id| item(id, DELIVERABLE, &format!("{{\"id\":\"{id}\"}}")))
+            .collect(),
+    )
+}
+
+/// A preimage sealed over `items` under `class_names`.
+pub fn preimage(class_names: &[&str], items: Vec<EvidenceItem>) -> EvidencePreimage {
+    let class_names: Vec<String> = class_names.iter().map(|s| s.to_string()).collect();
+    EvidencePreimage {
+        seal: evidence_hash(&class_names, &items),
+        class_names,
+        items,
+    }
+}
+
+pub fn item(id: &str, class_name: &str, content: &str) -> EvidenceItem {
+    EvidenceItem {
+        id: id.to_string(),
+        class_name: class_name.to_string(),
+        content: content.to_string(),
+    }
+}

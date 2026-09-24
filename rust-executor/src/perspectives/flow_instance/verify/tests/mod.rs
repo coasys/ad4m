@@ -7,62 +7,31 @@ mod post_cosign_swap;
 mod refusals;
 use super::verdict::VerdictKind;
 use super::*;
-use crate::perspectives::flow_evaluator::{evidence_hash, EvidenceItem};
+use crate::perspectives::flow_evaluator::evidence_hash;
 use crate::perspectives::flow_instance::atom::ACCEPTED_BY_PREDICATE;
 use crate::perspectives::flow_instance::receipt::EvidencePreimage;
 use crate::perspectives::flow_instance::roles::{RoleGrantEvidence, RoleInstanceHistory};
 use crate::perspectives::flow_instance::test_support::{
-    did_of, hash_of, out_item, out_items, out_ref, signed_link, signed_terminal_proposal,
-    signed_vote, T1, T2, T3,
+    deliverables, delivered, did_of, flow_json, hash_of, out_item, out_ref, outs, signed_link,
+    signed_terminal_proposal, signed_vote, two_state_flow, ATTACKER, BASE, DELIVERABLE, INSTANCE,
+    OUTPUT, T1, T2, T3,
 };
 use crate::perspectives::flow_instance::{ProposalLinks, ReadSet};
 use crate::types::DecoratedLinkExpression;
 use crate::types::LinkExpression;
-use serde_json::{json, Value};
+use serde_json::json;
 
-const INSTANCE: &str = "ad4m://flow/instance/i1";
-const BASE: &str = "ad4m://task/t1";
 const ALICE: &str = "alice";
 const BOB: &str = "bob";
 /// A third genuine signer, for the fixtures that have to show a forged
 /// link being dropped *without* taking the honest links beside it.
 const CAROL: &str = "carol";
 const REVIEWER: &str = "coasys://Reviewer";
-/// What most fixture flows' terminal `done` state requires. Incidental
-/// to the outputs since #1104: they are what the final proposal names.
-const DELIVERABLE: &str = "coasys://Deliverable";
-/// The node every honest final proposal names as the run's output.
-const OUTPUT: &str = "ad4m://deliverable/d1";
-/// A node the run never sealed, named by whoever re-mints it.
-const ATTACKER: &str = "ad4m://attacker/node";
 /// Earlier than any grant link a test writes — the fallback dating a
 /// dropped grant link must *not* be allowed to fall back to.
 const INSTANCE_CREATED: &str = "2025-12-01T00:00:00.000Z";
 
 // ---- fixtures --------------------------------------------------------
-
-fn flow_json(states: Value, transitions: Value) -> SHACLFlow {
-    serde_json::from_value(json!({
-        "name": "Delivery",
-        "namespace": "coasys://",
-        "states": states,
-        "transitions": transitions,
-    }))
-    .expect("fixture flow parses")
-}
-
-/// `open → done`, `done` terminal, default `{ n: 1 }` quorum.
-fn two_state_flow() -> SHACLFlow {
-    flow_json(
-        json!([
-            { "name": "open", "value": 0.0 },
-            { "name": "done", "value": 1.0, "requires": [{ "className": DELIVERABLE }] },
-        ]),
-        json!([
-            { "action_name": "Finish", "from_state": "open", "to_state": "done", "actions": [] },
-        ]),
-    )
-}
 
 fn catalogue(flows: Vec<SHACLFlow>) -> HashMap<String, SHACLFlow> {
     flows.into_iter().map(|f| (f.flow_uri(), f)).collect()
@@ -113,46 +82,14 @@ fn committed_links(
     signed_terminal_proposal(nonce, proposer, from, to, &seal(), outputs, committed, at)
 }
 
-/// Each id's preimage as the fixture graph holds it ([`out_items`]).
-fn outs(ids: &[&str]) -> Vec<EvidenceItem> {
-    out_items(ids)
-}
-
 /// What `Verified.outputs` reports for `ids`.
 fn refs(ids: &[&str]) -> Vec<OutputRef> {
     ids.iter().map(|id| out_ref(id)).collect()
 }
 
-/// What `done`'s guard matched on the honest run, as a mint carries it.
-fn delivered() -> EvidencePreimage {
-    deliverables(&[OUTPUT])
-}
-
 /// The seal every fixture proposal into `done` carries.
 fn seal() -> String {
     delivered().seal
-}
-
-fn deliverables(ids: &[&str]) -> EvidencePreimage {
-    sealed_over(
-        &[DELIVERABLE],
-        ids.iter()
-            .map(|id| EvidenceItem {
-                id: id.to_string(),
-                class_name: DELIVERABLE.to_string(),
-                content: format!("{{\"id\":\"{id}\"}}"),
-            })
-            .collect(),
-    )
-}
-
-fn sealed_over(class_names: &[&str], items: Vec<EvidenceItem>) -> EvidencePreimage {
-    let class_names: Vec<String> = class_names.iter().map(|s| s.to_string()).collect();
-    EvidencePreimage {
-        seal: evidence_hash(&class_names, &items),
-        class_names,
-        items,
-    }
 }
 
 fn read_set(proposals: Vec<ProposalLinks>, role_grants: Vec<RoleGrantEvidence>) -> ReadSet {
