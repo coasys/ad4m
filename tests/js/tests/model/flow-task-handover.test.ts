@@ -97,7 +97,10 @@
  *          per-flow receipt index. Part 3 runs both halves. What a UI still
  *          has to do by hand: call `mintFlowReceipt` after the grant settles.
  *          Nothing mints automatically.
- *  GAP 2 — no flow subscriptions (`onStateChange` / `onProposalAdded`).
+ *  GAP 2 — no flow subscriptions (`onStateChange` / `onProposalAdded`),
+ *          and no read that re-derives a run's state without voting:
+ *          `currentStateName` is the engine's cache. Part 3 probes with the
+ *          button itself, whose refusal names the derived state.
  *          Poll `findAll` / `proposals()` / `currentStateName`.
  *  GAP 3 — `FlowTransition.actions` exists on the type and nothing executes it.
  *  GAP 4 — two managed users on one executor cannot share a perspective, so
@@ -586,14 +589,20 @@ describe("flow task handover — WE-facing API with roles", function () {
     // THE ONE RULE, on the gated task from the negative half: Bob's vote is
     // unchanged, but a receipt is on the graph now, so the same vote counts.
     // The grant is dated from the receipt's `settled_at` (when Bob's grant
-    // reached quorum), and Bob voted after that. Re-pressing writes nothing
-    // and re-derives.
-    const reDerived = await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
-    expect(reDerived.recordedVote, "Bob had already voted; nothing new is written").to.be.false;
+    // reached quorum), and Bob voted after that, so the fold now derives
+    // Done with nothing new written. There is no client read that re-derives
+    // without voting (GAP 2; `currentStateName` is the engine's cache), so
+    // the probe is the button: the refusal names the state the fold derived.
+    let reDerived = "";
+    try {
+      await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
+    } catch (e: any) {
+      reDerived = String(e?.message ?? e);
+    }
     expect(
-      reDerived.derivedState,
-      "the vote Bob cast before the mint counts once the receipt exists",
-    ).to.equal("Done");
+      reDerived,
+      "the vote Bob cast before the mint counts once the receipt exists — the fold is already in Done",
+    ).to.match(/`Done` is not reachable from `Done`/);
 
     // A fresh gated task, and a sharper non-holder: Alice now has her OWN
     // ReviewerRole instance (same class, same domain), nominated through the
