@@ -144,6 +144,50 @@ async fn a_levels_author_reaches_or_arms_without_their_own() {
     );
 }
 
+/// The granter collapse (`or` arms that only name a granter fold into one
+/// author list) must not replace an author the level inherits. Admin's rule
+/// has an arm `{ didProperty: agent, where: { rank: lead }, or: [{ author: LEAD }] }`
+/// with no `author` of its own, so its `rank` link needs admin, and Lead's
+/// sub-arm scopes only the `agent` link. Lead wrote `rank -> lead` for Mallory:
+/// that must not satisfy the arm.
+#[tokio::test]
+async fn an_inherited_author_survives_the_granter_collapse_in_an_arm() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/lead-ranked",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(MALLORY)),
+            (LEAD, "ns://agent", lit(MALLORY)),
+            (LEAD, "ns://rank", lit("lead")),
+        ],
+    );
+    role_instance(
+        &store,
+        "ns://r/admin-ranked",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(ALICE)),
+            (LEAD, "ns://agent", lit(ALICE)),
+            (ADMIN, "ns://rank", lit("lead")),
+        ],
+    );
+    let rule = json!({ "className": "Reviewer", "didProperty": "agent", "where": { "author": ADMIN },
+                       "or": [ { "className": "Reviewer", "didProperty": "agent", "where": { "rank": "lead" },
+                                 "or": [ { "className": "Reviewer", "where": { "author": LEAD } } ] } ] });
+
+    assert!(
+        eligible(&store, &rule, "T1", MALLORY).await.is_empty(),
+        "Lead's `rank -> lead` must not stand in for admin's in an arm that inherits admin"
+    );
+    assert_eq!(
+        eligible(&store, &rule, "T1", ALICE).await,
+        vec!["ns://r/admin-ranked"],
+        "control: admin ranked Alice, Lead wrote her `agent` link"
+    );
+}
+
 /// A positive `OR` whose arms each carry nested authors, the shape the
 /// translator emits for a branched rule. It has to be pushed into SPARQL (a
 /// per-link author in a declined clause is refused), so a result at all means
