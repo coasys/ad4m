@@ -261,9 +261,10 @@ async fn eligible_unless_refused(
 /// matches on admin's `agent` link. She must not be a reviewer of T2.
 ///
 /// The same holds one level down (an arm with fields and no `author`, whose own
-/// arms name one). Controls: the collapsing rule (without `rank: senior`), and
-/// the non-collapsing rule with `forTask` written into each arm, both of which
-/// make Mallory a reviewer of T1 and not of T2.
+/// arms name one), and for a wrapper arm with no `where` whose own arm names
+/// one. The translator refuses all three. Controls: the collapsing rule
+/// (without `rank: senior`), and the non-collapsing rule with `forTask` written
+/// into each arm, both of which make Mallory a reviewer of T1 and not of T2.
 #[tokio::test]
 async fn a_level_without_an_author_does_not_leave_its_fields_bare_beside_author_arms() {
     let store = SparqlStore::new(None).unwrap();
@@ -284,7 +285,11 @@ async fn a_level_without_an_author_does_not_leave_its_fields_bare_beside_author_
     let nested = json!({ "className": "Reviewer", "didProperty": "agent",
                          "or": [ { "className": "Reviewer", "where": { "forTask": "$flow.base" },
                                    "or": [ { "className": "Reviewer", "where": { "author": ADMIN } } ] } ] });
-    for rule in [&level, &nested] {
+    let wrapped = json!({ "className": "Reviewer", "didProperty": "agent",
+                          "where": { "forTask": "$flow.base" },
+                          "or": [ { "className": "Reviewer",
+                                    "or": [ { "className": "Reviewer", "where": { "author": ADMIN } } ] } ] });
+    for rule in [&level, &nested, &wrapped] {
         let t2 = eligible_unless_refused(&store, rule, "T2", MALLORY).await;
         assert!(
             t2.as_ref().is_none_or(|ids| ids.is_empty()),

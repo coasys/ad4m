@@ -2084,6 +2084,10 @@ mod tests {
             // One level down: an arm with fields whose own arm names a granter.
             json!({ "className": "ns://R", "didProperty": "agent",
                     "or": [ { "className": "ns://R", "where": for_task, "or": [ arm(json!({ "author": admin })) ] } ] }),
+            // A wrapper arm with no `where` whose own arm names a granter:
+            // only the recursion in `names_author` sees that `author`.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ { "className": "ns://R", "or": [ arm(json!({ "author": admin })) ] } ] }),
             // Without a `didProperty`.
             json!({ "className": "ns://R", "where": { "reviewer": "$did" },
                     "or": [ arm(json!({ "author": admin, "rank": "senior" })) ] }),
