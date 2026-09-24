@@ -8,7 +8,7 @@ use holochain::{
 use log::error;
 use serde::{Deserialize, Serialize};
 use std::io::Cursor;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::timeout;
 
 use super::holochain_service_once_started;
@@ -267,12 +267,23 @@ async fn call_zome_function(
         }
         None => None,
     };
+    // The dispatch loop refuses the call if it is still queued when this op's own timeout
+    // fires (#1133): past that instant nobody is waiting for the result, so running it
+    // would only fire a stale zome call after the caller has already reported a timeout.
+    let deadline = Some(Instant::now() + TIMEOUT_DURATION);
     let interface = holochain_service_once_started()
         .await
         .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
     let response = timeout(
         TIMEOUT_DURATION,
-        interface.call_zome_function(app_id, cell_name, zome_name, fn_name, extern_payload),
+        interface.call_zome_function(
+            app_id,
+            cell_name,
+            zome_name,
+            fn_name,
+            extern_payload,
+            deadline,
+        ),
     )
     .await
     .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?

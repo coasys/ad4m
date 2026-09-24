@@ -811,6 +811,7 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
             UNYT_ZOME.to_string(),
             fn_name.to_string(),
             payload,
+            None,
         )
         .await?;
 
