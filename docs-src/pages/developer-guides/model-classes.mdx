@@ -741,9 +741,49 @@ const recipes = await Recipe.findAll(perspective, {
     category: ["Dessert", "Snack"],  // IN (array membership)
     status: { not: "archived" },     // Not equal
     tags: { contains: "vegan" },     // Contains
+    cuisine: { eq: "Italian" },      // Equality as an operator (same as "Italian")
   }
 });
 ```
+
+`eq` exists so a value can sit beside `author` in one operator object (see below). It takes a value or an array (any of), and cannot be combined with the other value operators.
+
+### Filtering by Author
+
+Every link records who wrote it. `author` in a `where` can ask about one link or about the whole instance, and where you put it decides which.
+
+| Form | Example | Matches when |
+|---|---|---|
+| Nested (per link) | `{ agent: { eq: did, author: admin } }` | admin wrote an `agent -> did` link |
+| Bare (per instance) | `{ author: admin }` | admin wrote the instance's earliest link (its `.author`) |
+| Side by side (both) | `{ agent: did, author: admin }` | admin wrote the earliest link **and** an `agent -> did` link |
+
+**Nested: ask who wrote the link.** Put `author` inside the property's operator object. The author and the value condition must hold on the same link. That link need not hold the current value: `{ agent: { eq: alice, author: admin } }` still matches after someone writes `agent -> bob`, and the returned instance then shows `agent: bob`.
+
+```typescript
+// Reviewers that admin appointed: admin must have written the `agent` link itself.
+const appointed = await Reviewer.findAll(perspective, {
+  where: { agent: { eq: candidateDid, author: adminDid } }
+});
+```
+
+This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it. The check reads the author each link claims. Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands it also matches a link whose signature did not verify, so see [Unverified Links](#unverified-links) before you rely on it.
+
+- `{ agent: { author: admin } }` with no value operator: admin wrote some `agent` link, whatever its value.
+- `author` combines with the other operators: `{ note: { contains: "ok", author: admin } }` is "admin wrote a `note` link containing ok", `{ status: { not: "archived", author: admin } }` is "admin wrote a `status` link other than archived".
+- On relations it works the same way: `{ reviews: { author: admin } }` is "admin wrote some `reviews` link". Beside a quantifier it scopes the relation link: `{ reviews: { some: { verdict: "ok" }, author: admin } }` is "admin linked a review whose verdict is ok", and `{ reviews: { none: {}, author: admin } }` is "admin linked no review".
+- Author values: a DID, an array of DIDs (any of them), `{ not: did }` or `{ not: [dids] }`, and `{ contains: "..." }`.
+- Negation is explicit. `NOT: { agent: { eq: did, author: admin } }` means admin wrote no `agent -> did` link. `agent: { eq: did, author: { not: admin } }` means someone other than admin wrote one. If both admin and a peer wrote it, the first fails and the second passes.
+
+**Bare: ask who created the instance.** `{ author: me }` with no link-backed property beside it matches instances whose earliest link I wrote, the same value as the built-in `.author`. Mute lists (`{ author: { not: [...] } }`) work this way. Beside only a getter property or `timestamp` the `author` is bare too, because those have no link.
+
+**Side by side: both.** A top-level `author` beside property or relation conditions in the same object is short for the bare `author` plus the same `author` nested under each of those properties. `{ agent: did, note: "x", author: admin }` needs admin to have created the instance and written both links; `author: { not: admin }` negates both halves. For an instance one agent created and wrote alone, this gives the same answer as the bare reading. It is narrower otherwise, so it never matches more than either reading. A `none` quantifier beside it is not scoped, since "admin linked none" would be wider than "none".
+
+**Scope stays in its object.** A top-level `author` does not reach into `AND`/`OR`/`NOT` sub-clauses, and an `author` inside a sub-clause applies only to its own object's properties. `{ agent: did, OR: [{ author: admin }, { author: lead }] }` is a bare `agent` condition and a bare `author`. Write `{ agent: { eq: did, author: [admin, lead] } }` for "admin or lead wrote the `agent` link".
+
+**Where it runs, and when it is refused.** A per-link `author` (nested, or the per-link half of side by side) is checked in the store, on each link's own author, so `findAll`, `count` and paginated queries agree. If any part of the query can only be evaluated after it runs (`timestamp`, a getter property, a relation `some`/`none` whose clause the store cannot express, or an operator the store cannot express), a per-link `author` makes the query fail with an error. At that stage each instance has only its single `.author`, and the engine refuses rather than check the wrong author. `author` nested under a getter property, `timestamp` or `id` is an error too, since there is no link to check.
+
+A condition on the value alone, such as `{ agent: did }`, accepts a link from any author. The instance JSON does not change: `.author` is still the author of the earliest link, and a property still reads its latest value.
 
 ### Eager Loading with `include`
 
@@ -841,7 +881,7 @@ post.__links.comments;
 // [
 //   { author: "did:key:z6Mk…", timestamp: "2026-09-23T10:00:00.000Z",
 //     data: { source: postId, predicate: "app://has_comment", target: "…" },
-//     proof: { key: "…", signature: "…" } },
+//     proof: { key: "…", signature: "…", valid: true, invalid: false } },
 //   …
 // ]
 post.__links["app://revoked"]; // [] when there is no such link
@@ -851,7 +891,8 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
-- **Rows** have the shape of a `LinkExpression` (`LinkRow` in the SDK), so you can verify `proof` yourself. A link stored without a proof arrives with an empty `key` and `signature`. Treat that as unverifiable, not as valid. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. Links whose signature did not verify are left out unless the query sets `includeUnverified` (see [Unverified Links](#unverified-links)), so by default every row reads `valid: true`. With `includeUnverified`, a link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should still require `proof.valid`, so it stays correct when the query sets `includeUnverified`. `data.target` is the target exactly as it was signed (a literal written in another encoding than `Literal.from(v).toUrl()` keeps its original bytes), and the verdict was computed over those bytes, so verifying `proof` yourself gives the same answer. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Per-item provenance for collections:** `links: ["members"]` answers "who added each member, when, and does their signature hold". The plain `members` array stays as it is.
 - **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
 - **Additive:** the rows are read by a separate query over the returned page. Asking for them never changes `createdAt`, `updatedAt` or any property value. `links` works with `where`, `order`, pagination, `properties` and inside an `include` sub-query (`include: { comments: { links: ["app://flag"] } }`).
@@ -882,6 +923,45 @@ const comments = await Comment.query(perspective)
   .get();
 ```
 
+### Unverified Links
+
+Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
+
+This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A relation `where`, as in `@HasMany(() => Comment, { through: "recipe://comment", where: { status: "approved" } })`, reads each target's values through the same filter, so an unverified `status` link neither admits a comment nor drops one. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
+
+```typescript
+@HasMany({
+  getter: `SELECT ?target WHERE {
+    <Base> <recipe://comment> ?target .
+    ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <Base> <recipe://comment> ?target )>> ;
+       <ad4m://ontology/proofValid> "true" .
+  }`,
+})
+comments: string[] = [];
+```
+
+To *show* an unverified claim, for example a UI that marks a value as unverified, opt in:
+
+```typescript
+const recipes = await Recipe.findAll(perspective, { includeUnverified: true });
+
+// or with the query builder
+const recipes = await Recipe.query(perspective).includeUnverified().get();
+```
+
+Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
+
+> **Current limit:** unverified links are skipped by what *hydrates* an instance (except a hand-written `getter`, see above), by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
+>
+> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back, and on a page it takes a slot like any other instance. A node with no verified links at all cannot be conjured this way.
+> - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
+> - **Per-link `author`.** `{ agent: { eq: did, author: admin } }` can match through a forged `agent -> did` link that claims admin as its author.
+> - **Counts.** `count` and `totalCount` include instances matched only through unverified links, so they can be larger than the rows you can page through.
+>
+> Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
+>
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
+
 ### Reading by Link Status
 
 Every link is either **Shared** (gossiped to the neighbourhood) or **Local** (kept on this executor). A query normally reads both. A property declared `local: true` reads only its Local links. To read instances as they exist in links of one status only, for every property, set `linkStatus`:
@@ -899,7 +979,17 @@ const drafts = await Card.findAll(perspective, { linkStatus: "local" });
 
 Use `linkStatus: "shared"` when the result is shown to another user, so nothing executor-private leaks into it. Under `"shared"`, a `local: true` property always comes back empty. Included relations inherit the setting unless their own sub-query sets `linkStatus`. The [`__links` rows](#per-link-rows-with-links) are restricted the same way: under `"shared"` they list only Shared links.
 
-> **Current limit:** `linkStatus` restricts the links that *hydrate* an instance. It does not yet restrict the links that *select* instances: `where` conditions pushed into SPARQL, the class's flags, and `count`/`totalCount` and `$` projection counts still match links of any status. So a `"shared"` read with `where: { note: "x" }` can return an instance whose only `note` link is Local, with `note` left empty. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
+`linkStatus` and [`includeUnverified`](#unverified-links) are independent and both apply to the same link: a link is read only when it has the requested status **and** its signature verified (or the query sets `includeUnverified`). For a Local link whose signature did not verify:
+
+| `linkStatus` | `includeUnverified` | Read? |
+| --- | --- | --- |
+| unset | unset | no (unverified) |
+| unset | `true` | yes |
+| `"local"` | unset | no (unverified) |
+| `"local"` | `true` | yes |
+| `"shared"` | unset or `true` | no (Local) |
+
+> **Current limit:** `linkStatus` restricts the links that *hydrate* an instance. It does not yet restrict the links that *select* instances: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount`, `$` projection counts and the sort order behind `limit`/`offset` still match links of any status. So a `"shared"` read with `where: { note: "x" }` can return an instance whose only `note` link is Local, with `note` left empty. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
 
 ### Query Engine
 

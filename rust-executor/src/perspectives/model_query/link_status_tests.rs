@@ -383,20 +383,15 @@ async fn link_status_shared_does_not_select_on_a_local_value() {
 }
 
 /// Merge guard for #1123 (the default invalid-proof filter), which adds its own
-/// `FILTER EXISTS` to the reverse-relation reads next to this PR's.
+/// check to the reverse-relation reads next to this PR's.
 ///
 /// Two `FILTER EXISTS` clauses over two reifier variables mean "a Shared link
 /// exists and a verified link exists", not "one link is both". Here the mark
 /// has a valid Local link and a forged Shared link on the same triple, so
-/// together they would pass a Shared (and, after #1123, verified) read, and a
-/// Local value would reach the Shared-only caller.
-///
-/// On this branch alone the forged Shared link is read because nothing checks
-/// signatures yet, so this test is red by design. Whichever of #1123 / #1116
-/// lands second folds the two clauses into one `FILTER EXISTS` over a single
-/// reifier and removes the `#[ignore]`.
+/// together they would pass a Shared, verified-only read, and a Local value
+/// would reach the Shared-only caller. `reverse_triple_filter` checks both on
+/// one reifier.
 #[tokio::test]
-#[ignore = "needs #1123: fold the proofValid and status FILTER EXISTS into one reifier"]
 async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_one() {
     let store = SparqlStore::new(None).unwrap();
     let signer = ls_seed(&store);
@@ -442,4 +437,101 @@ async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_o
         "no single link is both Shared and verified: {}",
         result.instances[0]
     );
+}
+
+/// How `linkStatus` combines with #1123's `includeUnverified`: both apply to the
+/// same link, independently. A link is read only when it has the requested
+/// status and its signature verified, or the query opted in to unverified
+/// links. So a Local link that does not verify is withheld by default and
+/// under `linkStatus: local`, returned under `includeUnverified` with `local`
+/// or no status, and never under `shared`. Checked on the hydrated `note` and
+/// on its `__links` rows, on both instance-query plans.
+#[tokio::test]
+async fn link_status_and_include_unverified_both_apply_to_a_local_unverified_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let c = "ls://c/1";
+    store
+        .add_link(&ls_link(
+            &signer,
+            c,
+            "ad4m://type",
+            "ls://Card",
+            0,
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+    // A verified Local `title`, so every read has at least one row and returns
+    // the card: the question is only whether `note` hydrates.
+    store
+        .add_link(&ls_link(
+            &signer,
+            c,
+            "ls://title",
+            "literal:string:local",
+            1,
+            LinkStatus::Local,
+        ))
+        .unwrap();
+    // Local, signed over a different target, so it does not verify.
+    let mut forged_local = ls_link(
+        &signer,
+        c,
+        "ls://note",
+        "literal:string:signed",
+        2,
+        LinkStatus::Local,
+    );
+    forged_local.data.target = "literal:string:unverified".to_string();
+    assert!(
+        !forged_local.compute_proof_valid(),
+        "the fixture must not verify"
+    );
+    store.add_link(&forged_local).unwrap();
+
+    for limit in [None, Some(10)] {
+        for (link_status, include_unverified, read) in [
+            (None, None, false),
+            (None, Some(true), true),
+            (Some(LinkStatus::Local), None, false),
+            (Some(LinkStatus::Local), Some(true), true),
+            (Some(LinkStatus::Shared), None, false),
+            (Some(LinkStatus::Shared), Some(true), false),
+        ] {
+            let result = execute_model_query_from_json(
+                &store,
+                "Card",
+                &ModelQueryInput {
+                    limit,
+                    link_status: link_status.clone(),
+                    include_unverified,
+                    links: Some(vec!["note".to_string()]),
+                    ..Default::default()
+                },
+                LS_SHAPE_JSON,
+            )
+            .await
+            .unwrap();
+            let case = format!(
+                "limit {limit:?}, linkStatus {link_status:?}, includeUnverified {include_unverified:?}"
+            );
+            let inst = result
+                .instances
+                .first()
+                .unwrap_or_else(|| panic!("{case}: the card must be returned"));
+            let rows: Vec<&str> = inst["__links"]["note"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{case}: `__links.note` missing: {inst}"))
+                .iter()
+                .map(|r| r["data"]["target"].as_str().unwrap())
+                .collect();
+            if read {
+                assert_eq!(inst["note"], json!("unverified"), "{case}: {inst}");
+                assert_eq!(rows, vec!["literal:string:unverified"], "{case}");
+            } else {
+                assert!(unset(inst, "note"), "{case}: note must be withheld: {inst}");
+                assert!(rows.is_empty(), "{case}: `__links` must be empty: {rows:?}");
+            }
+        }
+    }
 }

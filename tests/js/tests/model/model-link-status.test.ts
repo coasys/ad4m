@@ -12,6 +12,11 @@
  * whose only link was written Local. Neither is declared `local`, so the
  * pre-#1116 read returns both, whoever asks.
  *
+ * The last case pins how `linkStatus` combines with #1113's
+ * `includeUnverified`: both apply to the same link, so a Local link whose
+ * signature does not verify is read only with `includeUnverified`, and never
+ * under `linkStatus: 'shared'`.
+ *
  * Not covered here, and still open: which instances are *selected* (`where`,
  * the class's flags, `count`) is not restricted by `linkStatus`. See the
  * `#[ignore]`d Rust test `link_status_shared_does_not_select_on_a_local_value`
@@ -27,6 +32,7 @@ import {
   Ad4mModel,
   Flag,
   Link,
+  LinkExpression,
   LinkQuery,
   Literal,
   Model,
@@ -153,5 +159,60 @@ describe("Ad4mModel — linkStatus reads", function () {
       .links(["note"])
       .get();
     expect(targets(viaBuilder[0], "note")).to.deep.equal([]);
+  });
+
+  // Runs last: it adds a forged Local `note` link the cases above must not see.
+  it("combines with includeUnverified on the same link", async () => {
+    // The agent's own signed Local note, with its target swapped after signing
+    // and its timestamp moved later, written Local. It does not verify.
+    const [signed] = await perspective.get(
+      new LinkQuery({ source: cardId, predicate: "lsc://note" })
+    );
+    const forged = {
+      author: signed.author,
+      timestamp: new Date(Date.parse(signed.timestamp) + 60_000).toISOString(),
+      data: {
+        source: signed.data.source,
+        predicate: signed.data.predicate,
+        target: Literal.from("unverified local note").toUrl(),
+      },
+      proof: { key: signed.proof.key, signature: signed.proof.signature },
+    } as LinkExpression;
+    await perspective.addLinkExpression(forged, "local");
+    const stored = (
+      await perspective.get(new LinkQuery({ source: cardId, predicate: "lsc://note" }))
+    ).find((l) => l.data.target === forged.data.target);
+    expect(stored, "the forged link must be stored").to.exist;
+    expect(String(stored!.status).toLowerCase()).to.equal("local");
+    expect(stored!.proof.valid, "the forged link must not verify").to.not.equal(true);
+
+    const unverified = forged.data.target;
+    const cases: [object, boolean][] = [
+      [{}, false],
+      [{ includeUnverified: true }, true],
+      [{ linkStatus: "local" }, false],
+      [{ linkStatus: "local", includeUnverified: true }, true],
+      [{ linkStatus: "shared" }, false],
+      [{ linkStatus: "shared", includeUnverified: true }, false],
+    ];
+    for (const [flags, read] of cases) {
+      const card = await find({ ...flags, links: ["note"] });
+      const rows = (card.__links?.note ?? []).map((l) => l.data.target);
+      const label = JSON.stringify(flags);
+      if (read) {
+        expect(card.note, label).to.equal("unverified local note");
+        expect(rows, label).to.include(unverified);
+      } else {
+        expect(card.note, label).to.not.equal("unverified local note");
+        expect(rows, label).to.not.include(unverified);
+      }
+    }
+
+    const viaBuilder = await LinkStatusCard.query(perspective)
+      .where({ id: cardId })
+      .linkStatus("local")
+      .includeUnverified()
+      .get();
+    expect(viaBuilder[0]?.note).to.equal("unverified local note");
   });
 });

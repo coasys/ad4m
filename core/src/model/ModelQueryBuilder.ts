@@ -10,7 +10,7 @@ import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectivePr
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
-  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
+  TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -81,7 +81,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+  where(conditions: TypedQueryWhere<T>): ModelQueryBuilder<T> {
     this.queryParams.where = conditions as Where;
     return this;
   }
@@ -282,6 +282,21 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
     this.queryParams.linkStatus = status;
+    return this;
+  }
+
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * Off by default: the executor withholds unverified links. Turn it on only
+   * to *display* an unverified claim, never for data you act on. See
+   * {@link Query.includeUnverified}.
+   *
+   * @param enabled - Whether to include unverified links (default: true)
+   * @returns The query builder for chaining
+   */
+  includeUnverified(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.includeUnverified = enabled;
     return this;
   }
 

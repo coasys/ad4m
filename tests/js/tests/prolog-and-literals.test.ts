@@ -3050,6 +3050,39 @@ describe("Prolog + Literals", () => {
         })
     })
 
+    // A link comes back with the target it was signed over, whatever literal
+    // encoding the writer used. The store keeps literal targets as typed
+    // values; before the read-back fix it re-rendered them in the SDK's
+    // encoding, so a read-back copy handed on to another agent no longer
+    // matched its signature.
+    describe("Literal link targets", () => {
+        it("read back byte for byte, in any literal encoding", async () => {
+            const perspective = await ad4m!.perspective.add("literal read-back")
+            const targets = [
+                "literal:string:Write the guide",
+                'literal:json:{"a": 1, "b": "x y"}',
+                "literal:string:a%2Db%5Fc",
+                Literal.from("Write the guide").toUrl(),
+                Literal.from({ a: 1 }).toUrl(),
+            ]
+            for (const [i, target] of targets.entries()) {
+                await perspective.add(new Link({ source: `test://read-back/${i}`, predicate: "test://p", target }))
+            }
+            for (const [i, target] of targets.entries()) {
+                const links = await perspective.get(new LinkQuery({ source: `test://read-back/${i}` }))
+                expect(links.length).to.equal(1)
+                expect(links[0].data.target).to.equal(target)
+                expect(links[0].proof.valid).to.be.true
+            }
+        })
+
+        it("expression.create(_, 'literal') encodes like Literal.toUrl()", async () => {
+            const url = await ad4m!.expression.create({ note: "a-b_c.d~e" }, "literal")
+            expect(url).to.not.match(/%2D|%2E|%5F|%7E/i)
+            expect(url).to.equal(Literal.from(Literal.fromUrl(url).get()).toUrl())
+        })
+    })
+
     describe("Smart Literal", () => {
         let perspective: PerspectiveProxy | null = null
 

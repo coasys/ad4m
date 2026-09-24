@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
-use super::sparql_builder::status_triple_filter;
+use super::sparql_builder::reverse_triple_filter;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
@@ -34,13 +34,16 @@ use crate::types::LinkStatus;
 /// containing all instance IDs.  The results are attached to each instance
 /// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
 ///
-/// With a `link_status` (#1116), only links of that status are read
-/// ([`status_triple_filter`]).
+/// With a `link_status` (#1116), only links of that status are read, and a
+/// link whose signature did not verify is not read unless the query opted in
+/// with `include_unverified` (#1113). Both are checked on one reifier
+/// ([`reverse_triple_filter`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
     link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -64,9 +67,9 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
-        let status = status_triple_filter(safe_pred, link_status);
+        let filter = reverse_triple_filter(safe_pred, link_status, include_unverified);
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{status} }}",
+            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
             target_constraint
         );
         let result_json = store.query(&sparql)?;
@@ -116,9 +119,11 @@ pub fn resolve_reverse_relations(
 /// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
 /// are passed through to the recursive call.
 ///
-/// `link_status` is the parent query's. A sub-query that does not set its own
-/// inherits it, so a Shared-only read stays Shared-only on the included
-/// instances; a sub-query's own `linkStatus` wins.
+/// `link_status` and `include_unverified` are the parent query's. A sub-query
+/// that does not set its own inherits each of them, so a Shared-only read stays
+/// Shared-only on the included instances, and a caller that asked to see
+/// unverified rows sees them there too. A sub-query's own setting wins,
+/// including an explicit `includeUnverified: false`.
 pub(super) async fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -127,6 +132,7 @@ pub(super) async fn resolve_includes_recursive(
     resolver: &dyn ShapeResolver,
     depth: u8,
     link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -146,6 +152,9 @@ pub(super) async fn resolve_includes_recursive(
         };
         if sub_query.link_status.is_none() {
             sub_query.link_status = link_status.cloned();
+        }
+        if sub_query.include_unverified.is_none() {
+            sub_query.include_unverified = include_unverified;
         }
 
         // Checked here, where the include is recognised, rather than down in
@@ -568,9 +577,13 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
-    let status = status_triple_filter(safe_pred, sub_query.link_status.as_ref());
+    let filter = reverse_triple_filter(
+        safe_pred,
+        sub_query.link_status.as_ref(),
+        sub_query.include_unverified,
+    );
     let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{status} }}"
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{filter} }}"
     );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
