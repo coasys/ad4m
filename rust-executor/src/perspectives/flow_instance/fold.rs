@@ -32,7 +32,11 @@
 //! edge arrive whenever two replicas mint concurrently — each dedupes only
 //! against the proposals it has seen — and asking "is *this proposal*
 //! settled?" would strand such a flow at genesis forever, while asking "did
-//! the *edge* collect `n` distinct voters?" resolves it.
+//! the *edge* collect `n` distinct voters?" resolves it. On a **terminal**
+//! edge the unit is one notch finer — the edge's *outputs commitment* — so
+//! that the votes an edge settles on always agreed to one set of outputs;
+//! see [`settle_edge`] for why anything coarser lets one early uncommitted
+//! proposal make the run unreceiptable forever (#1108/#1118).
 //!
 //! What that is *not*, as of #987: the deliberate two-bot path. The mint pass
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
@@ -464,9 +468,30 @@ fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAt
     false
 }
 
-/// One edge: pool the eligible votes of every not-yet-consumed atom on
+/// One edge: pool the eligible votes of the not-yet-consumed atoms on
 /// `from → to`, and if the rule's `{n}` distinct voters is met, report the
 /// edge as settled at the moment the n-th of them signed.
+///
+/// **On a terminal edge, votes pool per outputs commitment** — the fold half
+/// of #1118 option 2 (#1108 re-review, @lal-bot-coasys). A vote into a
+/// terminal state is agreement to *those outputs*: `accept` refuses to
+/// co-sign an atom whose commitment it cannot recompute, and a receipt can
+/// only speak for one commitment ([`super::receipt::final_edge_commitment`]).
+/// Pooling across commitments therefore counted votes that agreed to
+/// nothing in common: one eligible early proposal with no `outputs_hash`
+/// (or a rival one) landed in the settled edge's `atom_uris`, the
+/// commitment read back `Uncommitted`/`Conflicting`, and the run settled
+/// terminally with a receipt nobody could ever mint — permanently, since
+/// there is no proposing past a settled edge. So: atoms are grouped by
+/// their commitment, an atom with none contributes nothing, quorum must be
+/// reached **within one group**, and among quorate groups the
+/// earliest-settled wins (hash order breaks a tie, deterministically). The
+/// settled edge's atoms all share one commitment by construction.
+///
+/// A non-terminal edge keeps pooling across every atom: no run ends there,
+/// `accept` ignores outputs off the final edge, and splitting its quorum by
+/// an irrelevant field would re-open the twin-proposal wedge pooling exists
+/// to close.
 ///
 /// An edge that was already quorate when the walk arrived settles at the
 /// moment of arrival (`max(nth, after)`), so a proposal that lost an earlier
@@ -492,6 +517,57 @@ fn settle_edge(
         );
         return None;
     };
+    let candidates: Vec<&VouchedAtom> = atoms
+        .iter()
+        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
+        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
+        .collect();
+
+    if !super::receipt::is_terminal_state(flow, to) {
+        return settle_pool(from, to, after, &rule, &candidates);
+    }
+
+    // Terminal edge: group by commitment. BTreeMap so a tie between two
+    // quorate groups breaks by hash order on every replica alike.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&VouchedAtom>> =
+        std::collections::BTreeMap::new();
+    for v in candidates {
+        match v.atom.outputs_hash.as_deref() {
+            Some(hash) => groups.entry(hash).or_default().push(v),
+            None => log::debug!(
+                "flow: atom {} on terminal edge `{from}` → `{to}` carries no outputs \
+                 commitment; its votes bind no outputs and are not pooled",
+                v.atom.uri
+            ),
+        }
+    }
+    groups
+        .into_values()
+        .filter_map(|group| settle_pool(from, to, after, &rule, &group))
+        .min_by(|a, b| {
+            (
+                parse_link_timestamp(&a.settled_at),
+                &a.settled_at,
+                &a.atom_uris,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.settled_at),
+                    &b.settled_at,
+                    &b.atom_uris,
+                ))
+        })
+}
+
+/// The pooling half of [`settle_edge`], over one already-chosen set of
+/// atoms: sort every eligible vote by parsed instant, count distinct DIDs,
+/// and settle at the n-th — floored by `after`.
+fn settle_pool(
+    from: &str,
+    to: &str,
+    after: &str,
+    rule: &ConsensusRule,
+    atoms: &[&VouchedAtom],
+) -> Option<SettledEdge> {
     // Pool with each vote's parsed instant and sort by it — string order is
     // client-library order inside a sub-second collision (#1000). Atom
     // construction already dropped unparseable timestamps, so the
@@ -500,8 +576,6 @@ fn settle_edge(
     // all cannot be the n-th.
     let mut pooled: Vec<(DateTime<Utc>, &Vote, &str)> = atoms
         .iter()
-        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
-        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
         .flat_map(|v| {
             v.eligible_votes
                 .iter()
@@ -534,7 +608,7 @@ fn settle_edge(
         if !atom_uris.iter().any(|u| u == uri) {
             atom_uris.push(uri.to_string());
         }
-        if quorum(&rule, voters.len()) {
+        if quorum(rule, voters.len()) {
             nth = Some((instant, vote.at.clone()));
             break;
         }
@@ -604,8 +678,24 @@ mod tests {
     }
 
     /// One atom on `from → to` carrying exactly the listed `(did, at)` votes
-    /// as eligible. Fields the fold never reads carry placeholders.
+    /// as eligible. Fields the fold never reads carry placeholders. Every
+    /// fixture atom shares one outputs commitment, so on a terminal edge the
+    /// per-commitment grouping collapses to the plain pooling these tests
+    /// are about; [`vouched_committing`] is the fixture for the grouping
+    /// itself.
     fn vouched(uri: &str, from: &str, to: &str, votes: &[(&str, &str)]) -> VouchedAtom {
+        vouched_committing(uri, from, to, Some("shared-outputs-hash"), votes)
+    }
+
+    /// [`vouched`] with an explicit outputs commitment (`None`: the proposer
+    /// signed none).
+    fn vouched_committing(
+        uri: &str,
+        from: &str,
+        to: &str,
+        outputs_hash: Option<&str>,
+        votes: &[(&str, &str)],
+    ) -> VouchedAtom {
         let votes: Vec<Vote> = votes
             .iter()
             .map(|(did, at)| Vote {
@@ -621,9 +711,58 @@ mod tests {
                 proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
                 proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
                 evidence_hash: "seal".to_string(),
+                outputs_hash: outputs_hash.map(str::to_string),
+                outputs: Vec::new(),
                 votes: votes.clone(),
             },
             eligible_votes: votes,
+        }
+    }
+
+    /// Lal's terminal-edge scenario at the fold layer (#1108 re-review):
+    /// under `{n: 2}` into terminal `approved`, Mallory's early atom with no
+    /// commitment (or a rival one) must not pool with Alice's and Bob's
+    /// votes on the committed atom. Quorum is reached inside the committed
+    /// group: the settled edge names only Alice's atom, and settles at
+    /// Bob's vote — not at the Mallory+Alice pair the old pooling counted.
+    ///
+    /// Killing test for the mutation that pools terminal edges across
+    /// commitments again.
+    #[test]
+    fn a_terminal_edge_pools_votes_per_outputs_commitment() {
+        const MALLORY: &str = "did:key:mallory";
+        let flow = review_flow(Some(2));
+        for rival_commitment in [None, Some("hash-y")] {
+            let atoms = [
+                vouched_committing(
+                    "p-mallory",
+                    "review",
+                    "approved",
+                    rival_commitment,
+                    &[(MALLORY, T1)],
+                ),
+                vouched_committing(
+                    "p-alice",
+                    "review",
+                    "approved",
+                    Some("hash-x"),
+                    &[(ALICE, T2), (BOB, T3)],
+                ),
+            ];
+            let derived = fold("review", &flow, &atoms);
+            assert_eq!(derived.state, "approved", "rival: {rival_commitment:?}");
+            assert_eq!(
+                derived.settled[0].atom_uris,
+                vec!["p-alice"],
+                "only the quorate group's atoms settle, so every counted atom \
+                 shares one commitment (rival: {rival_commitment:?})"
+            );
+            assert_eq!(
+                derived.settled[0].settled_at, T3,
+                "quorum is the 2nd voter INSIDE the group — Bob at T3, not \
+                 Mallory+Alice at T2 (rival: {rival_commitment:?})"
+            );
+            assert_eq!(derived.settled[0].voters, vec![ALICE, BOB]);
         }
     }
 

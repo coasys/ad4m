@@ -207,6 +207,126 @@ pub enum Scope {
         id: String,
         predicate: String,
     },
+    /// Bounded traversal from one or more anchors — see [`Traverse`](Scope::Traverse).
+    ///
+    /// A third variant rather than options on the two above, because those are
+    /// constructed as struct literals throughout `auto_processor`,
+    /// `interpretation` and `flow_context`, none of which traverse anything.
+    /// Adding fields there would have meant editing every write-scope call site
+    /// to say "and don't traverse", which is noise at each one and a much wider
+    /// blast radius than the feature deserves. The split is also honest: the
+    /// variants above identify *an* anchor, this one says how to walk from
+    /// *several*.
+    ///
+    /// `rename_all` because the TS `TraverseScope` is spread verbatim into the
+    /// wire JSON, spelling this variant's multi-word fields in camelCase — and
+    /// serde ignores unknown fields on an untagged variant, so a missed
+    /// spelling here is not an error but a silently dropped limit. The other
+    /// variants' fields are all single words, which is why the enum never
+    /// needed this before. The snake_case alias keeps Rust-side spellings
+    /// working.
+    #[serde(rename_all = "camelCase")]
+    Traverse {
+        /// The anchors to walk from. One query answers for all of them, which
+        /// is what keeps a level of a tree to a single round trip (and a single
+        /// subscription) rather than one per parent.
+        #[serde(deserialize_with = "deserialize_ids_flex")]
+        ids: Vec<String>,
+        predicate: String,
+        /// Follow the predicate as far as it goes, rather than one step.
+        ///
+        /// Note the path reports only its endpoints: SPARQL property paths bind
+        /// no intermediate variables, so a transitive read says *that* a node is
+        /// under the anchor and never *where*. Reconstructing the shape needs
+        /// the inverse relation read separately (`@BelongsTo`).
+        ///
+        /// Every named anchor is excluded from the result, as with `levels` —
+        /// an anchor is where the read started, not something it found. The `+`
+        /// path gives that for free only in a tree; in a cycle the anchor is
+        /// one-or-more steps from itself, so the exclusion is stated in the
+        /// query rather than left to the path operator.
+        #[serde(default)]
+        transitive: bool,
+        #[serde(default)]
+        direction: ScopeDirection,
+        /// Keep at most this many results *per anchor*, applied after ordering
+        /// and before hydration.
+        ///
+        /// SPARQL cannot express a per-group limit — it has no window functions,
+        /// and its sub-SELECTs are uncorrelated — so this is applied in the
+        /// executor between the two phases of the query. That placement is the
+        /// whole point: the id phase over-fetches rows of one string, and the
+        /// hydration phase, which is the expensive half, sees only the survivors.
+        #[serde(default, alias = "limit_per_anchor")]
+        limit_per_anchor: Option<usize>,
+        /// Walk the relation level by level, keeping this many results per anchor at each depth —
+        /// `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+        ///
+        /// The walk happens here rather than in the caller, and that is the whole point. A caller
+        /// driving it pays a network round trip per level, and a client that renders as each answer
+        /// arrives shows the tree assembling itself a level at a time. In here the levels are
+        /// sequential SPARQL against a local store with no serialisation between them, and the
+        /// records are hydrated once for the union — so three levels cost one request and one
+        /// hydration instead of three of each.
+        ///
+        /// Like `transitive`, the anchors are excluded from their own result. A walk that reaches
+        /// an anchor again — through a cycle, or because one anchor was named below another —
+        /// reports it once, at neither place: it is where the walk started, not something the walk
+        /// found.
+        ///
+        /// *Refused* alongside `transitive`, which is the unbounded form of the same walk: a path
+        /// expression reaches everything below the anchor and can be told nothing about depth.
+        /// Refused alongside `limit_per_anchor` too, which cannot express this on its own — with
+        /// one anchor at the top there is one group, so it caps the total rather than the breadth
+        /// at each level, and the walk sets its own per-level limit at every depth regardless.
+        /// Both are errors rather than a silent resolution in the walk's favour, which would be a
+        /// wrong answer wearing the shape of a right one.
+        #[serde(default)]
+        levels: Option<Vec<usize>>,
+    },
+}
+
+/// Which way a traversal follows its predicate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeDirection {
+    /// `anchor --predicate--> result`: the anchor owns the link. The default,
+    /// and the only direction the other `Scope` variants have ever had.
+    #[default]
+    Out,
+    /// `result --predicate--> anchor`: the result owns the link and points back.
+    ///
+    /// Answers "what points at this" for a *search* — ordered, filtered,
+    /// limited. Distinct from a reverse `include`, which answers the same
+    /// question for rows already in hand and cannot narrow them.
+    In,
+}
+
+/// Accept `ids` as either a bare string or a list of them.
+///
+/// The single-anchor spelling is the common one (one branch of a thread, one
+/// node of a graph) and requiring `["x"]` for it would be a papercut at every
+/// call site.
+fn deserialize_ids_flex<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                Value::String(s) => Ok(s),
+                other => Err(serde::de::Error::custom(format!(
+                    "scope ids must be strings, got {other}"
+                ))),
+            })
+            .collect(),
+        other => Err(serde::de::Error::custom(format!(
+            "scope ids must be a string or a list of strings, got {other}"
+        ))),
+    }
 }
 
 /// Value in the `include` map for eager-loading relations.
@@ -234,6 +354,19 @@ pub struct ProjectionInput {
     /// When true, attach a count (integer) instead of a list.
     #[serde(default)]
     pub count: bool,
+    /// Count (or list) everything reachable through `from`, not just one step.
+    ///
+    /// What "42 replies" on a collapsed branch means: people read that as the
+    /// whole conversation below it, and a direct-child count says 3. The
+    /// projection query is already grouped per parent and already asked of
+    /// every row at once, so this costs one token in the emitted path and no
+    /// extra round trip.
+    ///
+    /// Refused alongside a link-author or link-timestamp filter: those read the
+    /// reification of *one* link, and a path is a reachability test with no
+    /// single link to point at.
+    #[serde(default)]
+    pub transitive: bool,
     /// Bare class name of the projection target.  The executor resolves the
     /// target shape from this through its in-memory cache when projection
     /// where-clauses reference target properties by name.
@@ -325,6 +458,188 @@ pub struct ModelQueryInput {
 pub struct ModelQueryResult {
     pub instances: Vec<Value>,
     pub total_count: usize,
+}
+
+/// The `where: { producedByFlow: { flow, state? } }` filter, extracted from
+/// a query before the pipeline sees it.
+///
+/// It is not a property filter: whether an instance is a valid output of a
+/// flow is decided by signature verification over carried receipts
+/// (`flow_instance::produced`), which SPARQL cannot express and
+/// `matches_where` has no store to answer. So the key is **removed** from
+/// the where clause here and resolved by the caller
+/// (`PerspectiveInstance::model_query`) into a concrete id set *before* the
+/// query runs — which is what makes it apply before pagination: the ids go
+/// into the store as a `VALUES ?source` constraint, so `limit` counts only
+/// instances that passed (the same ordering guarantee `limitPerAnchor`
+/// gives its slice).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducedByFlowFilter {
+    /// The flow's URI, as the perspective's catalogue keys it.
+    pub flow: String,
+    /// Only runs settled into this terminal state; absent = any.
+    pub state: Option<String>,
+}
+
+/// Remove and parse the top-level `producedByFlow` where key, if present.
+///
+/// **Malformed is an error, never a skip.** A filter that silently dropped
+/// would return every instance — the exact opposite of a fail-closed
+/// verification filter. The same reasoning refuses the key anywhere it
+/// cannot act: nested in `OR`/`AND`/`NOT` branches, under a `some`/`none`
+/// quantifier, or inside an include/projection sub-query. Those positions
+/// would need per-branch verification semantics nobody has defined; a query
+/// naming them gets an error instead of an answer that looks filtered and
+/// is not.
+pub fn take_produced_by_flow(
+    input: &mut ModelQueryInput,
+) -> Result<Option<ProducedByFlowFilter>, String> {
+    const KEY: &str = "producedByFlow";
+
+    let filter = match input.where_clause.as_mut().and_then(|wc| wc.remove(KEY)) {
+        None => None,
+        Some(WhereCondition::SubClause(map)) => {
+            let mut flow = None;
+            let mut state = None;
+            for (k, v) in &map {
+                match (k.as_str(), v) {
+                    ("flow", WhereCondition::String(s)) => flow = Some(s.clone()),
+                    ("state", WhereCondition::String(s)) => state = Some(s.clone()),
+                    _ => {
+                        return Err(format!(
+                            "`{KEY}` takes `{{ flow, state? }}` with string values; `{k}` is \
+                             not part of it"
+                        ))
+                    }
+                }
+            }
+            let flow = flow.ok_or_else(|| {
+                format!("`{KEY}` needs a `flow`: which flow's outputs is the question")
+            })?;
+            Some(ProducedByFlowFilter { flow, state })
+        }
+        Some(other) => {
+            return Err(format!(
+                "`{KEY}` must be an object `{{ flow, state? }}`, got {other:?}"
+            ))
+        }
+    };
+
+    // The key must not survive anywhere the resolver cannot see it.
+    if let Some(position) = find_stray_produced_by_flow(input) {
+        return Err(format!(
+            "`{KEY}` is only supported as a top-level where key on the queried class \
+             (found {position}); it resolves to a verified id set and has no per-branch \
+             semantics"
+        ));
+    }
+    Ok(filter)
+}
+
+/// Where, other than the (already-extracted) top level, does a
+/// `producedByFlow` key still sit? `None` when the query is clean.
+fn find_stray_produced_by_flow(input: &ModelQueryInput) -> Option<String> {
+    fn in_clause(wc: &BTreeMap<String, WhereCondition>, top: bool) -> Option<String> {
+        for (key, cond) in wc {
+            if key == "producedByFlow" && !top {
+                return Some("nested in a where branch".to_string());
+            }
+            match cond {
+                WhereCondition::SubClause(map) => {
+                    if let Some(hit) = in_clause(map, false) {
+                        return Some(hit);
+                    }
+                }
+                WhereCondition::SubClauses(branches) => {
+                    for branch in branches {
+                        if let Some(hit) = in_clause(branch, false) {
+                            return Some(hit);
+                        }
+                    }
+                }
+                WhereCondition::Ops(ops) => {
+                    for nested in [&ops.some, &ops.none].into_iter().flatten() {
+                        if let Some(hit) = in_clause(nested, false) {
+                            return Some(hit);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    if let Some(wc) = &input.where_clause {
+        // The caller extracted the top-level key before scanning; one still
+        // here at the top means the caller never extracted (include
+        // sub-queries), and that position cannot act either.
+        if let Some(hit) = in_clause(wc, true) {
+            return Some(hit);
+        }
+    }
+    if let Some(includes) = &input.include {
+        for value in includes.values() {
+            if let IncludeValue::SubQuery(sub) = value {
+                if sub
+                    .where_clause
+                    .as_ref()
+                    .is_some_and(|wc| wc.contains_key("producedByFlow"))
+                {
+                    return Some("in an include sub-query".to_string());
+                }
+                if let Some(hit) = find_stray_produced_by_flow(sub) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    if let Some(projections) = &input.projections {
+        for proj in projections.values() {
+            if let Some(wc) = &proj.where_clause {
+                if wc.contains_key("producedByFlow") {
+                    return Some("in a projection where clause".to_string());
+                }
+                if let Some(hit) = in_clause(wc, false) {
+                    return Some(hit);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Constrain the query to `allowed` ids, intersecting with any `id`
+/// condition the caller already wrote. Returns `false` when the resulting
+/// set is empty — the caller should answer with no instances rather than
+/// send the store an empty `VALUES`.
+///
+/// An existing `id` condition that is not a plain string or string array is
+/// refused: intersecting a verified id set with operator or combinator
+/// semantics has no defined meaning, and approximating one would return an
+/// answer to a question the caller did not ask.
+pub fn constrain_ids(
+    input: &mut ModelQueryInput,
+    allowed: std::collections::BTreeSet<String>,
+) -> Result<bool, String> {
+    let wc = input.where_clause.get_or_insert_with(BTreeMap::new);
+    let intersected: Vec<String> = match wc.get("id") {
+        None => allowed.into_iter().collect(),
+        Some(WhereCondition::String(one)) => allowed.into_iter().filter(|id| id == one).collect(),
+        Some(WhereCondition::StringArray(several)) => allowed
+            .into_iter()
+            .filter(|id| several.contains(id))
+            .collect(),
+        Some(other) => {
+            return Err(format!(
+                "`producedByFlow` cannot be combined with this `id` condition ({other:?}); \
+                 use a plain id or an id list"
+            ))
+        }
+    };
+    let any = !intersected.is_empty();
+    wc.insert("id".to_string(), WhereCondition::StringArray(intersected));
+    Ok(any)
 }
 
 /// Parameters for SPARQL-side pagination (pushed ORDER BY + LIMIT + OFFSET).
@@ -734,6 +1049,160 @@ mod where_condition_deser_tests {
         let mq: ModelQueryInput = serde_json::from_value(json).unwrap();
         let wc = mq.where_clause.unwrap();
         assert!(matches!(wc.get("OR"), Some(WhereCondition::SubClauses(b)) if b.len() == 2));
+    }
+}
+
+#[cfg(test)]
+mod produced_by_flow_filter_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    fn input(json: serde_json::Value) -> ModelQueryInput {
+        serde_json::from_value(json).expect("query parses")
+    }
+
+    fn ids(list: &[&str]) -> BTreeSet<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// The filter comes out parsed and the where clause no longer carries the
+    /// key — `matches_where` must never see it as a property named
+    /// `producedByFlow`, which no instance has and every instance would fail.
+    #[test]
+    fn the_filter_is_extracted_and_removed_from_the_where_clause() {
+        let mut q = input(serde_json::json!({
+            "where": {
+                "producedByFlow": { "flow": "coasys://DeliveryFlow", "state": "done" },
+                "title": "Ship it",
+            }
+        }));
+        let filter = take_produced_by_flow(&mut q)
+            .expect("well-formed")
+            .expect("present");
+        assert_eq!(
+            filter,
+            ProducedByFlowFilter {
+                flow: "coasys://DeliveryFlow".into(),
+                state: Some("done".into()),
+            }
+        );
+        let wc = q
+            .where_clause
+            .as_ref()
+            .expect("the rest of the clause stays");
+        assert!(!wc.contains_key("producedByFlow"));
+        assert!(wc.contains_key("title"), "sibling conditions are untouched");
+
+        let mut none = input(serde_json::json!({ "where": { "title": "x" } }));
+        assert_eq!(take_produced_by_flow(&mut none).expect("fine"), None);
+
+        let mut stateless = input(serde_json::json!({
+            "where": { "producedByFlow": { "flow": "coasys://DeliveryFlow" } }
+        }));
+        let filter = take_produced_by_flow(&mut stateless).expect("state is optional");
+        assert_eq!(filter.expect("present").state, None);
+    }
+
+    /// A verification filter that silently dropped would admit everything.
+    /// Malformed shapes are errors, whatever else the query says.
+    ///
+    /// Red if `take_produced_by_flow` skips a shape it cannot parse.
+    #[test]
+    fn a_malformed_filter_is_an_error_not_a_skip() {
+        for bad in [
+            serde_json::json!({ "where": { "producedByFlow": "coasys://DeliveryFlow" } }),
+            serde_json::json!({ "where": { "producedByFlow": { "state": "done" } } }),
+            serde_json::json!({ "where": { "producedByFlow": { "flow": "f", "extra": "x" } } }),
+            serde_json::json!({ "where": { "producedByFlow": { "flow": 42 } } }),
+        ] {
+            let mut q = input(bad.clone());
+            assert!(
+                take_produced_by_flow(&mut q).is_err(),
+                "must refuse rather than silently admit everything: {bad}"
+            );
+        }
+    }
+
+    /// Nowhere the resolver cannot act may carry the key: nested branches,
+    /// quantifiers, include sub-queries and projections all refuse. Each
+    /// would otherwise read as an ordinary (never-matching or, worse,
+    /// always-matching) property condition.
+    #[test]
+    fn the_key_is_refused_anywhere_but_the_top_level() {
+        for (label, bad) in [
+            (
+                "OR branch",
+                serde_json::json!({ "where": { "OR": [
+                    { "producedByFlow": { "flow": "f" } },
+                    { "title": "x" },
+                ]}}),
+            ),
+            (
+                "some quantifier",
+                serde_json::json!({ "where": { "comments": { "some": {
+                    "producedByFlow": { "flow": "f" }
+                }}}}),
+            ),
+            (
+                "include sub-query",
+                serde_json::json!({ "include": { "comments": {
+                    "where": { "producedByFlow": { "flow": "f" } }
+                }}}),
+            ),
+            (
+                "projection where",
+                serde_json::json!({ "projections": { "$n": {
+                    "from": "comments",
+                    "where": { "producedByFlow": { "flow": "f" } }
+                }}}),
+            ),
+        ] {
+            let mut q = input(bad);
+            assert!(
+                take_produced_by_flow(&mut q).is_err(),
+                "{label}: a position the resolver cannot see must refuse"
+            );
+        }
+    }
+
+    /// The resolved id set lands as a store-pushable `id` IN-condition and
+    /// intersects with whatever `id` condition the caller already wrote —
+    /// both conditions hold, never either alone.
+    #[test]
+    fn the_allow_set_intersects_an_existing_id_condition() {
+        let mut fresh = input(serde_json::json!({ "where": { "title": "x" } }));
+        assert!(constrain_ids(&mut fresh, ids(&["a", "b"])).expect("ok"));
+        assert!(matches!(
+            fresh.where_clause.as_ref().unwrap().get("id"),
+            Some(WhereCondition::StringArray(v)) if v == &vec!["a".to_string(), "b".to_string()]
+        ));
+
+        let mut narrowed = input(serde_json::json!({ "where": { "id": ["b", "c"] } }));
+        assert!(constrain_ids(&mut narrowed, ids(&["a", "b"])).expect("ok"));
+        assert!(matches!(
+            narrowed.where_clause.as_ref().unwrap().get("id"),
+            Some(WhereCondition::StringArray(v)) if v == &vec!["b".to_string()]
+        ));
+
+        let mut disjoint = input(serde_json::json!({ "where": { "id": "c" } }));
+        assert!(
+            !constrain_ids(&mut disjoint, ids(&["a", "b"])).expect("ok"),
+            "a disjoint intersection reports empty so the caller answers with no rows"
+        );
+
+        let mut weird = input(serde_json::json!({ "where": { "id": { "contains": "a" } } }));
+        assert!(
+            constrain_ids(&mut weird, ids(&["a"])).is_err(),
+            "an id condition with operator semantics has no defined intersection"
+        );
+    }
+
+    /// An empty allow set must yield `false`, not an empty `VALUES` block
+    /// handed to the store.
+    #[test]
+    fn an_empty_allow_set_short_circuits() {
+        let mut q = input(serde_json::json!({}));
+        assert!(!constrain_ids(&mut q, BTreeSet::new()).expect("ok"));
     }
 }
 

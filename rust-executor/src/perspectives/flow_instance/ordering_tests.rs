@@ -110,6 +110,11 @@ fn vouched(uri: &str, votes: &[(&str, &str)]) -> VouchedAtom {
             proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
             proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
             evidence_hash: "seal".to_string(),
+            // `approved` is terminal, and a terminal edge pools votes per
+            // outputs commitment (#1108/#1118) — one shared commitment keeps
+            // these tests about ordering, not grouping.
+            outputs_hash: Some("shared-outputs-hash".to_string()),
+            outputs: Vec::new(),
             votes: votes.clone(),
         },
         eligible_votes: votes,

@@ -1,4 +1,5 @@
 pub mod auto_processor;
+pub(crate) mod content_address;
 pub(crate) mod flow_classes;
 pub(crate) mod flow_context;
 pub(crate) mod flow_evaluator;
@@ -730,23 +731,25 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
+    // `instance.links` is already `LinkExpression`. Decorating just to persist
+    // would convert back at the store boundary. Missing status defaults to
+    // Local, matching the previous decorate path (not Shared).
+    let additions: Vec<crate::types::LinkExpression> = instance
         .links
         .into_iter()
-        .map(|link| {
-            let status = link.status.clone().unwrap_or(LinkStatus::Local);
-            crate::types::DecoratedLinkExpression::from((link, status))
+        .map(|mut link| {
+            if link.status.is_none() {
+                link.status = Some(LinkStatus::Local);
+            }
+            link
         })
         .collect();
 
-    let diff = crate::types::DecoratedPerspectiveDiff {
-        additions: decorated_links,
-        removals: vec![],
-    };
-
-    // Write to SPARQL store
     perspective
-        .persist_link_diff(&diff)
+        .persist_link_diff(&crate::types::PerspectiveDiff {
+            additions,
+            removals: vec![],
+        })
         .await
         .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 
