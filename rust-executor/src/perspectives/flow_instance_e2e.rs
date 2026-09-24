@@ -3136,9 +3136,14 @@ async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt:
 /// The ids `model_query` returns for `ns://Task` under a `producedByFlow`
 /// filter, plus the reported total.
 async fn tasks_produced_by(f: &Fixture, query: serde_json::Value) -> (Vec<String>, usize) {
+    ids_of_class(f, "ns://Task", query).await
+}
+
+/// The ids `model_query` returns for `class`, plus the reported total.
+async fn ids_of_class(f: &Fixture, class: &str, query: serde_json::Value) -> (Vec<String>, usize) {
     let json = f
         .perspective
-        .model_query("ns://Task", &query.to_string())
+        .model_query(class, &query.to_string())
         .await
         .expect("model_query");
     let result: serde_json::Value = serde_json::from_str(&json).expect("result parses");
@@ -3442,4 +3447,81 @@ async fn the_page_is_cut_after_the_filter_so_limit_counts_only_valid_outputs() {
         "a page of 2 is 2 VALID outputs — got {ids:?}"
     );
     assert_eq!(total, 2, "and the total counts only what verified");
+}
+
+/// A second class the fixture's Task node also conforms to: it asks for a
+/// `title` and nothing else, so every Task is a `ns://Role` instance too —
+/// with other content, since the hydration reads through a different shape.
+const ROLE_SDNA: &str = r#"{
+  "target_class":"ns://Role",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://title","target":"value"}],
+  "properties":[
+    {"path":"ns://title","name":"title","identity":true,"min_count":1,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://title","target":"value"}]}
+  ]
+}"#;
+
+/// The class dimension through the filter (#1108): a run that committed to a
+/// node **as a Task** has said nothing about that node as a Role, even when
+/// the node conforms to both. So `producedByFlow` admits it into the Task
+/// query and refuses it from the Role query — same flow, same receipt, same
+/// id.
+///
+/// Pins which guard answered: the unfiltered Role query DOES return the
+/// node, so shape conformance is not what excludes it — only the class
+/// match on the committed `(class, id)` can be.
+///
+/// Red if the filter admits by id alone (`output_matches_class` ignored, or
+/// matching on `output.id` only).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_output_committed_as_a_task_is_not_produced_by_the_flow_as_a_role() {
+    use super::flow_instance::produced::mint_flow_receipt;
+    use super::perspective_instance::SdnaType;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_sdna(
+            "ns://Role".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(ROLE_SDNA.to_string()),
+            &ctx,
+        )
+        .await
+        .expect("add_sdna(Role)");
+
+    // Precondition: the Task node IS a Role instance by conformance.
+    let (ids, _) = ids_of_class(&f, "ns://Role", serde_json::json!({})).await;
+    assert!(
+        ids.contains(&TASK.to_string()),
+        "precondition: the Task node conforms to ns://Role — got {ids:?}"
+    );
+
+    let instance = f.instance_uri.clone();
+    propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+    mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+        .await
+        .expect("mint");
+
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": f.flow_uri } } });
+
+    let (ids, total) = ids_of_class(&f, "ns://Task", filter.clone()).await;
+    assert_eq!(ids, vec![TASK.to_string()], "control: the committed class");
+    assert_eq!(total, 1);
+
+    let (ids, total) = ids_of_class(&f, "ns://Role", filter).await;
+    assert!(
+        ids.is_empty(),
+        "committed as a Task, so not a valid Role output — got {ids:?}"
+    );
+    assert_eq!(total, 0, "and the total agrees");
 }
