@@ -42,6 +42,12 @@ lazy_static! {
     static ref ALLIANCE_DNA_HASH: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> =
         Arc::new(tokio::sync::Mutex::new(false));
+    /// Held across every alliance zome call (`call_alliance_zome`). Unyt reaches the
+    /// dispatcher from Rust, not through a language runtime, so nothing else serializes it,
+    /// and since #1133 the dispatcher runs zome calls concurrently. Unyt's writes race each
+    /// other on one source chain: the per-signal `handle_signal` tasks and the poll loop
+    /// (`check_pending_payments` / `check_pending_sends`) both commit and accept.
+    static ref ALLIANCE_CALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 }
 
 /// Check if a cell_id_key (hex dna_hash:hex agent_key) belongs to the alliance DNA.
@@ -841,12 +847,14 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
     }
 }
 
-/// Runs one zome call on the alliance cell.
+/// Runs one zome call on the alliance cell, after any other Unyt call has finished
+/// (`ALLIANCE_CALL_LOCK`).
 async fn call_alliance_zome(
     hc: &HolochainServiceInterface,
     fn_name: &str,
     payload: Option<ExternIO>,
 ) -> Result<ZomeCallResponse, AnyError> {
+    let _one_at_a_time = ALLIANCE_CALL_LOCK.lock().await;
     hc.call_zome_function(
         UNYT_APP_ID.to_string(),
         UNYT_CELL_NAME.to_string(),

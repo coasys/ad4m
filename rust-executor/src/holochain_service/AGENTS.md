@@ -16,6 +16,10 @@ method in `interface.rs`. Keep them in sync until item 10 collapses them. A new
 variant that mutates the conductor's app set must also be added to `is_lifecycle`,
 or it will run concurrently with zome calls (#1133).
 
+Zome calls run concurrently, including two on the same cell. Language code is
+serialized per language by its runtime; a Rust caller that writes to a cell from
+several tasks must serialize itself, as `unyt_service::call_alliance_zome` does.
+
 ## Facts
 
 - `HolochainService::init` is invoked from `agent/conductor_startup.rs`, in a task that
