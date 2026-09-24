@@ -1998,6 +1998,21 @@ fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) 
         .collect()
 }
 
+/// Whether the text after a `<` is an IRIREF: characters SPARQL allows in an
+/// IRI, then `>`. Whitespace, a quote or another `<` first means the `<` was
+/// an operator.
+fn opens_iri(rest: impl Iterator<Item = char>) -> bool {
+    for c in rest {
+        match c {
+            '>' => return true,
+            '<' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' => return false,
+            c if c <= ' ' => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Rewrite the SPARQL variables in one pattern, leaving lexical values alone.
 fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + namespace.len());
@@ -2030,7 +2045,10 @@ fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
             }
             // An IRI is opaque too, and may legitimately carry `?source` in a
             // query component. `validate_iri` guarantees no `>` inside one.
-            '<' => {
+            // A `<` that does not open an IRIREF is the less-than operator
+            // (`STR(?t1) < STR(?t0)`, `lt`), and the variables after it must
+            // still be rewritten.
+            '<' if opens_iri(chars.clone()) => {
                 out.push(c);
                 for iri in chars.by_ref() {
                     out.push(iri);
@@ -2558,6 +2576,24 @@ mod relation_quantifier_tests {
         assert_eq!(
             rebased[0],
             "    ?_q0commentst <we://p?source=1> ?_q0commentsft_x ."
+        );
+    }
+
+    #[test]
+    fn rebasing_rewrites_variables_after_a_less_than_operator() {
+        // A `<` that opens no IRI is the operator. Read as an IRI it swallowed
+        // everything up to the next `>`, so `?_t0` and the `VALUES` variable
+        // kept their outer names, and a creator check inside a quantifier
+        // compared against an unbound variable (#1114).
+        let patterns = vec![
+            "FILTER(STR(?_t1) < STR(?_t0)) VALUES ?_p { <we://p> } FILTER(?_n <= 3)".to_string(),
+        ];
+
+        let rebased = rebase_into_subquery(&patterns, "q0", "?_q0t");
+
+        assert_eq!(
+            rebased[0],
+            "FILTER(STR(?_q0t1) < STR(?_q0t0)) VALUES ?_q0p { <we://p> } FILTER(?_q0n <= 3)"
         );
     }
 

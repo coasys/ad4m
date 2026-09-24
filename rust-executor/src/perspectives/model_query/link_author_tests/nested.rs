@@ -389,9 +389,30 @@ async fn not_around_a_bare_author_is_still_instance_level() {
 /// clause, `verdict: { eq, author }` scopes the linked review's own link. The
 /// clause is rebased onto the quantifier's variable, and that rebase has to
 /// rewrite `?source` inside the reifier's `<<( … )>>` too.
+///
+/// `ns://t/mallory-made` tells the two halves of side by side apart: Mallory
+/// created its review (the review's earliest link), and admin wrote its
+/// verdict. The nested form matches it, side by side does not. If the rebase
+/// left the instance-level half pointing at the task (admin's), side by side
+/// would match it too.
 #[tokio::test]
 async fn a_nested_author_inside_a_quantifier_scopes_the_linked_records_link() {
     let (store, task_shape, resolver) = task_review_fixture();
+    let (task, review) = ("ns://t/mallory-made", "ns://rv/mallory-made");
+    for l in [
+        link(ADMIN, task, "ns://type", "ns://task", T0),
+        link(ADMIN, task, "ns://review", review, T0),
+        link(MALLORY, review, "ns://type", "ns://review", T0),
+        link(
+            ADMIN,
+            review,
+            "ns://verdict",
+            &lit("approved"),
+            "2026-01-01T00:00:01.000Z",
+        ),
+    ] {
+        store.add_link(&l).unwrap();
+    }
 
     assert_eq!(
         ids_on_every_plan_of(
@@ -401,10 +422,10 @@ async fn a_nested_author_inside_a_quantifier_scopes_the_linked_records_link() {
             json!({ "reviews": { "some": { "verdict": { "eq": "approved", "author": ADMIN } } } })
         )
         .await,
-        vec!["ns://t/honest"]
+        vec!["ns://t/honest", task]
     );
-    // Side by side in the nested clause: the review's author (admin, for both)
-    // and the verdict link's author.
+    // Side by side in the nested clause: the review's author and the verdict
+    // link's author. Mallory created one review and wrote the other's verdict.
     assert_eq!(
         ids_on_every_plan_of(
             &store,
