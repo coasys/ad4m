@@ -180,8 +180,14 @@ pub(crate) async fn mint_flow_instance(
 /// [`mint_flow_instance`], so the caller controls uniqueness and atomic
 /// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
-/// `evidence` is a collection: it is passed as a JSON array and
-/// `create_subject` expands it into one `addLink` per element.
+/// `evidence` and `outputs` are collections, written as one link per element
+/// **directly**, not through `create_subject`: the class may be registered
+/// under a client's shape rather than the hardwired one — the TS SDK's
+/// `FlowInstance.start` registers `FlowTransitionProposal` itself, with both
+/// as `@HasMany` relations (an `ad4m://adder`, no `ad4m://setter`) — and
+/// `create_subject` writes values only through setters. The engine's own
+/// commitment must not depend on which shape a client registered. Each
+/// target is resolved exactly as the hardwired setter would (#1127).
 /// `rationale` is written only when `Some` and non-empty. `runUri` is not
 /// written; engine-emitted proposals do not track back to a run today.
 ///
@@ -243,8 +249,14 @@ pub(crate) async fn write_flow_transition_proposal(
         }
     }
 
+    // The collections, as `(property, predicate, elements)`, written below.
+    let mut collections: Vec<(&str, &str, Vec<String>)> = Vec::new();
     if !evidence_ids.is_empty() {
-        values["evidence"] = serde_json::json!(evidence_ids);
+        collections.push((
+            "evidence",
+            PROPOSAL_EVIDENCE_PREDICATE,
+            evidence_ids.to_vec(),
+        ));
     }
 
     if let Some(items) = outputs {
@@ -258,7 +270,11 @@ pub(crate) async fn write_flow_transition_proposal(
             .map(OutputRef::encode)
             .collect();
         if !encoded.is_empty() {
-            values["outputs"] = serde_json::json!(encoded);
+            collections.push((
+                "outputs",
+                crate::perspectives::flow_instance::atom::OUTPUT_PREDICATE,
+                encoded,
+            ));
         }
     }
 
@@ -270,7 +286,7 @@ pub(crate) async fn write_flow_transition_proposal(
             },
             uri.clone(),
             Some(values),
-            batch_id,
+            batch_id.clone(),
             context,
         )
         .await
@@ -278,8 +294,42 @@ pub(crate) async fn write_flow_transition_proposal(
             anyhow::anyhow!("write_flow_transition_proposal: create_subject failed: {e:#}")
         })?;
 
+    let mut links = Vec::new();
+    for (property, predicate, elements) in collections {
+        for element in elements {
+            let target = perspective
+                .resolve_property_value(
+                    FLOW_TRANSITION_PROPOSAL_CLASS,
+                    property,
+                    &serde_json::Value::String(element),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("write_flow_transition_proposal: `{property}` value: {e:#}")
+                })?;
+            links.push(Link {
+                source: uri.clone(),
+                predicate: Some(predicate.to_string()),
+                target,
+            });
+        }
+    }
+    if !links.is_empty() {
+        perspective
+            .add_links(links, LinkStatus::Shared, batch_id, context)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("write_flow_transition_proposal: collection links: {e:#}")
+            })?;
+    }
+
     Ok(uri)
 }
+
+/// The predicate a proposal's `evidence` collection is written under — the
+/// hardwired SDNA's `evidence` path (locked by the SDNA tests below).
+pub(crate) const PROPOSAL_EVIDENCE_PREDICATE: &str = "ad4m://flow/evidence";
 
 /// Write a `FlowInstance`'s `currentState` link — the engine's **cache** of
 /// what [`crate::perspectives::flow_instance::fold_read_set`] derived.
@@ -548,6 +598,8 @@ mod tests {
         // but for the writer's payload: every JSON key the writer sends
         // to `create_subject` MUST be a declared SDNA property name.
         // A silent mismatch would return Ok while never writing.
+        // `evidence` and `outputs` are written as direct links (#1127), but
+        // their values still resolve through these property names.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let props: Vec<&str> = v["properties"]
             .as_array()
@@ -584,11 +636,12 @@ mod tests {
 
     #[test]
     fn evidence_and_outputs_properties_are_collections_with_add_link_setters() {
-        // The writer passes `evidence` and `outputs` as JSON arrays, and
-        // `create_subject` only expands an array into per-element
-        // `addLink`s when every setter action is `addLink` — on a
-        // `setSingleTarget` setter the array would be stored as one
-        // `literal:json:` blob instead. Locking the shape here so a
+        // The engine writes these as one link per element itself (#1127),
+        // but any other writer — a client calling `create_subject` with an
+        // array — relies on `create_subject` expanding it into per-element
+        // `addLink`s, which it does only when every setter action is
+        // `addLink`; on a `setSingleTarget` setter the array would be stored
+        // as one `literal:json:` blob instead. Locking the shape here so a
         // well-meaning SDNA edit that switches to `setSingleTarget`
         // (which would type-check) breaks this test instead of silently
         // changing the on-graph representation at runtime. For `outputs`
@@ -641,6 +694,11 @@ mod tests {
                 .map(str::to_string)
         };
         assert_eq!(path_of("outputs").as_deref(), Some(OUTPUT_PREDICATE));
+        // The writer names the evidence predicate itself (#1127).
+        assert_eq!(
+            path_of("evidence").as_deref(),
+            Some(super::PROPOSAL_EVIDENCE_PREDICATE)
+        );
         assert_eq!(
             path_of("outputsHash").as_deref(),
             Some(OUTPUTS_HASH_PREDICATE)

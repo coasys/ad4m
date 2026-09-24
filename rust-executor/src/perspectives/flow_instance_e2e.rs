@@ -3108,3 +3108,111 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
         "the honest end-to-end receipt verifies, got: {verdict}"
     );
 }
+
+/// The TS SDK registers its own `FlowTransitionProposal` shape
+/// (`FlowInstance.start` → `Ad4mModel.registerAll`), and there `evidence` and
+/// `outputs` are `@HasMany` relations: an `ad4m://adder`, no `ad4m://setter`.
+/// That shape carries the `nonce` path, so `ensure_flow_model_classes` keeps
+/// it — and `create_subject` writes values only through setters. The
+/// engine's own proposal write must not depend on which shape a client
+/// registered: the outputs commitment it signs has to land as links, or the
+/// run completes with nothing to mint (found by #1127's SDK test in CI).
+///
+/// Red if the writer hands the collections to `create_subject` — the
+/// relation-shaped class drops both with a "declares no setter" warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_registered_relation_shape_does_not_drop_the_proposal_collections() {
+    use super::flow_classes::{FLOW_TRANSITION_PROPOSAL_CLASS, FLOW_TRANSITION_PROPOSAL_SDNA};
+    use super::flow_instance::atom::OUTPUT_PREDICATE;
+    use super::flow_instance::receipt::FlowReceipt;
+    use super::perspective_instance::SdnaType;
+
+    let mut f = seed_satisfied_fixture(None).await;
+
+    // The relation-style shape: same class, same paths, but the two
+    // collections carry an adder instead of a setter — what the TS SDK's
+    // `@HasMany` generates.
+    let mut shape: serde_json::Value =
+        serde_json::from_str(FLOW_TRANSITION_PROPOSAL_SDNA).expect("hardwired SDNA parses");
+    for property in shape["properties"].as_array_mut().expect("properties") {
+        if matches!(property["name"].as_str(), Some("evidence" | "outputs")) {
+            let setter = property
+                .as_object_mut()
+                .expect("property object")
+                .remove("setter")
+                .expect("the hardwired collection has a setter");
+            property["adder"] = setter;
+        }
+    }
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_sdna(
+            FLOW_TRANSITION_PROPOSAL_CLASS.to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(shape.to_string()),
+            &ctx,
+        )
+        .await
+        .expect("register the relation-style proposal shape");
+
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("propose settles on {n: 1}");
+
+    let proposal_links = links_of(&f, &outcome.proposal_uri).await;
+    let with = |predicate: &str| {
+        proposal_links
+            .iter()
+            .filter(|l| l.data.predicate.as_deref() == Some(predicate))
+            .count()
+    };
+    assert_eq!(
+        with(OUTPUT_PREDICATE),
+        1,
+        "the committed output must land as a link whatever shape is registered"
+    );
+    assert_eq!(
+        with("ad4m://flow/evidence"),
+        1,
+        "and so must the cited evidence"
+    );
+
+    // Mint from what the proposal's links name, the way a receipt minter
+    // reads a completed run — not from the refs this test proposed with.
+    let read_set = f.read_set().await;
+    let named: Vec<OutputRef> = read_set
+        .atoms()
+        .into_iter()
+        .find(|a| a.uri == outcome.proposal_uri)
+        .expect("the proposal is an atom")
+        .outputs;
+    assert_eq!(named, vec![task_ref(TASK)], "the atom reads its outputs back");
+    let flows = load_shacl_flows(&f.perspective).await.expect("flows");
+    let loaded = load_outputs(&f.perspective, &named)
+        .await
+        .expect("load outputs");
+    let receipt = FlowReceipt::mint(
+        &flows[&f.flow_uri],
+        read_set,
+        loaded.into_values().collect(),
+        Vec::new(),
+    )
+    .expect("a run whose outputs landed mints");
+    assert_eq!(
+        receipt
+            .outputs
+            .iter()
+            .map(OutputRef::of)
+            .collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+}
