@@ -58,7 +58,8 @@ fn make_link_with_status(
 /// paging, not signatures, so they read through [`fixture_query`] /
 /// [`fixture_query_from_json`] with `include_unverified` (which `include` and
 /// projection sub-queries inherit). The default itself is tested against real
-/// signatures in the `proof_valid_*` tests at the end of this file.
+/// signatures in `proof_valid_tests.rs`, and through the SDK in
+/// `tests/js/tests/model/model-unverified-links.test.ts`.
 fn with_unverified(query: &ModelQueryInput) -> ModelQueryInput {
     let mut query = query.clone();
     if query.include_unverified.is_none() {
