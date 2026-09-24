@@ -25,7 +25,6 @@ use super::flow_instance::atom::{
     RESOLVED_AS_PREDICATE, ROLE_GRANT_REVOKED_PREDICATE, TO_STATE_PREDICATE,
 };
 use super::flow_instance::fold::DerivedState;
-use super::flow_instance::grant::GrantContext;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
@@ -34,10 +33,10 @@ use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff}
 
 mod cache_and_marks;
 mod content_addressed_uri;
-mod granted_by;
 mod manual_path;
 mod outputs_commitment;
 mod produced_by;
+mod produced_by_gate;
 mod proposer_and_evidence;
 mod quorum_and_read_set;
 mod roles;

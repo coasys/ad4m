@@ -209,38 +209,40 @@ pub struct ModelQuery {
     /// TS `or?: ModelQuery[]` field (§7.3 multi-role composition).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub or: Option<Vec<ModelQuery>>,
-    /// Role membership granted by another flow completing. Only meaningful on
-    /// a `fromRole` query; see
+    /// Role membership granted by another flow completing: each matched
+    /// instance must be a valid output of that flow, and the grant is dated
+    /// from the run's quorum. Only meaningful on a `fromRole` query; see
     /// [`grant`](crate::perspectives::flow_instance::grant) for the semantics,
     /// the failure directions, and — importantly for anyone configuring one —
     /// what it takes to un-grant.
     #[serde(
-        rename = "grantedByFlow",
+        rename = "producedByFlow",
         default,
         skip_serializing_if = "Option::is_none"
     )]
-    pub granted_by_flow: Option<GrantedByFlow>,
+    pub produced_by_flow: Option<ProducedByFlow>,
 }
 
-/// A `fromRole` gate that additionally requires each matched instance to be an
-/// output of a completed run of a named flow, and dates the grant from that
-/// run's quorum rather than from an assignment link.
+/// A `fromRole` gate that additionally requires each matched instance to be a
+/// valid output of a completed run of a named flow, and dates the grant from
+/// that run's quorum rather than from an assignment link.
 ///
-/// Both fields are required and both are checked: without `flow`, completing
-/// any flow would grant every such role; without `terminal_state`, a run that
-/// settled into a flow's `rejected` state would grant what its `approved`
-/// state was meant to.
+/// The same name and shape as the model-query filter
+/// `where: { producedByFlow: { flow, state? } }` (#1127), and decided by the
+/// same check ([`produced`](crate::perspectives::flow_instance::produced)).
+/// The one difference is that `state` is **required** here: without it, a
+/// run that settled into a flow's `rejected` state would grant what its
+/// `approved` state was meant to.
 ///
-/// Mirrors `GrantedByFlow` in `core/src/shacl/SHACLFlow.ts`.
+/// Mirrors `ProducedByFlow` in `core/src/shacl/SHACLFlow.ts`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
-pub struct GrantedByFlow {
+pub struct ProducedByFlow {
     /// The granting flow's `flow_uri()` — `{namespace}{name}Flow`. Compared
     /// with the receipt's own `flow_uri`.
     pub flow: String,
     /// The state that run must have settled into, compared with the state the
     /// verifier's **own** fold re-derived, never the one the receipt asserts.
-    #[serde(rename = "terminalState")]
-    pub terminal_state: String,
+    pub state: String,
 }
 
 /// `count` shape on a `ModelQuery`. Default `{ min: 1 }` — at least one

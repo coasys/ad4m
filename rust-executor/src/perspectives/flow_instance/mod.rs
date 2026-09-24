@@ -113,7 +113,6 @@ use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use fold::{rule_for, Contention, DerivedState, ResolvedRule};
-use grant::GrantContext;
 use roles::resolve_role_grants;
 use std::collections::{BTreeSet, HashMap};
 
@@ -239,21 +238,11 @@ impl<'a> FlowInstance<'a> {
     /// The authoritative state of this flow: calls `read_set` (all I/O), then
     /// `fold_read_set` (pure). The single entry point the rest of the engine
     /// uses for "what state is this flow in" — nothing else is authoritative.
-    ///
-    /// `catalogue` is the caller's whole flow catalogue, not just this flow:
-    /// a `grantedByFlow` gate verifies receipts for *other* flows, and it
-    /// verifies them against the reader's own definitions. Every caller
-    /// already holds one — they had to look `self.flow` up in it.
     pub async fn derive_state(
         &self,
         perspective: &PerspectiveInstance,
-        catalogue: &HashMap<String, SHACLFlow>,
     ) -> anyhow::Result<DerivedState> {
-        fold_read_set(
-            self.flow,
-            &self.read_set(perspective).await?,
-            GrantContext::root(catalogue),
-        )
+        fold_read_set(self.flow, &self.read_set(perspective).await?)
     }
 }
 
@@ -292,7 +281,7 @@ pub async fn derive_states(
             continue;
         };
         match FlowInstance::from_record(record, flow)
-            .derive_state(perspective, flows_by_uri)
+            .derive_state(perspective)
             .await
         {
             Ok(derived) => out.push(DerivedFlow {

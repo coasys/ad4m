@@ -4,7 +4,6 @@
 
 use super::atom::{marked_fired, TransitionAtom};
 use super::fold::{fold, rule_for, DerivedState, ResolvedRule, VouchedAtom};
-use super::grant::GrantContext;
 use super::roles::{self, eligible_votes, RoleGrant, RoleGrantEvidence};
 use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_evaluator::requires_query_input;
@@ -304,12 +303,10 @@ fn link_counts(link: &DecoratedLinkExpression) -> bool {
 /// construction
 /// ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)).
 ///
-/// Carried **receipts** pass through untouched. There is nothing to
-/// re-decorate: a receipt is not a link and carries no per-replica read view,
-/// and every claim inside it —  including each of its own links' signatures —
-/// is recomputed by [`verify_receipt_within`](verify) when the grant gate
-/// reaches it. Filtering here would be a second, weaker gate in front of the
-/// real one.
+/// A carried `produced_at` passes through untouched: it is a date, not a
+/// link, and there is nothing here to re-check it against. What it is worth
+/// to a reader of a serialised read-set is stated in
+/// [`grant`](super::grant) § *What a receipt of a gated flow proves*.
 fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
     let grant_links: Vec<LinkExpression> = history
         .grant_links
@@ -327,7 +324,7 @@ fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstan
         } else {
             history.asserted_instance_timestamp.clone()
         },
-        granting_receipts: history.granting_receipts.clone(),
+        produced_at: history.produced_at.clone(),
     }
 }
 
@@ -372,20 +369,7 @@ fn delocalized(link: &LinkExpression) -> LinkExpression {
 /// This is the function an off-perspective verifier re-runs over a minted
 /// token's proof to reach the same verdict independently — after
 /// re-decorating the carried links' signatures, per [`ReadSet`].
-///
-/// `grants` carries the flow catalogue and the remaining depth budget that a
-/// `grantedByFlow` gate needs ([`grant`]). It is a parameter rather than
-/// something this function builds because a receipt reached by following a
-/// `granted_by` edge must fold with what is *left* of the budget, not with a
-/// fresh one — and because a reader folding against the wrong catalogue would
-/// otherwise silently grant nothing. Callers with no grant gates in play still
-/// pass [`GrantContext::root`] over their own catalogue; there is no
-/// catalogue-free shortcut on purpose.
-pub fn fold_read_set(
-    flow: &SHACLFlow,
-    read_set: &ReadSet,
-    grants: GrantContext<'_>,
-) -> anyhow::Result<DerivedState> {
+pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<DerivedState> {
     let Some(initial) = initial_state_of(flow) else {
         anyhow::bail!(
             "fold_read_set: flow `{}` has no states, so {} has no genesis to fold from",
@@ -404,7 +388,7 @@ pub fn fold_read_set(
             initial
         );
     }
-    let grants = role_grant_views(flow, read_set, grants)?;
+    let grants = role_grant_views(flow, read_set)?;
     let vouched: Vec<VouchedAtom> = read_set
         .atoms()
         .into_iter()
@@ -447,15 +431,11 @@ pub fn fold_read_set(
 /// ungated edge admits every vote regardless, and resolving it would only
 /// invite a reader to think the gate meant something.
 ///
-/// The `grantedByFlow` spec, like the authority rule, is read from **the flow
-/// definition passed in here** and never from the carried evidence: a minter
-/// who could name the granting flow would be naming the rule its own receipt
-/// is judged by.
-fn role_grant_views(
-    flow: &SHACLFlow,
-    read_set: &ReadSet,
-    ctx: GrantContext<'_>,
-) -> anyhow::Result<Vec<RoleGrant>> {
+/// The `producedByFlow` gate, like the authority rule, is read from **the
+/// flow definition passed in here** and never from the carried evidence: a
+/// minter who could name the granting flow would be naming the rule its own
+/// receipt is judged by.
+fn role_grant_views(flow: &SHACLFlow, read_set: &ReadSet) -> anyhow::Result<Vec<RoleGrant>> {
     let record = read_set.as_record(flow);
     let mut grants = Vec::with_capacity(read_set.role_grants.len());
     for evidence in &read_set.role_grants {
@@ -469,7 +449,7 @@ fn role_grant_views(
             continue;
         };
         let view = requires_query_input(role, &record, &evidence.did)
-            .and_then(|input| evidence.resolve(&input, role, ctx))
+            .and_then(|input| evidence.resolve(&input, role))
             .map_err(|e| {
                 e.context(format!(
                     "flow instance {}: role evidence for `{}` on `{}` does not resolve, so no \

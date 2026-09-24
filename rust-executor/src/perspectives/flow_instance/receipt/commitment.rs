@@ -142,14 +142,7 @@ mod tests {
                 ),
             ],
         );
-        let receipt = FlowReceipt::mint(
-            &flow,
-            rs,
-            outs(&[OUTPUT]),
-            Vec::new(),
-            GrantContext::empty(),
-        )
-        .expect("mints");
+        let receipt = FlowReceipt::mint(&flow, rs, outs(&[OUTPUT]), Vec::new()).expect("mints");
         assert_eq!(receipt.outputs, outs(&[OUTPUT]));
     }
 
@@ -169,8 +162,7 @@ mod tests {
         let uncommitted_uri = uncommitted.uri.clone();
         let rs = read_set("open", vec![uncommitted]);
 
-        let derived = fold_read_set(&two_state_flow(), &rs.reverified(), GrantContext::empty())
-            .expect("folds");
+        let derived = fold_read_set(&two_state_flow(), &rs.reverified()).expect("folds");
         assert_eq!(
             derived.state, "open",
             "an uncommitted terminal proposal settles nothing (#1108/#1118)"
@@ -180,7 +172,6 @@ mod tests {
             rs.clone(),
             outs(&[OUTPUT]),
             vec![delivered()],
-            GrantContext::empty(),
         )
         .expect_err("no commitment, no settle, no receipt");
         assert!(
@@ -260,14 +251,8 @@ mod tests {
         let rs = read_set("open", vec![alice, bob]);
 
         for named in [[OUTPUT], [ATTACKER]] {
-            let err = FlowReceipt::mint(
-                &flow,
-                rs.clone(),
-                outs(&named),
-                Vec::new(),
-                GrantContext::empty(),
-            )
-            .expect_err("conflicting commitments bind nothing");
+            let err = FlowReceipt::mint(&flow, rs.clone(), outs(&named), Vec::new())
+                .expect_err("conflicting commitments bind nothing");
             assert!(
                 format!("{err:#}").contains("can still transition out"),
                 "one vote per commitment is short of `{{n: 2}}` in every group, \

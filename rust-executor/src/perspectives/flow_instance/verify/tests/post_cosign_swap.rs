@@ -36,14 +36,8 @@ fn a_post_co_sign_outputs_swap_cannot_mint_or_verify_a_receipt() {
         }],
         Vec::new(),
     );
-    let receipt = FlowReceipt::mint(
-        &flow,
-        control,
-        outs(&[OUTPUT]),
-        vec![delivered()],
-        GrantContext::empty(),
-    )
-    .expect("control: the co-signed proposal mints for the outputs it named");
+    let receipt = FlowReceipt::mint(&flow, control, outs(&[OUTPUT]), vec![delivered()])
+        .expect("control: the co-signed proposal mints for the outputs it named");
     assert!(
         verify_receipt(&catalogue(vec![two_state_flow()]), &receipt).is_verified(),
         "control: and verifies"
@@ -76,14 +70,8 @@ fn a_post_co_sign_outputs_swap_cannot_mint_or_verify_a_receipt() {
         "the swapped fields do not address the voted URI, so the proposal \
          is not an atom and Bob's vote counts for nothing"
     );
-    let err = FlowReceipt::mint(
-        &flow,
-        swapped.clone(),
-        outs(&[ATTACKER]),
-        vec![delivered()],
-        GrantContext::empty(),
-    )
-    .expect_err("no receipt for the swapped output can mint");
+    let err = FlowReceipt::mint(&flow, swapped.clone(), outs(&[ATTACKER]), vec![delivered()])
+        .expect_err("no receipt for the swapped output can mint");
     assert!(
         format!("{err:#}").contains("can still transition out"),
         "the fold must stay in `open` over the swapped read-set, got: {err:#}"
@@ -140,14 +128,8 @@ fn a_post_co_sign_seal_swap_cannot_mint_or_verify_a_receipt() {
         swapped.reverified().atoms().is_empty(),
         "a re-signed seal does not address the voted URI"
     );
-    let err = FlowReceipt::mint(
-        &flow,
-        swapped,
-        outs(&[OUTPUT]),
-        vec![reframed],
-        GrantContext::empty(),
-    )
-    .expect_err("no receipt over the swapped seal can mint");
+    let err = FlowReceipt::mint(&flow, swapped, outs(&[OUTPUT]), vec![reframed])
+        .expect_err("no receipt over the swapped seal can mint");
     assert!(
         format!("{err:#}").contains("can still transition out"),
         "got: {err:#}"
@@ -185,7 +167,7 @@ fn twins_with_distinct_nonces_still_pool_their_votes_on_one_edge() {
     let atoms = rs.reverified().atoms();
     assert_eq!(atoms.len(), 2, "two nonces, two atoms");
     assert_ne!(atoms[0].uri, atoms[1].uri, "two nonces, two addresses");
-    let derived = fold_read_set(&flow, &rs.reverified(), GrantContext::empty()).expect("folds");
+    let derived = fold_read_set(&flow, &rs.reverified()).expect("folds");
     assert_eq!(
         derived.state, "doing",
         "one vote on each twin still reaches `n: 2` on the shared edge"
