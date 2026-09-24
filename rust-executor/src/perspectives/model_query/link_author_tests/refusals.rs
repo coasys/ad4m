@@ -88,6 +88,48 @@ async fn a_per_link_author_inside_an_unpushable_quantifier_is_refused() {
     );
 }
 
+/// `author` nested under a getter property inside a quantifier's nested clause
+/// is the malformed-`author` error, the same as at the top level. The nested
+/// clause's error is carried up out of the quantifier to the refusal. Without
+/// that, nothing is refused, and the query returns no rows only because the
+/// post-hydration filter fails closed on every quantifier. Red when that
+/// propagation is removed.
+#[tokio::test]
+async fn a_nested_author_under_a_getter_inside_a_quantifier_is_an_error() {
+    use super::super::types::ShapeResolver;
+
+    let (store, task_shape, resolver) = task_review_fixture();
+    // The Review shape plus `computed`, a getter-backed property, as in
+    // `reviewer_with_getter`.
+    let mut review_shape = (*resolver.get_shape("Review").unwrap()).clone();
+    let mut computed = review_shape
+        .properties
+        .iter()
+        .find(|p| p.name == "verdict")
+        .unwrap()
+        .clone();
+    computed.name = "computed".to_string();
+    computed.predicate = String::new();
+    computed.getter = Some("SELECT ?target WHERE { <Base> <ns://verdict> ?target }".to_string());
+    review_shape.properties.push(computed);
+    resolver.register("Review", review_shape);
+
+    let nested = |computed: Value| json!({ "reviews": { "some": { "computed": computed } } });
+
+    let err = refused_on_every_plan_of(
+        &store,
+        &task_shape,
+        &resolver,
+        nested(json!({ "eq": "approved", "author": ADMIN })),
+    )
+    .await;
+    assert!(err.contains("not a property stored as a link"), "{err}");
+    assert!(!err.contains("per-link `author`"), "{err}");
+
+    // The control: without the `author` the same clause is not an error.
+    ids_on_every_plan_of(&store, &task_shape, &resolver, nested(json!("approved"))).await;
+}
+
 /// `author` nested under something with no link to check is malformed.
 #[tokio::test]
 async fn a_nested_author_without_a_link_is_an_error() {
