@@ -668,6 +668,47 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
     expect(await proxy.interpretationOverlays()).toEqual(overlayA);
     expect(calls).toBe(2);
   });
+
+  it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      acceptInterpretation: jest.fn(async () => true),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    await proxy.acceptInterpretation('a');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[0](overlayA);
+    resolvers[1]([]);
+    expect(await before).toEqual(overlayA);
+    expect(await after).toEqual([]);
+  });
+
+  it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    // Detaches even when the write throws: it may have landed before the error.
+    await expect(proxy.rejectInterpretation('a')).rejects.toThrow('reject failed');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    // The detached RPC settling first must not clear the newer one.
+    resolvers[0](overlayA);
+    expect(await before).toEqual(overlayA);
+    const joiner = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[1]([]);
+    expect(await after).toEqual([]);
+    expect(await joiner).toEqual([]);
+  });
 });
 
 // ── fix #1008: PerspectiveProxy.remove accepts bare Link ────────────────────
