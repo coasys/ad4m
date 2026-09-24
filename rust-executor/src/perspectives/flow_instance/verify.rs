@@ -560,7 +560,7 @@ impl FlowReceipt {
 mod tests {
     use super::*;
     use crate::perspectives::flow_evaluator::{evidence_hash, EvidenceItem};
-    use crate::perspectives::flow_instance::atom::fixtures::{
+    use crate::perspectives::flow_instance::test_support::{
         did_of, hash_of, out_item, out_items, out_ref, signed_link, signed_terminal_proposal,
         signed_vote, T1, T2, T3,
     };
@@ -1581,7 +1581,7 @@ mod tests {
     fn a_final_edge_that_committed_to_no_outputs_is_refused() {
         let flow = two_state_flow();
         let mut receipt = mint(&flow, completed());
-        let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+        let (uri, links) = crate::perspectives::flow_instance::test_support::signed_proposal(
             "p-uncommitted",
             ALICE,
             "open",
@@ -1738,7 +1738,7 @@ mod tests {
         };
         // The honest run walks both edges…
         let (first_uri, first_links) =
-            crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+            crate::perspectives::flow_instance::test_support::signed_proposal(
                 "ad4m://p/1",
                 ALICE,
                 "open",
@@ -1883,7 +1883,7 @@ mod tests {
     /// red for the mutation that drops `outputs_hash` from the URI preimage.
     #[test]
     fn a_post_co_sign_outputs_swap_cannot_mint_or_verify_a_receipt() {
-        use crate::perspectives::flow_instance::atom::fixtures::signed_terminal_links_at;
+        use crate::perspectives::flow_instance::test_support::signed_terminal_links_at;
         let flow = two_state_flow();
 
         // The proposal Bob actually co-signed: committing to OUTPUT.
@@ -1958,7 +1958,7 @@ mod tests {
     /// mutation that drops the seal from the URI preimage.
     #[test]
     fn a_post_co_sign_seal_swap_cannot_mint_or_verify_a_receipt() {
-        use crate::perspectives::flow_instance::atom::fixtures::signed_terminal_links_at;
+        use crate::perspectives::flow_instance::test_support::signed_terminal_links_at;
         let flow = two_state_flow();
 
         let (uri, _) = final_links("p-seal-swap", ALICE, "open", "done", T1);
@@ -2017,7 +2017,7 @@ mod tests {
             ]),
         );
         let twin = |nonce: &str, proposer: &str, at: &str| {
-            let (uri, links) = crate::perspectives::flow_instance::atom::fixtures::signed_proposal(
+            let (uri, links) = crate::perspectives::flow_instance::test_support::signed_proposal(
                 nonce, proposer, "open", "doing", "seal-1", at,
             );
             ProposalLinks { uri, links }

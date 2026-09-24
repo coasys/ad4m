@@ -616,7 +616,7 @@ pub fn final_edge_commitment(derived: &DerivedState, ingested: &ReadSet) -> Outp
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_instance::atom::fixtures::{
+    use crate::perspectives::flow_instance::test_support::{
         did_of, hash_of, out_item, out_items, signed_proposal, signed_terminal_proposal,
         signed_vote, T1, T2, T3,
     };

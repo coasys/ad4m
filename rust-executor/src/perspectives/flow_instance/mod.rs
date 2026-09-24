@@ -96,6 +96,8 @@ pub mod pass;
 pub mod propose;
 pub mod receipt;
 pub mod roles;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod time;
 pub mod trigger;
 pub mod verify;
