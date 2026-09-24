@@ -236,6 +236,39 @@ pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class
 /// replica.
 pub const MAX_FLOW_RECEIPTS: usize = 256;
 
+/// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
+/// question about flow F reads only F's receipts. Discovery only, like every
+/// receipt link: anyone may write one, and what it points at still has to
+/// verify.
+pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
+
+/// The receipt read for a flow hit [`MAX_FLOW_RECEIPTS`]. Returned as an
+/// error, never as a shorter list: "I could not read every receipt" must not
+/// read as "there are no valid outputs" — the same argument that makes an
+/// unknown flow an error. Every surface refuses on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceiptBudgetExceeded {
+    /// The flow whose receipts were being read.
+    pub flow: String,
+    /// How many candidates the read found — more than `cap`.
+    pub found: usize,
+    /// [`MAX_FLOW_RECEIPTS`].
+    pub cap: usize,
+}
+
+impl std::fmt::Display for ReceiptBudgetExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "flow `{}` has {} receipt candidates, over the receipt budget of {}; its valid \
+             outputs cannot be decided without reading them all, so none are reported",
+            self.flow, self.found, self.cap
+        )
+    }
+}
+
+impl std::error::Error for ReceiptBudgetExceeded {}
+
 /// Every receipt carried by the perspective, optionally pre-filtered to one
 /// claimed `flow_uri` (a *claim* — verification comes later and is the
 /// caller's job).

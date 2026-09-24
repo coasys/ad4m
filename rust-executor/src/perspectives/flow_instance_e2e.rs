@@ -3114,9 +3114,11 @@ async fn an_honest_run_through_the_real_co_sign_path_mints_a_verifying_receipt()
 // ---------------------------------------------------------------------------
 
 /// Write `receipt`'s body to the graph exactly as any member could — the
-/// receipt-content link off its content-derived node. Discovery only; whether
-/// it proves anything is decided by verification, which is the point of
-/// half these tests.
+/// receipt-content link off its content-derived node, plus the flow → receipt
+/// index link under the flow it claims. Discovery only; whether it proves
+/// anything is decided by verification, which is the point of half these
+/// tests (so the forgery must be *found*, or those tests would pass on
+/// discovery instead of on the verifier).
 async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt::FlowReceipt) {
     let body = ad4m_client::literal::Literal::from_json(
         serde_json::to_value(receipt).expect("receipt serialises"),
@@ -3128,6 +3130,13 @@ async fn plant_receipt(f: &mut Fixture, receipt: &super::flow_instance::receipt:
         &uri,
         super::flow_instance::receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
         &body,
+        LinkStatus::Shared,
+    )
+    .await;
+    f.link(
+        &receipt.flow_uri,
+        super::flow_instance::produced::FLOW_RECEIPT_INDEX_PREDICATE,
+        &uri,
         LinkStatus::Shared,
     )
     .await;
@@ -3677,25 +3686,9 @@ async fn an_unknown_flow_is_an_error_not_an_empty_answer() {
     );
 }
 
-/// The receipt-body cap: `ad4m://flow/receipt_content` links are writable by
-/// anyone, so one enumeration reads at most `MAX_FLOW_RECEIPTS` of them,
-/// first by URI. Pinned at the boundary: with `MAX - 1` junk bodies sorting
-/// ahead of it the honest receipt is still read; with `MAX` of them it is
-/// dropped — and its output with it, the documented fail-closed cost (a
-/// dropped candidate only removes a witness).
-///
-/// Pins which guard answered: the dropped receipt still verifies on its
-/// own, so the cap — not the verifier — is what excluded it.
-///
-/// Red if the cap is removed or loosened, or applied before the sort.
-#[tokio::test(flavor = "multi_thread")]
-async fn at_most_max_flow_receipts_bodies_are_read_per_enumeration() {
-    use super::flow_instance::produced::{
-        flow_valid_outputs, mint_flow_receipt, verify_flow_receipt, MAX_FLOW_RECEIPTS,
-    };
-    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
-
-    let mut f = seed_satisfied_fixture(None).await;
+/// Complete the fixture's run with `TASK` as its one output and mint the
+/// receipt — the honest material the budget tests below crowd around.
+async fn mint_honest_task_receipt(f: &mut Fixture) -> super::flow_instance::receipt::FlowReceipt {
     let instance = f.instance_uri.clone();
     propose_flow_transition(
         &mut f.perspective,
@@ -3707,65 +3700,193 @@ async fn at_most_max_flow_receipts_bodies_are_read_per_enumeration() {
     )
     .await
     .expect("propose settles on {n: 1}");
-    let honest = mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
+    super::flow_instance::produced::mint_flow_receipt(&mut f.perspective, &instance, &f.ctx)
         .await
-        .expect("mint");
+        .expect("mint")
+}
+
+/// Lal's #1127 flood: any member can write `receipt_content` links (and the
+/// flow → receipt index links) whose URIs sort below every genuine receipt.
+/// Once flow F's read would exceed `MAX_FLOW_RECEIPTS` the answer must be an
+/// **error** on every surface — never an empty list, which a payout gate or
+/// #1076 would read as a confident "nothing was produced". Same rule as the
+/// unknown flow: "I could not read every receipt" is not "no valid outputs".
+///
+/// Pinned at the boundary: `MAX - 1` junk candidates plus the honest receipt
+/// is exactly the budget and still answers; one more is over it. The honest
+/// receipt keeps verifying throughout, and the error is the typed
+/// `ReceiptBudgetExceeded`, so it is the budget that answered.
+///
+/// Red if the read truncates silently (the pre-#1127-review behaviour: the
+/// honest receipt was evicted and every surface answered `[]`), if the
+/// budget is off by one, or if any surface swallows the error.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_receipt_flood_is_an_error_not_an_empty_answer() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, load_flow_receipts, verify_flow_receipt, ReceiptBudgetExceeded,
+        FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
     let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
 
     // `-` sorts before every hex digit and letter, so each junk node leads
-    // the honest one under the same prefix.
-    let junk = |i: usize| Link {
-        source: format!("{RECEIPT_URI_PREFIX}-junk-{i:04}"),
-        predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-        target: literal(&format!("not a receipt {i}")),
+    // the honest one under the same prefix. The body need not be a receipt.
+    let junk = |i: usize| {
+        let uri = format!("{RECEIPT_URI_PREFIX}-junk-{i:04}");
+        vec![
+            Link {
+                source: flow.clone(),
+                predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+                target: uri.clone(),
+            },
+            Link {
+                source: uri,
+                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                target: literal(&format!("not a receipt {i}")),
+            },
+        ]
     };
     assert!(
-        junk(0).source < honest_uri,
+        format!("{RECEIPT_URI_PREFIX}-junk-0000") < honest_uri,
         "precondition: junk sorts first"
     );
+    let filter = serde_json::json!({ "where": { "producedByFlow": { "flow": flow } } });
 
     let ctx = f.ctx.clone();
     f.perspective
         .add_links(
-            (0..MAX_FLOW_RECEIPTS - 1).map(junk).collect(),
+            (0..MAX_FLOW_RECEIPTS - 1).flat_map(junk).collect(),
             LinkStatus::Shared,
             None,
             &ctx,
         )
         .await
-        .expect("plant MAX - 1 junk bodies");
+        .expect("plant MAX - 1 junk candidates");
     assert_eq!(
-        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
+        flow_valid_outputs(&f.perspective, &flow, None)
             .await
-            .expect("valid outputs")
+            .expect("exactly the budget still answers")
             .len(),
         1,
-        "MAX - 1 junk bodies leave room for the honest receipt"
+        "MAX - 1 junk candidates leave room for the honest receipt"
     );
+    let (ids, _) = tasks_produced_by(&f, filter.clone()).await;
+    assert_eq!(ids, vec![TASK.to_string()]);
 
     f.perspective
-        .add_links(
-            vec![junk(MAX_FLOW_RECEIPTS - 1)],
-            LinkStatus::Shared,
-            None,
-            &ctx,
-        )
+        .add_links(junk(MAX_FLOW_RECEIPTS - 1), LinkStatus::Shared, None, &ctx)
         .await
-        .expect("plant the MAX-th junk body");
-    assert!(
-        flow_valid_outputs(&f.perspective, &f.flow_uri, None)
-            .await
-            .expect("valid outputs")
-            .is_empty(),
-        "with MAX junk bodies ahead of it, the honest receipt is not read"
-    );
+        .expect("plant the MAX-th junk candidate");
+
+    let over = |e: &anyhow::Error| e.downcast_ref::<ReceiptBudgetExceeded>().cloned();
+    let expected = ReceiptBudgetExceeded {
+        flow: flow.clone(),
+        found: MAX_FLOW_RECEIPTS + 1,
+        cap: MAX_FLOW_RECEIPTS,
+    };
+
+    let err = load_flow_receipts(&f.perspective, Some(&flow))
+        .await
+        .expect_err("the loader must not hand back a truncated list");
+    assert_eq!(over(&err), Some(expected.clone()), "loader: {err:#}");
+
+    let err = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect_err("flowValidOutputs must refuse, not answer []");
+    assert_eq!(over(&err), Some(expected.clone()), "enumeration: {err:#}");
+
+    let err = f
+        .perspective
+        .model_query("ns://Task", &filter.to_string())
+        .await
+        .expect_err("the producedByFlow filter must refuse, not return an empty page");
+    assert_eq!(over(&err), Some(expected), "filter: {err:#}");
+
     let verdict = verify_flow_receipt(&f.perspective, &honest)
         .await
         .expect("verify");
     assert!(
         verdict.is_verified(),
-        "the dropped receipt is fine on its own — the cap excluded it, got: {verdict}"
+        "the honest receipt is fine on its own — only the budget refused, got: {verdict}"
     );
+}
+
+/// The no-attacker half of Lal's review: the budget is per flow. Receipts of
+/// other flows — more than `MAX_FLOW_RECEIPTS` of them, all sorting below
+/// flow F's honest receipt — plus as many stray bodies nobody indexed, must
+/// neither hide F's receipt nor push F's read over budget. A busy
+/// perspective with many flows is the normal case, not an attack.
+///
+/// Red if the read is perspective-wide (the pre-review behaviour: the other
+/// flows' bodies filled the shared cap and evicted F's receipt, answering
+/// `[]`), or if it counts candidates outside F's index.
+#[tokio::test(flavor = "multi_thread")]
+async fn other_flows_receipts_do_not_spend_this_flows_budget() {
+    use super::flow_instance::produced::{
+        flow_valid_outputs, FLOW_RECEIPT_INDEX_PREDICATE, MAX_FLOW_RECEIPTS,
+    };
+    use super::flow_instance::receipt::{FLOW_RECEIPT_CONTENT_PREDICATE, RECEIPT_URI_PREFIX};
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let honest_uri = honest.uri().expect("uri");
+    let flow = f.flow_uri.clone();
+
+    let mut links = Vec::new();
+    for i in 0..=MAX_FLOW_RECEIPTS {
+        // A receipt of another flow, indexed under that flow.
+        let mut other = honest.clone();
+        other.flow_uri = format!("other://Flow{i:04}");
+        let uri = format!("{RECEIPT_URI_PREFIX}-other-{i:04}");
+        links.push(Link {
+            source: other.flow_uri.clone(),
+            predicate: Some(FLOW_RECEIPT_INDEX_PREDICATE.to_string()),
+            target: uri.clone(),
+        });
+        links.push(Link {
+            source: uri,
+            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            target: ad4m_client::literal::Literal::from_json(
+                serde_json::to_value(&other).expect("serialises"),
+            )
+            .to_url()
+            .expect("literal url"),
+        });
+        // A stray body under no index at all.
+        links.push(Link {
+            source: format!("{RECEIPT_URI_PREFIX}-stray-{i:04}"),
+            predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+            target: literal(&format!("stray {i}")),
+        });
+    }
+    assert!(
+        format!("{RECEIPT_URI_PREFIX}-other-0000") < honest_uri,
+        "precondition: the other flows' receipts sort first"
+    );
+    let ctx = f.ctx.clone();
+    f.perspective
+        .add_links(links, LinkStatus::Shared, None, &ctx)
+        .await
+        .expect("plant the other flows' receipts and the strays");
+
+    let outputs = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("other flows' receipts do not spend this flow's budget");
+    assert_eq!(
+        outputs.iter().map(|o| o.output.clone()).collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+    let (ids, total) = tasks_produced_by(
+        &f,
+        serde_json::json!({ "where": { "producedByFlow": { "flow": flow } } }),
+    )
+    .await;
+    assert_eq!(ids, vec![TASK.to_string()]);
+    assert_eq!(total, 1);
 }
 
 /// The TS SDK registers its own `FlowTransitionProposal` shape
