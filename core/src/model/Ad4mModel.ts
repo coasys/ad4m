@@ -7,7 +7,7 @@ import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { resolveParentPredicate } from "./query-common";
+import { requireSingleParent, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -22,8 +22,9 @@ import type {
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
-  TypedQuery, IncludeExtras, IncludeOf,
+  TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
+import { isTraverseScope } from "./types";
 
 
 
@@ -392,6 +393,11 @@ export class Ad4mModel {
   author: string;
   createdAt: any;
   updatedAt: any;
+  /**
+   * Per-link rows for the entries asked for with `Query.links`, keyed as they
+   * were asked. Absent when the query did not ask for any.
+   */
+  declare __links?: LinksMap;
 
   /**
    * Backwards compatibility alias for createdAt.
@@ -990,7 +996,28 @@ export class Ad4mModel {
     const queryInput: any = {};
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      // A traversal keeps its own shape on the wire: the executor reads `ids`,
+      // and flattening it to one `id` here is how a request for a whole level
+      // would quietly become a request for one parent's children.
+      //
+      // Its fields are named rather than spread, because `model` — the class
+      // itself — is how the scope may name its predicate, and that is a
+      // constructor, not something to put in a query variable. The predicate is
+      // resolved above; what travels is the result.
+      if (isTraverseScope(query.parent)) {
+        const t = query.parent;
+        const traverse: Record<string, unknown> = {
+          ids: t.ids,
+          predicate: parentPredicate,
+        };
+        if (t.transitive !== undefined) traverse.transitive = t.transitive;
+        if (t.direction !== undefined) traverse.direction = t.direction;
+        if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+        if (t.levels !== undefined) traverse.levels = t.levels;
+        queryInput.parent = traverse;
+      } else {
+        queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      }
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
@@ -1043,6 +1070,7 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
 
     // Conformance getters, where filters, and target shapes for includes
@@ -1880,9 +1908,10 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });
@@ -1898,9 +1927,10 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });

@@ -109,21 +109,55 @@ pub(super) async fn resolve_projections(
             }
         };
 
+        // A projection's `where` names the counted records' properties, and
+        // `author` there is the projected link's. A per-link `author` nested
+        // under a property has no reading here, and this builder drops
+        // operators it does not know, so it is refused rather than ignored.
+        if proj.where_clause.as_ref().is_some_and(|wc| {
+            wc.values()
+                .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
+        }) {
+            return Err(deno_core::anyhow::anyhow!(
+                "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
+                 `where`; use its top-level `author` for the projected link's author"
+            ));
+        }
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
+
+        // A transitive projection counts (or lists) everything reachable, which
+        // is what "42 replies" on a collapsed branch means to a reader. The
+        // query is already grouped per parent and already asked of every row at
+        // once, so the whole cost is one character in the emitted path.
+        //
+        // It cannot be combined with a link-author or link-timestamp filter:
+        // those match the reification of a single link, and a path is a
+        // reachability test with no one link to reify. Refused rather than
+        // ignored — silently counting the whole subtree when the caller asked
+        // for "replies by this author" is a wrong number, not a loose one.
+        let path = if proj.transitive { "+" } else { "" };
+        if proj.transitive && !reifier_patterns.is_empty() {
+            log::warn!(
+                "IncludeProjection '{}': transitive projections cannot filter on link author or \
+                 timestamp — a property path has no single link to reify. Skipping.",
+                key
+            );
+            continue;
+        }
 
         if proj.count {
             let sparql = format!(
                 concat!(
                     "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
                     "    {parent_constraint}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}} GROUP BY ?parent"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
             );
@@ -160,13 +194,14 @@ pub(super) async fn resolve_projections(
                 concat!(
                     "SELECT ?parent ?t WHERE {{\n",
                     "    {parent_constraint}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
                     "}}{order_clause}"
                 ),
                 parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
                 order_clause = order_clause,
@@ -392,7 +427,7 @@ pub(super) fn build_projection_where_patterns(
         }
 
         if prop_name == "id" || prop_name == "base" {
-            match condition {
+            match condition.eq_normalized() {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    FILTER(STR(?t) = \"{escaped}\")\n"));
@@ -426,7 +461,7 @@ pub(super) fn build_projection_where_patterns(
         let var = format!("_pw{filter_idx}");
         filter_idx += 1;
 
-        match condition {
+        match condition.eq_normalized() {
             WhereCondition::String(val) => {
                 if is_literal_prop {
                     let escaped = escape_sparql_string(val);

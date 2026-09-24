@@ -37,6 +37,7 @@ use crate::perspectives::flow_context::{
     load_flow_instances, load_shacl_flows, reachable_next_states, FlowInstanceRecord, FlowTokens,
 };
 use crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
+use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::flow_semantic_check::{
     build_semantic_check_prompt, semantic_check_passed, SemanticCheckLlm,
 };
@@ -77,6 +78,14 @@ pub struct SatisfiedTransition {
     pub evidence_hash: String,
     /// The target state's `semanticCheck` hint, if it declares one.
     pub semantic_check: Option<String>,
+    /// `Some` exactly when `to_state` is terminal: the instances the
+    /// proposer names as the run's outputs, each with the content this
+    /// replica's `model_query` returned for it. The proposal names their
+    /// `(class, id)` and signs `outputs_hash` over the content next to the
+    /// evidence seal (#1104); see
+    /// `flow_instance::atom::check_outputs_commitment` for what a voter
+    /// checks.
+    pub outputs: Option<Vec<EvidenceItem>>,
 }
 
 /// One hydrated piece of guard evidence: an instance a `requires` query
@@ -159,10 +168,28 @@ pub(crate) fn canonical_json(v: &Value) -> String {
 /// hash regardless of result order; **editing a cited instance changes the
 /// hash**, which is what lets a voter detect a stale seal before co-signing.
 pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> String {
-    fn frame(hasher: &mut Sha256, field: &str) {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field.as_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update((class_names.len() as u64).to_le_bytes());
+    for name in class_names {
+        frame(&mut hasher, name);
     }
+    frame_items(&mut hasher, evidence);
+    hex::encode(hasher.finalize())
+}
+
+/// Length-prefix one field, so no field's content can shift bytes across a
+/// boundary. The one framing [`evidence_hash`], [`tagged_items_hash`] and
+/// [`super::content_address::content_address`] share.
+pub(crate) fn frame(hasher: &mut Sha256, field: &str) {
+    hasher.update((field.len() as u64).to_le_bytes());
+    hasher.update(field.as_bytes());
+}
+
+/// Each item's `(class, id, canonical_json(content))` triple, sorted and
+/// framed. Sorting makes the result independent of the order `model_query`
+/// returned the instances in; [`canonical_json`] makes it independent of
+/// their key order. Non-JSON content is framed verbatim.
+fn frame_items(hasher: &mut Sha256, evidence: &[EvidenceItem]) {
     let mut items: Vec<(String, String, String)> = evidence
         .iter()
         .map(|e| {
@@ -173,16 +200,28 @@ pub fn evidence_hash(class_names: &[String], evidence: &[EvidenceItem]) -> Strin
         })
         .collect();
     items.sort();
-    let mut hasher = Sha256::new();
-    hasher.update((class_names.len() as u64).to_le_bytes());
-    for name in class_names {
-        frame(&mut hasher, name);
-    }
     for (class, id, content) in &items {
-        frame(&mut hasher, class);
-        frame(&mut hasher, id);
-        frame(&mut hasher, content);
+        frame(hasher, class);
+        frame(hasher, id);
+        frame(hasher, content);
     }
+}
+
+/// The [`evidence_hash`] item framing under a domain `tag`, for a hash that
+/// must never be read as an evidence seal (the flow outputs commitment,
+/// `flow_instance::atom::outputs_hash`).
+///
+/// The digest input opens with `u64::MAX` where an evidence seal has its
+/// class-name count. No evidence seal can open that way: it would need
+/// 2^64 − 1 class names. The framed `tag` follows, then the items exactly as
+/// [`evidence_hash`] frames them. So the two hashes share one
+/// canonicalisation and one item framing, and cannot collide by
+/// construction.
+pub(crate) fn tagged_items_hash(tag: &str, items: &[EvidenceItem]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(u64::MAX.to_le_bytes());
+    frame(&mut hasher, tag);
+    frame_items(&mut hasher, items);
     hex::encode(hasher.finalize())
 }
 
@@ -277,7 +316,7 @@ pub(crate) fn requires_query_input(
     record: &FlowInstanceRecord,
     acting_did: &str,
 ) -> Result<Value> {
-    let where_clause = requires_where(query, record, acting_did, false)?;
+    let where_clause = requires_where(query, record, acting_did, None, None, false)?;
     let mut out = Map::new();
     if !where_clause.is_empty() {
         out.insert("where".into(), Value::Object(where_clause));
@@ -301,48 +340,232 @@ pub(crate) fn requires_query_input(
     Ok(out)
 }
 
+/// Translate one level of a `ModelQuery` (the top, or an `or` branch).
+///
+/// `author` is a per-link condition here: a role rule's `author` names who
+/// may grant the role, so every link the rule filters on at that level must be
+/// one that author wrote. It is emitted **nested** under every field the level
+/// emits, the DID property included (see `model_query::link_author`):
+/// `{ didProperty: agent, where: { forTask: T, author: A } }` becomes
+/// `{ forTask: { eq: T, author: A }, agent: { eq: did, author: A } }`, and an
+/// operator object takes it as one more key (`{ not: v, author: A }`). Nesting
+/// it under the DID property alone let anyone else's link satisfy the other
+/// fields (#1114). A field with no link behind it (a getter, `timestamp`) then
+/// makes `model_query` return an `Err`, which fails closed.
+///
+/// The DID property is the level's own `didProperty`, or for an `or` branch
+/// without one, the enclosing level's. `or` branches that each name only a
+/// granter (`where: { author: X }`) with plain DIDs collapse into one author
+/// list on the outer DID property: `{ agent: { eq: did, author: [A, B] } }`.
+/// Branches that say more keep their own `OR` arm, with the author nested
+/// under each of the arm's fields. An arm that inherits an author does not
+/// collapse: the granters would become its own author and replace the
+/// inherited one on its fields, where they only scope the DID property.
+///
+/// A level's `where` and its `or` are ANDed, so an arm's fields are links the
+/// rule filters on too. An arm with no `author` of its own therefore takes the
+/// enclosing level's, nested under each of its fields:
+/// `{ didProperty: agent, where: { author: A }, or: [{ where: { rank: lead } }] }`
+/// becomes `{ agent: { eq: did, author: A }, OR: [{ rank: { eq: lead, author: A } }] }`.
+/// An arm with its own `author` keeps its own.
+///
+/// An arm's `author` reaches its level's fields in one case only: when every
+/// arm names only a granter, the collapse makes their union the level's
+/// `author`, and it scopes the level's fields like an own one. A level with
+/// fields but no `author` (own, inherited or collapsed) whose arms name one
+/// anywhere below is refused: its fields would be emitted bare, so anyone's
+/// link could satisfy them beside a granter's arm, and one more condition in
+/// an arm (which stops the collapse) would widen the rule. The rule author puts
+/// the `author` on the level, or writes the level's fields into each arm.
+///
+/// A level with no field to nest under keeps its own `author` top level, where
+/// `model_query` reads it as the instance's author; an inherited one has
+/// nothing to scope there and is dropped.
+///
+/// `author` covers the `where` fields only. The `linkedTo` link (the `parent`
+/// scope) is matched from any author: `model_query` has no author condition
+/// on it yet (#1139).
 fn requires_where(
     query: &ModelQuery,
     record: &FlowInstanceRecord,
     acting_did: &str,
+    inherited_did_property: Option<&str>,
+    inherited_author: Option<&Value>,
     nested: bool,
 ) -> Result<Map<String, Value>> {
     if nested && query.linked_to.is_some() {
         bail!("`linkedTo` on an `or` branch is not supported by model_query");
     }
+    let did_property = query.did_property.as_deref().or(inherited_did_property);
     let mut out = Map::new();
+    let mut author = None;
     for (field, cond) in query.r#where.iter().flatten() {
-        out.insert(
-            field.clone(),
-            where_condition(field, cond, record, acting_did)?,
+        let value = where_condition(field, cond, record, acting_did)?;
+        // A DID property named `author` is a (hand-built) property, and the
+        // `where.author` beside it collides with it below.
+        if field == "author" && did_property != Some("author") {
+            author = Some(value);
+        } else {
+            out.insert(field.clone(), value);
+        }
+    }
+
+    let alts = query.or.as_ref().filter(|a| !a.is_empty());
+    if let Some(alts) = alts {
+        for alt in alts {
+            if alt.class_name != query.class_name {
+                bail!(
+                    "`or` branch class `{}` must match the outer class `{}`",
+                    alt.class_name,
+                    query.class_name
+                );
+            }
+            if alt.count.is_some() {
+                bail!("`count` on an `or` branch is not supported");
+            }
+        }
+    }
+
+    // `or` branches that only name a granter fold into one author list,
+    // unless that list would replace an author this level inherits.
+    let granters = match (did_property, &author, alts) {
+        (Some(_), None, Some(alts))
+            if query.did_property.is_some() && inherited_author.is_none() =>
+        {
+            granter_only_branches(alts, record, acting_did)?
+        }
+        _ => None,
+    };
+    let collapsed = granters.is_some();
+    if collapsed {
+        author = granters;
+    }
+    if author.is_none()
+        && inherited_author.is_none()
+        && !out.is_empty()
+        && alts.is_some_and(|alts| alts.iter().any(names_author))
+    {
+        let fields = out.keys().map(|f| format!("`{f}`")).collect::<Vec<_>>();
+        bail!(
+            "an `or` arm names an `author` but its level has none, so the level's {} would \
+             match a link anyone wrote: put the `author` on the level, or write those fields \
+             into each `or` arm",
+            fields.join(", ")
         );
     }
-    if let Some(prop) = &query.did_property {
+
+    // The level's own DID property, or an `or` branch granter's enclosing one.
+    let did_here = query
+        .did_property
+        .as_deref()
+        .or(did_property.filter(|_| author.is_some()));
+    if let Some(prop) = did_here {
         if out.contains_key(prop) {
             bail!("`didProperty` `{prop}` collides with an existing `where` field");
         }
-        out.insert(prop.clone(), Value::String(acting_did.to_string()));
+        out.insert(prop.to_string(), Value::String(acting_did.to_string()));
     }
-    if let Some(alts) = query.or.as_ref().filter(|a| !a.is_empty()) {
+
+    // The level's own `author`, else the one its enclosing level passed down.
+    let scope = author.as_ref().or(inherited_author);
+    if let Some(scope) = scope {
+        for (field, value) in out.iter_mut() {
+            *value = with_author(field, value.take(), scope)?;
+        }
+    }
+    if out.is_empty() {
+        if let Some(author) = &author {
+            out.insert("author".to_string(), author.clone());
+        }
+    }
+
+    if let Some(alts) = alts.filter(|_| !collapsed) {
         let branches = alts
             .iter()
             .map(|alt| {
-                if alt.class_name != query.class_name {
-                    bail!(
-                        "`or` branch class `{}` must match the outer class `{}`",
-                        alt.class_name,
-                        query.class_name
-                    );
-                }
-                if alt.count.is_some() {
-                    bail!("`count` on an `or` branch is not supported");
-                }
-                requires_where(alt, record, acting_did, true).map(Value::Object)
+                requires_where(alt, record, acting_did, did_property, scope, true)
+                    .map(Value::Object)
             })
             .collect::<Result<Vec<_>>>()?;
         out.insert("OR".to_string(), Value::Array(branches));
     }
     Ok(out)
+}
+
+/// Nest `author` into one field's condition: `v` becomes `{ eq: v, author }`,
+/// and an operator object takes `author` as one more key.
+///
+/// Only value operators take it. `equals` passes any JSON through, and beside
+/// a relation quantifier `author` would mean something else: `{ none: {…},
+/// author: A }` is "A wrote no such link", which `model_query` deliberately
+/// does not scope side by side, and `{ some: {…}, author: A }` scopes only the
+/// relation link, not the linked record's fields. A sub-clause object has no
+/// value to scope at all. Each is refused, so the rule fails closed.
+fn with_author(field: &str, condition: Value, author: &Value) -> Result<Value> {
+    const VALUE_OPS: [&str; 8] = ["eq", "not", "contains", "between", "lt", "lte", "gt", "gte"];
+    match condition {
+        Value::Object(mut ops) => {
+            if ops.contains_key("author") {
+                bail!("`{field}` already carries an `author` beside the rule's `author`");
+            }
+            if let Some(key) = ops.keys().find(|k| !VALUE_OPS.contains(&k.as_str())) {
+                bail!(
+                    "`{field}`: the rule's `author` cannot be nested beside `{key}`; only value \
+                     operators ({}) take it",
+                    VALUE_OPS.join(", ")
+                );
+            }
+            ops.insert("author".to_string(), author.clone());
+            Ok(Value::Object(ops))
+        }
+        value => Ok(json!({ "eq": value, "author": author })),
+    }
+}
+
+/// Whether `query`, or any `or` arm below it, has a `where.author`.
+fn names_author(query: &ModelQuery) -> bool {
+    query
+        .r#where
+        .as_ref()
+        .is_some_and(|w| w.contains_key("author"))
+        || query.or.iter().flatten().any(names_author)
+}
+
+/// The union of the granters when every `or` branch is only
+/// `{ className, where: { author: <DID or DIDs> } }`, else `None`.
+fn granter_only_branches(
+    alts: &[ModelQuery],
+    record: &FlowInstanceRecord,
+    acting_did: &str,
+) -> Result<Option<Value>> {
+    let mut dids: Vec<Value> = Vec::new();
+    for alt in alts {
+        let only_author = alt.did_property.is_none()
+            && alt.linked_to.is_none()
+            && alt.or.as_ref().is_none_or(|o| o.is_empty())
+            && alt
+                .r#where
+                .as_ref()
+                .is_some_and(|w| w.len() == 1 && w.contains_key("author"));
+        if !only_author {
+            return Ok(None);
+        }
+        let cond = &alt.r#where.as_ref().expect("checked above")["author"];
+        let found = match where_condition("author", cond, record, acting_did)? {
+            did @ Value::String(_) => vec![did],
+            Value::Array(items) if items.iter().all(Value::is_string) => items,
+            _ => return Ok(None),
+        };
+        for did in found {
+            if !dids.contains(&did) {
+                dids.push(did);
+            }
+        }
+    }
+    Ok(Some(match dids.len() {
+        1 => dids.remove(0),
+        _ => Value::Array(dids),
+    }))
 }
 
 fn where_condition(
@@ -458,7 +681,7 @@ pub struct RoleRevocation {
 ///
 /// **Authority is deliberately not checked here** — whether a tombstone's
 /// author may revoke depends on the role query, so the reader applies
-/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::revocation_authorised)
+/// [`revocation_authorised`](crate::perspectives::flow_instance::roles::evidence::revocation_authorised)
 /// itself against the definition it holds, and cannot be handed a
 /// pre-filtered set to trust.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -555,6 +778,36 @@ pub trait RequiresQueryable: Send + Sync {
         _did: &str,
     ) -> anyhow::Result<RoleGrantLinks> {
         Ok(RoleGrantLinks::default())
+    }
+
+    /// Every receipt filed under `flow_uri`'s index, read whole so the caller
+    /// can verify them itself.
+    ///
+    /// Called only for a role query that declares `producedByFlow`. The index
+    /// is writable by anyone and this call trusts nothing in it: collecting a
+    /// receipt decides nothing, and every check that matters runs in the
+    /// caller (see
+    /// [`flow_instance::grant`](crate::perspectives::flow_instance::grant)).
+    ///
+    /// Over [`MAX_FLOW_RECEIPTS`](crate::perspectives::flow_instance::produced::MAX_FLOW_RECEIPTS)
+    /// this is an `Err` carrying
+    /// [`ReceiptBudgetExceeded`](crate::perspectives::flow_instance::produced::ReceiptBudgetExceeded),
+    /// never a shorter list.
+    ///
+    /// The default knows nothing, which is the fail-closed answer here: no
+    /// receipts means no grant, so a stub that stays on this default never
+    /// turns into "granted by something I could not see".
+    async fn flow_receipts(&self, _flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        Ok(Vec::new())
+    }
+
+    /// This replica's flow definitions, keyed by `flow_uri()` — what a
+    /// `producedByFlow` gate verifies the granting flow's receipts against.
+    ///
+    /// The default is empty, which is fail-closed: a gate whose flow is not
+    /// in the catalogue is an error, never "not a member".
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        Ok(HashMap::new())
     }
 }
 
@@ -769,6 +1022,17 @@ impl RequiresQueryable for PerspectiveInstance {
             revocation_links,
         })
     }
+
+    /// `produced`'s loader, unchanged: scoped to the flow before it is
+    /// budgeted, and an error over budget. One reader of F's receipts for
+    /// every consumer, so the role gate cannot drift from `flowValidOutputs`.
+    async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
+        crate::perspectives::flow_instance::produced::load_flow_receipts(self, flow_uri).await
+    }
+
+    async fn flow_catalogue(&self) -> anyhow::Result<HashMap<String, SHACLFlow>> {
+        load_shacl_flows(self).await
+    }
 }
 
 /// Tri-state seal result for one target state's guard, used by the manual
@@ -898,6 +1162,16 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
             match evaluate_requires(perspective, requires, record, acting_did).await {
                 RequiresResult::Satisfied(class_names, evidence) => {
                     let evidence_ids: Vec<String> = evidence.iter().map(|e| e.id.clone()).collect();
+                    // The engine has no user to ask what a run produced, so
+                    // into a terminal state it names what the guard matched.
+                    // That is this proposer's choice, not a rule: a receipt
+                    // is checked against the signed commitment, never
+                    // against `requires` (#1104).
+                    let outputs = crate::perspectives::flow_instance::receipt::is_terminal_state(
+                        flow,
+                        &state.name,
+                    )
+                    .then(|| evidence.clone());
                     out.push(SatisfiedTransition {
                         flow_name: flow.name.clone(),
                         instance_uri: record.instance_uri.clone(),
@@ -907,6 +1181,7 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
                         evidence_ids,
                         evidence,
                         semantic_check: state.semantic_check.clone(),
+                        outputs,
                     })
                 }
                 RequiresResult::Unmet => {}
@@ -935,6 +1210,12 @@ pub async fn evaluate_flow_transitions<Q: RequiresQueryable + ?Sized>(
 /// bag, by definition) and for `Unmet` (there is nothing to cite).
 pub(crate) struct SealedEvidence {
     pub seal: EvidenceSeal,
+    /// The guard's class names, in the order [`evidence_hash`] framed them
+    /// into the seal. Carried because they are not recoverable from the
+    /// items: a negative guard contributes a class name and no item, so a
+    /// preimage of items alone could not be re-hashed (see
+    /// `flow_instance::receipt::EvidencePreimage`).
+    pub class_names: Vec<String>,
     pub evidence: Vec<EvidenceItem>,
 }
 
@@ -970,6 +1251,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
 ) -> Result<SealedEvidence> {
     let unmet = |seal| SealedEvidence {
         seal,
+        class_names: Vec::new(),
         evidence: Vec::new(),
     };
     let Some(state) = flow.states.iter().find(|s| s.name == to_state) else {
@@ -986,6 +1268,7 @@ pub(crate) async fn recompute_evidence_seal<Q: RequiresQueryable + ?Sized>(
     match evaluate_requires(perspective, requires, record, acting_did).await {
         RequiresResult::Satisfied(class_names, evidence) => Ok(SealedEvidence {
             seal: EvidenceSeal::Sealed(evidence_hash(&class_names, &evidence)),
+            class_names,
             evidence,
         }),
         RequiresResult::Unmet => Ok(unmet(EvidenceSeal::Unmet)),
@@ -1267,6 +1550,15 @@ pub(crate) async fn find_live_proposals<S: ProposalLookup + ?Sized>(
 /// whole contract — so it does not. Narrow (it needs two guard-identical edges
 /// into one state) and pre-existing, but real: prefer widening the key here
 /// over re-flattening the manual path onto it.
+///
+/// **The validity-blind match bites the same way.** A live terminal proposal
+/// no voter could sign — a bad or missing outputs commitment, an output that
+/// does not load — still matches the key, so it suppresses the engine mint
+/// on that edge for as long as it stays open. The manual path validates the
+/// atom as a co-signer would and mints past it (`live_proposal_role`); doing
+/// the same here needs `load_outputs`, which [`ProposalLookup`] cannot
+/// answer. Same remedy when it matters: a human proposes manually, or the
+/// invalid proposal's author rejects it.
 pub(crate) async fn proposal_already_exists<S: ProposalLookup + ?Sized>(
     store: &S,
     transition: &SatisfiedTransition,
@@ -1325,6 +1617,7 @@ pub(crate) async fn write_proposal(
         &transition.to_state,
         &transition.evidence_ids,
         &transition.evidence_hash,
+        transition.outputs.as_deref(),
         rationale,
         Some(batch_id.clone()),
         context,
@@ -1680,6 +1973,191 @@ mod tests {
         assert_eq!(qin(&empty_or, "did:key:x"), json!({}));
     }
 
+    /// A role rule's `author` names who may grant the role, so it is nested
+    /// under every field the level emits, the DID property included
+    /// (`model_query` reads that per link, #1114), and `or` branches that only
+    /// name a granter collapse into one author list. An `or` arm with no
+    /// `author` of its own takes its level's. What these queries match
+    /// is pinned in `model_query::link_author_tests::flow_rules`; this table
+    /// only pins the shape.
+    #[test]
+    fn role_author_is_nested_under_every_field_of_its_level() {
+        let did = "did:key:cand";
+        let task = inst().subject;
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        for (rule, expected) in [
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" } }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "author": { "in": ["did:key:admin", "did:key:lead"] } } }),
+                json!({ "agent": { "eq": did, "author": ["did:key:admin", "did:key:lead"] } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "$did" } }),
+                json!({ "agent": { "eq": did, "author": did } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "forTask": "$flow.base", "author": "did:key:admin" } }),
+                json!({ "forTask": { "eq": task, "author": "did:key:admin" },
+                        "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "where": { "tag": { "in": ["a", "b"] }, "state": { "equals": { "not": "archived" } },
+                                   "author": "did:key:admin" } }),
+                json!({ "tag": { "eq": ["a", "b"], "author": "did:key:admin" },
+                        "state": { "not": "archived", "author": "did:key:admin" },
+                        "agent": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "or": [ { "className": "ns://R", "where": { "author": "did:key:admin" } },
+                                { "className": "ns://R", "where": { "author": { "in": ["did:key:lead", "did:key:admin"] } } } ] }),
+                json!({ "agent": { "eq": did, "author": ["did:key:admin", "did:key:lead"] } }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent",
+                        "or": [ { "className": "ns://R", "where": { "role": "lead", "author": "did:key:admin" } },
+                                { "className": "ns://R", "where": { "author": "did:key:lead" } } ] }),
+                json!({ "agent": did, "OR": [
+                    { "role": { "eq": "lead", "author": "did:key:admin" },
+                      "agent": { "eq": did, "author": "did:key:admin" } },
+                    { "agent": { "eq": did, "author": "did:key:lead" } },
+                ] }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" },
+                        "or": [ { "className": "ns://R", "where": { "rank": "lead" } },
+                                { "className": "ns://R", "where": { "rank": { "equals": { "not": "junior" } } } } ] }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" }, "OR": [
+                    { "rank": { "eq": "lead", "author": "did:key:admin" } },
+                    { "rank": { "not": "junior", "author": "did:key:admin" } },
+                ] }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "author": "did:key:admin" },
+                        "or": [ { "className": "ns://R", "where": { "rank": "lead", "author": "did:key:lead" } },
+                                { "className": "ns://R", "where": {} } ] }),
+                json!({ "agent": { "eq": did, "author": "did:key:admin" }, "OR": [
+                    { "rank": { "eq": "lead", "author": "did:key:lead" },
+                      "agent": { "eq": did, "author": "did:key:lead" } },
+                    {},
+                ] }),
+            ),
+            (
+                json!({ "className": "ns://R", "didProperty": "agent", "where": { "role": "lead" } }),
+                json!({ "role": "lead", "agent": did }),
+            ),
+            (
+                json!({ "className": "ns://R", "where": { "reviewer": "$did", "author": "did:key:admin" } }),
+                json!({ "reviewer": { "eq": did, "author": "did:key:admin" } }),
+            ),
+            (
+                json!({ "className": "ns://R", "linkedTo": "base", "where": { "author": "$did" } }),
+                json!({ "author": did }),
+            ),
+        ] {
+            let q = role(rule.clone());
+            let got = qin(&q, did);
+            assert_eq!(got["where"], expected, "{rule}");
+        }
+    }
+
+    /// `equals` passes any JSON through. Beside a relation quantifier or in a
+    /// sub-clause, a rule's `author` would not mean "the author wrote this
+    /// link", so the translator refuses it instead of nesting it; the same
+    /// condition without an `author` still translates.
+    #[test]
+    fn role_author_is_refused_beside_a_quantifier_or_sub_clause() {
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        for cond in [
+            json!({ "none": { "verdict": "rejected" } }),
+            json!({ "some": { "verdict": "approved" } }),
+            json!({ "verdict": "approved" }),
+        ] {
+            let rule = |author: Option<&str>| {
+                let mut w = json!({ "reviews": { "equals": cond } });
+                if let Some(a) = author {
+                    w["author"] = json!(a);
+                }
+                role(json!({ "className": "ns://R", "didProperty": "agent", "where": w }))
+            };
+            let err = requires_query_input(&rule(Some("did:key:admin")), &inst(), "did:key:x")
+                .expect_err(&format!("author beside {cond}"))
+                .to_string();
+            assert!(err.contains("cannot be nested beside"), "{cond}: {err}");
+            requires_query_input(&rule(None), &inst(), "did:key:x")
+                .unwrap_or_else(|e| panic!("control without author, {cond}: {e}"));
+
+            // An inherited author is refused the same way inside an `or` arm.
+            let arm = role(json!({ "className": "ns://R", "didProperty": "agent",
+                "where": { "author": "did:key:admin" },
+                "or": [ { "className": "ns://R", "where": { "reviews": { "equals": cond } } } ] }));
+            assert!(
+                requires_query_input(&arm, &inst(), "did:key:x").is_err(),
+                "inherited author beside {cond}"
+            );
+        }
+    }
+
+    /// A level with fields but no `author` of its own (nor an inherited or
+    /// collapsed one) is refused when an `or` arm names one anywhere below:
+    /// its fields would be emitted bare beside the granter's arm (#1114).
+    /// Controls: the same fields under the collapse, under the level's own
+    /// `author`, written into each arm, and with no `author` anywhere.
+    #[test]
+    fn a_level_without_an_author_is_refused_beside_author_arms() {
+        let role = |v: Value| -> ModelQuery { serde_json::from_value(v).unwrap() };
+        let arm = |w: Value| json!({ "className": "ns://R", "where": w });
+        let admin = "did:key:admin";
+        let lead = "did:key:lead";
+        let for_task = json!({ "forTask": "$flow.base" });
+        for rule in [
+            // Arms that name granters but do not collapse.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "author": admin })), arm(json!({ "author": lead, "rank": "senior" })) ] }),
+            // An arm with no `author` beside a granter arm.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "rank": "senior" })), arm(json!({ "author": admin })) ] }),
+            // One level down: an arm with fields whose own arm names a granter.
+            json!({ "className": "ns://R", "didProperty": "agent",
+                    "or": [ { "className": "ns://R", "where": for_task, "or": [ arm(json!({ "author": admin })) ] } ] }),
+            // A wrapper arm with no `where` whose own arm names a granter:
+            // only the recursion in `names_author` sees that `author`.
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ { "className": "ns://R", "or": [ arm(json!({ "author": admin })) ] } ] }),
+            // Without a `didProperty`.
+            json!({ "className": "ns://R", "where": { "reviewer": "$did" },
+                    "or": [ arm(json!({ "author": admin, "rank": "senior" })) ] }),
+        ] {
+            let err = requires_query_input(&role(rule.clone()), &inst(), "did:key:x")
+                .expect_err(&rule.to_string())
+                .to_string();
+            assert!(
+                err.contains("put the `author` on the level"),
+                "{rule}: {err}"
+            );
+        }
+        for rule in [
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "author": admin })), arm(json!({ "author": lead })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent", "where": { "forTask": "$flow.base", "author": admin },
+                    "or": [ arm(json!({ "author": lead, "rank": "senior" })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent",
+                    "or": [ arm(json!({ "author": admin, "forTask": "$flow.base" })),
+                            arm(json!({ "author": lead, "rank": "senior", "forTask": "$flow.base" })) ] }),
+            json!({ "className": "ns://R", "didProperty": "agent", "where": for_task,
+                    "or": [ arm(json!({ "rank": "lead" })), arm(json!({ "rank": "senior" })) ] }),
+        ] {
+            requires_query_input(&role(rule.clone()), &inst(), "did:key:x")
+                .unwrap_or_else(|e| panic!("control {rule}: {e}"));
+        }
+    }
+
     #[test]
     fn query_input_rejects_conditions_model_query_cannot_express() {
         let exists = with_where(
@@ -1794,10 +2272,9 @@ mod tests {
         assert_eq!(
             requires_query_input(&q, &rec, "did:key:acting").unwrap(),
             json!({ "where": {
-                "about": "ad4m://task/onboarding",
-                "on": "ad4m://flow/instance/1",
-                "alsoOn": ["ad4m://flow/instance/1", "other"],
-                "author": "did:key:acting",
+                "about": { "eq": "ad4m://task/onboarding", "author": "did:key:acting" },
+                "on": { "eq": "ad4m://flow/instance/1", "author": "did:key:acting" },
+                "alsoOn": { "eq": ["ad4m://flow/instance/1", "other"], "author": "did:key:acting" },
             }})
         );
     }
@@ -2133,6 +2610,13 @@ mod tests {
                     }],
                 ),
                 semantic_check: Some("Agreed?".into()),
+                // `scoped` is terminal, so the engine names what the guard
+                // matched as the run's outputs, with its content (#1104).
+                outputs: Some(vec![EvidenceItem {
+                    id: "ad4m://task/1".into(),
+                    class_name: "ns://Task".into(),
+                    content: json!({ "id": "ad4m://task/1" }).to_string(),
+                }]),
             }]
         );
     }
@@ -2334,6 +2818,7 @@ mod tests {
                 evidence: Vec::new(),
                 evidence_hash: "hash".into(),
                 semantic_check: None,
+                outputs: None,
             }
         }
 

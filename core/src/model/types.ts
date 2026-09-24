@@ -16,6 +16,15 @@ import type { NodeExpression } from "../shacl/NodeExpression";
 // Query DSL types
 // ---------------------------------------------------------------------------
 
+/**
+ * Who wrote a link: a DID, any of several DIDs, or `{ not }` / `{ contains }`
+ * over the author DID.
+ */
+export type AuthorCondition =
+  | string
+  | string[]
+  | { not?: string | string[]; contains?: string };
+
 export type WhereOps = {
   not: string | number | boolean | string[] | number[];
   between: [number, number];
@@ -24,6 +33,16 @@ export type WhereOps = {
   gt: number; // greater than
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
+  /** Equality as an operator: `{ eq: X }` is the bare value `X` (an array
+   *  means any of). It lets a value sit beside `author`, and cannot be
+   *  combined with the other value operators. */
+  eq: string | number | boolean | string[] | number[];
+  /** Per-link author: the link that satisfies this property's condition was
+   *  written by this author, e.g. `{ agent: { eq: did, author: admin } }`.
+   *  Alone, `{ agent: { author: admin } }`: admin wrote some `agent` link.
+   *  Only on properties and relations stored as links (not getters,
+   *  `timestamp` or `id`). See "Filtering by Author" in the model-classes guide. */
+  author: AuthorCondition;
 };
 export type WhereCondition =
   | string
@@ -42,8 +61,23 @@ export type Where = {
   AND?: Where[];
   /** Logical NOT: instance must NOT satisfy the given sub-clause. */
   NOT?: Where;
+  /**
+   * Only instances that are valid outputs of a completed run of `flow`
+   * (optionally: of a run settled into terminal state `state`).
+   *
+   * Decided executor-side by cryptographic receipt verification, not by a
+   * property: an instance passes only when a verified receipt of the flow
+   * names it among the outputs its quorum committed to AND its live content
+   * still matches that commitment. Fail-closed — a forged, unverifiable or
+   * stale receipt excludes the instance — and applied BEFORE `limit`/
+   * `offset`, so a page of N is N valid outputs. Only supported as a
+   * top-level key on the queried class; anywhere else the query errors.
+   */
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -64,10 +98,137 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * predicate to write.
  *
  * **Raw form** — explicit predicate string, no metadata lookup.
+ *
+ * **Traverse form** — bounded traversal from one or more anchors, for reading
+ * a tree rather than one node's children. Read-only: AutoProcessor's write
+ * scopes reject it, because it names no single parent to write under.
  */
 export type Scope =
   | { model: typeof Ad4mModel; id: string; field?: string }
-  | { id: string; predicate: string };
+  | { id: string; predicate: string }
+  | TraverseScope;
+
+/**
+ * Walk a predicate from several anchors at once, and optionally all the way
+ * down.
+ *
+ * This exists because a tree read one level at a time costs a round trip per
+ * level and — under a subscription — one subscription per *parent*. Asking for
+ * every anchor in one query makes both proportional to depth instead.
+ *
+ * The predicate is named the same two ways the other scopes name it: literally,
+ * or by the model and relation that own it. See {@link TraverseByPredicate} and
+ * {@link TraverseByModel}.
+ */
+export type TraverseScope = TraverseByPredicate | TraverseByModel;
+
+/** A traversal naming its predicate literally, as the Raw scope does. */
+export interface TraverseByPredicate extends TraverseOptions {
+  predicate: string;
+}
+
+/**
+ * A traversal naming its predicate through the model that declares it, as the
+ * Model scope does — `{ model: Post, field: 'comments' }` rather than
+ * `'test://has_comment'`.
+ *
+ * Without `field` the predicate is resolved by scanning for a relation on
+ * `model` whose target is the queried class, which is the same rule the Model
+ * scope uses and the same reason to pass `field` when a parent has more than
+ * one relation to the same child.
+ */
+export interface TraverseByModel extends TraverseOptions {
+  model: typeof Ad4mModel;
+  field?: string;
+}
+
+/** Everything a traversal says that is not how it names its predicate. */
+export interface TraverseOptions {
+  /** The anchors to walk from. A bare string is the single-anchor spelling. */
+  ids: string | string[];
+  /**
+   * Follow the predicate as far as it goes rather than one step.
+   *
+   * The result is a flat set of everything reachable, and it does **not**
+   * describe the shape it came from: SPARQL property paths bind no intermediate
+   * variables, so a row says that it is under the anchor and never where. To
+   * rebuild a tree, read the inverse relation (`@BelongsToOne`) alongside it and
+   * assemble from the parent each row reports.
+   *
+   * Excludes every named anchor, not just the one a given row was reached through — a caller
+   * naming two anchors where one sits below the other gets neither back, exactly as with `levels`.
+   * An anchor is where the read started, not something it found, and that holds in a cycle too.
+   *
+   * Refused alongside `levels`, which is the bounded form of the same walk.
+   */
+  transitive?: boolean;
+  /**
+   * `'out'` (default) matches `anchor --predicate--> result`; `'in'` matches
+   * `result --predicate--> anchor`, which is how to *search* among the things
+   * pointing at a node — ordered, filtered, limited. A reverse `include`
+   * answers the same question for rows already in hand, but cannot narrow them.
+   */
+  direction?: 'out' | 'in';
+  /**
+   * Keep at most this many results per anchor — "the top 5 replies under each
+   * of these 20 comments" in one query.
+   *
+   * Applied by the executor between selecting ids and hydrating them, because
+   * SPARQL has no per-group limit (no window functions, and sub-SELECTs are
+   * uncorrelated). The practical consequence is that the over-fetch is paid in
+   * ids, not records: a branch with 3,000 replies costs 3,000 strings and
+   * hydrates 5.
+   *
+   * Pair it with `order` — without one the "top" N is whatever the store
+   * happened to return first. A global `limit`/`offset` is applied to the
+   * sliced union afterwards, not before it.
+   *
+   * Refused alongside `levels`, which applies its own per-anchor limit at
+   * every depth.
+   */
+  limitPerAnchor?: number;
+  /**
+   * Walk the relation level by level, keeping this many results per anchor at each depth —
+   * `[10, 5, 3]` is "ten replies, five under each of those, three under each of *those*".
+   *
+   * The walk happens in the executor, which is the point of it. A caller can drive the same walk by
+   * asking for one level and using the ids as the next level's anchors, but each step is then a
+   * network round trip, and a UI that draws as each answer lands shows the tree assembling itself a
+   * level at a time. Inside the executor the levels are sequential queries against a local store
+   * with nothing serialised between them, and the records are hydrated once for the union — so
+   * three levels cost one request and one hydration rather than three of each.
+   *
+   * Results come back flat and breadth-first; read the inverse relation alongside to rebuild the
+   * tree, exactly as with `transitive`. The anchors are excluded from their own result, also as
+   * with `transitive` — a walk that reaches an anchor again, through a cycle or because one anchor
+   * was named below another, reports it at neither place.
+   *
+   * Each record appears once, under whichever anchor the ordering reaches first — a reply to two
+   * of the anchors is one reply, not two. It does not spend a place in the other anchors' breadth
+   * either: they fill theirs with replies of their own, so a breadth of five means five distinct
+   * records wherever five exist.
+   *
+   * A global `limit`/`offset` applies to that flat union once, after every level has been cut to
+   * its own breadth — not to each level.
+   *
+   * Combining this with `transitive` or `limitPerAnchor` is an **error**, not a preference the
+   * executor resolves: `transitive` is the unbounded form of the same walk, and `limitPerAnchor`
+   * has no place to act when the walk sets a per-anchor limit at every depth itself. (It is not a
+   * substitute either — with a single anchor at the top there is one group, so it caps the total
+   * rather than the breadth at each level.) Put the first level's breadth in `levels[0]`.
+   */
+  levels?: number[];
+}
+
+/**
+ * Whether this scope is a traversal rather than a single named parent.
+ *
+ * The other two forms carry `id`; this one carries `ids` and may name several,
+ * so anything reaching for one parent — every write path — has to ask first.
+ */
+export function isTraverseScope(scope: Scope): scope is TraverseScope {
+  return 'ids' in scope;
+}
 
 /**
  * Describes which relations to eager-load when querying.
@@ -118,6 +279,20 @@ export interface IncludeProjection {
   /** When true, attaches an integer count instead of a list. */
   count?: true;
   /**
+   * Project over everything reachable through `from`, not just one step.
+   *
+   * `{ from: 'comments', count: true, transitive: true }` is the whole
+   * conversation under each row rather than its direct replies — which is what
+   * a reader takes "42 replies" on a collapsed branch to mean. The projection
+   * query is already grouped per parent and already asked of every row at once,
+   * so this adds no round trip.
+   *
+   * Cannot be combined with a filter on the link's author or timestamp: those
+   * read the reification of one link, and a path has none. Such a projection is
+   * skipped with a warning rather than silently answering a different question.
+   */
+  transitive?: boolean;
+  /**
    * Bare class name of the projection target.  Set automatically by
    * `prepareModelQueryParams`; the executor resolves the target's shape
    * through its in-memory cache when applying projection where filters.
@@ -163,7 +338,53 @@ export type Query = {
    * queries where getter-backed properties are not needed.
    */
   deepQuery?: boolean;
+  /**
+   * Return the individual links behind each instance, with their own author,
+   * timestamp, signature and signature verdict, under `instance.__links`. For
+   * a collection this is per-item provenance: who added each member, when, and
+   * whether their signature holds.
+   *
+   * Each entry is a property or relation name the model declares, or an
+   * absolute predicate IRI — including one the model does **not** declare
+   * (an annotation such as a revocation tombstone). A name wins over the IRI
+   * reading. Every requested entry is present on every instance, as `[]` when
+   * it has no such link. An entry that is neither a declared name nor an IRI,
+   * or that names a reverse relation (`@BelongsToOne` / `@BelongsToMany`),
+   * makes the query fail rather than answer `[]`.
+   *
+   * The rows are read by a second query after the instances are hydrated, so
+   * asking for them never changes `createdAt`, `updatedAt` or any property.
+   * See {@link LinkRow}.
+   */
+  links?: string[];
 };
+
+/**
+ * One stored link as returned under `__links` — the same shape as the
+ * `LinkExpression` `perspective.get()` returns, including the signature
+ * verdict the executor recorded when the link was stored.
+ *
+ * `proof.valid` is `true` only when the signature verifies against `author`.
+ * A link stored without a proof arrives with `key` and `signature` set to
+ * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
+ * one. Anything that acts on a row (counting a vote, granting a role) should
+ * require `proof.valid`.
+ *
+ * `valid` is never `null` here and `invalid` is always `!valid`, the same
+ * convention as `perspective.get()`. So `invalid: true` does not by itself mean
+ * a signature failed: it also covers a link with no proof, or with no recorded
+ * verdict. To tell an unsigned link from a failed signature, check whether
+ * `proof.signature` is `""`.
+ */
+export interface LinkRow {
+  author: string;
+  timestamp: string;
+  data: { source: string; predicate: string; target: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
+}
+
+/** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
+export type LinksMap = Record<string, LinkRow[]>;
 
 /**
  * Sub-query options for a specific relation inside an `IncludeMap`.
@@ -244,6 +465,10 @@ type HasNoTypedFields<T extends Ad4mModel> =
 export type StringWhereOps = {
   not?: string | string[];
   contains?: string;
+  /** See {@link WhereOps.eq}. */
+  eq?: string | string[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type NumericWhereOps = {
@@ -253,12 +478,16 @@ export type NumericWhereOps = {
   gt?: number;
   gte?: number;
   between?: [number, number];
+  /** See {@link WhereOps.eq}. */
+  eq?: number | number[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type TypedWhereCondition<V> =
     V extends string  ? string | string[] | StringWhereOps
   : V extends number  ? number | number[] | NumericWhereOps
-  : V extends boolean ? boolean
+  : V extends boolean ? boolean | { eq?: boolean; author?: AuthorCondition }
   : V extends Array<infer U>
       ? U extends string ? string | string[] | StringWhereOps
         : U extends number ? number | number[] | NumericWhereOps
@@ -272,6 +501,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
+      /** Alone: the instance's `.author`, i.e. its earliest link's author.
+       *  Beside property/relation conditions in the same object: that, AND
+       *  each of those conditions is satisfied by a link this author wrote.
+       *  For "this author wrote the `agent` link" alone, nest it:
+       *  `{ agent: { eq: did, author } }`. It does not reach into
+       *  `OR`/`AND`/`NOT` sub-clauses. See "Filtering by Author" in the
+       *  model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];
@@ -283,6 +519,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
  *  shape when T has no declared fields (e.g. fromSHACL-derived classes). */
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
+
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
 
 // ---- Typed order -------------------------------------------------------------
 
@@ -304,6 +547,7 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  links?: string[];
 };
 
 /** Projection — `from` must be a real relation on T; `where`/`order` constrained to that target.
@@ -311,9 +555,9 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
  *  variants narrow inference into `IncludeExtras` (count → number, limit-1 → scalar). */
 export type TypedIncludeProjection<T extends Ad4mModel> = {
   [K in RelationKeysOf<T>]:
-    | { from: K; count: true }
-    | { from: K; limit: 1; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
-    | { from: K; limit?: number; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
+    | { from: K; count: true; transitive?: boolean }
+    | { from: K; limit: 1; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> }
+    | { from: K; limit?: number; transitive?: boolean; where?: TypedWhere<RelatedModel<T, K>>; order?: TypedOrder<RelatedModel<T, K>> };
 }[RelationKeysOf<T>];
 
 type StrictTypedIncludeMap<T extends Ad4mModel> =
@@ -359,12 +603,13 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  links?: string[];
 };
 
 export type TypedQuery<T extends Ad4mModel> =
