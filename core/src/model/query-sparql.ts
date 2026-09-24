@@ -86,8 +86,8 @@ export function hasJsOnlyWhereFilters(
  * to the bare `X`, and refuse a per-link `author`.
  *
  * A per-link `author` (nested, `{ agent: { eq: X, author: A } }`, or a
- * top-level `author` beside link-backed property conditions) is answered by
- * the executor, which joins each matched link's reifier (#1114). This builder
+ * top-level `author` beside link-backed property or relation conditions) is
+ * answered by the executor, which joins each matched link's reifier (#1114). This builder
  * has no such join, and treating the author as instance-level here would
  * answer a different, wider question. `findAll()`/`count()` answer it.
  */
@@ -123,9 +123,10 @@ function assertNoPerLinkAuthor(metadata: ModelMetadata, where: Where): void {
         "it. Use the model query path (findAll/count).",
     );
   };
+  // A property or a relation with a predicate, as the executor's `is_link_leaf`.
   const linkBacked = (key: string) => {
-    const prop = metadata.properties[key];
-    return !!prop && !!prop.predicate && !prop.getter;
+    const field = metadata.properties[key] ?? metadata.relations?.[key];
+    return !!field && !!field.predicate && !field.getter;
   };
   for (const [key, condition] of Object.entries(where)) {
     if (key === "OR" || key === "AND") {
