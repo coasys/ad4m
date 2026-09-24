@@ -2084,6 +2084,19 @@ async fn propose_flow_transition_handler(
         .get("rationale")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // The run's outputs, named by the caller for a proposal into a terminal
+    // state as `{ className, id }` pairs (#1104). Absent means none; anything
+    // else that is not an array of such pairs is refused rather than read as
+    // none.
+    let outputs: Vec<crate::perspectives::flow_instance::atom::OutputRef> =
+        match params.get("outputs") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!(
+                    "`outputs` must be an array of {{ className, id }} objects: {e}"
+                ))
+            })?,
+        };
     check_capability(
         &ctx.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
@@ -2099,6 +2112,7 @@ async fn propose_flow_transition_handler(
         &mut perspective,
         &instance_uri,
         &to_state,
+        &outputs,
         rationale.as_deref(),
         &agent_context,
     )
