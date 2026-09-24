@@ -19,9 +19,14 @@
 //! is a property or relation **name** the shape declares, or an absolute
 //! predicate IRI. The result gains one key, [`LINKS_KEY`], mapping each
 //! requested entry — spelled as requested — to every link on that predicate,
-//! shaped as a [`LinkExpression`](crate::types::LinkExpression) (author,
-//! timestamp, data, proof) so a consumer can deserialize it directly and verify
-//! the signature itself.
+//! shaped as a [`DecoratedLinkExpression`](crate::types::DecoratedLinkExpression)
+//! (author, timestamp, data, proof with the stored signature verdict) so a
+//! consumer can deserialize it directly, gate on the verdict, or verify the
+//! signature itself.
+//!
+//! For a collection that is per-item provenance (#1046 §6, #1115):
+//! `links: ["members"]` gives each member its own author, timestamp and
+//! verdict next to the plain `members` array, which stays as it is.
 //!
 //! The read is one extra query over the page that is actually returned, run
 //! after hydration. That placement is deliberate: the instance query and its
@@ -135,10 +140,19 @@ pub(super) fn resolve_link_keys(
 /// instance query applies, so a gossiped Shared link on a local predicate is not
 /// reintroduced through this side door.
 ///
-/// A link stored without a proof comes back as `"proof": {"key": "",
-/// "signature": ""}`. That is *not* "unsigned but valid":
-/// `LinkExpression::compute_proof_valid` returns `false` for it, and so must
-/// any verdict layered on these rows.
+/// Each row's `proof` carries the store's signature verdict as `valid` /
+/// `invalid` (#1115), recorded at insert time from the signature itself, so a
+/// row deserializes as a [`DecoratedLinkExpression`](crate::types::DecoratedLinkExpression)
+/// — the shape `perspective.get` returns — and a consumer can gate on the
+/// verdict without redoing the crypto. Only a stored `"true"` reads as valid;
+/// a missing annotation reads `valid: false`, never "unsigned but valid". A
+/// link stored without a proof comes back as `{"key": "", "signature": "",
+/// "valid": false, "invalid": true}`.
+///
+/// `data.target` is the target the link was signed over (the store's
+/// `wireTarget` annotation when a literal was written in another encoding
+/// than the store's canonical one), and the verdict was computed over those
+/// same bytes, so the verdict and a consumer's own re-verification agree.
 ///
 /// Not viewer-scoped: like the rest of `model_query` on `dev`, this read does
 /// not take a `viewer_did`. When #1058 threads `viewer_author_filter` through
@@ -173,7 +187,7 @@ pub(super) async fn attach_links(
             .join(" ");
         let local_status = local_status_filter(shape);
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -182,6 +196,7 @@ pub(super) async fn attach_links(
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofKey> ?proofKey . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 {local_status}}}"#
         );
@@ -190,6 +205,12 @@ pub(super) async fn attach_links(
         for row in &rows {
             let source = s(row, "source");
             let predicate = s(row, "predicate");
+            // Same decoding as `sparql_store::decode_proof_valid`: only a
+            // stored "true" is valid; an absent annotation is not. As in
+            // `VerifiedExpression::from`, `invalid` is `!valid`, so it covers
+            // a failed signature, a missing verdict and a missing proof alike;
+            // an empty `signature` is what tells an unsigned link apart.
+            let valid = s(row, "proofValid") == "true";
             let link = json!({
                 "author": s(row, "author"),
                 "timestamp": s(row, "timestamp"),
@@ -206,6 +227,8 @@ pub(super) async fn attach_links(
                 "proof": {
                     "key": s(row, "proofKey"),
                     "signature": s(row, "proofSig"),
+                    "valid": valid,
+                    "invalid": !valid,
                 },
             });
             found
@@ -472,6 +495,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
         let row = &rows[0];
         assert_eq!(row["data"]["target"], raw);
+        assert_eq!(row["proof"]["valid"], true, "the stored verdict");
+        assert_eq!(row["proof"]["invalid"], false);
         let link = LinkExpression {
             author: row["author"].as_str().unwrap().into(),
             timestamp: row["timestamp"].as_str().unwrap().into(),

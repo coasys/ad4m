@@ -279,6 +279,13 @@ pub fn verify_receipt(
         }
         OutputsCommitment::NoFinalEdge => return ReceiptVerdict::NoFinalEdge,
     }
+    // Committed implies a final edge, so this `else` is unreachable; it is
+    // spelled out rather than unwrapped so that it stays a refusal if that
+    // ever changes.
+    let Some(last) = derived.settled.last() else {
+        return ReceiptVerdict::NoFinalEdge;
+    };
+    let settled_at = last.settled_at.clone();
 
     let voters: BTreeSet<String> = derived
         .settled
@@ -287,6 +294,7 @@ pub fn verify_receipt(
         .collect();
     ReceiptVerdict::Verified {
         terminal_state: derived.state,
+        settled_at,
         outputs: receipt.outputs.iter().map(OutputRef::of).collect(),
         voters: voters.into_iter().collect(),
     }

@@ -3833,8 +3833,18 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        let query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+        let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // `where.producedByFlow` is resolved here, not in the pipeline: it
+        // needs the perspective (receipts, flow catalogue) and signature
+        // verification, neither of which SPARQL or the post-hydration filter
+        // has. Extracted BEFORE the query runs and turned into an id
+        // constraint the store applies ahead of `limit`/`offset` — so a page
+        // of N is N *valid* outputs, never N rows later thinned. Malformed or
+        // mis-placed filters error rather than silently admit everything.
+        let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
+            .map_err(deno_core::anyhow::Error::msg)?;
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
@@ -3849,6 +3859,42 @@ impl PerspectiveInstance {
             .await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
+
+        if let Some(filter) = produced_by_flow {
+            let valid = super::flow_instance::produced::flow_valid_outputs(
+                self,
+                &filter.flow,
+                filter.state.as_deref(),
+            )
+            .await?;
+            // Only outputs committed as the queried class pass; see
+            // `output_matches_class` for why conformance alone is not enough.
+            let allowed: std::collections::BTreeSet<String> = valid
+                .into_iter()
+                .filter(|v| {
+                    super::flow_instance::produced::output_matches_class(
+                        &v.output,
+                        class_name,
+                        &shape.target_class,
+                    )
+                })
+                .map(|v| v.output.id)
+                .collect();
+            if !super::model_query::constrain_ids(&mut query_input, allowed)
+                .map_err(deno_core::anyhow::Error::msg)?
+            {
+                // No valid output survives; answer directly rather than
+                // handing the store an empty VALUES block.
+                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                    instances: vec![],
+                    total_count: 0,
+                })
+                .map_err(|e| {
+                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+                });
+            }
+        }
+
         let result = super::model_query::execute_model_query(
             &self.sparql_store,
             shape.as_ref(),
@@ -5840,6 +5886,22 @@ impl PerspectiveInstance {
                     .and_then(|p| p.as_str())
                 {
                     predicates.push(pred.to_string());
+                }
+                // `producedByFlow` resolves through the flow's receipts and
+                // the flow catalogue, not the shape: re-run when a receipt's
+                // index entry or body lands (sync may deliver them apart) —
+                // the reads `load_flow_receipts` makes — or a flow is
+                // registered, whose definition is written with its
+                // `rdf://type ad4m://Flow` link.
+                if query
+                    .get("where")
+                    .and_then(|w| w.get("producedByFlow"))
+                    .is_some()
+                {
+                    use super::flow_instance::{produced, receipt};
+                    predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
+                    predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
+                    predicates.push("rdf://type".to_string());
                 }
             }
         }
@@ -8341,6 +8403,52 @@ mod tests {
             assert!(
                 predicates.iter().any(|p| p == expected),
                 "trigger set {predicates:?} is missing {expected}"
+            );
+        }
+    }
+
+    /// A `producedByFlow` subscription's answer moves when a receipt lands
+    /// (index entry or body, which sync may deliver separately) or a flow is
+    /// registered — none of them shape predicates. Before, the trigger set
+    /// held only the shape's predicates, so a receipt minted after the
+    /// subscription never re-ran it and the new output never appeared.
+    #[tokio::test]
+    async fn test_model_trigger_predicates_cover_produced_by_flow_reads() {
+        use crate::perspectives::flow_instance::{produced, receipt};
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Recipe".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(cache_test_shacl("Recipe", "ns://")),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add_sdna");
+        let reads = [
+            produced::FLOW_RECEIPT_INDEX_PREDICATE,
+            receipt::FLOW_RECEIPT_CONTENT_PREDICATE,
+            "rdf://type",
+        ];
+
+        let filtered = perspective.build_model_trigger_predicates(
+            "Recipe",
+            Some(r#"{ "where": { "producedByFlow": { "flow": "ns://F", "state": "done" } } }"#),
+        );
+        for expected in reads.iter().copied().chain(["ns://name"]) {
+            assert!(
+                filtered.iter().any(|p| p == expected),
+                "trigger set {filtered:?} is missing {expected}"
+            );
+        }
+
+        // Only the filter pays for them: a plain subscription stays narrow.
+        let plain = perspective.build_model_trigger_predicates("Recipe", Some("{}"));
+        for unexpected in reads {
+            assert!(
+                !plain.iter().any(|p| p == unexpected),
+                "plain trigger set {plain:?} should not carry {unexpected}"
             );
         }
     }

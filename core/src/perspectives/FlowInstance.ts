@@ -121,6 +121,60 @@ export interface FlowProposeResult {
 }
 
 /**
+ * One instance a verified flow receipt speaks for — an entry of
+ * `PerspectiveProxy.flowValidOutputs(flow, state?)`.
+ *
+ * Every entry has already passed the whole verification chain executor-side:
+ * the receipt's signatures and quorum re-checked, its outputs bound to the
+ * quorum-signed commitment (#1104), and the instance's *live* content still
+ * equal to what the quorum committed to. An output edited since the run
+ * completed is not listed, although the receipt itself stays verifiable.
+ */
+export interface FlowValidOutput {
+  /** The instance, as the `(className, id)` pair the quorum committed to. */
+  output: FlowOutputRef;
+  /** The instance's content as committed at completion (its `modelQuery`
+   *  hydration, JSON-encoded). */
+  content: string;
+  /** The terminal state the granting run settled into, re-derived by the
+   *  verifier. */
+  terminalState: string;
+  /** Content-derived URI of the receipt that proves this output. */
+  receiptUri: string;
+}
+
+/**
+ * What `PerspectiveProxy.verifyFlowReceipt` learned — a THREE-way answer,
+ * not a boolean, and collapsing it to one is the classic mistake:
+ *
+ * - `"verified"`   — the carried material re-derives the claim;
+ * - `"rejected"`   — the material was checked and does not hold up;
+ * - `"undecidable"`— this replica cannot decide (it lacks the flow
+ *   definition, or holds a different one). Refuse to act on it exactly as
+ *   on `"rejected"`, but do NOT treat it as evidence against the receipt
+ *   or its minter — sync the definition and ask again.
+ */
+export interface FlowReceiptVerdict {
+  outcome: "verified" | "rejected" | "undecidable";
+  /** Human-readable reason, phrased for the outcome it accompanies. */
+  detail: string;
+  /** Only on `"verified"`: the terminal state the reader's own fold reached. */
+  terminalState?: string;
+  /** Only on `"verified"`: the outputs the receipt speaks for. */
+  outputs?: FlowOutputRef[];
+  /** Only on `"verified"`: the distinct eligible DIDs that made the quorum. */
+  voters?: string[];
+}
+
+/** What `PerspectiveProxy.mintFlowReceipt` wrote: the receipt's
+ *  content-derived node URI and its body (opaque to clients — verify it with
+ *  `verifyFlowReceipt`, never by inspection). */
+export interface FlowMintedReceipt {
+  receiptUri: string;
+  receipt: object;
+}
+
+/**
  * Extract the flow's human-readable name from its canonical URI.
  *
  * `SHACLFlow.flowUri` is `${namespace}${name}Flow` (e.g.
