@@ -104,6 +104,46 @@ async fn a_member_cannot_promote_herself_through_an_or_branch() {
     }
 }
 
+/// The same self-promotion with the `author` one level up: the level's
+/// `where` and its `or` are ANDed, so the arms' fields are links the rule
+/// filters on too, and an arm without an `author` of its own needs the
+/// level's. Admin appointed Mallory, who then wrote `rank -> lead` herself.
+#[tokio::test]
+async fn a_levels_author_reaches_or_arms_without_their_own() {
+    let store = SparqlStore::new(None).unwrap();
+    role_instance(
+        &store,
+        "ns://r/self",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(MALLORY)),
+            (MALLORY, "ns://rank", lit("lead")),
+        ],
+    );
+    role_instance(
+        &store,
+        "ns://r/lead",
+        ADMIN,
+        &[
+            (ADMIN, "ns://agent", lit(ALICE)),
+            (ADMIN, "ns://rank", lit("lead")),
+        ],
+    );
+    let rule = json!({ "className": "Reviewer", "didProperty": "agent", "where": { "author": ADMIN },
+                       "or": [ { "className": "Reviewer", "where": { "rank": "lead" } },
+                               { "className": "Reviewer", "where": { "rank": "senior" } } ] });
+
+    assert!(
+        eligible(&store, &rule, "T1", MALLORY).await.is_empty(),
+        "Mallory's own `rank -> lead` must not satisfy an arm under admin's `author`"
+    );
+    assert_eq!(
+        eligible(&store, &rule, "T1", ALICE).await,
+        vec!["ns://r/lead"],
+        "control: admin made Alice lead"
+    );
+}
+
 /// A positive `OR` whose arms each carry nested authors, the shape the
 /// translator emits for a branched rule. It has to be pushed into SPARQL (a
 /// per-link author in a declined clause is refused), so a result at all means
