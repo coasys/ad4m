@@ -1476,12 +1476,11 @@ mod tests {
     #[tokio::test]
     async fn the_stub_answers_an_unknown_links_key_with_nothing() {
         let mut stub = members(&[ALICE()]);
-        stub.histories.insert(
-            "r0".into(),
-            history(ALICE(), Some(T1), &[(ADMIN(), T2)]),
-        );
+        stub.histories
+            .insert("r0".into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
         let tomb = crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
-        let query = json!({ "where": { "agent": ALICE() }, "links": [STUB_GRANT_KEY, tomb, "agnet"] });
+        let query =
+            json!({ "where": { "agent": ALICE() }, "links": [STUB_GRANT_KEY, tomb, "agnet"] });
         let raw = stub
             .model_query("ns://Reviewer", &query.to_string())
             .await
