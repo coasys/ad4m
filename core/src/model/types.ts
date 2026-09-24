@@ -323,6 +323,7 @@ export type Query = {
    * https://github.com/coasys/ad4m/issues/1120.
    */
   includeUnverified?: boolean;
+  /**
    * Return the individual links behind each instance, with their own author,
    * timestamp and signature, under `instance.__links`.
    *
