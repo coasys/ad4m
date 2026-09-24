@@ -9,7 +9,9 @@
 //! 3. at most `ZOME_CALL_CONCURRENCY` non-lifecycle requests run at once, and that many do
 //!    (`concurrency_is_bounded`);
 //! 4. a request dequeued past its deadline is refused by the loop and never reaches the
-//!    dispatcher (`expired_request_is_refused_without_reaching_the_service`);
+//!    dispatcher (`expired_request_is_refused_without_reaching_the_service`), and so is one
+//!    whose deadline passes while it waits for a permit
+//!    (`request_expiring_while_waiting_for_a_permit_is_refused`);
 //! 5. `Shutdown` is answered only after every in-flight request has finished
 //!    (`shutdown_drains_in_flight_calls`).
 //!
@@ -23,6 +25,7 @@ use deno_core::error::AnyError;
 use holochain::prelude::{AppBundleSource, ExternIO, InstallAppPayload, ZomeCallResponse};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::task::Poll;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -185,6 +188,21 @@ impl Harness {
     }
 }
 
+/// Spawns `request` after polling it once, so it is in the dispatch loop's channel when this
+/// returns. `tokio::spawn` alone sends only on the task's first poll, so two requests spawned
+/// back to back reach the channel in either order.
+async fn enqueue<F>(request: F) -> JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    let mut request = Box::pin(request);
+    match futures::poll!(&mut request) {
+        Poll::Ready(out) => tokio::spawn(async move { out }),
+        Poll::Pending => tokio::spawn(request),
+    }
+}
+
 fn label_of(response: ZomeCallResponse) -> String {
     match response {
         ZomeCallResponse::Ok(io) => io.decode().unwrap(),
@@ -224,8 +242,8 @@ async fn install_app_waits_for_in_flight_zome_calls_and_blocks_new_ones() {
     h.wait_started("a").await;
 
     // Queued in this order; the loop dequeues in this order.
-    let install = tokio::spawn(h.install_app());
-    let b = tokio::spawn(h.zome_call("b", 0, None));
+    let install = enqueue(h.install_app()).await;
+    let b = enqueue(h.zome_call("b", 0, None)).await;
 
     assert_eq!(label_of(a.await.unwrap().unwrap()), "a");
     let install_err = install.await.unwrap().unwrap_err();
@@ -284,6 +302,41 @@ async fn expired_request_is_refused_without_reaching_the_service() {
     // The loop is still serving.
     let live = h.zome_call("live", 0, None).await.unwrap();
     assert_eq!(label_of(live), "live");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn request_expiring_while_waiting_for_a_permit_is_refused() {
+    let h = Harness::start();
+
+    let busy: Vec<_> = (0..ZOME_CALL_CONCURRENCY)
+        .map(|i| tokio::spawn(h.zome_call(&format!("busy{i}"), 300, None)))
+        .collect();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while h.mock.in_flight.load(Ordering::SeqCst) < ZOME_CALL_CONCURRENCY {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("every permit must be taken within 5 s");
+
+    // Dequeued at once, well before its deadline, but no permit frees up until the busy
+    // calls finish ~300 ms later: by then its caller has given up.
+    let deadline = Instant::now() + Duration::from_millis(100);
+    let err = h.zome_call("late", 0, Some(deadline)).await.unwrap_err();
+
+    // The verdict: refused after the permit wait, never run.
+    assert!(
+        err.to_string().contains("expired after"),
+        "expected the expiry refusal, got: {err}"
+    );
+    for call in busy {
+        call.await.unwrap().unwrap();
+    }
+    assert!(
+        !h.mock.events().contains(&"start:late".to_string()),
+        "a request that expired waiting for a permit must never reach the dispatcher"
+    );
+    assert_eq!(h.mock.zome_calls.load(Ordering::SeqCst), ZOME_CALL_CONCURRENCY);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
