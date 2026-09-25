@@ -7789,6 +7789,122 @@ mod tests {
         .unwrap();
     }
 
+    /// The per-owner link events reach only the owners who may see the link
+    /// (#1024). Co-owners share one instance and `events_ws` forwards each
+    /// event by its `owner`, so an event is how a link would reach an owner
+    /// who cannot read it back through any query.
+    ///
+    /// The main agent adds, updates and removes one Local and one Shared link
+    /// on a perspective it co-owns with `OTHER_USER`. The main agent receives
+    /// all six events; `OTHER_USER` receives the three for the Shared link and
+    /// none for the Local one.
+    #[tokio::test]
+    async fn link_events_reach_only_the_owners_who_may_see_the_link() {
+        let mut perspective = setup().await;
+        let me = crate::agent::did();
+        perspective.persisted.lock().await.owners = Some(vec![me.clone(), OTHER_USER.to_string()]);
+        let uuid = perspective.uuid.clone();
+        let pubsub = get_global_pubsub().await;
+        let mut added_rx = pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await;
+        let mut removed_rx = pubsub
+            .subscribe(&crate::pubsub::PERSPECTIVE_LINK_REMOVED_TOPIC)
+            .await;
+        let mut updated_rx = pubsub
+            .subscribe(&crate::pubsub::PERSPECTIVE_LINK_UPDATED_TOPIC)
+            .await;
+
+        let ctx = AgentContext::main_agent();
+        let link = |target: &str| Link {
+            source: WRITE_SOURCE.to_string(),
+            predicate: Some("test://event".to_string()),
+            target: target.to_string(),
+        };
+        for (status, name) in [(LinkStatus::Local, "local"), (LinkStatus::Shared, "shared")] {
+            let first = perspective
+                .add_link(link(&format!("test://{name}-1")), status, None, &ctx)
+                .await
+                .unwrap();
+            let second = perspective
+                .update_link(
+                    LinkExpression::from(first),
+                    link(&format!("test://{name}-2")),
+                    None,
+                    &ctx,
+                )
+                .await
+                .unwrap();
+            perspective
+                .remove_link(LinkExpression::from(second), None)
+                .await
+                .unwrap();
+        }
+
+        // The single-link paths publish before they return, so every event
+        // is already queued.
+        fn drain<T: serde::de::DeserializeOwned>(
+            rx: &mut tokio::sync::broadcast::Receiver<String>,
+        ) -> Vec<T> {
+            let mut out = Vec::new();
+            while let Ok(message) = rx.try_recv() {
+                out.push(serde_json::from_str(&message).unwrap());
+            }
+            out
+        }
+        let mut added: Vec<(String, String)> = drain::<PerspectiveLinkWithOwner>(&mut added_rx)
+            .into_iter()
+            .filter(|e| e.perspective_uuid == uuid)
+            .map(|e| (e.owner, e.link.data.target))
+            .collect();
+        let mut removed: Vec<(String, String)> = drain::<PerspectiveLinkWithOwner>(&mut removed_rx)
+            .into_iter()
+            .filter(|e| e.perspective_uuid == uuid)
+            .map(|e| (e.owner, e.link.data.target))
+            .collect();
+        let mut updated: Vec<(String, String)> =
+            drain::<PerspectiveLinkUpdatedWithOwner>(&mut updated_rx)
+                .into_iter()
+                .filter(|e| e.perspective_uuid == uuid)
+                .map(|e| {
+                    (
+                        e.owner,
+                        format!("{} -> {}", e.old_link.data.target, e.new_link.data.target),
+                    )
+                })
+                .collect();
+        for events in [&mut added, &mut removed, &mut updated] {
+            events.sort();
+        }
+
+        let other = OTHER_USER.to_string();
+        let expected = |local: &str, shared: &str| {
+            let mut v = vec![
+                (me.clone(), local.to_string()),
+                (me.clone(), shared.to_string()),
+                (other.clone(), shared.to_string()),
+            ];
+            v.sort();
+            v
+        };
+        assert_eq!(
+            added,
+            expected("test://local-1", "test://shared-1"),
+            "added"
+        );
+        assert_eq!(
+            updated,
+            expected(
+                "test://local-1 -> test://local-2",
+                "test://shared-1 -> test://shared-2"
+            ),
+            "updated"
+        );
+        assert_eq!(
+            removed,
+            expected("test://local-2", "test://shared-2"),
+            "removed"
+        );
+    }
+
     #[tokio::test]
     async fn set_single_target_leaves_other_users_local_link() {
         let mut perspective = setup().await;

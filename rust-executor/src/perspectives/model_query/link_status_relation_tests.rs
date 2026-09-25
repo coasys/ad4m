@@ -339,3 +339,156 @@ async fn link_status_applies_to_a_projection_target() {
         "the projection target's Local property must be withheld under Shared: {shared}"
     );
 }
+
+/// #1024 on a typed relation's generated getter and its `where`: another
+/// user's `Local` link neither fills the relation for a viewer nor makes a
+/// target conform or pass the relation's `where`.
+///
+/// Alice owns every link. The card's relation to `r/1` is her Local link;
+/// `r/2` is related by a Shared link but typed only by her Local flag; `r/3`
+/// is related and typed by Shared links, and its only `aside` is her Local
+/// link. Bob sees `r/3` alone, and with `where: { aside: "local" }` nothing.
+/// Alice and executor scope see all three, and `r/1` and `r/3` under the
+/// `where`. Each assertion covers all four plans: `include` off and on,
+/// single and two-phase.
+#[tokio::test]
+async fn another_users_local_links_do_not_fill_a_typed_relation_for_a_viewer() {
+    let store = SparqlStore::new(None).unwrap();
+    let alice = ls_seed(&store);
+    let bob = crate::agent::signatures::TestSigner::generate();
+    ls_seed_remark(&store, &alice);
+    for l in [
+        ls_link(
+            &alice,
+            "ls://c/1",
+            "ls://comment",
+            "ls://r/1",
+            6,
+            LinkStatus::Local,
+        ),
+        ls_local_type(&alice, "ls://r/2", "ls://Remark", 7),
+        ls_link(
+            &alice,
+            "ls://c/1",
+            "ls://comment",
+            "ls://r/2",
+            8,
+            LinkStatus::Shared,
+        ),
+        ls_link(
+            &alice,
+            "ls://r/3",
+            "ad4m://type",
+            "ls://Remark",
+            9,
+            LinkStatus::Shared,
+        ),
+        ls_link(
+            &alice,
+            "ls://c/1",
+            "ls://comment",
+            "ls://r/3",
+            10,
+            LinkStatus::Shared,
+        ),
+        ls_link(
+            &alice,
+            "ls://r/3",
+            "ls://aside",
+            "literal:string:local",
+            11,
+            LinkStatus::Local,
+        ),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+
+    let shape_json = |where_aside: bool| {
+        let mut comments = json!({
+            "predicate": "ls://comment",
+            "kind": "hasMany",
+            "targetClassName": "Remark",
+            "getter": "SELECT ?target WHERE { <Base> <ls://comment> ?target . ?target <ad4m://type> <ls://Remark> . }"
+        });
+        if where_aside {
+            comments["whereFilter"] = json!({ "aside": "local" });
+            comments["wherePredicates"] = json!({ "aside": "ls://aside" });
+        }
+        json!({
+            "className": "Card",
+            "properties": {
+                "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"ls://Card"}
+            },
+            "relations": { "comments": comments }
+        })
+        .to_string()
+    };
+    let comments = |where_aside: bool, viewer: Option<String>| {
+        let store = &store;
+        let shape_json = shape_json(where_aside);
+        async move {
+            let (resolver, shape) = StaticShapeResolver::from_json("Card", &shape_json).unwrap();
+            resolver.register(
+                "Remark",
+                parse_shape_from_json(LS_REMARK_SHAPE_JSON, "Remark").unwrap(),
+            );
+            let mut out = Vec::new();
+            for include in [false, true] {
+                // `limit` switches to the two-phase plan.
+                for limit in [None, Some(10)] {
+                    let query = ModelQueryInput {
+                        limit,
+                        include: include.then(|| {
+                            HashMap::from([("comments".to_string(), IncludeValue::Bool(true))])
+                        }),
+                        ..Default::default()
+                    };
+                    let result = super::query::execute_model_query(
+                        store,
+                        shape.as_ref(),
+                        &query,
+                        &resolver,
+                        viewer.as_deref(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        result.instances.len(),
+                        1,
+                        "include {include}, limit {limit:?}"
+                    );
+                    out.push(ids(&result.instances[0]["comments"]));
+                }
+            }
+            out
+        }
+    };
+    // The same ids from all four plans.
+    let each =
+        |expected: &[&str]| vec![expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(); 4];
+
+    let bob_did = Some(bob.did.clone());
+    let alice_did = Some(alice.did.clone());
+    assert_eq!(
+        comments(false, bob_did.clone()).await,
+        each(&["ls://r/3"]),
+        "Bob: not r/1 (Alice's Local relation link), not r/2 (Alice's Local flag)"
+    );
+    assert_eq!(
+        comments(true, bob_did).await,
+        each(&[]),
+        "Bob: r/3's only aside is Alice's Local link"
+    );
+    for viewer in [alice_did, None] {
+        assert_eq!(
+            comments(false, viewer.clone()).await,
+            each(&["ls://r/1", "ls://r/2", "ls://r/3"]),
+            "{viewer:?}"
+        );
+        assert_eq!(
+            comments(true, viewer.clone()).await,
+            each(&["ls://r/1", "ls://r/3"]),
+            "{viewer:?}: where aside"
+        );
+    }
+}
