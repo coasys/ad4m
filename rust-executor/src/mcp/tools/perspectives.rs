@@ -2,10 +2,10 @@
 //!
 //! Tools for managing perspectives (knowledge graphs) and raw links.
 
+use super::instances::{normalize_legacy_literal, other_literal_spelling};
 use super::Ad4mMcpHandler;
 use crate::agent::capabilities::defs::PERSPECTIVE_CREATE_CAPABILITY;
 use crate::perspectives::perspective_instance::SdnaType;
-use crate::perspectives::utils::prolog_resolution_to_string;
 use crate::perspectives::{add_perspective, all_perspectives};
 use crate::types::Link;
 use crate::types::{LinkQuery, LinkStatus, PerspectiveHandle};
@@ -21,13 +21,6 @@ use serde_json::json;
 /// Parameters for listing perspectives
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListPerspectivesParams {}
-
-/// Parameters for listing subject classes in a perspective
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct ListSubjectClassesParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-}
 
 /// Parameters for creating a new perspective
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -67,19 +60,85 @@ pub struct QueryLinksParams {
 pub struct AddModelParams {
     /// Perspective UUID
     pub perspective_id: String,
-    /// Subject class name
+    /// Bare subject class name, matching the local name of the shape's
+    /// `target_class` (e.g. `Task` for `target_class: "board://Task"`)
     pub class_name: String,
     /// SHACL shape definition as JSON string
     pub shacl_json: String,
 }
 
-/// Parameters for running a Prolog query
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
-pub struct InferParams {
-    /// Perspective UUID
-    pub perspective_id: String,
-    /// Prolog query string
-    pub query: String,
+/// Local (bare) name of a `target_class` URI: the segment after the last `/`
+/// or `#`. `board://Task` → `Task`; a bare `Task` is returned unchanged.
+fn local_class_name(target_class: &str) -> &str {
+    target_class
+        .rsplit(['/', '#'])
+        .next()
+        .unwrap_or(target_class)
+}
+
+/// Check that `class_name` is the local name of the shape's `target_class`.
+///
+/// The two are stored independently — `class_name` names the SDNA entry while
+/// `target_class` defines the class URI — and a mismatch registers a class that
+/// looks fine in `describe_perspective` but whose property setters are never
+/// found, so every write fails with "read-only". Rejecting the mismatch up
+/// front turns a silent broken registration into an actionable error.
+fn validate_class_name(class_name: &str, shacl_json: &str) -> Result<(), String> {
+    let shape: serde_json::Value = serde_json::from_str(shacl_json)
+        .map_err(|e| format!("Error: shacl_json is not valid JSON: {}", e))?;
+
+    let target_class = shape
+        .get("target_class")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            "Error: shacl_json has no `target_class` field. Every SHACL shape must declare \
+             the class URI it describes, e.g. \"target_class\": \"board://Task\"."
+                .to_string()
+        })?;
+
+    let expected = local_class_name(target_class);
+    if class_name != expected {
+        return Err(format!(
+            "Error: class_name '{}' does not match the SHACL target_class '{}'. \
+             Pass class_name: \"{}\" — the bare class name, without the namespace. \
+             Registering a mismatched name yields a class whose properties are all \
+             read-only, because its setters are stored under the other name.",
+            class_name, target_class, expected
+        ));
+    }
+
+    Ok(())
+}
+
+/// The link filters `query_links` should try, in order.
+///
+/// Always the filter exactly as the caller gave it, first; plus the filter with
+/// every `literal:` field flipped to its other spelling, when that differs. See
+/// the comment in `query_links` for why both are needed rather than just the
+/// normalised one — and note the flip has to run in *both* directions, because
+/// the direction that matters is the one an agent arrives at by navigating the
+/// graph: newer links store the canonical spelling, while the node those links
+/// point at may carry its own properties under the legacy one. Expanding only
+/// legacy→canonical leaves that node looking like an empty container.
+type LinkFilter = (Option<String>, Option<String>, Option<String>);
+fn link_filter_variants(
+    source: &Option<String>,
+    predicate: &Option<String>,
+    target: &Option<String>,
+) -> Vec<LinkFilter> {
+    let flip = |v: &Option<String>| {
+        v.as_ref()
+            .map(|s| other_literal_spelling(s).unwrap_or_else(|| s.clone()))
+    };
+
+    let as_given = (source.clone(), predicate.clone(), target.clone());
+    let flipped = (flip(source), flip(predicate), flip(target));
+
+    if flipped == as_given {
+        vec![as_given]
+    } else {
+        vec![as_given, flipped]
+    }
 }
 
 // ============================================================================
@@ -115,46 +174,6 @@ impl Ad4mMcpHandler {
             }));
         }
         serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
-    }
-
-    /// Get all models (subject classes) defined in a perspective
-    #[tool(
-        description = "Get all models (SHACL subject classes) defined in a perspective. Models are schemas that give structure to the raw link graph — like database table definitions. Each model defines typed properties and collections. Use query_subjects to find instances, get_subject_data to read them, or use the dynamic per-class tools (e.g. channel_create, message_get)."
-    )]
-    pub async fn get_models(&self, params: Parameters<ListSubjectClassesParams>) -> String {
-        let uuid = &params.0.perspective_id;
-
-        match self.get_readable_perspective(uuid).await {
-            Ok(perspective) => {
-                let links = perspective
-                    .get_links(&LinkQuery {
-                        predicate: Some("rdf://type".to_string()),
-                        target: Some("ad4m://SubjectClass".to_string()),
-                        ..Default::default()
-                    })
-                    .await;
-
-                match links {
-                    Ok(class_links) => {
-                        let classes: Vec<String> = class_links
-                            .iter()
-                            .map(|l| {
-                                l.data
-                                    .source
-                                    .split("://")
-                                    .last()
-                                    .unwrap_or(&l.data.source)
-                                    .to_string()
-                            })
-                            .collect();
-                        serde_json::to_string_pretty(&classes)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
-                    }
-                    Err(e) => format!("Error listing subject classes: {}", e),
-                }
-            }
-            Err(e) => e,
-        }
     }
 
     /// Create a new perspective
@@ -207,17 +226,22 @@ impl Ad4mMcpHandler {
 
     /// Add a link to a perspective
     #[tool(
-        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal://string:Alice'. In shared neighbourhoods, links sync to all members."
+        description = "Add a link (RDF-like triple) to a perspective. Links are the fundamental data unit — all data (properties, type markers, collections) is stored as links. Example: source='did:key:abc' predicate='ad4m://name' target='literal:string:Alice' — note the single colon: the legacy 'literal://string:…' spelling is not a parseable IRI and breaks every query that inlines it. In shared neighbourhoods, links sync to all members."
     )]
     pub async fn add_link(&self, params: Parameters<AddLinkParams>) -> String {
         let p = &params.0;
 
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
+                // The legacy `literal://…` spelling the old example advertised
+                // is not a parseable IRI, so storing it verbatim poisons every
+                // SPARQL read of the link. Normalise to the single-colon form
+                // (what the TypeScript SDK's `Literal` now requires too) and
+                // echo the stored target back so the caller sees it.
                 let link = Link {
-                    source: p.source.clone(),
+                    source: normalize_legacy_literal(&p.source).into_owned(),
                     predicate: Some(p.predicate.clone()),
-                    target: p.target.clone(),
+                    target: normalize_legacy_literal(&p.target).into_owned(),
                 };
 
                 match perspective
@@ -246,39 +270,83 @@ impl Ad4mMcpHandler {
 
     /// Query links in a perspective
     #[tool(
-        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values."
+        description = "Query links in a perspective. Links are RDF-like triples with source, predicate, and target. Filter by any combination — omit a filter to match all values for that field. Example: source='expr://abc' with no predicate/target returns all links from that address. Use predicate filter to find specific property values. A `literal://x:y` filter also matches the canonical `literal:x:y` spelling and vice versa, so a link written through add_link (which normalises) is found by the string it was written with."
     )]
     pub async fn query_links(&self, params: Parameters<QueryLinksParams>) -> String {
         let p = &params.0;
 
+        // `add_link` normalises `literal://x:y` to `literal:x:y` on the way in
+        // (above), so a caller that writes the legacy spelling and then reads
+        // back with the *same string it just wrote successfully* used to get an
+        // empty array and no error — it looks like the write failed, and it did
+        // not.
+        //
+        // The obvious fix — normalise the filter — is wrong: links that a peer
+        // or an older client actually stored in the legacy form still exist
+        // byte-for-byte in the store (nothing normalises on sync; see #1014),
+        // and a normalised-only filter can no longer find them. That would
+        // break the very query that diagnosed #1014.
+        //
+        // So match *either* spelling: the filter as given, plus the same filter
+        // with its `literal:` fields flipped to the other spelling. Storage is
+        // untouched and both populations remain reachable.
+        //
+        // The flip runs in both directions, and the canonical→legacy one is the
+        // direction that matters most: an agent navigating the graph arrives at
+        // the canonical spelling, because that is what the newer links store,
+        // while the node they point at may carry its own `type`/`body` links
+        // under the legacy spelling. Expanding only legacy→canonical makes such
+        // a node present as an empty container — one `has_child` out, no
+        // content — which is a wrong answer that looks like a complete one.
+        //
+        // Mixing spellings across fields in one call is not expanded
+        // combinatorially — the two passes are all-as-given and all-flipped,
+        // which covers a caller using one spelling.
+        let filters = link_filter_variants(&p.source, &p.predicate, &p.target);
+
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
-                let query = LinkQuery {
-                    source: p.source.clone(),
-                    predicate: p.predicate.clone(),
-                    target: p.target.clone(),
-                    ..Default::default()
-                };
+                let mut result: Vec<serde_json::Value> = Vec::new();
+                let mut seen: std::collections::HashSet<(String, String, String, String)> =
+                    std::collections::HashSet::new();
 
-                match perspective.get_links(&query).await {
-                    Ok(links) => {
-                        let result: Vec<serde_json::Value> = links
-                            .iter()
-                            .map(|l| {
-                                json!({
-                                    "source": l.data.source,
-                                    "predicate": l.data.predicate,
-                                    "target": l.data.target,
-                                    "timestamp": l.timestamp,
-                                    "author": l.author,
-                                })
-                            })
-                            .collect();
-                        serde_json::to_string_pretty(&result)
-                            .unwrap_or_else(|e| format!("Error: {}", e))
+                for (source, predicate, target) in filters {
+                    let query = LinkQuery {
+                        source,
+                        predicate,
+                        target,
+                        ..Default::default()
+                    };
+
+                    let links = match perspective.get_links(&query).await {
+                        Ok(links) => links,
+                        Err(e) => return format!("Error querying links: {}", e),
+                    };
+
+                    for l in &links {
+                        // Two filters can match the same link only if the store
+                        // holds both spellings; dedupe so the caller never sees
+                        // a row twice because of how it spelled the filter.
+                        let key = (
+                            l.data.source.clone(),
+                            l.data.predicate.clone().unwrap_or_default(),
+                            l.data.target.clone(),
+                            l.timestamp.clone(),
+                        );
+                        if !seen.insert(key) {
+                            continue;
+                        }
+                        result.push(json!({
+                            "source": l.data.source,
+                            "predicate": l.data.predicate,
+                            "target": l.data.target,
+                            "timestamp": l.timestamp,
+                            "author": l.author,
+                        }));
                     }
-                    Err(e) => format!("Error querying links: {}", e),
                 }
+
+                serde_json::to_string_pretty(&result).unwrap_or_else(|e| format!("Error: {}", e))
             }
             Err(e) => e,
         }
@@ -286,10 +354,14 @@ impl Ad4mMcpHandler {
 
     /// Add a model (subject class definition) to a perspective
     #[tool(
-        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, dynamic MCP tools are auto-generated for the class: {class}_create, {class}_get, {class}_set_{property}, {class}_add_{collection}, etc. The tool list updates after registration."
+        description = "Register a model (subject class) using a SHACL JSON definition. This defines the schema — properties, collections, types — for typed objects in the perspective. Once registered, the class appears in describe_perspective and can be used with the generic instance_* tools by class_name (instance_create, instance_query, …). If the executor runs with dynamicClassTools enabled, per-class tools ({class}_create, {class}_set_{property}, …) are additionally generated and the tool list updates after registration."
     )]
     pub async fn add_model(&self, params: Parameters<AddModelParams>) -> String {
         let p = &params.0;
+
+        if let Err(message) = validate_class_name(&p.class_name, &p.shacl_json) {
+            return message;
+        }
 
         match self.get_writable_perspective(&p.perspective_id).await {
             Ok((mut perspective, agent_context)) => {
@@ -318,25 +390,129 @@ impl Ad4mMcpHandler {
             Err(e) => e,
         }
     }
+}
 
-    /// Run a Prolog query for complex reasoning
-    #[tool(
-        description = "Run a Prolog query on a perspective for complex reasoning. The link graph is exposed as Prolog facts (triple/3), enabling pattern matching and inference beyond simple link queries. Example: 'triple(X, \"rdf://type\", \"ad4m://SubjectClass\")' finds all subject classes. Use for advanced queries not covered by other tools."
-    )]
-    pub async fn infer(&self, params: Parameters<InferParams>) -> String {
-        let p = &params.0;
+#[cfg(test)]
+mod tests {
+    use super::{link_filter_variants, local_class_name, validate_class_name};
 
-        match self.get_writable_perspective(&p.perspective_id).await {
-            Ok((perspective, agent_context)) => {
-                match perspective
-                    .prolog_query_with_context(p.query.clone(), &agent_context)
-                    .await
-                {
-                    Ok(result) => prolog_resolution_to_string(result),
-                    Err(e) => format!("Error running query: {}", e),
-                }
-            }
-            Err(e) => e,
+    fn shape(target_class: &str) -> String {
+        format!(r#"{{"target_class":"{}","properties":[]}}"#, target_class)
+    }
+
+    #[test]
+    fn local_name_strips_namespace() {
+        assert_eq!(local_class_name("board://Task"), "Task");
+        assert_eq!(local_class_name("http://example.org/ns#Task"), "Task");
+        assert_eq!(local_class_name("Task"), "Task");
+    }
+
+    #[test]
+    fn bare_name_matching_target_class_is_accepted() {
+        assert!(validate_class_name("Task", &shape("board://Task")).is_ok());
+    }
+
+    #[test]
+    fn uri_form_class_name_is_rejected() {
+        // The zombie-schema case: registration used to succeed and produce a
+        // class whose every property was read-only.
+        let err = validate_class_name("board://Task", &shape("board://Task")).unwrap_err();
+        assert!(err.contains("board://Task"), "{}", err);
+        assert!(err.contains("\"Task\""), "{}", err);
+    }
+
+    #[test]
+    fn unrelated_class_name_is_rejected() {
+        let err = validate_class_name("SomethingElse", &shape("board://Comment")).unwrap_err();
+        assert!(err.contains("SomethingElse"), "{}", err);
+        assert!(err.contains("board://Comment"), "{}", err);
+    }
+
+    #[test]
+    fn missing_target_class_is_rejected() {
+        let err = validate_class_name("Task", r#"{"properties":[]}"#).unwrap_err();
+        assert!(err.contains("target_class"), "{}", err);
+    }
+
+    #[test]
+    fn invalid_json_is_rejected() {
+        let err = validate_class_name("Task", "not json").unwrap_err();
+        assert!(err.contains("not valid JSON"), "{}", err);
+    }
+
+    fn some(v: &str) -> Option<String> {
+        Some(v.to_string())
+    }
+
+    /// `add_link` normalises `literal://` on the way in, so a caller reading
+    /// back with the string it just wrote must still find the row — while a
+    /// link a peer genuinely stored in the legacy form stays findable too.
+    /// Both populations exist at once, so both filters have to run.
+    #[test]
+    fn legacy_filter_also_tries_the_normalised_spelling() {
+        let variants = link_filter_variants(&some("literal://string:lalpoisontest"), &None, &None);
+        assert_eq!(
+            variants,
+            vec![
+                (some("literal://string:lalpoisontest"), None, None),
+                (some("literal:string:lalpoisontest"), None, None),
+            ],
+            "as-given must come first, so a genuinely legacy row is still reachable"
+        );
+    }
+
+    /// The direction that matters most: an agent navigating the graph arrives at
+    /// the canonical spelling, because that is what the newer links store, while
+    /// the node those links point at may hold its own `type`/`body` under the
+    /// legacy one. Expanding only legacy→canonical makes that node present as an
+    /// empty container — one `has_child` out and no content.
+    #[test]
+    fn canonical_filter_also_tries_the_legacy_spelling() {
+        let variants = link_filter_variants(
+            &some("literal:string:h4o520"),
+            &some("ad4m://has_child"),
+            &None,
+        );
+        assert_eq!(
+            variants,
+            vec![
+                (
+                    some("literal:string:h4o520"),
+                    some("ad4m://has_child"),
+                    None
+                ),
+                (
+                    some("literal://string:h4o520"),
+                    some("ad4m://has_child"),
+                    None
+                ),
+            ],
+            "non-literal fields must pass through the flip untouched"
+        );
+    }
+
+    /// A value with no counterpart spelling costs no second query.
+    #[test]
+    fn filters_without_a_counterpart_run_once() {
+        for v in [
+            "ad4m://obj/nefoboz",
+            "did:key:z6Mk",
+            // Neither `literal://` nor `literal:x` is the two-part
+            // `literal:<kind>:<value>` shape, in either direction.
+            "literal://",
+            "literal:x",
+        ] {
+            assert_eq!(
+                link_filter_variants(&some(v), &None, &None).len(),
+                1,
+                "{v} should not expand"
+            );
         }
+    }
+
+    /// No filter at all is still exactly one query, not two identical ones.
+    #[test]
+    fn empty_filter_runs_once() {
+        assert_eq!(link_filter_variants(&None, &None, &None).len(), 1);
     }
 }

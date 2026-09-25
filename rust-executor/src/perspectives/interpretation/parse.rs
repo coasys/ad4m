@@ -1,4 +1,4 @@
-use super::ProposedInstance;
+use super::{InterpretationOutput, ProposedInstance};
 
 /// Parse a raw LLM response into proposed instances.
 ///
@@ -6,14 +6,32 @@ use super::ProposedInstance;
 /// common wrappers (mirrors Flux `LLMutils.ts`): `<think>…</think>` blocks,
 /// ```-fences, and trailing commas. Then parse as a JSON array.
 pub fn parse_interpretation_response(raw: &str) -> anyhow::Result<Vec<ProposedInstance>> {
+    parse_interpretation_output(raw).map(|out| out.instances)
+}
+
+/// Parse a raw LLM response into instances plus flow proposals. Accepts the
+/// wrapping object `{ "instances": [...], "flow_proposals": [...] }` as well
+/// as a bare array of instances.
+pub fn parse_interpretation_output(raw: &str) -> anyhow::Result<InterpretationOutput> {
     let cleaned = clean_llm_json(raw);
-    let instances: Vec<ProposedInstance> = serde_json::from_str(&cleaned).map_err(|e| {
+    let value: serde_json::Value = serde_json::from_str(&cleaned).map_err(|e| {
         anyhow::anyhow!(
             "interpretation JSON parse failed: {e}; cleaned payload length: {} bytes",
             cleaned.len()
         )
     })?;
-    Ok(instances)
+    match value {
+        serde_json::Value::Array(_) => Ok(InterpretationOutput {
+            instances: serde_json::from_value(value)
+                .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}"))?,
+            flow_proposals: Vec::new(),
+        }),
+        serde_json::Value::Object(_) => serde_json::from_value(value)
+            .map_err(|e| anyhow::anyhow!("interpretation JSON parse failed: {e}")),
+        _ => Err(anyhow::anyhow!(
+            "interpretation JSON must be an array or an object at the top level"
+        )),
+    }
 }
 
 /// Strip the reasoning/markdown noise local models add around JSON.
@@ -42,7 +60,86 @@ fn clean_llm_json(raw: &str) -> String {
     //    comma inside a genuine string value could be dropped. Extracting the
     //    bracketed block first confines the string-scanner to actual JSON.
     let candidate = s.trim();
-    let extracted = extract_bracketed(candidate, '[', ']')
+    // Strict-parse at each TOP-LEVEL bracket position in order, taking the
+    // first position where a complete JSON value parses; fall back to the
+    // greedy spans when none does (trailing commas are repaired below).
+    //
+    // Top-level-only strict attempts are what make this safe for every
+    // payload shape this branch accepts: a prose-only bracket (e.g.
+    // `I'll extract {a couple of things}: [...]`) fails its strict parse and
+    // the scan moves on to the real payload — see the
+    // `prose_braces_before_the_real_array_*` regression test — and a
+    // wrapper object `{ "instances": [...], "flow_proposals": [...] }` is
+    // taken whole rather than truncated to its inner instances array, which
+    // an array-first chain would silently do (dropping flow_proposals).
+    // Restricting to depth-0 positions keeps a repair-needing outer array
+    // (trailing commas) from being hijacked by a valid inner object: the
+    // inner positions are never strict-tried, so the outer falls through to
+    // the greedy span + comma repair. The depth scan is string-aware; prose
+    // with unbalanced quotes merely skews the scan towards the greedy
+    // fallbacks, which is the pre-existing behaviour for that case.
+    let mut top_level_starts = Vec::new();
+    {
+        let (mut depth, mut in_string, mut escaped) = (0i32, false, false);
+        for (i, c) in candidate.char_indices() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '[' | '{' => {
+                    if depth == 0 {
+                        top_level_starts.push(i);
+                    }
+                    depth += 1;
+                }
+                ']' | '}' => depth = (depth - 1).max(0),
+                _ => {}
+            }
+        }
+    }
+    // Among the strict-parsing candidates, prefer the first that actually
+    // DESERIALIZES as a NON-EMPTY interpretation payload: a model may emit
+    // an unrelated-but-valid JSON value in its prose before the real
+    // payload — an object (`{"model": "gemma3"}`), a scalar array
+    // (`["Task"]`), or an empty array (`No changes needed: []. Actually,
+    // here: [{…}]`) — and taking it just because it parses would either
+    // fail the semantic parse and burn a retry, or (for `[]`) silently
+    // report zero instances, while the real payload sits ignored right
+    // behind it. When nothing non-empty deserializes, fall back to the
+    // first candidate merely SHAPED like a non-empty payload, so a
+    // slightly-malformed real payload still wins over prose values
+    // (including a prose `[]`) and the semantic parse reports ITS mismatch
+    // rather than the prose value's. Then any payload-shaped candidate —
+    // this is where a legitimate sole-`[]` "no instances" response lands,
+    // so it stays parseable. When even that misses, keep the first valid
+    // value — old behaviour.
+    let strict_candidates: Vec<String> = top_level_starts
+        .iter()
+        .filter_map(|&i| extract_first_json_value(candidate, i))
+        .collect();
+    let extracted = strict_candidates
+        .iter()
+        .find(|c| parses_as_nonempty_interpretation_payload(c))
+        .or_else(|| {
+            strict_candidates
+                .iter()
+                .find(|c| looks_like_nonempty_interpretation_payload(c))
+        })
+        .or_else(|| {
+            strict_candidates
+                .iter()
+                .find(|c| looks_like_interpretation_payload(c))
+        })
+        .or_else(|| strict_candidates.first())
+        .cloned()
+        .or_else(|| extract_bracketed(candidate, '[', ']'))
         .or_else(|| extract_bracketed(candidate, '{', '}'))
         .unwrap_or_else(|| candidate.to_string());
 
@@ -50,6 +147,72 @@ fn clean_llm_json(raw: &str) -> String {
     //    now scoped to the extracted JSON. Skips commas inside string literals
     //    so values like "a, }" survive.
     strip_trailing_commas(&extracted)
+}
+
+/// Semantic payload check used as the first ranking tier for strict
+/// candidates: does this JSON actually deserialize into one of the two
+/// accepted payload shapes (bare instance array, or wrapper object) *with
+/// content*? An unrelated scalar array like `["Task"]` parses as JSON and
+/// passes the structural check below, but fails here — so the real payload
+/// behind it still wins. An **empty** array in prose ("No changes: []")
+/// deserializes fine but is rejected by the non-empty requirement, or it
+/// would silently yield zero instances with the real payload sitting right
+/// behind it. A wrapper counts as non-empty when either `instances` or
+/// `flow_proposals` carries entries — a proposals-only payload is real
+/// work.
+///
+/// Load-bearing detail: `InterpretationOutput::instances` has NO
+/// `#[serde(default)]`, which is what makes a prose object like
+/// `{"model": "gemma3"}` fail this tier. If `instances` ever gains a
+/// default, any prose object starts winning here.
+fn parses_as_nonempty_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(v @ serde_json::Value::Array(_)) => serde_json::from_value::<Vec<ProposedInstance>>(v)
+            .map(|instances| !instances.is_empty())
+            .unwrap_or(false),
+        Ok(v @ serde_json::Value::Object(_)) => serde_json::from_value::<InterpretationOutput>(v)
+            .map(|out| !out.instances.is_empty() || !out.flow_proposals.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Structural (not semantic) non-empty payload check — second ranking tier:
+/// an array with at least one element, or an object whose `instances` key
+/// holds a non-empty array. Keeps a slightly-malformed real payload ranked
+/// above prose values — including a prose `[]` — so the semantic parse
+/// error points at the payload, not the prose.
+fn looks_like_nonempty_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(serde_json::Value::Array(items)) => !items.is_empty(),
+        Ok(serde_json::Value::Object(map)) => map
+            .get("instances")
+            .and_then(|v| v.as_array())
+            .map(|items| !items.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Any-payload-shaped check — third ranking tier: an array (empty included),
+/// or an object carrying an `instances` key. This is where a legitimate
+/// sole-`[]` "no instances" response is picked up, so it stays parseable
+/// while never outranking real content.
+fn looks_like_interpretation_payload(candidate: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(candidate) {
+        Ok(serde_json::Value::Array(_)) => true,
+        Ok(serde_json::Value::Object(map)) => map.contains_key("instances"),
+        _ => false,
+    }
+}
+
+/// Strictly parse one JSON value starting at `start` and return exactly its
+/// span, so trailing prose is not swallowed into the payload.
+fn extract_first_json_value(s: &str, start: usize) -> Option<String> {
+    let mut stream =
+        serde_json::Deserializer::from_str(&s[start..]).into_iter::<serde_json::Value>();
+    stream.next()?.ok()?;
+    Some(s[start..start + stream.byte_offset()].to_string())
 }
 
 /// Return the substring from the first `open` to the matching last `close`,
@@ -110,6 +273,7 @@ fn strip_trailing_commas(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::perspectives::interpretation::LlmFlowProposal;
     use crate::perspectives::interpretation::*;
     use crate::perspectives::interpretation_test_support::*;
 
@@ -158,6 +322,93 @@ mod tests {
         let out = parse_interpretation_response(raw).unwrap();
         assert_eq!(out.len(), 2);
         assert_eq!(prop_values(&out, "title"), vec!["A", "B"]);
+    }
+
+    #[test]
+    fn prose_braces_before_the_real_array_dont_swallow_the_payload() {
+        // Brace-prose before the array: the array-first chain must not let the
+        // `{a couple of things}` span become the payload. Under an
+        // object-first ordering the greedy `{`-matcher would short-circuit
+        // here and the real payload would never be tried.
+        let raw = r#"OK, I'll extract {a couple of things}: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].class, "Task");
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
+    }
+
+    #[test]
+    fn unrelated_valid_json_before_the_real_payload_is_skipped() {
+        // A syntactically valid but unrelated object in the prose must not
+        // win just because it parses: the scan prefers the first candidate
+        // shaped like a payload (array, or object with `instances`).
+        let raw = r#"Config used: {"model": "gemma3", "temp": 0.2}. Result: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // Same with a bare-array payload after an unrelated object.
+        let raw = r#"Notes: {"irrelevant": true} then [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["B"]);
+
+        // No payload-shaped candidate at all: first valid value is still
+        // taken and the semantic parse reports the mismatch (old behaviour).
+        assert!(parse_interpretation_output(r#"Just: {"note": "hi"}"#).is_err());
+    }
+
+    #[test]
+    fn unrelated_scalar_array_before_the_real_payload_is_skipped() {
+        // A scalar array is valid JSON and array-shaped, but does not
+        // deserialize as instances — it must not outrank the real payload.
+        let raw = r#"Classes seen: ["Task"]. Result: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // Same with a bare-array payload after the unrelated scalar array.
+        let raw = r#"Classes seen: ["Task", "Belief"] then [{"class":"Task","title":"B"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["B"]);
+    }
+
+    #[test]
+    fn empty_array_in_prose_before_the_real_payload_is_skipped() {
+        // `[]` deserializes as a perfectly valid (empty) instance vector, so
+        // without the non-empty requirement it would win the ranking and the
+        // pass would silently report zero instances — no parse error, no
+        // retry — with the real payload sitting right behind it.
+        let raw = r#"No changes needed: []. Actually, here: [{"class":"Task","title":"A"}]"#;
+        let out = parse_interpretation_response(raw).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(prop_values(&out, "title"), vec!["A"]);
+
+        // Same silent-drop shape with an empty wrapper object in the prose.
+        let raw = r#"Result: {"instances":[]} — wait: {"instances":[{"class":"Task","title":"B"}],"flow_proposals":[]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+
+        // A proposals-only wrapper is real content, not "empty" — it must
+        // still win over prose that precedes it.
+        let raw = r#"Config: {"model":"gemma3"}. Result: {"instances":[],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert!(out.instances.is_empty());
+        assert_eq!(out.flow_proposals.len(), 1);
+    }
+
+    #[test]
+    fn wrapper_object_after_prose_keeps_flow_proposals() {
+        // A wrapper object must be taken whole: an array-first extraction
+        // chain would strict-parse the inner `instances` array and silently
+        // drop `flow_proposals`.
+        let raw = r#"Here {you go}: {"instances":[{"class":"Task","title":"A"}],"flow_proposals":[{"instance":"ad4m://flow/instance/1","toState":"scoped"}]}"#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.flow_proposals.len(), 1);
+        assert_eq!(out.flow_proposals[0].to_state, "scoped");
     }
 
     #[test]
@@ -275,7 +526,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
+        assert!(out.flow_proposals.is_empty());
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
@@ -298,7 +550,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(out.len(), 1);
+        assert_eq!(out.instances.len(), 1);
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
@@ -308,7 +560,7 @@ mod tests {
         // and propagate the last parse error rather than looping forever.
         let attempts = std::sync::Arc::new(std::sync::atomic::AtomicU8::new(0));
         let attempts_clone = attempts.clone();
-        let result: anyhow::Result<Vec<ProposedInstance>> = retry_interpretation_parse(move |_| {
+        let result: anyhow::Result<InterpretationOutput> = retry_interpretation_parse(move |_| {
             let a = attempts_clone.clone();
             async move {
                 a.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -321,5 +573,51 @@ mod tests {
             attempts.load(std::sync::atomic::Ordering::SeqCst),
             INTERPRETATION_MAX_ATTEMPTS
         );
+    }
+
+    #[test]
+    fn output_wrapping_object_carries_instances_and_flow_proposals() {
+        let raw = r#"Here you go:
+        {
+          "instances": [ {"class":"Task","title":"Ship the PR"} ],
+          "flow_proposals": [
+            {"instance":"ad4m://flow/instance/delivery-42","toState":"review","reason":"PR is up"}
+          ]
+        }
+        Let me know if you need more."#;
+        let out = parse_interpretation_output(raw).unwrap();
+        assert_eq!(out.instances.len(), 1);
+        assert_eq!(out.instances[0].class, "Task");
+        assert_eq!(
+            out.flow_proposals,
+            vec![LlmFlowProposal {
+                instance: "ad4m://flow/instance/delivery-42".into(),
+                to_state: "review".into(),
+                reason: Some("PR is up".into()),
+            }]
+        );
+    }
+
+    #[test]
+    fn output_accepts_bare_array_and_object_without_flow_proposals() {
+        let bare =
+            parse_interpretation_output(r#"[{"class":"Intention","title":"Do X"}]"#).unwrap();
+        assert_eq!(bare.instances.len(), 1);
+        assert!(bare.flow_proposals.is_empty());
+
+        let wrapped =
+            parse_interpretation_output(r#"{"instances":[{"class":"Belief","title":"X"}]}"#)
+                .unwrap();
+        assert_eq!(wrapped.instances.len(), 1);
+        assert!(wrapped.flow_proposals.is_empty());
+    }
+
+    #[test]
+    fn output_rejects_lone_instance_object_and_malformed_proposal() {
+        assert!(parse_interpretation_output(r#"{"class":"Belief","title":"X"}"#).is_err());
+        assert!(parse_interpretation_output(
+            r#"{"instances":[],"flow_proposals":[{"toState":"review"}]}"#
+        )
+        .is_err());
     }
 }

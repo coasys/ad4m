@@ -362,4 +362,115 @@ describe("Decorators → SHACL writer round-trip", () => {
     );
     expect(rebuiltProp?.ordering).toBe("linkedList");
   });
+
+  it("round-trips ordering through toJSON/fromJSON", () => {
+    @Model({ name: "JsonOrderedItem" })
+    class JsonOrderedItem extends Ad4mModel {}
+
+    @Model({ name: "JsonOrderedHolder" })
+    class JsonOrderedHolder extends Ad4mModel {
+      @HasMany({
+        through: "ns://ordered",
+        target: () => JsonOrderedItem,
+        ordering: { strategy: "linkedList" },
+      })
+      ordered: string[] = [];
+
+      @HasMany({ through: "ns://plain", target: () => JsonOrderedItem })
+      plain: string[] = [];
+    }
+
+    const { shape } = JsonOrderedHolder.generateSHACL();
+
+    // `toJSON` — not `toLinks` — is what `ensureSubjectClass` ships to the
+    // backend, which turns it into the `ad4m://ordering` link the executor
+    // reads the strategy back from. A declaration dropped here is inert
+    // end to end however faithfully `toLinks` spells it: the setter writes
+    // no ordering entries and hydration never reorders.
+    const json: any = shape.toJSON();
+    const orderedProp = json.properties.find((p: any) => p.name === "ordered");
+    expect(orderedProp?.ordering).toBe("linkedList");
+
+    const plainProp = json.properties.find((p: any) => p.name === "plain");
+    expect(plainProp?.ordering).toBeUndefined();
+
+    const rebuilt = SHACLShape.fromJSON(json);
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "ordered")?.ordering,
+    ).toBe("linkedList");
+    expect(
+      rebuilt.properties.find((p: any) => p.name === "plain")?.ordering,
+    ).toBeUndefined();
+  });
+});
+
+/**
+ * An inverse relation is registered twice by design: once in the relation
+ * registry, which describes the edge, and once as property metadata, which is
+ * what makes the accessor read-only. Both were then emitted into the shape, so
+ * `generateSHACL()` described the property twice — once thinly and once with
+ * its target class and options.
+ *
+ * A duplicate is not cosmetic. The executor reads the shape to decide what a
+ * class has; two entries for one name mean two conformance patterns and two
+ * hydration passes for the same predicate, and any consumer comparing a shape
+ * against a manifest sees a property the manifest cannot produce.
+ */
+describe("inverse relations appear once in the generated shape", () => {
+  @Model({ name: "RoundTripParent" })
+  class RoundTripParent extends Ad4mModel {
+    @HasMany({ through: "test://child" })
+    children: string[] = [];
+  }
+
+  @Model({ name: "RoundTripChild" })
+  class RoundTripChild extends Ad4mModel {
+    @BelongsToOne({ through: "test://child" })
+    parent?: string;
+
+    @BelongsToMany({ through: "test://tagged" })
+    taggedBy: string[] = [];
+  }
+
+  const propertiesOf = (cls: any): any[] =>
+    (cls.generateSHACL().shape?.properties ?? []) as any[];
+
+  it("emits one shape per inverse relation", () => {
+    const names = propertiesOf(RoundTripChild).map((p) => p.name);
+    expect(names.filter((n) => n === "parent")).toHaveLength(1);
+    expect(names.filter((n) => n === "taggedBy")).toHaveLength(1);
+  });
+
+  it("keeps the relation loop's description rather than the property loop's", () => {
+    const parent = propertiesOf(RoundTripChild).find((p) => p.name === "parent");
+    expect(parent.path).toBe("test://child");
+    // maxCount is the relation loop's contribution: belongsToOne is scalar.
+    expect(parent.maxCount).toBe(1);
+  });
+
+  it("leaves the owning side alone", () => {
+    const names = propertiesOf(RoundTripParent).map((p) => p.name);
+    expect(names.filter((n) => n === "children")).toHaveLength(1);
+  });
+
+  /**
+   * The forward and inverse of one link share a predicate, so a consumer
+   * keying shape properties by path finds two. That is correct and worth
+   * pinning: it is what made a downstream sort non-deterministic.
+   */
+  it("lets a forward and inverse relation share one predicate", () => {
+    @Model({ name: "RoundTripBoth" })
+    class RoundTripBoth extends Ad4mModel {
+      @HasMany({ through: "test://comment" })
+      comments: string[] = [];
+
+      @BelongsToOne({ through: "test://comment" })
+      inReplyTo?: string;
+    }
+
+    const props = propertiesOf(RoundTripBoth).filter(
+      (p) => p.path === "test://comment",
+    );
+    expect(props.map((p) => p.name).sort()).toEqual(["comments", "inReplyTo"]);
+  });
 });

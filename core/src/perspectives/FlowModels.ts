@@ -9,14 +9,14 @@
  * Querying:
  *   const pending = await FlowTransitionProposal.findAll(perspective);
  *
- * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust
- * engine does not yet mint these — that lands with the consensus firing
- * work in a later PR arc. This class defines the on-graph shape so:
- *   - clients can build UI over proposals immediately (Deliberation demo);
- *   - the SDNA-parity test locks TS/Rust drift the moment the JSON exists
- *     (`rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`);
- *   - the engine can start writing into this shape when consensus lands
- *     without touching the client-side surface.
+ * Slice 5/7 of the flow-implementation arc (design doc §4.2). The Rust engine
+ * mints these as of #987 — see `flow_classes.rs` (`mint_proposal`, URIs at
+ * `ad4m://flow/proposal/{id}`) — and reads them back in
+ * `flow_instance/atom.rs`. A UI mints or joins them through
+ * `FlowInstance.proposeTransition`. This class is the client-side mirror:
+ *   - clients build UI over proposals without knowing the raw link predicates;
+ *   - the SDNA-parity test locks TS/Rust drift against
+ *     `rust-executor/src/perspectives/hardwired_sdna/flow_transition_proposal.json`.
  */
 
 import { Ad4mModel } from "../model/Ad4mModel";
@@ -26,9 +26,12 @@ import { Model } from "../model/decorators";
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
 // on the engine side; see file header). One node per proposed transition; the
-// URI is `ad4m://flow/proposal/<uuid>` when the engine mints it, but the class
-// carries no URI-format constraint — apps constructing proposals directly may
-// choose any URI they can defend as unique.
+// URI the engine mints is `ad4m://flow/proposal/<hash>` — the content address
+// of the proposer-signed fields under the `nonce` (#1108). The class carries
+// no URI-format constraint, but a proposal whose URI is not that content
+// address (including any app-chosen URI) is not engine-visible: co-signatures
+// name the URI, so the engine only counts proposals whose URI commits to
+// their fields.
 
 @Model({ name: "FlowTransitionProposal" })
 export class FlowTransitionProposal extends Ad4mModel {
@@ -72,6 +75,37 @@ export class FlowTransitionProposal extends Ad4mModel {
    */
   @Property({ through: "ad4m://flow/evidence_hashes", required: true })
   evidenceHashes: string = "";
+
+  /**
+   * The instances the proposer names as the run's outputs. Written only on
+   * a proposal into a terminal state; one link per output, ordering not
+   * significant. Each entry is the canonical JSON text of a
+   * `{ className, id }` pair (`FlowOutputRef`); `JSON.parse` it to read one.
+   */
+  @HasMany({ through: "ad4m://flow/output", datatype: "xsd:string" })
+  outputs: string[] = [];
+
+  /**
+   * SHA-256 (hex) over the named outputs' content (each instance as
+   * `model_query` returns it through its class), signed by the proposer
+   * next to the evidence seal. Co-signers load the outputs and recompute it
+   * before voting, and a flow receipt's output preimages must hash to it.
+   * Empty on a proposal into a non-terminal state.
+   */
+  @Property({ through: "ad4m://flow/outputs_hash" })
+  outputsHash: string = "";
+
+  /**
+   * The proposer's uniqueness salt for this proposal's content-addressed
+   * URI (`ad4m://flow/proposal/<hash>`; the hash covers the instance, the
+   * edge, the seal, the outputs commitment, the proposer DID and this
+   * nonce). The engine writes a UUID. A proposal without one — or whose URI
+   * does not match its own signed fields — is not engine-visible:
+   * co-signatures name the URI, so the URI must commit to what they sign
+   * (#1108).
+   */
+  @Property({ through: "ad4m://flow/nonce" })
+  nonce: string = "";
 
   /**
    * URI of the `InterpretationRun` node that produced this proposal, when
@@ -147,8 +181,14 @@ export class FlowInstanceRecord extends Ad4mModel {
   @Property({ through: "ad4m://flow/base", required: true })
   subject: string = "";
 
-  /** Name of the state the flow is currently in. */
-  @Property({ through: "ad4m://flow/current_state", required: true })
+  /**
+   * The state name this replica's executor last derived for the flow — a
+   * per-replica cache written as a `local` link, never the authority (the
+   * fold over the signed proposals is). Optional on the shape: a row that
+   * synced in from a peer carries no value until the local consensus pass
+   * has run, so an empty string means "not yet derived here".
+   */
+  @Property({ through: "ad4m://flow/current_state", local: true })
   currentState: string = "";
 
   // "When was this flow started?" is answered by `Ad4mModel`'s built-in

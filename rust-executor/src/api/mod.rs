@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod errors;
 pub mod events_ws;
+pub mod internal;
 pub mod openai_compat;
 pub mod types;
 pub mod ws_rpc;
@@ -82,7 +83,9 @@ pub fn api_router(state: AppState) -> Router {
                 }))
             }),
         )
-        .route("/health", get(|| async { Json(json!({"status": "ok"})) }));
+        .route("/health", get(|| async { Json(json!({"status": "ok"})) }))
+        // Internal platform → executor endpoint (INTERNAL_API_TOKEN auth)
+        .route("/internal/shutdown", post(internal::internal_shutdown));
 
     // Build the WS handler map once at startup
     let handler_map = Arc::new(ws_handler::build_handler_map());
@@ -157,7 +160,19 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
             axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
                 .serve(tls_app.into_make_service())
                 .await
-                .unwrap_or_else(|e| log::error!("TLS server error: {}", e));
+                // Same reasoning as the MCP HTTPS listener: the cleartext API
+                // below is bound to 127.0.0.1 because TLS is *configured*, not
+                // because this task bound. If it fails, the API has no remote
+                // surface, and "TLS server error" is not a sentence an operator
+                // maps to that outage.
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "API HTTPS listener on port {tls_port} stopped: {e}. The remote API is \
+                         now unavailable: the cleartext listener is on 127.0.0.1:{port} because \
+                         TLS is configured. Free port {tls_port} and restart the executor to \
+                         restore remote access."
+                    )
+                });
         });
 
         let listener =
