@@ -71,7 +71,9 @@
 //! operator and an author value that is not a DID, a DID array, `{ not }` or
 //! `{ contains }`.
 
-use super::sparql_builder::{compile_where_clause, instance_link_predicates, local_predicates};
+use super::sparql_builder::{
+    compile_where_clause, instance_link_predicates, local_predicates, LinkGuard,
+};
 use super::types::{ModelQueryInput, ModelShape, ShapeResolver, WhereCondition, WhereOps};
 use super::utils::escape_sparql_string;
 use deno_core::anyhow::{anyhow, Error};
@@ -286,16 +288,21 @@ fn author_expr(var: &str, cond: &WhereCondition) -> Option<String> {
 }
 
 /// Require the link `subject <predicate> object` to be written by an author
-/// meeting every condition in `authors`.
+/// meeting every condition in `authors`, and to pass the query's `guard`.
 ///
 /// Joins the link's reifier, the same `rdf:reifies` + `ad4m://ontology/author`
 /// pair the instance query reads authors from. `object` is the term or
 /// variable the caller's own triple pattern used, so the join names the very
 /// link that satisfied the value condition, not merely some link on the
-/// predicate. `tag` must be unique within the query; the variables start with
-/// `?_` so that a relation quantifier's rebase namespaces them.
+/// predicate. The guard's status and verdict checks go on that **same**
+/// reifier (#1120): otherwise a forged link claiming the author and a genuine
+/// link by someone else on the same triple would pass between them. `tag` must
+/// be unique within the query; the variables start with `?_` so that a
+/// relation quantifier's rebase namespaces them.
 ///
-/// `Ok(None)` when there is no author to check. `Err(())` when an author
+/// With no author to check, the guard alone, joined on a reifier of its own
+/// ([`LinkGuard::join`]).
+/// `Ok(None)` when there is nothing to check at all. `Err(())` when an author
 /// condition cannot be rendered, and the leaf must be declined.
 pub(super) fn link_author_join(
     authors: &[&WhereCondition],
@@ -303,9 +310,16 @@ pub(super) fn link_author_join(
     predicate: &str,
     object: &str,
     tag: &str,
+    guard: LinkGuard,
 ) -> Result<Option<String>, ()> {
     if authors.is_empty() {
-        return Ok(None);
+        let join = guard.join(
+            &format!("?_lg{tag}"),
+            subject,
+            &format!("<{predicate}>"),
+            object,
+        );
+        return Ok((!join.is_empty()).then(|| format!("   {join}")));
     }
     let reifier = format!("?_la{tag}");
     let author = format!("?_la{tag}_a");
@@ -314,8 +328,14 @@ pub(super) fn link_author_join(
         .map(|cond| author_expr(&author, cond))
         .collect::<Option<Vec<_>>>()
         .ok_or(())?;
+    let checks = guard.on_reifier(&reifier);
+    let checks = if checks.is_empty() {
+        String::new()
+    } else {
+        format!("\n   {checks}")
+    };
     Ok(Some(format!(
-        "    {reifier} <{RDF_REIFIES}> <<( {subject} <{predicate}> {object} )>> .\n    {reifier} <{ONT_AUTHOR}> {author} .\n    FILTER({})",
+        "    {reifier} <{RDF_REIFIES}> <<( {subject} <{predicate}> {object} )>> .\n    {reifier} <{ONT_AUTHOR}> {author} .{checks}\n    FILTER({})",
         tests.join(" && ")
     )))
 }
@@ -325,8 +345,11 @@ pub(super) fn link_author_join(
 /// The instance-level half of a side-by-side `author`. Hydration takes the
 /// author of the earliest of the links it reads for an instance: those on the
 /// shape's predicates ([`instance_link_predicates`]), with `local` predicates
-/// restricted to `Local` links, each with an author and a timestamp.
-/// Timestamps compare as strings, as hydration compares them.
+/// restricted to `Local` links, each with an author and a timestamp, and only
+/// links the query's `guard` admits, as hydration reads them (#1120). Without
+/// that, a forged earlier link claiming A would make the instance's author A
+/// here while the row shows someone else. Timestamps compare as strings, as
+/// hydration compares them.
 ///
 /// When several links share the earliest timestamp hydration shows whichever
 /// it met first, which the store does not fix. This requires **every** one of
@@ -337,6 +360,7 @@ pub(super) fn instance_author_filter(
     shape: &ModelShape,
     cond: &WhereCondition,
     tag: &str,
+    guard: LinkGuard,
 ) -> Option<String> {
     let predicates = instance_link_predicates(shape);
     let locals = local_predicates(shape);
@@ -359,6 +383,10 @@ pub(super) fn instance_author_filter(
         lines.push(format!("FILTER(isIRI({p}))"));
         lines.push(format!("{r} <{ONT_AUTHOR}> ?_ia{tag}a{n} ."));
         lines.push(format!("{r} <{ONT_TIMESTAMP}> ?_ia{tag}t{n} ."));
+        let checks = guard.on_reifier(&r);
+        if !checks.is_empty() {
+            lines.push(checks.trim_start().to_string());
+        }
         if !locals.is_empty() {
             let s = format!("?_ia{tag}s{n}");
             lines.push(format!("OPTIONAL {{ {r} <{ONT_STATUS}> {s} . }}"));
@@ -397,7 +425,7 @@ pub(super) fn refuse_unanswerable_link_author(
     let Some(ref wc) = query.where_clause else {
         return Ok(());
     };
-    let compiled = compile_where_clause(wc, shape, Some(resolver));
+    let compiled = compile_where_clause(wc, shape, Some(resolver), LinkGuard::of(query));
     if let Some(error) = compiled.link_author_error {
         return Err(anyhow!("where: {error}"));
     }
@@ -472,6 +500,7 @@ mod tests {
             "ns://p",
             "?o",
             "0",
+            LinkGuard::ANY,
         )
         .unwrap()
         .unwrap();

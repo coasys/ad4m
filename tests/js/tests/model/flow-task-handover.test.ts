@@ -346,9 +346,11 @@ describe("flow task handover — WE-facing API with roles", function () {
     } catch (e: any) {
       unreachable = String(e?.message ?? e);
     }
-    // Exact wording from `flow_instance/propose.rs`: the reachability check
-    // runs before the guard, and each message names only its own cause, so
-    // neither assertion can pass on the other refusal.
+    // Exact wording from `flow_instance/propose.rs`. A loose pattern such as
+    // `/not reachable|Done/i` or `/guard/i` also passes on an unrelated error
+    // that merely mentions `Done` or a guard, including one thrown before
+    // these checks run. The reachability check runs before the guard, so each
+    // call produces one deterministic message and exact matching cannot flake.
     expect(unreachable).to.match(/`Done` is not reachable from `Ready`/);
 
     // Unmet guard is an error. Fail-on-old-code: InProgress requires a WorkLog.

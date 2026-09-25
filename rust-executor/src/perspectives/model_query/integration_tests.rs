@@ -6,7 +6,7 @@ use super::projection::{
     build_projection_order_clause, build_projection_where_patterns, resolve_projections,
 };
 use super::shape::parse_shape_from_json;
-use super::sparql_builder::build_instance_sparql;
+use super::sparql_builder::{build_instance_sparql, LinkGuard};
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
@@ -706,7 +706,10 @@ async fn test_build_projection_where_patterns_empty_when_no_clause() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
+    assert_eq!(
+        build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY),
+        ""
+    );
 }
 
 #[tokio::test]
@@ -726,7 +729,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
         "expected id IRI filter, got: {patterns}"
@@ -764,7 +767,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         "Signal",
         parse_shape_from_json(target_shape_json, "Signal").unwrap(),
     );
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("?t <signal://type>"),
         "expected triple pattern for signal://type, got: {patterns}"
@@ -891,6 +894,7 @@ async fn test_resolve_projections_count() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -946,6 +950,7 @@ async fn test_resolve_projections_list() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -1000,6 +1005,7 @@ async fn test_resolve_projections_scalar() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -1046,6 +1052,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -1122,6 +1129,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -1195,6 +1203,7 @@ async fn test_resolve_projections_where_filter_by_author() {
             &shape,
             &_resolver,
             0,
+            None,
             Some(true),
         )
         .await
@@ -1476,7 +1485,8 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true, Some(true));
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2047,7 +2057,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2126,7 +2136,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2253,7 +2263,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2325,7 +2335,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2395,7 +2405,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2488,7 +2498,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -4469,6 +4479,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         &shape,
         &resolver,
         0,
+        None,
         Some(true),
     )
     .await
@@ -4503,6 +4514,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         &shape,
         &resolver,
         0,
+        None,
         Some(true),
     )
     .await

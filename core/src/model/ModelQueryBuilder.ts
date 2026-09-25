@@ -6,7 +6,7 @@
  */
 
 import type { Ad4mModel } from "./Ad4mModel";
-import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
@@ -262,6 +262,29 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
     this.queryParams.deepQuery = enabled;
+    return this;
+  }
+
+  /**
+   * Reads instances as they exist in links of one status only.
+   *
+   * `'shared'` leaves out every Local link, both from the values returned and
+   * from what decides which instances are returned. Use it when the data is
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
+   *
+   * @param status - `'shared'` or `'local'`
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const cards = await Card.query(perspective).linkStatus('shared').get();
+   * ```
+   */
+  linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
+    this.queryParams.linkStatus = status;
     return this;
   }
 

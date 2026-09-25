@@ -12,9 +12,16 @@
 //! The main entry points are [`build_instance_sparql`] (full row query) and
 //! [`build_count_sparql`] (lightweight `COUNT`).  Both delegate to
 //! [`build_query_patterns`] for the shared conformance + where logic.
+//!
+//! Every link either kind of pattern matches passes the query's [`LinkGuard`]
+//! (`linkStatus`, `includeUnverified`), the same links hydration reads. So a
+//! link that is withheld from an instance's values cannot select it, count it,
+//! order it or exclude it either (#1120).
 
 use serde_json::Value;
 
+use crate::perspectives::sparql_store::status_str;
+use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
 use super::link_author::{
@@ -96,25 +103,15 @@ fn typed_number_literal(n: f64) -> Option<String> {
 /// times against a limit. Aggregating is therefore not an optimisation — it is
 /// what makes a row mean an instance.
 ///
-/// Unless `include_unverified`, only links whose signature verified are probed
-/// (#1113), so an unverified earlier link cannot move an instance up the page.
-/// The probe is a required pattern: a source whose probe link never verified
-/// has no timestamp and is left off a timestamp-ordered page, although
-/// `COUNT`, which matches conformance on the bare triple, still counts it
-/// (#1120).
-pub(super) fn build_timestamp_probe(
-    shape: &ModelShape,
-    include_unverified: Option<bool>,
-) -> String {
+/// Only links the query's [`LinkGuard`] admits are probed (#1113, #1120), so
+/// an unverified or other-status earlier link cannot move an instance up the
+/// page. The probe joins one reifier per link, so the checks sit on that same
+/// reifier. The probe is a required pattern, and conformance reads the same
+/// links, so a source whose probe link is withheld is not an instance at all.
+pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
-    // The probe joins one reifier per link, so the verdict is read off that
-    // same reifier (see [`proof_valid_filter`]).
-    let verified = if include_unverified.unwrap_or(false) {
-        ""
-    } else {
-        " ?_r <ad4m://ontology/proofValid> \"true\" ."
-    };
+    let verified = guard.on_reifier("?_r");
 
     if let Some(prop) = shape.properties.iter().find(|p| {
         // `emittable_iri` on the initial: the value is inlined as `<…>`
@@ -182,6 +179,7 @@ pub(super) fn build_instance_sparql(
     resolver: Option<&dyn ShapeResolver>,
 ) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let guard = LinkGuard::of(query);
 
     let needed = instance_link_predicates(shape);
 
@@ -260,7 +258,7 @@ pub(super) fn build_instance_sparql(
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
-                let ts_probe = build_timestamp_probe(shape, query.include_unverified);
+                let ts_probe = build_timestamp_probe(shape, guard);
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
 {conformance}
@@ -280,32 +278,22 @@ pub(super) fn build_instance_sparql(
                 // filtered set, so there is no index to lose here.
                 // The xsd:double cast yields the numeric sort key when the
                 // value parses as a number.
-                let verified = verified_link_exists(
-                    "?source",
-                    predicate,
-                    "?_sort_raw",
-                    query.include_unverified,
-                );
+                let link = order_key_link(guard, "?source", predicate, "?_sort_raw");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw .{verified} BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
+            OPTIONAL {{ {link} BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Projection(predicate) => {
-                let verified = verified_link_exists(
-                    "?source",
-                    predicate,
-                    "?_proj_t",
-                    query.include_unverified,
-                );
+                let link = order_key_link(guard, "?source", predicate, "?_proj_t");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_proj_t .{verified} }}
+            OPTIONAL {{ {link} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -313,19 +301,13 @@ pub(super) fn build_instance_sparql(
                 rel_pred,
                 prop_pred,
             } => {
-                let rel_verified =
-                    verified_link_exists("?source", rel_pred, "?_rp_rel", query.include_unverified);
-                let prop_verified = verified_link_exists(
-                    "?_rp_rel",
-                    prop_pred,
-                    "?_rp_raw",
-                    query.include_unverified,
-                );
+                let rel_link = order_key_link(guard, "?source", rel_pred, "?_rp_rel");
+                let prop_link = order_key_link(guard, "?_rp_rel", prop_pred, "?_rp_raw");
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel .{rel_verified} OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw .{prop_verified} BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
+            OPTIONAL {{ {rel_link} OPTIONAL {{ {prop_link} BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -336,9 +318,10 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        let link_status = link_status_filter(query.link_status.as_ref());
         let proof_valid = proof_valid_filter(query.include_unverified);
         InstanceQueryPlan::Single(format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
 {predicate_filter}    ?source ?predicate ?target .
@@ -346,8 +329,64 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{local_status}}}"#
         ))
+    }
+}
+
+/// The link an order key reads, `subject <predicate> object`, as the pattern
+/// inside its `OPTIONAL`: only a link the guard admits supplies the key.
+///
+/// The guarded form is a sub-`SELECT`. Oxigraph evaluates an `OPTIONAL` over a
+/// reifier join, or over `FILTER EXISTS`, row by row with a scan, which made a
+/// page ordered by a property take seconds on a few thousand instances
+/// (`test_perf_guarded_selection_paginated_query`); the sub-`SELECT` is
+/// evaluated once. Plain triple when the guard is open.
+fn order_key_link(guard: LinkGuard, subject: &str, predicate: &str, object: &str) -> String {
+    let triple = format!("{subject} <{predicate}> {object} .");
+    let join = guard.join("?_skr", subject, &format!("<{predicate}>"), object);
+    if join.is_empty() {
+        triple
+    } else {
+        format!("{{ SELECT {subject} {object} WHERE {{ {triple}{join} }} }}")
+    }
+}
+
+/// SPARQL fragment restricting the rows that hydrate an instance to links of
+/// one [`LinkStatus`], for every predicate: the `linkStatus` query option
+/// (#1046 §7, #1116).
+///
+/// Each row of the instance query is one link joined through its own reifier,
+/// so requiring `?_reifier <ad4m://ontology/status> "Shared"` keeps exactly the
+/// Shared links. The pattern is required, not `OPTIONAL`: a link with no status
+/// annotation is dropped, the same fail-closed rule as [`local_status_filter`].
+/// So a link written by a binary that stored no status is invisible under
+/// either value, and an old store can answer "no Shared links" without
+/// anything being wrong. Only callers that opt in are affected.
+/// The two compose. Under `Shared` a `local: true` property hydrates nothing,
+/// because its links are Local by declaration. That is the answer to "this
+/// instance as it exists in Shared links".
+///
+/// It sits next to [`proof_valid_filter`] on the same `?_reifier`, so the two
+/// combine per link: a row is kept when its link has the status **and**
+/// verified (or the query set `include_unverified`). A Local link that did not
+/// verify is withheld under `Some(Local)` unless `include_unverified` is set.
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// including the include and `$` projection sub-queries that hydrate related
+/// instances, and the `__links` rows. Everything that matches a bare triple
+/// instead, which is what *selects* instances (conformance, `where`, `COUNT`,
+/// the two-phase plan's order keys, scopes, projections) and the reverse
+/// relations, applies the same status through [`LinkGuard`].
+///
+/// Empty when no status is requested.
+pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
+    match status {
+        None => String::new(),
+        Some(s) => format!(
+            "    ?_reifier <ad4m://ontology/status> \"{}\" .\n",
+            status_str(s)
+        ),
     }
 }
 
@@ -377,19 +416,15 @@ pub(super) fn build_instance_sparql(
 /// re-ingestion of a genuine link suppress it.
 ///
 /// Scope: this filters the rows that hydrate an instance, in both query plans,
-/// and the `__links` rows (`links.rs`). [`verified_link_exists`] does the same
-/// for the reads that match a bare triple: the reverse relations, the order
-/// keys of the two-phase plan's pagination subquery, and the non-transitive
-/// projections. So an unverified link cannot reorder a page, push a genuine
-/// instance past `limit`, or change a `$` count. The timestamp order key reads
-/// the verdict off its own reifier in [`build_timestamp_probe`]. A typed
-/// relation's generated getter gets it on its own triple in
+/// and the `__links` rows (`links.rs`). The reads that match a bare triple,
+/// which exists as soon as any link asserts it, get the same verdict through
+/// [`LinkGuard`]: conformance, pushed `where` (on the author's reifier when an
+/// `author` scopes the link), `COUNT` / `totalCount`, the order keys of the
+/// two-phase plan's pagination subquery ([`build_timestamp_probe`] on its own
+/// reifier), scopes, `$` projections and the reverse relations. A transitive
+/// scope or projection is walked one guarded step at a time
+/// (`query::guarded_reach`). A typed relation's generated getter gets it in
 /// `getters::verify_relation_getter`; a hand-written getter runs as written.
-///
-/// What decides *which* instances match still reads the bare triple, which
-/// exists as soon as any link asserts it, so it still matches unverified
-/// links: conformance, pushed `where`, `COUNT` / `totalCount`, and transitive
-/// projections. See #1120.
 ///
 /// Empty when the query opts in with `includeUnverified`.
 pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
@@ -400,37 +435,128 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
     }
 }
 
-/// [`proof_valid_filter`] for reads that match the bare triple
-/// `?source <predicate> ?target` instead of joining one reifier per row: the
-/// reverse-relation reads in `relations.rs`, which hydrate `belongsToOne` /
-/// `belongsToMany` values. The row is kept when at least one link asserting the
-/// triple verified. `FILTER EXISTS` rather than a join, so two verified links
-/// over one triple do not return the source twice.
+/// Which links a read may use: the query's `linkStatus` (#1116) and
+/// `includeUnverified` (#1113), as one value.
 ///
-/// Empty when `include_unverified` is `Some(true)`.
-pub(super) fn verified_triple_filter(predicate: &str, include_unverified: Option<bool>) -> String {
-    verified_link_exists("?source", predicate, "?target", include_unverified)
+/// Every read that matches a link goes through this, whether it hydrates an
+/// instance or decides which instances match (#1120). The checks always sit on
+/// **one** reifier variable: a link passes when *it* has the status and *it*
+/// verified. Two clauses over two reifier variables would mean "a Shared link
+/// exists and a verified link exists", which a verified Local link and a forged
+/// Shared one on the same triple satisfy between them.
+///
+/// The default (`LinkGuard::default()`) is no status restriction and verified
+/// links only. A missing annotation fails closed: both checks are required
+/// triples, so a link with no status or no verdict does not pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct LinkGuard<'a> {
+    pub(super) status: Option<&'a LinkStatus>,
+    pub(super) include_unverified: Option<bool>,
 }
 
-/// The `FILTER EXISTS` behind [`verified_triple_filter`], for any
-/// `subject <predicate> object` pattern: the pagination subquery's sort keys
-/// and the non-transitive projections use it with their own variables.
+impl<'a> LinkGuard<'a> {
+    /// The guard a query asks for.
+    pub(super) fn of(query: &'a ModelQueryInput) -> Self {
+        LinkGuard {
+            status: query.link_status.as_ref(),
+            include_unverified: query.include_unverified,
+        }
+    }
+
+    /// No restriction at all: any status, unverified links included. The
+    /// emitted SPARQL is then what it was before the guard existed.
+    #[cfg(test)]
+    pub(super) const ANY: LinkGuard<'static> = LinkGuard {
+        status: None,
+        include_unverified: Some(true),
+    };
+
+    /// Whether this guard lets every link through, so nothing is emitted.
+    pub(super) fn is_open(&self) -> bool {
+        self.status.is_none() && self.include_unverified.unwrap_or(false)
+    }
+
+    /// The checks as triple patterns on `reifier`, a variable the caller has
+    /// already joined to the link through `rdf:reifies`. Empty when open.
+    pub(super) fn on_reifier(&self, reifier: &str) -> String {
+        let mut out = String::new();
+        if let Some(s) = self.status {
+            out.push_str(&format!(
+                " {reifier} <ad4m://ontology/status> \"{}\" .",
+                status_str(s)
+            ));
+        }
+        if !self.include_unverified.unwrap_or(false) {
+            out.push_str(&format!(
+                " {reifier} <ad4m://ontology/proofValid> \"true\" ."
+            ));
+        }
+        out
+    }
+
+    /// Join `reifier` to a link asserting `subject predicate object` and check
+    /// it: what the patterns that *select* instances use. `predicate` is a
+    /// term, `<iri>` or a variable; `reifier` must be a fresh `?_` variable,
+    /// unique in the query. Empty when open.
+    ///
+    /// A join rather than [`Self::exists`]: Oxigraph evaluates a `FILTER
+    /// EXISTS` over a triple term by scanning, which made a guarded page two
+    /// orders of magnitude slower (`test_perf_guarded_selection_paginated_query`).
+    /// Two passing links over one triple yield the solution twice, so every
+    /// consumer of these patterns deduplicates: `COUNT(DISTINCT ?source)`, the
+    /// id phase's `GROUP BY ?source`, and the single plan's `SELECT DISTINCT`.
+    pub(super) fn join(
+        &self,
+        reifier: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
+        if self.is_open() {
+            return String::new();
+        }
+        format!(
+            " {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( {subject} {predicate} {object} )>> .{}",
+            self.on_reifier(reifier)
+        )
+    }
+
+    /// For a read that matches the bare triple `subject predicate object`
+    /// rather than joining one reifier per row: kept when at least one link
+    /// asserting the triple passes both checks on the same reifier.
+    /// `FILTER EXISTS` rather than a join, so two passing links over one triple
+    /// do not return the subject twice: the reads that hydrate a relation use
+    /// it. `predicate` is a term: `<iri>` or a variable. Empty when open.
+    pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
+        if self.is_open() {
+            return String::new();
+        }
+        format!(
+            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( {subject} {predicate} {object} )>> .{} }}",
+            self.on_reifier("?_pv")
+        )
+    }
+}
+
+/// [`LinkGuard::exists`] for an IRI predicate, with the two options passed
+/// separately: the reverse relations in `relations.rs`, and a typed relation's
+/// generated getter and a relation's `where` (`getters.rs`).
 ///
-/// Empty when `include_unverified` is `Some(true)`.
+/// Empty when no status is requested and `include_unverified` is `Some(true)`.
 pub(super) fn verified_link_exists(
     subject: &str,
     predicate: &str,
     object: &str,
+    status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
 ) -> String {
-    if include_unverified.unwrap_or(false) {
-        String::new()
-    } else {
-        format!(
-            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
-             <<( {subject} <{predicate}> {object} )>> . ?_pv <ad4m://ontology/proofValid> \"true\" . }}"
-        )
+    LinkGuard {
+        status,
+        include_unverified,
     }
+    .exists(subject, &format!("<{predicate}>"), object)
 }
 
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
@@ -517,7 +643,7 @@ pub(super) fn all_where_pushable(
 ) -> bool {
     match query.where_clause {
         None => true,
-        Some(ref wc) => compile_where_clause(wc, shape, resolver).complete,
+        Some(ref wc) => compile_where_clause(wc, shape, resolver, LinkGuard::of(query)).complete,
     }
 }
 
@@ -537,6 +663,7 @@ pub(super) fn build_query_patterns(
     resolver: Option<&dyn ShapeResolver>,
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
+    let guard = LinkGuard::of(query);
 
     /// A scope the builder cannot express, as patterns that match nothing.
     ///
@@ -579,7 +706,9 @@ pub(super) fn build_query_patterns(
             Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} <{safe_pred}> ?source ."));
+                    let pred = format!("<{safe_pred}>");
+                    let guarded = guard.join("?_sr", &subj, &pred, "?source");
+                    conformance_patterns.push(format!("    {subj} {pred} ?source .{guarded}"));
                     conformance_patterns.extend(filter);
                 } else {
                     log::warn!(
@@ -601,7 +730,9 @@ pub(super) fn build_query_patterns(
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
                         let (subj, filter) = parent_subject(safe_id);
-                        conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
+                        let pred = format!("<{safe_f}>");
+                        let guarded = guard.join("?_sr", &subj, &pred, "?source");
+                        conformance_patterns.push(format!("    {subj} {pred} ?source .{guarded}"));
                         conformance_patterns.extend(filter);
                     } else {
                         log::warn!("Parent scope matches nothing: invalid IRI in field='{}'", f);
@@ -611,7 +742,9 @@ pub(super) fn build_query_patterns(
                     let safe_model = escape_sparql_string(model);
                     let hash_model = format!("#{safe_model}");
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} ?_parentPred ?source ."));
+                    let guarded = guard.join("?_sr", &subj, "?_parentPred", "?source");
+                    conformance_patterns
+                        .push(format!("    {subj} ?_parentPred ?source .{guarded}"));
                     conformance_patterns.extend(filter);
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
@@ -658,16 +791,33 @@ pub(super) fn build_query_patterns(
                 // it and the caller gets their own anchor back as its own
                 // descendant. The exclusion the doc promises is stated below
                 // rather than inferred from the path operator.
+                //
+                // A single step is guarded like any other link. A path has no
+                // single link per hop to read a verdict or status from, so
+                // under a guard that restricts links the executor walks it
+                // (`query::guarded_reach`) and this binds the pairs it reached.
                 let path = if *transitive { "+" } else { "" };
-                let pattern = match direction {
-                    ScopeDirection::Out => {
-                        format!("    ?{ANCHOR_VAR} <{safe_pred}>{path} ?source .")
-                    }
-                    ScopeDirection::In => {
-                        format!("    ?source <{safe_pred}>{path} ?{ANCHOR_VAR} .")
-                    }
+                let anchor = format!("?{ANCHOR_VAR}");
+                let (subject, object) = match direction {
+                    ScopeDirection::Out => (anchor.as_str(), "?source"),
+                    ScopeDirection::In => ("?source", anchor.as_str()),
                 };
-                conformance_patterns.push(pattern);
+                match (&query.walked, *transitive) {
+                    (Some(pairs), true) => conformance_patterns.push(walked_pairs(
+                        pairs,
+                        &format!("    {subject} <{safe_pred}>+ {object} ."),
+                    )),
+                    _ => {
+                        let guarded = if *transitive {
+                            String::new()
+                        } else {
+                            guard.join("?_sr", subject, &format!("<{safe_pred}>"), object)
+                        };
+                        conformance_patterns.push(format!(
+                            "    {subject} <{safe_pred}>{path} {object} .{guarded}"
+                        ));
+                    }
+                }
                 // An empty anchor list yields an empty VALUES, which is legal
                 // and answers with nothing — the right answer for "the replies
                 // to none of these", and much better than an unbound `?_anchor`
@@ -701,19 +851,55 @@ pub(super) fn build_query_patterns(
     // narrowed `?source` to one node's children — narrow enough that a scan of
     // every node sharing a predicate would cost more than it excludes.
     let scoped_by_parent = !conformance_patterns.is_empty();
-    conformance_patterns.extend(shape_conformance_patterns(shape, !scoped_by_parent));
+    conformance_patterns.extend(shape_conformance_patterns(shape, !scoped_by_parent, guard));
 
     // WHERE clause filters that can be pushed to SPARQL.
     let where_patterns = query
         .where_clause
         .as_ref()
-        .map(|wc| compile_where_clause(wc, shape, resolver).patterns)
+        .map(|wc| compile_where_clause(wc, shape, resolver, guard).patterns)
         .unwrap_or_default();
 
     let conformance = conformance_patterns.join("\n");
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
+}
+
+/// Bind `?_anchor` and `?source` to exactly the `(anchor, node)` pairs of a
+/// guarded walk.
+///
+/// A seekable `VALUES` when every id is an emittable IRI. Otherwise the ids are
+/// matched as strings, and `path` (the unguarded property path) binds the two
+/// variables: every guarded pair is also a path pair, so the intersection is
+/// exactly the guarded pairs.
+fn walked_pairs(pairs: &[(String, String)], path: &str) -> String {
+    if pairs
+        .iter()
+        .all(|(a, s)| emittable_iri(a) && emittable_iri(s))
+    {
+        let rows = pairs
+            .iter()
+            .map(|(a, s)| format!("(<{a}> <{s}>)"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("    VALUES (?{ANCHOR_VAR} ?source) {{ {rows} }}")
+    } else {
+        let rows = pairs
+            .iter()
+            .map(|(a, s)| {
+                format!(
+                    "(\"{}\" \"{}\")",
+                    escape_sparql_string(a),
+                    escape_sparql_string(s)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "{path}\n    VALUES (?_walkedA ?_walkedS) {{ {rows} }}\n    FILTER(STR(?{ANCHOR_VAR}) = ?_walkedA && STR(?source) = ?_walkedS)"
+        )
+    }
 }
 
 /// The patterns that say "`?source` is an instance of this class", derived from
@@ -735,11 +921,34 @@ pub(super) fn build_query_patterns(
 /// own query — which applies these. Without them a record can match a clause and
 /// come back with the relation empty.
 ///
+/// Each triple is kept only when a link `guard` admits asserts it, so a forged
+/// flag, or one of the other status, does not make a node an instance.
+///
 /// `allow_structural_fallback` gates the final tier, which scans every node
 /// carrying any of the class's predicates. It is the weakest signal and the most
 /// expensive one, so a caller that has already narrowed the subject declines it.
-fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: bool) -> Vec<String> {
+fn shape_conformance_patterns(
+    shape: &ModelShape,
+    allow_structural_fallback: bool,
+    guard: LinkGuard,
+) -> Vec<String> {
     let mut conformance_patterns = Vec::new();
+    // `?source <pred> object .`, kept only when a link the guard admits
+    // asserts it. The object is `<iri>` or a `?_cf…` variable unique to the
+    // property, which also names the reifier.
+    let triple = |pred: &str, object: &str| {
+        let reifier = match object.strip_prefix("?_") {
+            Some(var) => format!("?_r{var}"),
+            None => format!(
+                "?_rcf{}",
+                format!("{pred}{object}").replace(|c: char| !c.is_alphanumeric(), "_")
+            ),
+        };
+        format!(
+            "    ?source <{pred}> {object} .{}",
+            guard.join(&reifier, "?source", &format!("<{pred}>"), object)
+        )
+    };
 
     let mut has_conformance = false;
     for prop in &shape.properties {
@@ -757,26 +966,20 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
                     // the whole query fail to parse. STR() matches the
                     // `new_unchecked` store term either way.
                     if emittable_iri(initial) {
-                        conformance_patterns
-                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
+                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?_cf_{safe_name} . FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
-                            prop.predicate
+                            "{} FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
+                            triple(&prop.predicate, &format!("?_cf_{safe_name}"))
                         ));
                     }
                 } else {
-                    conformance_patterns.push(format!(
-                        "    ?source <{}> ?_cf_{safe_name} .",
-                        prop.predicate
-                    ));
+                    conformance_patterns
+                        .push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
                 }
             } else {
-                conformance_patterns.push(format!(
-                    "    ?source <{}> ?_cf_{safe_name} .",
-                    prop.predicate
-                ));
+                conformance_patterns.push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
             }
         }
     }
@@ -793,20 +996,17 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
                 if prop.is_flag {
                     // Same `emittable_iri` gate as the required branch above.
                     if emittable_iri(initial) {
-                        conformance_patterns
-                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
+                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?_cfInit_{safe_name} . FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
-                            prop.predicate
+                            "{} FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
+                            triple(&prop.predicate, &format!("?_cfInit_{safe_name}"))
                         ));
                     }
                 } else {
-                    conformance_patterns.push(format!(
-                        "    ?source <{}> ?_cfInit_{safe_name} .",
-                        prop.predicate
-                    ));
+                    conformance_patterns
+                        .push(triple(&prop.predicate, &format!("?_cfInit_{safe_name}")));
                 }
                 break;
             }
@@ -828,8 +1028,9 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
 
         if !known_predicates.is_empty() {
             conformance_patterns.push(format!(
-                "    {{ SELECT DISTINCT ?source WHERE {{ ?source ?_structPred ?_structTarget . FILTER(?_structPred IN ({})) }} }}",
-                known_predicates.join(", ")
+                "    {{ SELECT DISTINCT ?source WHERE {{ ?source ?_structPred ?_structTarget . FILTER(?_structPred IN ({})){} }} }}",
+                known_predicates.join(", "),
+                guard.join("?_rstruct", "?source", "?_structPred", "?_structTarget")
             ));
         }
     }
@@ -916,10 +1117,12 @@ pub(super) fn compile_where_clause(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
 ) -> CompiledWhere {
     let mut seq = 0usize;
     let mut la = LinkAuthorState::default();
-    let (patterns, complete) = compile_where_clause_seq(wc, shape, resolver, &mut seq, &mut la);
+    let (patterns, complete) =
+        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la);
     CompiledWhere {
         patterns,
         complete,
@@ -950,6 +1153,7 @@ fn compile_where_clause_seq(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     seq: &mut usize,
     la: &mut LinkAuthorState,
 ) -> (Vec<String>, bool) {
@@ -964,7 +1168,7 @@ fn compile_where_clause_seq(
         la.per_link = true;
         let tag = *seq;
         *seq += 1;
-        match instance_author_filter(shape, author, &tag.to_string()) {
+        match instance_author_filter(shape, author, &tag.to_string(), guard) {
             Some(p) => patterns.push(p),
             None => {
                 la.fail(
@@ -982,7 +1186,8 @@ fn compile_where_clause_seq(
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let (p, c) = compile_where_clause_seq(branch, shape, resolver, seq, la);
+                        let (p, c) =
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
                         patterns.extend(p);
                         complete &= c;
                     }
@@ -998,7 +1203,8 @@ fn compile_where_clause_seq(
                     // what decides whether the declined `OR` may fall back to
                     // post-hydration at all.
                     for branch in branches {
-                        let (p, c) = compile_where_clause_seq(branch, shape, resolver, seq, la);
+                        let (p, c) =
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
                         if !c || !binds_source(&p) {
                             ok = false;
                             continue;
@@ -1015,7 +1221,7 @@ fn compile_where_clause_seq(
             },
             "NOT" => match condition.as_not_clause() {
                 Some(branch) => {
-                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, seq, la);
+                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, guard, seq, la);
                     if c && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
@@ -1041,6 +1247,7 @@ fn compile_where_clause_seq(
                     condition,
                     shape,
                     resolver,
+                    guard,
                     seq,
                     &scoping,
                     la,
@@ -1072,6 +1279,7 @@ fn compile_leaf_condition(
     condition: &WhereCondition,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     seq: &mut usize,
     scoping: &[&WhereCondition],
     la: &mut LinkAuthorState,
@@ -1106,10 +1314,11 @@ fn compile_leaf_condition(
         la.per_link = true;
     }
 
-    // The link-author join for a triple this leaf emits (see
-    // `super::link_author`): empty when no `author` scopes the leaf, `None`
-    // when one does and cannot be rendered, which declines the leaf. `tag`
-    // tells apart two triples of one leaf, the arms of a UNION.
+    // What restricts the link behind a triple this leaf emits: its author when
+    // an `author` scopes the leaf (see `super::link_author`), and always the
+    // query's `guard`, on the same reifier. Empty when neither applies, `None`
+    // when an author cannot be rendered, which declines the leaf. `tag` tells
+    // apart two triples of one leaf, the arms of a UNION.
     let author_join = |subject: &str, predicate: &str, object: &str, tag: &str| {
         link_author_join(
             &authors,
@@ -1117,6 +1326,7 @@ fn compile_leaf_condition(
             predicate,
             object,
             &format!("{leaf_id}{tag}"),
+            guard,
         )
         .ok()
         .map(|join| join.map(|j| format!("\n{j}")).unwrap_or_default())
@@ -1325,7 +1535,7 @@ fn compile_leaf_condition(
                     }
                 };
                 let quantified = compile_relation_quantifier(
-                    shape, prop, safe_pred, inner, negate, resolver, leaf_id, &authors, la,
+                    shape, prop, safe_pred, inner, negate, resolver, guard, leaf_id, &authors, la,
                 )?;
                 out.push(quantified);
             }
@@ -1688,8 +1898,10 @@ mod tests {
             "should project ?_proj_sort: {sparql}"
         );
         assert!(
-            sparql.contains("OPTIONAL { ?source <test://has-like> ?_proj_t"),
-            "should join via predicate OPTIONAL: {sparql}"
+            sparql.contains(
+                "OPTIONAL { { SELECT ?source ?_proj_t WHERE { ?source <test://has-like> ?_proj_t ."
+            ),
+            "should join via predicate OPTIONAL, guarded in a sub-SELECT: {sparql}"
         );
         assert!(
             sparql.contains("GROUP BY ?source"),
@@ -1811,7 +2023,7 @@ mod tests {
     #[test]
     fn timestamp_probe_skips_flag_with_non_iri_initial() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let probe = build_timestamp_probe(&s, Some(true));
+        let probe = build_timestamp_probe(&s, LinkGuard::ANY);
         assert!(
             !probe.contains("<true>"),
             "must not inline a non-IRI initial: {probe}"
@@ -1822,7 +2034,7 @@ mod tests {
         );
         // A parseable initial keeps the targeted reified form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let probe = build_timestamp_probe(&s, Some(true));
+        let probe = build_timestamp_probe(&s, LinkGuard::ANY);
         assert!(
             probe.contains("<todo://yes>"),
             "a parseable initial stays targeted: {probe}"
@@ -1877,7 +2089,7 @@ mod where_compiler_tests {
             WhereCondition::String("anything".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.patterns.is_empty(), "nothing can be emitted");
         assert!(
@@ -1891,7 +2103,7 @@ mod where_compiler_tests {
     fn test_unknown_property_is_not_pushable() {
         let s = test_shape();
         let clause = wc(vec![("nope", WhereCondition::String("x".to_string()))]);
-        assert!(!compile_where_clause(&clause, &s, None).complete);
+        assert!(!compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -1904,7 +2116,7 @@ mod where_compiler_tests {
             ("nope", WhereCondition::String("x".to_string())),
         ]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(!compiled.patterns.is_empty(), "the known key still pushes");
         assert!(!compiled.complete, "but the clause is not fully covered");
@@ -1923,7 +2135,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1946,7 +2158,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(
             compiled.patterns.is_empty(),
@@ -1974,7 +2186,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete, "an id disjunction must push down");
         let sparql = compiled.patterns.join("\n");
@@ -2004,7 +2216,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2022,7 +2234,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2044,7 +2256,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        assert!(compile_where_clause(&clause, &s, None).complete);
+        assert!(compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 
     // ---- AND -------------------------------------------------------------
@@ -2062,7 +2274,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(!compiled.patterns.is_empty(), "the sound half still pushes");
         assert!(!compiled.complete);
@@ -2086,7 +2298,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2227,6 +2439,7 @@ fn compile_relation_quantifier(
     inner: &BTreeMap<String, WhereCondition>,
     negate: bool,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     leaf_id: usize,
     authors: &[&WhereCondition],
     la: &mut LinkAuthorState,
@@ -2253,10 +2466,17 @@ fn compile_relation_quantifier(
     } else {
         ("?source", target_var.as_str())
     };
-    let join = link_author_join(authors, subject, safe_pred, object, &format!("q{leaf_id}"))
-        .ok()?
-        .map(|j| format!("\n    {j}"))
-        .unwrap_or_default();
+    let join = link_author_join(
+        authors,
+        subject,
+        safe_pred,
+        object,
+        &format!("q{leaf_id}"),
+        guard,
+    )
+    .ok()?
+    .map(|j| format!("\n    {j}"))
+    .unwrap_or_default();
     let link = format!("        {subject} <{safe_pred}> {object} .{join}");
 
     let mut body = vec![link];
@@ -2298,7 +2518,7 @@ fn compile_relation_quantifier(
     // sharing a predicate would cost more inside an `EXISTS` than it excludes.
     if let Some(ref target_shape) = target_shape {
         body.extend(rebase_into_subquery(
-            &shape_conformance_patterns(target_shape.as_ref(), false),
+            &shape_conformance_patterns(target_shape.as_ref(), false, guard),
             &namespace,
             &target_var,
         ));
@@ -2320,7 +2540,7 @@ fn compile_relation_quantifier(
             return None;
         };
 
-        let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
+        let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver, guard);
         // Carried up before the clause can be declined below: a per-link
         // `author` in a nested clause the store cannot answer in full must
         // reach `refuse_unanswerable_link_author`. The post-hydration filter
@@ -2432,7 +2652,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(Some(vec![]), None))]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2445,7 +2665,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(None, Some(vec![])))]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         assert!(compiled.patterns.join("\n").contains("FILTER NOT EXISTS"));
@@ -2463,7 +2683,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete, "the target shape resolves, so it pushes");
         let sparql = compiled.patterns.join("\n");
@@ -2498,7 +2718,7 @@ mod relation_quantifier_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(!compile_where_clause(&clause, &s, Some(&r)).complete);
+        assert!(!compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2514,7 +2734,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.patterns.is_empty());
         assert!(!compiled.complete, "must fall back rather than half-push");
@@ -2535,7 +2755,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2550,7 +2770,7 @@ mod relation_quantifier_tests {
         s.properties.push(rel);
 
         let clause = wc(vec![("mentions", ops_with(Some(vec![]), None))]);
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2573,7 +2793,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2611,7 +2831,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let sparql = compile_where_clause(&clause, &s, Some(&r))
+        let sparql = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY)
             .patterns
             .join("\n");
 
@@ -2636,7 +2856,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let sparql = compile_where_clause(&clause, &s, Some(&r))
+        let sparql = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY)
             .patterns
             .join("\n");
 
@@ -2665,7 +2885,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2755,7 +2975,7 @@ mod relation_quantifier_tests {
         });
 
         let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete, "cardinality does not gate a quantifier");
         let sparql = compiled.patterns.join("\n");
@@ -2779,7 +2999,7 @@ mod relation_quantifier_tests {
             WhereCondition::String("anything".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(compiled.patterns.is_empty(), "nothing can be emitted");
         assert!(
             !compiled.complete,
@@ -2801,7 +3021,7 @@ mod relation_quantifier_tests {
             WhereCondition::String("not-an-iri".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2813,7 +3033,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(Some(vec![]), Some(vec![])))]);
 
-        assert!(!compile_where_clause(&clause, &s, None).complete);
+        assert!(!compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 }
 
@@ -2842,7 +3062,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(compile_where_clause(&c, &s(), None).complete);
+        assert!(compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2857,7 +3077,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        let compiled = compile_where_clause(&c, &s(), None);
+        let compiled = compile_where_clause(&c, &s(), None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2871,7 +3091,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(!compile_where_clause(&c, &s(), None).complete);
+        assert!(!compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2887,7 +3107,7 @@ mod ops_completeness_tests {
             }),
         )]);
         assert!(
-            !compile_where_clause(&c, &s(), None).complete,
+            !compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete,
             "a dropped `not` must not be masked by a rendered `gt`",
         );
     }
@@ -2898,7 +3118,7 @@ mod ops_completeness_tests {
         // to "the property exists", which is not what the Rust filter does for the
         // same clause — it matches everything.
         let c = wc(vec![("title", ops(WhereOps::default()))]);
-        let compiled = compile_where_clause(&c, &s(), None);
+        let compiled = compile_where_clause(&c, &s(), None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }

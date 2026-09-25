@@ -767,7 +767,7 @@ const appointed = await Reviewer.findAll(perspective, {
 });
 ```
 
-This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it. The check reads the author each link claims. Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands it also matches a link whose signature did not verify, so see [Unverified Links](#unverified-links) before you rely on it.
+This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it. The check reads the author each link claims, and only on links whose signature verified (see [Unverified Links](#unverified-links)), so a forged link that claims admin as its author does not pass it.
 
 - `{ agent: { author: admin } }` with no value operator: admin wrote some `agent` link, whatever its value.
 - `author` combines with the other operators: `{ note: { contains: "ok", author: admin } }` is "admin wrote a `note` link containing ok", `{ status: { not: "archived", author: admin } }` is "admin wrote a `status` link other than archived".
@@ -951,16 +951,51 @@ const recipes = await Recipe.query(perspective).includeUnverified().get();
 
 Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
 
-> **Current limit:** unverified links are skipped by what *hydrates* an instance (except a hand-written `getter`, see above), by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
->
-> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back, and on a page it takes a slot like any other instance. A node with no verified links at all cannot be conjured this way.
-> - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
-> - **Per-link `author`.** `{ agent: { eq: did, author: admin } }` can match through a forged `agent -> did` link that claims admin as its author.
-> - **Counts.** `count` and `totalCount` include instances matched only through unverified links, so they can be larger than the rows you can page through.
->
-> Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
->
+**Selection follows the same rule.** Unverified links are skipped both by what *hydrates* an instance and by what decides *which* instances match: `where` conditions (a nested or side-by-side `author`, relation membership, `NOT`), the class's flags, `count`/`totalCount`, the sort order behind `limit`/`offset`, a `parent` scope's link, and what a `$` projection counts or lists, `transitive` projections included. So a forged link cannot:
+
+- make an existing node an instance of a class it was never flagged as,
+- select an instance by a value it does not hydrate with, or satisfy `{ agent: { eq: did, author: admin } }` by claiming admin as its author,
+- exclude an instance through `NOT`,
+- change a count, reorder a page or push a genuine instance off it.
+
+With `includeUnverified: true`, selection reads unverified links as well, the same as hydration. The one exception is a hand-written `getter` (see above).
+
 > **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
+
+### Reading by Link Status
+
+Every link is either **Shared** (gossiped to the neighbourhood) or **Local** (kept on this executor). A query normally reads both. A property declared `local: true` reads only its Local links. To read instances as they exist in links of one status only, for every property, set `linkStatus`:
+
+```typescript
+// Values only from links the neighbourhood sees
+const cards = await Card.findAll(perspective, { linkStatus: "shared" });
+
+// or with the query builder
+const cards = await Card.query(perspective).linkStatus("shared").get();
+
+// Only this executor's Local links
+const drafts = await Card.findAll(perspective, { linkStatus: "local" });
+```
+
+Use `linkStatus: "shared"` when the result is shown to another user: no Local link is used for the values returned or to decide which instances are returned (`where`, the class's flags, `count`/`totalCount`, the order behind `limit`/`offset`, `parent` scopes and `$` projections). An instance whose flag links are all Local is not an instance under `"shared"`, and under `"local"` an instance needs a Local flag link to be returned at all. The same holds for the targets of a typed relation: under `"local"` it lists only targets flagged in a Local link. Under `"shared"`, a `local: true` property always comes back empty. Typed relations are filtered too, including the ones filled by the SDK's generated conformance getter; a hand-written `getter` runs as written and reads links of any status. Included relations and `$` projection targets inherit the setting, unless an include's own sub-query sets `linkStatus`. The [`__links` rows](#per-link-rows-with-links) are restricted the same way: under `"shared"` they list only Shared links.
+
+`linkStatus` and [`includeUnverified`](#unverified-links) are independent and both apply to the same link: a link is read only when it has the requested status **and** its signature verified (or the query sets `includeUnverified`). For a Local link whose signature did not verify:
+
+| `linkStatus` | `includeUnverified` | Read? |
+| --- | --- | --- |
+| unset | unset | no (unverified) |
+| unset | `true` | yes |
+| `"local"` | unset | no (unverified) |
+| `"local"` | `true` | yes |
+| `"shared"` | unset or `true` | no (Local) |
+
+The class's flag is read the same way, so which status the flag link has decides whether an instance is returned at all. A Local note on an instance flagged only in a Shared link (your private note on a shared card) is read with no `linkStatus`, but the instance is not returned under `"local"`:
+
+| Flag link | `linkStatus` unset | `"local"` | `"shared"` |
+| --- | --- | --- | --- |
+| Shared only | returned | not returned | returned |
+| Local only | returned | returned | not returned |
+| both | returned | returned | returned |
 
 ### Query Engine
 
