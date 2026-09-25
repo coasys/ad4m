@@ -391,7 +391,7 @@ async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
 /// run is the positive control: the same fixture, grant and vote under the
 /// rule without the stale key settle the edge, so the refusal is the key's.
 ///
-/// Killing mutation: drop the `unknown_role_gate_keys` check from
+/// Killing mutation: drop the `role_gate_key_errors` check from
 /// `decode_consensus_rule`. The rule then decodes as the plain `owner` gate and
 /// the second run settles to `scoped`.
 #[tokio::test(flavor = "multi_thread")]
