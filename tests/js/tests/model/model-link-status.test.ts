@@ -131,6 +131,13 @@ describe("Ad4mModel — linkStatus reads", function () {
     remark.body = "shared body";
     await remark.save();
     remarkId = remark.id;
+    // Flagged Local as well, so it is a Remark under `linkStatus: 'local'`:
+    // the typed relation's generated getter checks the target's flag under
+    // the same status (#1120).
+    await perspective.add(
+      new Link({ source: remarkId, predicate: "lsc://type", target: "lsc://remark" }),
+      "local"
+    );
     await perspective.add(
       new Link({ source: cardId, predicate: "lsc://remark", target: remarkId }),
       "local"
