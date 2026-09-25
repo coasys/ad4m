@@ -745,7 +745,7 @@ async fn harness_propose_transition_tool_call_routes_rationale_to_graph_e2e() {
 
     let mut f = seed_satisfied_fixture(None).await;
     let active_flows =
-        gather_active_flow_contexts(&f.perspective, &[BASE_URI.to_string()], None).await;
+        gather_active_flow_contexts(&f.perspective, &[BASE_URI.to_string()], None, None).await;
     assert_eq!(active_flows.len(), 1, "got {active_flows:?}");
     assert_eq!(active_flows[0].instance_uri, f.instance_uri);
 

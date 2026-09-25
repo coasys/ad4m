@@ -137,7 +137,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    let contexts =
+        gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -170,7 +171,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         base_uri.to_string(),
         "ad4m://task/other-batch-item".to_string(),
     ];
-    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None).await;
+    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None, None).await;
     assert_eq!(
         scoped.len(),
         1,
@@ -181,9 +182,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     // 6) Subjects that don't include the instance's base URI: empty.
     //    This is the property that lets batch-scoped passes ignore
     //    flows running on unrelated bases.
-    let other =
-        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()], None)
-            .await;
+    let other = gather_active_flow_contexts(
+        &perspective,
+        &["ad4m://task/unrelated".to_string()],
+        None,
+        None,
+    )
+    .await;
     assert!(
         other.is_empty(),
         "batch narrowed to a different subject must drop the running flow, got {other:?}"
@@ -193,7 +198,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     used to sweep every FlowInstance on the perspective and
     //     inject it into every prompt (unbounded). The fix makes empty
     //     mean empty — no flow context, no unbounded sweep.
-    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None).await;
+    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None, None).await;
     assert!(
         empty.is_empty(),
         "empty subjects must not surface any flows, got {empty:?}"
@@ -245,8 +250,8 @@ async fn load_flow_instances_absent_class_returns_empty() {
     assert!(all.is_empty());
 }
 
-/// `gather_active_flow_contexts` must use the `Local` `currentState` cache
-/// rather than deriving.  Observable: set the cache to "scoped" WITHOUT any
+/// `gather_active_flow_contexts` must use the run user's own `Local`
+/// `currentState` cache rather than deriving.  Observable: set the cache to "scoped" WITHOUT any
 /// transition proposals in the graph.  The fold, seeing no quorum, returns
 /// "identified" (genesis state).  Only cache-first can return "scoped".
 #[tokio::test(flavor = "multi_thread")]
@@ -282,7 +287,10 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         .await
         .expect("advance_flow_instance_state to scoped");
 
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    let own_did = crate::agent::did_for_context(&ctx).expect("DID");
+    let contexts =
+        gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, Some(&own_did))
+            .await;
     assert_eq!(
         contexts.len(),
         1,
@@ -292,4 +300,48 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         contexts[0].current_state, "scoped",
         "Local cache at 'scoped' must be returned (fold would give 'identified' — no proposals)"
     );
+}
+
+/// A co-owner's Local `currentState` is theirs, not the flow's state. Mallory
+/// starts an instance with a `currentState` of her choosing (what
+/// `FlowInstanceRecord.create({ currentState })` lets any co-owner write).
+/// The flow context that goes into another user's interpretation prompt is
+/// the derived state, not her value.
+#[tokio::test(flavor = "multi_thread")]
+async fn gather_active_flow_contexts_ignores_a_co_owners_cache() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    for link in parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse") {
+        perspective
+            .add_link(link, LinkStatus::Local, None, &ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
+    let mallory_email = "mallory-loader@1058.test";
+    crate::agent::AgentService::ensure_user_key_exists(mallory_email).expect("key");
+    let mallory = crate::agent::AgentContext::for_user_email(mallory_email.to_string());
+
+    let base_uri = "ad4m://task/planted-cache";
+    mint_flow_instance(
+        &mut perspective,
+        "delivery://DeliveryFlow",
+        base_uri,
+        "scoped",
+        "planted-cache-inst-1",
+        None,
+        &mallory,
+    )
+    .await
+    .expect("mint_flow_instance as the co-owner");
+
+    // The run acts for the main agent, who holds no cache of their own.
+    let own_did = crate::agent::did_for_context(&ctx).expect("DID");
+    for viewer in [Some(own_did.as_str()), None] {
+        let contexts =
+            gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, viewer).await;
+        assert_eq!(contexts.len(), 1, "{contexts:?}");
+        assert_eq!(
+            contexts[0].current_state, "identified",
+            "viewer {viewer:?}: the fold (no proposals: genesis), not the co-owner's cache"
+        );
+    }
 }
