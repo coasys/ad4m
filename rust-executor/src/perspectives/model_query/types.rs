@@ -569,6 +569,13 @@ pub struct ModelQueryInput {
     /// attributes each link separately rather than the instance as a whole.
     #[serde(default)]
     pub links: Option<Vec<String>>,
+    /// The `(anchor, node)` pairs a transitive [`Scope::Traverse`] reaches
+    /// over links the query's `linkStatus` / `includeUnverified` admit, one
+    /// guarded step at a time. Filled by the executor before the query is
+    /// built, because a property path cannot be restricted per hop (#1120).
+    /// Never on the wire.
+    #[serde(skip)]
+    pub(super) walked: Option<Vec<(String, String)>>,
 }
 
 /// Result returned by the model query endpoint.

@@ -268,11 +268,12 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /**
    * Reads instances as they exist in links of one status only.
    *
-   * `'shared'` leaves out every Local link from the values returned. Use it
-   * when the data is shown to another user. Which instances are returned can
-   * still depend on Local links until
-   * https://github.com/coasys/ad4m/issues/1120 is fixed. See
-   * {@link Query.linkStatus}.
+   * `'shared'` leaves out every Local link, both from the values returned and
+   * from what decides which instances are returned. Use it when the data is
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
    *
    * @param status - `'shared'` or `'local'`
    * @returns The query builder for chaining

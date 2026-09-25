@@ -366,11 +366,11 @@ export type Query = {
    * `linkStatus: 'local', includeUnverified: true` (or with no `linkStatus`
    * and `includeUnverified: true`).
    *
-   * Scope: this restricts the links that hydrate an instance. Which instances
-   * are *selected* (`where`, the class's flags, `count`, `$` projection
-   * counts) and the order behind `limit`/`offset` still match links of any
-   * status, see
-   * https://github.com/coasys/ad4m/issues/1120.
+   * Scope: this restricts the links that hydrate an instance and the links
+   * that *select* it (`where`, the class's flags, `count`/`totalCount`, `$`
+   * projections, `parent` scopes and the order behind `limit`/`offset`). So an
+   * instance is returned under `'local'` only when it is flagged in a Local
+   * link, and under `'shared'` only when it is flagged in a Shared one.
    */
   linkStatus?: LinkStatus;
   /**
@@ -388,11 +388,11 @@ export type Query = {
    *
    * Included relations inherit the setting unless their sub-query sets its own.
    *
-   * The same applies to the rows under `__links`, to the order behind
-   * `limit`/`offset` and to `$` projections. Which instances are *selected*
-   * (`where`, the class's flags, `count`/`totalCount`, `transitive`
-   * projections) still matches unverified links, see
-   * https://github.com/coasys/ad4m/issues/1120.
+   * The same applies to the rows under `__links` and to what *selects* an
+   * instance: `where` (including a per-link `author`), the class's flags,
+   * `count`/`totalCount`, the order behind `limit`/`offset`, `parent` scopes
+   * and `$` projections, `transitive` ones included. With `true`, selection
+   * reads unverified links too.
    */
   includeUnverified?: boolean;
   /**
