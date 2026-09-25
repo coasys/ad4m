@@ -338,15 +338,13 @@ async fn link_status_restricts_links_rows() {
     }
 }
 
-/// Instance *selection* is not restricted by `linkStatus` — #1120.
+/// Instance *selection* is restricted by `linkStatus` too (#1120).
 ///
-/// `where: {note: "local"}` is pushed into SPARQL and matches the bare triple,
-/// which the Local link asserts. A Shared-only read therefore returns the card,
-/// with `note` withheld, so a condition on a Local value reveals which
-/// instances carry it. A `limit: 0` count reports it too. Remove the `#[ignore]`
-/// with the #1120 fix.
+/// `where: {note: "local"}` is pushed into SPARQL. Were it to match the bare
+/// triple, which the Local link asserts, a Shared-only read would return the
+/// card with `note` withheld, so a condition on a Local value would reveal
+/// which instances carry it. A `limit: 0` count must not report it either.
 #[tokio::test]
-#[ignore = "#1120: where/conformance/count are not restricted by linkStatus"]
 async fn link_status_shared_does_not_select_on_a_local_value() {
     let store = SparqlStore::new(None).unwrap();
     ls_seed(&store);
