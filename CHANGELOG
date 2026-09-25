@@ -61,6 +61,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
 
 ### Added
+- **`linkStatus` model query option: read an instance from links of one status only** [#1124](https://github.com/coasys/ad4m/pull/1124)
+  - `findAll(perspective, { linkStatus: "shared" })` / `.linkStatus("shared")` hydrates every property, relation, `author`, `updatedAt` and `__links` row from Shared links only, so no Local link is used for the values in a result shown to another user (#1024). `"local"` is the converse. Unset reads both, as before. Typed relations filled by the SDK's generated conformance getter are filtered too; a hand-written `getter` runs as written. Included relations and `$` projection targets inherit it unless an include's sub-query sets its own.
+  - Combines with `includeUnverified` on the same link: a link is read only when it has the requested status and its signature verified, or the query sets `includeUnverified`.
+  - A link with no stored status annotation is not read under either value (fail closed).
+  - Values only, so which instances are returned can still depend on Local links: `where`, the class's flags, `count`/`totalCount`, `$` projection counts and the order behind `limit`/`offset` still match links of any status. Tracked in [#1120](https://github.com/coasys/ad4m/issues/1120).
 - Add hosting GraphQL contract (HostingUserInfo, PaymentRequestResult) [#743](https://github.com/coasys/ad4m/pull/743)
 - OpenClaw plugin managed mode [#739](https://github.com/coasys/ad4m/pull/739)
 - Wrap OpenClaw skill in plugin [#737](https://github.com/coasys/ad4m/pull/737)

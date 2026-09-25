@@ -6,7 +6,7 @@
  */
 
 import type { Ad4mModel } from "./Ad4mModel";
-import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
@@ -262,6 +262,28 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
     this.queryParams.deepQuery = enabled;
+    return this;
+  }
+
+  /**
+   * Reads instances as they exist in links of one status only.
+   *
+   * `'shared'` leaves out every Local link from the values returned. Use it
+   * when the data is shown to another user. Which instances are returned can
+   * still depend on Local links until
+   * https://github.com/coasys/ad4m/issues/1120 is fixed. See
+   * {@link Query.linkStatus}.
+   *
+   * @param status - `'shared'` or `'local'`
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const cards = await Card.query(perspective).linkStatus('shared').get();
+   * ```
+   */
+  linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
+    this.queryParams.linkStatus = status;
     return this;
   }
 

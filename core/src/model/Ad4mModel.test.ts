@@ -3516,6 +3516,43 @@ describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
 });
 
 // ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
 // includeUnverified — opt-in to links whose signature did not verify (#1113)
 // ──────────────────────────────────────────────────────────
 

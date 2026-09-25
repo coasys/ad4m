@@ -16,7 +16,7 @@ use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    local_status_filter, per_anchor_limit, proof_valid_filter, ANCHOR_VAR,
+    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -587,6 +587,7 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
+                    let link_status = link_status_filter(query_input.link_status.as_ref());
                     let proof_valid = proof_valid_filter(query_input.include_unverified);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
@@ -596,7 +597,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -643,6 +644,7 @@ pub(super) async fn execute_model_query_inner(
             store,
             &mut instances,
             &reverse_rels,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
     }
@@ -743,6 +745,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
     }
@@ -757,6 +760,7 @@ pub(super) async fn execute_model_query_inner(
                 shape,
                 resolver,
                 depth,
+                query_input.link_status.as_ref(),
                 query_input.include_unverified,
             )
             .await?;
@@ -786,6 +790,7 @@ pub(super) async fn execute_model_query_inner(
         store,
         shape,
         &link_keys,
+        query_input.link_status.as_ref(),
         query_input.include_unverified,
         &mut final_instances,
     )
@@ -800,6 +805,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )
         .await?;
