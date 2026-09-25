@@ -2493,7 +2493,16 @@ mod tests {
         let rec = record("ns://F", "ns://i", "s");
         let full: serde_json::Map<String, Value> = LINKED_TO_KEYS
             .iter()
-            .map(|k| (k.to_string(), json!(if *k == LINKED_TO_TO { "base" } else { "ns://has" })))
+            .map(|k| {
+                (
+                    k.to_string(),
+                    json!(if *k == LINKED_TO_TO {
+                        "base"
+                    } else {
+                        "ns://has"
+                    }),
+                )
+            })
             .collect();
         assert_eq!(
             linked_to_parent(&Value::Object(full.clone()), &rec).expect("all listed keys"),

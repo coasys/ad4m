@@ -456,7 +456,11 @@ mod tests {
             ("query", keys(from_role), QUERY_KEYS),
             ("or arm", keys(&from_role["or"][0]), QUERY_KEYS),
             ("count", keys(&from_role["count"]), COUNT_KEYS),
-            ("producedByFlow", keys(&from_role["producedByFlow"]), PRODUCED_BY_FLOW_KEYS),
+            (
+                "producedByFlow",
+                keys(&from_role["producedByFlow"]),
+                PRODUCED_BY_FLOW_KEYS,
+            ),
             ("where condition", conditions, CONDITION_KEYS),
         ] {
             // The `or` arm leaves its own `or` unset.
@@ -464,7 +468,10 @@ mod tests {
                 "or arm" => list(known).into_iter().filter(|k| k != "or").collect(),
                 _ => list(known),
             };
-            assert_eq!(wire_keys, known, "{level}: wire keys and the known list differ");
+            assert_eq!(
+                wire_keys, known,
+                "{level}: wire keys and the known list differ"
+            );
         }
     }
 }
