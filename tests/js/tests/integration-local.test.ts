@@ -5,12 +5,13 @@
  * local bootstrap languages and --run-holochain false. No kitsune bootstrap
  * server, no HC conductor — much faster and zero network overhead.
  *
- * Alice and Bob share languages and neighbourhoods through the shared mode of
- * the local language-language and neighbourhood store (utils/sharedStores.ts),
- * so the suites that only need that sharing run here: Shared language store
- * and Language. The suites that need links to sync between nodes
- * (Neighbourhood, Auto-processor, Cross-peer SHACL shape sync) stay in
- * integration.test.ts, the multi-node Holochain suite.
+ * Alice and Bob share languages, neighbourhoods and agent profiles through the
+ * shared mode of the local stores (utils/sharedStores.ts). Links sync between
+ * them through the server-link-language and a link-server started here, so
+ * this suite is also the multi-node suite for that link language: the
+ * Neighbourhood, Auto-processor and Cross-peer SHACL shape sync suites run on
+ * the [server-link] config. Their p-diff-sync legs stay in integration.test.ts,
+ * the multi-node Holochain suite.
  */
 import fs from 'fs-extra'
 import path from 'path'
@@ -29,11 +30,21 @@ import shaclRpcTests from "./shacl-rpc";
 import flatLanguageTests from "./flat-language.test";
 import languageTests from "./language";
 import sharedLanguageStoreTests from "./shared-language-store";
+import neighbourhoodTests from "./neighbourhood";
+import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
+import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
+import { startLinkServer, LinkServerHandle } from "../utils/linkServer";
+import { LinkLangConfig, serverLinkLang } from "../utils/linkLangConfig";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const TEST_DIR = `${__dirname}/../tst-tmp`
+
+// Published by prepare-test (publishTestLangs.ts). The link-server leg
+// below needs it; fail loudly rather than silently dropping the leg.
+const SERVER_LINK_HASH_PATH = "./scripts/server-link-language-hash";
+const SERVER_LINK_HASH = fs.existsSync(SERVER_LINK_HASH_PATH) ? fs.readFileSync(SERVER_LINK_HASH_PATH).toString().trim() : "";
 
 let testContext: TestContext = new TestContext()
 testContext.holochain = false
@@ -85,6 +96,14 @@ describe("Local integration tests (no Holochain)", function () {
         const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob-local')
         let bobExecutorProcess: ChildProcess | null = null
         let bobPorts: number[] = []
+        // One link-server for every server-link neighbourhood in this block;
+        // per-neighbourhood isolation comes from the UID template param.
+        let linkServer: LinkServerHandle | null = null
+        let serverLinkConfig: LinkLangConfig | null = null
+        const getServerLinkConfig = () => {
+            if (!serverLinkConfig) throw new Error("server-link config not initialised — before() didn't run?");
+            return serverLinkConfig;
+        }
 
         before(async () => {
             bobPorts = await getFreePorts(3);
@@ -94,17 +113,34 @@ describe("Local integration tests (no Holochain)", function () {
             testContext.bob = new Ad4mClient(baseUrl(bobApiPort))
             testContext.bobCore = bobExecutorProcess
             await testContext.bob.agent.generate("passphrase")
+
+            if (!SERVER_LINK_HASH) {
+                throw new Error(
+                    `[integration-local] ${SERVER_LINK_HASH_PATH} is missing or empty. ` +
+                    `Server-link-language did not publish during prepare-test — ` +
+                    `fix that before running this suite (the link-server leg must not be dropped silently).`,
+                );
+            }
+            linkServer = await startLinkServer();
+            serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
         })
 
         after(async () => {
             if (bobExecutorProcess) {
                 await quitExecutor(bobExecutorProcess, bobPorts[0]);
             }
+            if (linkServer) {
+                await linkServer.kill();
+                linkServer = null;
+            }
             deregisterPorts(bobPorts);
         })
 
-        describe('Shared language store', sharedLanguageStoreTests(testContext))
+        describe('Shared stores', sharedLanguageStoreTests(testContext))
         describe('Language', languageTests(testContext))
+        describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, getServerLinkConfig))
+        describe('Auto-processor (two executors) [server-link]', autoProcessorNeighbourhoodTests(testContext, getServerLinkConfig))
+        describe('Cross-peer SHACL shape sync [server-link]', crossPeerShapeSyncTests(testContext, getServerLinkConfig))
     })
 })
 

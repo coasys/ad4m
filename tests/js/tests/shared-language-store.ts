@@ -1,16 +1,18 @@
 /**
- * Shared mode of the local language-language and neighbourhood store.
+ * Shared mode of the local language-language, neighbourhood store and
+ * agent-language.
  *
  * Invariant: with a `storagePath` setting (written by startExecutor, see
- * utils/sharedStores.ts), a language or neighbourhood that one executor
- * publishes can be fetched by another executor that points at the same
- * directory, with no Holochain. Without the setting, the stores keep
- * using the per-executor ad4m:host KV, and nothing reaches the directory.
+ * utils/sharedStores.ts), a language, neighbourhood or agent profile that
+ * one executor publishes can be fetched by another executor that points at
+ * the same directory, with no Holochain. Without the setting, the stores
+ * keep using the per-executor ad4m:host KV, and nothing reaches the
+ * directory.
  *
  * Needs testContext.alice and testContext.bob: two executors started with
  * the default (shared) stores.
  */
-import { Ad4mClient, LanguageMetaInput, Perspective } from "@coasys/ad4m";
+import { Ad4mClient, ExpressionProof, LanguageMetaInput, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { expect } from "chai";
 import fs from "fs";
 import path from "path";
@@ -18,7 +20,7 @@ import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 import { TestContext } from "./test-context";
 import { baseUrl, quitExecutor, startExecutor } from "../utils/utils";
-import { SHARED_LANGUAGES_DIR, SHARED_NEIGHBOURHOODS_DIR, sharedLanguageExists } from "../utils/sharedStores";
+import { SHARED_AGENT_PROFILES_DIR, SHARED_LANGUAGES_DIR, SHARED_NEIGHBOURHOODS_DIR, sharedLanguageExists } from "../utils/sharedStores";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -77,6 +79,29 @@ export default function sharedLanguageStoreTests(testContext: TestContext) {
 
             const address = url.split("://")[1];
             expect(fs.existsSync(path.join(SHARED_NEIGHBOURHOODS_DIR, `neighbourhood-${address}.json`))).to.be.true;
+        });
+
+        it("Bob reads Alice's agent profile by DID", async () => {
+            const alice = testContext.alice;
+            const bob = testContext.bob;
+            const aliceDid = (await alice.agent.me()).did;
+
+            // A link in Alice's public perspective, so the profile Bob reads
+            // is one Alice wrote, not an empty default.
+            const link = new LinkExpression();
+            link.author = aliceDid;
+            link.timestamp = new Date().toISOString();
+            link.data = new Link({ source: aliceDid, predicate: "shared-store://profile", target: "literal:string:Alice" });
+            link.proof = new ExpressionProof("sig", "key");
+            await alice.agent.updatePublicPerspective(new Perspective([link]));
+
+            const seen = await bob.agent.byDID(aliceDid);
+            expect(seen, "Bob's agent-language returned nothing for Alice's DID").to.not.be.null;
+            expect(seen!.did).to.equal(aliceDid);
+            const targets = seen!.perspective!.links.map(l => l.data.target);
+            expect(targets).to.include("literal:string:Alice");
+
+            expect(fs.existsSync(path.join(SHARED_AGENT_PROFILES_DIR, `agent-${aliceDid}.json`))).to.be.true;
         });
 
         describe("without a storagePath setting (KV mode)", () => {
