@@ -124,7 +124,7 @@ pub(super) fn validate_iri(s: &str) -> Result<&str, Error> {
 /// NamedNode, as do all subjects.  Do not "fix" such ids by routing them
 /// through the XSD translator — an XSD literal cannot be a subject, and the
 /// `STR()` fallback below would stop matching the wire id.
-pub(super) fn emittable_iri(s: &str) -> bool {
+pub(crate) fn emittable_iri(s: &str) -> bool {
     validate_iri(s).is_ok() && oxigraph::model::NamedNode::new(s).is_ok()
 }
 

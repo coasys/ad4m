@@ -9432,6 +9432,123 @@ async fn links_rejects_a_reverse_relation_name() {
     assert!(msg.contains("reverse"), "says why: {msg}");
 }
 
+// ---------------------------------------------------------------------------
+// The role gate over a DID collection, through the real store (#1129 review)
+// ---------------------------------------------------------------------------
+
+/// The flow engine's role reads, answered by the real query pipeline over
+/// [`ROLE_SHAPE_JSON`] instead of a stub that decides membership by looking
+/// for the DID in the query text. Here nothing but `model_query` decides.
+///
+/// [`seed_role`] links do not verify, so it reads through
+/// [`fixture_query_from_json`] (#1113 opt-in): the tests are about the DID
+/// gate, not signatures.
+struct RoleStore(SparqlStore);
+
+#[async_trait::async_trait]
+impl crate::perspectives::flow_evaluator::RequiresQueryable for RoleStore {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> anyhow::Result<String> {
+        let input: ModelQueryInput = serde_json::from_str(query_json)?;
+        let result = fixture_query_from_json(&self.0, class_name, &input, ROLE_SHAPE_JSON)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(serde_json::to_string(&result)?)
+    }
+}
+
+/// **A non-member is not a member**, whichever layer answers the DID condition.
+///
+/// `members` is a DID collection. When a role's `where` cannot be pushed to
+/// SPARQL in full, the unpushed part is re-tested on the hydrated instance by
+/// `matches_where`. That function used to skip every String/StringArray
+/// condition on a collection, on the assumption that SPARQL had already
+/// applied it. At the top level of a clause it had: pushable leaves are
+/// emitted even when a sibling is not, so the first two cases were always
+/// closed. Inside a declined `OR` it had not. One unpushable leaf in any
+/// branch sends the whole disjunction to the Rust filter, where the
+/// DID condition passed vacuously. Every Reviewer instance then matched every
+/// candidate.
+///
+/// The unpushable leaf here is `timestamp`: it is hydrated, so it can be
+/// filtered, but it is no link, so it cannot be pushed. It used to be
+/// `author`, until #1122 answered an `author` beside link-backed siblings in
+/// the store, per link. The `author` rows are kept: they are the route the
+/// #1129 review found, and they must stay closed now that SPARQL answers
+/// them. They no longer reach the Rust filter, which is why the `timestamp`
+/// rows exist.
+///
+/// Mallory authored nothing and belongs to nothing. Alice is the only member.
+/// Red before the fix on the `or` rows with `timestamp`: Mallory came back
+/// holding `role://instance/1`.
+#[tokio::test]
+#[rustfmt::skip]
+async fn a_did_collection_role_gate_does_not_admit_a_non_member() {
+    use crate::perspectives::flow_context::FlowInstanceRecord;
+    use crate::perspectives::flow_instance::roles::resolve_role_grants;
+    use crate::perspectives::shacl_parser::ModelQuery;
+
+    let alice = "did:key:zAlice";
+    let mallory = "did:key:zMallory";
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", alice, false);
+    let store = RoleStore(store);
+    let record = FlowInstanceRecord {
+        flow_uri: "delivery://DeliveryFlow".into(),
+        instance_uri: "ad4m://flow/instance/1".into(),
+        subject: "ad4m://task/1".into(),
+        current_state: "review".into(),
+        created_at: None,
+    };
+
+    // Holds for the instance (its earliest link is at T0), and only the Rust
+    // filter can answer it. `gte` takes epoch milliseconds.
+    let t0_ms = chrono::DateTime::parse_from_rfc3339(ROLE_T0).unwrap().timestamp_millis();
+    let since_t0 = json!({ "equals": { "gte": t0_ms } });
+    let cases: Vec<(&str, Value)> = vec![
+        ("top level: didProperty beside `author` (the reviewed route, per-link since #1122)",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "author": ROLE_ADMIN } })),
+        ("top level: `$did` on the collection beside `author`",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "author": ROLE_ADMIN } })),
+        ("`or`: the DID condition beside `author` in a branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "author": ROLE_ADMIN } }] })),
+        ("top level: didProperty beside an unpushable sibling",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "timestamp": since_t0 } })),
+        ("top level: `$did` on the collection beside an unpushable sibling",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "timestamp": since_t0 } })),
+        ("`or`: the DID condition inside a branch the compiler declines",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "timestamp": since_t0 } }] })),
+        ("`or`: `in` over the collection inside a declined branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": { "in": ["$did"] }, "timestamp": since_t0 } }] })),
+    ];
+
+    for (name, role_json) in cases {
+        let role: ModelQuery = serde_json::from_value(role_json).expect("role query");
+        let evidence = resolve_role_grants(
+            &store, "approved", &role, &record, &[alice.to_string(), mallory.to_string()],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name}: resolve_role_grants: {e:#}"));
+        let held = |did: &str| -> Vec<String> {
+            evidence.iter().find(|e| e.did == did).expect("one evidence per candidate")
+                .instances.iter().map(|i| i.instance_id.clone()).collect()
+        };
+        // The control pins that the branch is live, so the refusal below is
+        // the DID condition and not a query that matches nobody.
+        assert_eq!(held(alice), vec!["role://instance/1"], "{name}: the member holds the role");
+        assert_eq!(held(mallory), Vec::<String>::new(), "{name}: a non-member must hold nothing");
+    }
+}
+
 /// `links` inside an `include` sub-query: the sub-query recurses through
 /// `execute_model_query_inner`, so each included instance carries its own
 /// `__links`.
