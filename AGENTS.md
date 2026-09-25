@@ -71,13 +71,15 @@ The integration tests are in `tests/js`. Two suites:
 | `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` | `bootstrap-languages/local/*`, executors run with `--run-holochain false` |
 | `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Holochain agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
 
-`integration-tests-js` is the regular suite and the required check. Put a
-two-executor test there when it only needs one executor to see languages or
-neighbourhoods the other published: `startExecutor` points the local
-language-language and neighbourhood store of every executor at shared
-directories under `tests/js/tst-tmp` (`tests/js/utils/sharedStores.ts`). A test
-that needs links to sync between executors goes in the multi-node Holochain
-suite.
+`integration-tests-js` is the regular suite and the required check. It is also
+the multi-node suite for the server-link-language: `integration-local.test.ts`
+starts a link-server and runs the Neighbourhood, Auto-processor and Cross-peer
+shape sync suites on the `[server-link]` config. Two executors there see each
+other's languages, neighbourhoods and agent profiles because `startExecutor`
+points the local language-language, neighbourhood store and agent-language of
+every executor at shared directories under `tests/js/tst-tmp`
+(`tests/js/utils/sharedStores.ts`). Only tests of p-diff-sync itself (links
+syncing over Holochain) go in the multi-node Holochain suite.
 
 ### Port Conflicts
 

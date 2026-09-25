@@ -155,6 +155,11 @@ commands:
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
+      - run:
+          # The local suite's multi-node leg syncs links through the
+          # server-link-language and a link-server it starts itself.
+          name: Build link-server
+          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
 
   restore_rust_compile_inputs:
     description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
