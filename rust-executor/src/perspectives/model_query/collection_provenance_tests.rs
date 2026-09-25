@@ -92,8 +92,11 @@ async fn each_collection_member_carries_its_own_author_timestamp_and_verdict() {
         .signature;
     store.add_link(&forged).unwrap();
 
+    // The unverified row is withheld by default (#1113); opt in to read its
+    // verdict. `proof_valid_tests.rs` pins the default.
     let query = ModelQueryInput {
         links: Some(vec!["members".to_string()]),
+        include_unverified: Some(true),
         ..Default::default()
     };
     let result = execute_model_query_from_json(&store, "Team", &query, TEAM_SHAPE_JSON)
@@ -192,8 +195,11 @@ async fn an_unsigned_member_reads_as_not_valid() {
     unsigned.proof.signature = String::new();
     store.add_link(&unsigned).unwrap();
 
+    // The unverified row is withheld by default (#1113); opt in to read its
+    // verdict. `proof_valid_tests.rs` pins the default.
     let query = ModelQueryInput {
         links: Some(vec!["members".to_string()]),
+        include_unverified: Some(true),
         ..Default::default()
     };
     let result = execute_model_query_from_json(&store, "Team", &query, TEAM_SHAPE_JSON)

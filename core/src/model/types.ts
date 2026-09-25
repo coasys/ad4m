@@ -16,6 +16,15 @@ import type { NodeExpression } from "../shacl/NodeExpression";
 // Query DSL types
 // ---------------------------------------------------------------------------
 
+/**
+ * Who wrote a link: a DID, any of several DIDs, or `{ not }` / `{ contains }`
+ * over the author DID.
+ */
+export type AuthorCondition =
+  | string
+  | string[]
+  | { not?: string | string[]; contains?: string };
+
 export type WhereOps = {
   not: string | number | boolean | string[] | number[];
   between: [number, number];
@@ -24,6 +33,16 @@ export type WhereOps = {
   gt: number; // greater than
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
+  /** Equality as an operator: `{ eq: X }` is the bare value `X` (an array
+   *  means any of). It lets a value sit beside `author`, and cannot be
+   *  combined with the other value operators. */
+  eq: string | number | boolean | string[] | number[];
+  /** Per-link author: the link that satisfies this property's condition was
+   *  written by this author, e.g. `{ agent: { eq: did, author: admin } }`.
+   *  Alone, `{ agent: { author: admin } }`: admin wrote some `agent` link.
+   *  Only on properties and relations stored as links (not getters,
+   *  `timestamp` or `id`). See "Filtering by Author" in the model-classes guide. */
+  author: AuthorCondition;
 };
 export type WhereCondition =
   | string
@@ -320,6 +339,28 @@ export type Query = {
    */
   deepQuery?: boolean;
   /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * By default the executor withholds every link whose stored signature
+   * verdict is not valid, so a forged or tampered link never becomes a
+   * property value, a relation target, `author` or `updatedAt`. That
+   * includes a typed relation's generated conformance getter. A `getter` you
+   * write yourself runs as written, so it reads unverified links unless it
+   * joins the link's `ad4m://ontology/proofValid` itself. Set this to
+   * `true` only to *display* an unverified claim, e.g. a UI that marks a value
+   * as unverified. Anything that acts on the data, such as a vote counter or a
+   * role check, must leave it off.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * The same applies to the rows under `__links`, to the order behind
+   * `limit`/`offset` and to `$` projections. Which instances are *selected*
+   * (`where`, the class's flags, `count`/`totalCount`, `transitive`
+   * projections) still matches unverified links, see
+   * https://github.com/coasys/ad4m/issues/1120.
+   */
+  includeUnverified?: boolean;
+  /**
    * Return the individual links behind each instance, with their own author,
    * timestamp, signature and signature verdict, under `instance.__links`. For
    * a collection this is per-item provenance: who added each member, when, and
@@ -446,6 +487,10 @@ type HasNoTypedFields<T extends Ad4mModel> =
 export type StringWhereOps = {
   not?: string | string[];
   contains?: string;
+  /** See {@link WhereOps.eq}. */
+  eq?: string | string[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type NumericWhereOps = {
@@ -455,12 +500,16 @@ export type NumericWhereOps = {
   gt?: number;
   gte?: number;
   between?: [number, number];
+  /** See {@link WhereOps.eq}. */
+  eq?: number | number[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type TypedWhereCondition<V> =
     V extends string  ? string | string[] | StringWhereOps
   : V extends number  ? number | number[] | NumericWhereOps
-  : V extends boolean ? boolean
+  : V extends boolean ? boolean | { eq?: boolean; author?: AuthorCondition }
   : V extends Array<infer U>
       ? U extends string ? string | string[] | StringWhereOps
         : U extends number ? number | number[] | NumericWhereOps
@@ -474,6 +523,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
+      /** Alone: the instance's `.author`, i.e. its earliest link's author.
+       *  Beside property/relation conditions in the same object: that, AND
+       *  each of those conditions is satisfied by a link this author wrote.
+       *  For "this author wrote the `agent` link" alone, nest it:
+       *  `{ agent: { eq: did, author } }`. It does not reach into
+       *  `OR`/`AND`/`NOT` sub-clauses. See "Filtering by Author" in the
+       *  model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];
@@ -513,6 +569,8 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 
@@ -575,6 +633,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.includeUnverified}. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 

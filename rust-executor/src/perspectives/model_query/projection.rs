@@ -17,6 +17,7 @@
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+use super::sparql_builder::verified_link_exists;
 use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
@@ -51,7 +52,8 @@ use crate::perspectives::sparql_store::SparqlStore;
 ///
 /// When `proj.target_shape` is set, raw target IRIs are replaced with fully
 /// hydrated model instances via a recursive `execute_model_query_inner` call
-/// (one batch per projection key, eliminating TS-side round-trips).
+/// (one batch per projection key, eliminating TS-side round-trips). That call
+/// inherits the parent query's `include_unverified`.
 pub(super) async fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
@@ -59,6 +61,7 @@ pub(super) async fn resolve_projections(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    include_unverified: Option<bool>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -109,8 +112,27 @@ pub(super) async fn resolve_projections(
             }
         };
 
+        // A projection's `where` names the counted records' properties, and
+        // `author` there is the projected link's. A per-link `author` nested
+        // under a property has no reading here, and this builder drops
+        // operators it does not know, so it is refused rather than ignored.
+        if proj.where_clause.as_ref().is_some_and(|wc| {
+            wc.values()
+                .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
+        }) {
+            return Err(deno_core::anyhow::anyhow!(
+                "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
+                 `where`; use its top-level `author` for the projected link's author"
+            ));
+        }
         let where_patterns = build_projection_where_patterns(proj, resolver);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
+        let verified = projection_verified_pattern(
+            proj.transitive,
+            !reifier_patterns.is_empty(),
+            &safe_pred,
+            include_unverified,
+        );
 
         // A transitive projection counts (or lists) everything reachable, which
         // is what "42 replies" on a collapsed branch means to a reader. The
@@ -140,6 +162,7 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}} GROUP BY ?parent"
                 ),
                 parent_constraint = parent_constraint,
@@ -147,6 +170,7 @@ pub(super) async fn resolve_projections(
                 path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
             );
 
             let result_json = store.query(&sparql)?;
@@ -184,6 +208,7 @@ pub(super) async fn resolve_projections(
                     "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}}{order_clause}"
                 ),
                 parent_constraint = parent_constraint,
@@ -191,6 +216,7 @@ pub(super) async fn resolve_projections(
                 path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
                 order_clause = order_clause,
             );
 
@@ -263,6 +289,7 @@ pub(super) async fn resolve_projections(
                             let sub_query = ModelQueryInput {
                                 where_clause: Some(sub_where),
                                 deep_query: Some(true),
+                                include_unverified,
                                 ..ModelQueryInput::default()
                             };
 
@@ -414,7 +441,7 @@ pub(super) fn build_projection_where_patterns(
         }
 
         if prop_name == "id" || prop_name == "base" {
-            match condition {
+            match condition.eq_normalized() {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    FILTER(STR(?t) = \"{escaped}\")\n"));
@@ -448,7 +475,7 @@ pub(super) fn build_projection_where_patterns(
         let var = format!("_pw{filter_idx}");
         filter_idx += 1;
 
-        match condition {
+        match condition.eq_normalized() {
             WhereCondition::String(val) => {
                 if is_literal_prop {
                     let escaped = escape_sparql_string(val);
@@ -573,6 +600,36 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
     } else {
         let joined = terms.join(" ");
         format!("\nORDER BY {joined}")
+    }
+}
+
+/// The #1113 verdict for one projection's `?parent <predicate> ?t` link.
+///
+/// With an `author` / `timestamp` filter the query already joins that link's
+/// reifier as `?_prj_reif`, so the verdict is read off the same reifier: a
+/// verified link by someone else must not stand in for the one the filter
+/// matched. Without one, [`verified_link_exists`] keeps the target when some
+/// link asserting it verified, which also keeps `COUNT(DISTINCT ?t)` from
+/// counting a target twice.
+///
+/// Empty for a transitive projection: a property path has no single link per
+/// hop to read a verdict from, so those still count unverified links (#1120).
+/// Empty as well when the query opts in with `include_unverified`.
+pub(super) fn projection_verified_pattern(
+    transitive: bool,
+    joins_reifier: bool,
+    safe_pred: &str,
+    include_unverified: Option<bool>,
+) -> String {
+    if transitive || include_unverified.unwrap_or(false) {
+        String::new()
+    } else if joins_reifier {
+        "    ?_prj_reif <ad4m://ontology/proofValid> \"true\" .\n".to_string()
+    } else {
+        format!(
+            "   {}\n",
+            verified_link_exists("?parent", safe_pred, "?t", include_unverified)
+        )
     }
 }
 

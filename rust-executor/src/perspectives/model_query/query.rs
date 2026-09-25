@@ -10,12 +10,13 @@ use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    local_status_filter, per_anchor_limit, ANCHOR_VAR,
+    local_status_filter, per_anchor_limit, proof_valid_filter, ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -259,6 +260,11 @@ pub(super) async fn execute_model_query_inner(
             ));
         }
     }
+
+    // A per-link `author` condition is answered in the store or not at all.
+    // The post-hydration fallback only knows the earliest link's author, so a
+    // clause that would reach it is refused here, before any plan is chosen.
+    refuse_unanswerable_link_author(query_input, shape, resolver)?;
 
     // Resolved up front so a bad key is an error on every query shape, not
     // only on the ones that go on to return rows.
@@ -581,6 +587,7 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
+                    let proof_valid = proof_valid_filter(query_input.include_unverified);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -589,7 +596,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{proof_valid}{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -632,7 +639,12 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .collect();
     if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(store, &mut instances, &reverse_rels)?;
+        resolve_reverse_relations(
+            store,
+            &mut instances,
+            &reverse_rels,
+            query_input.include_unverified,
+        )?;
     }
 
     // Apply post-hydration where-clause filters
@@ -731,14 +743,23 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            query_input.include_unverified,
         )?;
     }
 
     // Eager-load included relations
     if let Some(ref include) = query_input.include {
         if !paginated.is_empty() && !shape.include_relations.is_empty() {
-            resolve_includes_recursive(store, &mut paginated, include, shape, resolver, depth)
-                .await?;
+            resolve_includes_recursive(
+                store,
+                &mut paginated,
+                include,
+                shape,
+                resolver,
+                depth,
+                query_input.include_unverified,
+            )
+            .await?;
         }
     }
 
@@ -761,7 +782,14 @@ pub(super) async fn execute_model_query_inner(
     };
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
-    attach_links(store, shape, &link_keys, &mut final_instances).await?;
+    attach_links(
+        store,
+        shape,
+        &link_keys,
+        query_input.include_unverified,
+        &mut final_instances,
+    )
+    .await?;
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
@@ -772,6 +800,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            query_input.include_unverified,
         )
         .await?;
     }

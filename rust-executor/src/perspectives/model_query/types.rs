@@ -49,6 +49,19 @@ pub struct WhereOps {
     /// `{ comments: { none: {} } }` is "has none at all".
     #[serde(default)]
     pub none: Option<BTreeMap<String, WhereCondition>>,
+    /// Equality spelled as an operator: `{ eq: X }` means the same as the bare
+    /// value `X` (a scalar, or an array for "any of"). It exists so a value can
+    /// sit beside `author` in one operator object, and cannot be combined with
+    /// the other value operators.
+    #[serde(default)]
+    pub eq: Option<Box<WhereCondition>>,
+    /// Per-link author: the link that satisfies this property's value
+    /// condition must have been written by an author meeting this condition
+    /// (a DID, a DID array, `{ not }` or `{ contains }`). With no value
+    /// condition beside it, some link on the property must have been. See
+    /// [`super::link_author`].
+    #[serde(default)]
+    pub author: Option<Box<WhereCondition>>,
 }
 
 impl Default for WhereOps {
@@ -63,6 +76,8 @@ impl Default for WhereOps {
             contains: None,
             some: None,
             none: None,
+            eq: None,
+            author: None,
         }
     }
 }
@@ -105,6 +120,80 @@ pub enum WhereCondition {
     Ops(WhereOps),
     /// Single nested where clause used for the NOT combinator.
     SubClause(BTreeMap<String, WhereCondition>),
+}
+
+impl WhereCondition {
+    /// `{ eq: X }` on its own is the bare value `X`; anything else is returned
+    /// as it is. For the readers that match on the bare shapes.
+    pub fn eq_normalized(&self) -> &WhereCondition {
+        match self {
+            WhereCondition::Ops(o) if o.author.is_none() => match o.eq.as_deref() {
+                Some(eq)
+                    if o.not.is_none()
+                        && o.between.is_none()
+                        && o.lt.is_none()
+                        && o.lte.is_none()
+                        && o.gt.is_none()
+                        && o.gte.is_none()
+                        && o.contains.is_none()
+                        && o.some.is_none()
+                        && o.none.is_none() =>
+                {
+                    eq
+                }
+                _ => self,
+            },
+            _ => self,
+        }
+    }
+
+    /// The where clause a `NOT` holds.
+    ///
+    /// Untagged deserialisation cannot see the key a value sits under, so a
+    /// `NOT` clause whose keys are all operator names, `NOT: { author: A }`
+    /// being the one that matters, arrives as [`Ops`](WhereCondition::Ops).
+    /// This reads it back as the clause it was written as. `None` for a value
+    /// that is no clause at all.
+    pub fn as_not_clause(&self) -> Option<std::borrow::Cow<'_, BTreeMap<String, WhereCondition>>> {
+        use std::borrow::Cow;
+        let o = match self {
+            WhereCondition::SubClause(branch) => return Some(Cow::Borrowed(branch)),
+            WhereCondition::Ops(o) => o,
+            _ => return None,
+        };
+        let mut clause = BTreeMap::new();
+        let mut put = |key: &str, cond: WhereCondition| {
+            clause.insert(key.to_string(), cond);
+        };
+        let from = |v: &Value| serde_json::from_value::<WhereCondition>(v.clone()).ok();
+        if let Some(ref v) = o.not {
+            put("not", from(v)?);
+        }
+        if let Some((lo, hi)) = o.between {
+            put("between", WhereCondition::NumberArray(vec![lo, hi]));
+        }
+        for (key, n) in [("lt", o.lt), ("lte", o.lte), ("gt", o.gt), ("gte", o.gte)] {
+            if let Some(n) = n {
+                put(key, WhereCondition::Number(n));
+            }
+        }
+        if let Some(ref v) = o.contains {
+            put("contains", from(v)?);
+        }
+        if let Some(ref c) = o.some {
+            put("some", WhereCondition::SubClause(c.clone()));
+        }
+        if let Some(ref c) = o.none {
+            put("none", WhereCondition::SubClause(c.clone()));
+        }
+        if let Some(ref c) = o.eq {
+            put("eq", (**c).clone());
+        }
+        if let Some(ref c) = o.author {
+            put("author", (**c).clone());
+        }
+        Some(Cow::Owned(clause))
+    }
 }
 
 /// Sort direction for ORDER BY clauses.
@@ -450,6 +539,16 @@ pub struct ModelQueryInput {
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
     pub prefer_classes: Option<Vec<String>>,
+    /// Hydrate from links whose signature did not verify as well.
+    ///
+    /// By default a row whose link does not carry a stored `proofValid` of
+    /// `"true"` is withheld (see
+    /// [`proof_valid_filter`](super::sparql_builder::proof_valid_filter)). This
+    /// is the opt-out for a caller that wants to *display* an unverified claim —
+    /// a UI marking a value "unverified". Anything that acts on the data (a vote
+    /// counter, a role check) must leave it off.
+    #[serde(default)]
+    pub include_unverified: Option<bool>,
     /// Return the individual links behind these properties, relations or
     /// predicate IRIs under the additive `__links` key — see
     /// [`super::links`]. Reaches predicates the shape does not declare
