@@ -18,9 +18,11 @@ use super::tool_grammar;
 use super::types::{FunctionDef, ToolDef};
 use crate::ai_service::harness::provider::ToolSchema;
 use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
+use crate::ai_service::providers::{ChatTurn, ToolCall, ToolSpec};
 use crate::ai_service::AIService;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -52,6 +54,14 @@ impl CompletionSource for OpenAiCompatBridge {
         messages: &[Value],
         tools: Vec<ToolSchema>,
     ) -> Result<HarnessCompletion> {
+        // A provider whose wire format carries tools gets them handed over as
+        // definitions, and answers with structured calls. Everything else
+        // takes the prompt-injection path below, which works against any model
+        // at all — including every local one, which is why it stays.
+        if !tools.is_empty() && AIService::model_supports_native_tools(model_id) {
+            return self.complete_natively(model_id, messages, tools).await;
+        }
+
         // Convert the harness's ToolSchema list into openai-compat ToolDef —
         // same fields, different owning module. A schema-side rename would
         // let us drop this conversion; keep it explicit for now so the
@@ -151,6 +161,252 @@ impl CompletionSource for OpenAiCompatBridge {
             tool_calls,
         })
     }
+}
+
+impl OpenAiCompatBridge {
+    /// The tools-as-data path, for a provider whose wire format has them.
+    ///
+    /// Structurally simpler than the injected path it replaces: no `<tools>`
+    /// system prompt, no grammar, no recovering calls out of prose and no
+    /// stripping the blocks back out afterwards. The model is handed schemas
+    /// and answers with calls.
+    async fn complete_natively(
+        &self,
+        model_id: &str,
+        messages: &[Value],
+        tools: Vec<ToolSchema>,
+    ) -> Result<HarnessCompletion> {
+        let turns = structured_turns(messages)?;
+
+        let specs = tools
+            .iter()
+            .map(|schema| ToolSpec {
+                name: schema.name.clone(),
+                description: schema.description.clone(),
+                parameters: schema.parameters.clone(),
+            })
+            .collect();
+
+        let reply = self
+            .service
+            .prompt_with_tools(model_id.to_string(), turns, specs, self.auth_token.clone())
+            .await?;
+
+        Ok(HarnessCompletion {
+            content: reply.text,
+            tool_calls: reply
+                .tool_calls
+                .into_iter()
+                .map(|call| HarnessToolCall {
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.arguments,
+                })
+                .collect(),
+        })
+    }
+}
+
+/// The whole conversation as structured turns, with every call and result
+/// paired.
+///
+/// Anthropic accepts a `tool_use` only if the turn after it answers it, and a
+/// `tool_result` only if the turn before it made the call; either one unpaired
+/// and the whole request is refused. Mapping each message on its own cannot
+/// hold that, because pairing is a fact about neighbours. So the calls of the
+/// latest assistant turn stay open while its results arrive:
+///
+/// - A result naming an open call answers it.
+/// - A result with no id answers the oldest open call. This is what makes an
+///   id minted by [`to_provider_call`] reachable: a client that omits the id on
+///   a call omits it on the result too, and order is the only pairing left.
+/// - A result that answers nothing open travels as an ordinary user turn, so
+///   what the tool said still reaches the model. While calls are open it waits
+///   until their results are in. The API reads consecutive user turns as one
+///   message, and text ahead of a `tool_result` in that message breaks the
+///   pairing as surely as a missing result does.
+/// - A call still open when the next non-tool message arrives is removed from
+///   the turn that made it. Its text stays. If it had none, the turn goes too:
+///   an empty assistant message is refused like an unpaired call.
+///
+/// The harness gives every call an id and appends a result for every call,
+/// budget-exhausted ones included, so on its own conversations none of the
+/// last three cases fires.
+pub(super) fn structured_turns(messages: &[Value]) -> Result<Vec<ChatTurn>> {
+    let mut turns: Vec<ChatTurn> = Vec::with_capacity(messages.len());
+    let mut open: Option<OpenCalls> = None;
+
+    for m in messages {
+        let turn = structured_turn(m)?;
+
+        if m.get("role").and_then(|r| r.as_str()) == Some("tool") {
+            match open.as_mut() {
+                Some(calls) => match calls.answer(&turn) {
+                    Some(id) => turns.push(ChatTurn::tool_result(id, turn.content)),
+                    None => calls.unpaired.push(ChatTurn::user(turn.content)),
+                },
+                None => turns.push(ChatTurn::user(turn.content)),
+            }
+            continue;
+        }
+
+        if let Some(calls) = open.take() {
+            calls.close(&mut turns);
+        }
+        if !turn.tool_calls.is_empty() {
+            open = Some(OpenCalls {
+                turn: turns.len(),
+                waiting: turn.tool_calls.iter().map(|c| c.id.clone()).collect(),
+                unpaired: Vec::new(),
+            });
+        }
+        turns.push(turn);
+    }
+
+    if let Some(calls) = open.take() {
+        calls.close(&mut turns);
+    }
+    Ok(turns)
+}
+
+/// The latest assistant turn that made calls, while its results arrive.
+struct OpenCalls {
+    /// Its index in the turns built so far.
+    turn: usize,
+    /// Ids of its calls no result has answered yet, in order.
+    waiting: VecDeque<String>,
+    /// Results that answered none of them, held until the run of results ends.
+    unpaired: Vec<ChatTurn>,
+}
+
+impl OpenCalls {
+    /// The call this result answers, if any. See [`structured_turns`].
+    fn answer(&mut self, result: &ChatTurn) -> Option<String> {
+        match &result.tool_result_for {
+            Some(id) => {
+                let i = self.waiting.iter().position(|w| w == id)?;
+                self.waiting.remove(i)
+            }
+            None => self.waiting.pop_front(),
+        }
+    }
+
+    /// Remove the calls nothing answered, then append the held results.
+    fn close(self, turns: &mut Vec<ChatTurn>) {
+        if !self.waiting.is_empty() {
+            let calling = &mut turns[self.turn];
+            calling.tool_calls.retain(|c| !self.waiting.contains(&c.id));
+            // Only a turn left with no calls can be removed, and a turn with no
+            // calls has no results after it, so no other index moves.
+            if calling.tool_calls.is_empty() && calling.content.trim().is_empty() {
+                turns.remove(self.turn);
+            }
+        }
+        turns.extend(self.unpaired);
+    }
+}
+
+/// One harness message as a structured turn, keeping the tool information the
+/// text path folds into prose.
+///
+/// The harness appends an assistant turn carrying `tool_calls` and a
+/// `role:"tool"` result after every dispatch, so these are the shapes that
+/// actually arrive — a turn with neither is ordinary text.
+fn structured_turn(m: &Value) -> Result<ChatTurn> {
+    let role = m
+        .get("role")
+        .and_then(|r| r.as_str())
+        .ok_or_else(|| anyhow!("harness message missing `role`"))?;
+
+    let content = m
+        .get("content")
+        .map(flatten_content_value)
+        .unwrap_or_default();
+
+    match role {
+        "system" => Ok(ChatTurn::system(content)),
+        "tool" => {
+            // Anthropic rejects a `tool_result` whose `tool_use_id` is empty,
+            // so an unidentified result starts out as an ordinary user turn,
+            // which keeps what the tool said in front of the model.
+            // `structured_turns` pairs it with an open call where one exists.
+            match m.get("tool_call_id").and_then(|v| v.as_str()) {
+                Some(call_id) if !call_id.is_empty() => Ok(ChatTurn::tool_result(call_id, content)),
+                _ => Ok(ChatTurn::user(content)),
+            }
+        }
+        "assistant" => {
+            let calls: Vec<ToolCall> = m
+                .get("tool_calls")
+                .and_then(|v| v.as_array())
+                .map(|calls| calls.iter().filter_map(to_provider_call).collect())
+                .unwrap_or_default();
+
+            if calls.is_empty() {
+                Ok(ChatTurn::assistant(content))
+            } else {
+                Ok(ChatTurn::assistant_calling(content, calls))
+            }
+        }
+        // "user", and anything unrecognised. A role we do not know is safer
+        // read as the user speaking than dropped: the text still reaches the
+        // model, which is what the injected path would also have done.
+        _ => Ok(ChatTurn::user(content)),
+    }
+}
+
+/// One entry of an assistant turn's `tool_calls`, as the providers want it.
+///
+/// `arguments` arrives as a JSON *string* on the OpenAI wire and as an object
+/// once it has been through the harness. Both are accepted.
+///
+/// Arguments that are not an object — a string that will not parse, and one
+/// that parses to an array, a number or `null` — are kept rather than dropped,
+/// under `_raw`. Dropping
+/// the call looked safer and is not: the harness has already dispatched it and
+/// appends the matching `tool_result` on the next turn, so a missing `tool_use`
+/// leaves a result whose `tool_use_id` refers to nothing, and Anthropic rejects
+/// the whole request. A call the model can see went wrong is recoverable; an
+/// unbalanced conversation is not.
+///
+/// A call with no id gets one minted, for the same reason. An empty `tool_use`
+/// id is refused by the wire, but dropping the call produces exactly the
+/// unbalanced conversation the paragraph above is about, so the missing id
+/// argues for replacing it rather than for discarding the call. `complete`
+/// already mints `call_{uuid}` for every call it sees, so this is the same
+/// shape by the time anything downstream reads it. No result can name a minted
+/// id, so [`structured_turns`] pairs by order, and removes the call if nothing
+/// answers it.
+fn to_provider_call(raw: &Value) -> Option<ToolCall> {
+    let function = raw.get("function").unwrap_or(raw);
+    let name = function.get("name")?.as_str()?.to_string();
+
+    let id = raw.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+    let id = if id.is_empty() {
+        format!("call_{}", Uuid::new_v4())
+    } else {
+        id.to_string()
+    };
+
+    let arguments = match function.get("arguments") {
+        Some(Value::String(text)) => match serde_json::from_str::<Value>(text) {
+            Ok(value) if value.is_object() => value,
+            // `"[]"`, `"1"` and `"null"` are valid JSON and invalid arguments:
+            // a `tool_use` input must be an object. They go under `_raw` with
+            // the strings that did not parse at all, for the same reason — the
+            // call has to stay, or its result has nothing to name.
+            _ => serde_json::json!({ "_raw": text }),
+        },
+        Some(value) if value.is_object() => value.clone(),
+        Some(value) => serde_json::json!({ "_raw": value.to_string() }),
+        None => Value::Object(Default::default()),
+    };
+
+    Some(ToolCall {
+        id,
+        name,
+        arguments,
+    })
 }
 
 fn harness_schema_to_tool_def(s: &ToolSchema) -> ToolDef {
@@ -492,5 +748,367 @@ mod tests {
             body.contains("id=\"call_\\\"weird\\\"_id\""),
             "malformed encoding: {body}"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// structured_turn — the native path's message mapping
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod native_mapping_tests {
+    use super::*;
+    use crate::ai_service::providers::ChatRole;
+    use serde_json::json;
+
+    #[test]
+    fn a_tool_message_becomes_a_tool_result_naming_its_call() {
+        let turn = structured_turn(&json!({
+            "role": "tool",
+            "tool_call_id": "call_7",
+            "content": "42",
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.role, ChatRole::User);
+        assert_eq!(turn.tool_result_for.as_deref(), Some("call_7"));
+        assert_eq!(turn.content, "42");
+    }
+
+    #[test]
+    fn an_assistant_turn_keeps_its_calls_and_its_text() {
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "Looking that up.",
+            "tool_calls": [{
+                "id": "call_7",
+                "function": { "name": "search", "arguments": "{\"q\":\"x\"}" },
+            }],
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.role, ChatRole::Assistant);
+        assert_eq!(turn.content, "Looking that up.");
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].id, "call_7");
+        assert_eq!(turn.tool_calls[0].name, "search");
+        // The wire carries arguments as a JSON string; providers want the
+        // object, so it is parsed exactly once, here.
+        assert_eq!(turn.tool_calls[0].arguments["q"], "x");
+    }
+
+    #[test]
+    fn already_parsed_arguments_are_taken_as_they_are() {
+        // The harness appends its own assistant turns with arguments already
+        // an object, so both shapes reach this function in one conversation.
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call_8",
+                "function": { "name": "count", "arguments": { "n": 3 } },
+            }],
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.tool_calls[0].arguments["n"], 3);
+    }
+
+    #[test]
+    fn a_call_with_unparseable_arguments_is_kept_under_raw() {
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "hmm",
+            "tool_calls": [{
+                "id": "call_9",
+                "function": { "name": "search", "arguments": "{not json" },
+            }],
+        }))
+        .expect("maps");
+
+        // Dropping the call would leave the tool_result the harness appends
+        // next turn pointing at nothing, and Anthropic rejects a request whose
+        // tool_use_id matches no tool_use.
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].arguments["_raw"], "{not json");
+    }
+
+    #[test]
+    fn arguments_that_parse_to_something_other_than_an_object_go_under_raw_too() {
+        // `"[]"` is valid JSON and an invalid `tool_use` input: the provider
+        // wants an object. Passing it through refuses the whole conversation,
+        // and dropping the call unbalances it, so it joins the `_raw` case.
+        for arguments in [json!("[1,2]"), json!("7"), json!("null"), json!([1, 2])] {
+            let turn = structured_turn(&json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_10",
+                    "function": { "name": "search", "arguments": arguments },
+                }],
+            }))
+            .expect("maps");
+
+            assert_eq!(turn.tool_calls.len(), 1);
+            assert!(
+                turn.tool_calls[0].arguments.is_object(),
+                "{arguments} reached the provider as a non-object"
+            );
+            assert!(turn.tool_calls[0].arguments["_raw"].is_string());
+        }
+    }
+
+    #[test]
+    fn a_call_without_an_id_is_given_one_rather_than_dropped() {
+        // An empty tool_use id is refused by the API — which argues for
+        // replacing the id, not for discarding the call. Dropping it produces
+        // the same unbalanced conversation that keeping unparseable arguments
+        // under `_raw` exists to avoid.
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "hmm",
+            "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert_eq!(turn.tool_calls[0].name, "search");
+        assert!(
+            turn.tool_calls[0].id.starts_with("call_"),
+            "a minted id matches the shape `complete` produces: {}",
+            turn.tool_calls[0].id
+        );
+        assert_eq!(turn.content, "hmm");
+    }
+
+    #[test]
+    fn a_call_with_an_empty_id_is_given_one_too() {
+        // An id present but empty is the same failure as an absent one: the
+        // wire refuses it.
+        let turn = structured_turn(&json!({
+            "role": "assistant",
+            "content": "hmm",
+            "tool_calls": [{ "id": "", "function": { "name": "search", "arguments": "{}" } }],
+        }))
+        .expect("maps");
+
+        assert_eq!(turn.tool_calls.len(), 1);
+        assert!(!turn.tool_calls[0].id.is_empty());
+    }
+
+    #[test]
+    fn a_tool_result_without_an_id_becomes_an_ordinary_user_turn() {
+        // Anthropic rejects an empty tool_use_id. The text still has to reach
+        // the model, so it travels as a user turn.
+        let turn = structured_turn(&json!({ "role": "tool", "content": "42" })).expect("maps");
+
+        assert_eq!(turn.role, ChatRole::User);
+        assert!(turn.tool_result_for.is_none());
+        assert_eq!(turn.content, "42");
+    }
+
+    #[test]
+    fn a_tool_result_with_an_empty_id_becomes_an_ordinary_user_turn() {
+        let turn = structured_turn(&json!({
+            "role": "tool", "tool_call_id": "", "content": "42",
+        }))
+        .expect("maps");
+
+        assert!(turn.tool_result_for.is_none());
+    }
+
+    #[test]
+    fn an_id_less_call_and_an_id_less_result_pair_up() {
+        let turns = structured_turns(&[
+            json!({ "role": "user", "content": "find x" }),
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "tool", "content": "42" }),
+        ])
+        .expect("maps");
+
+        let minted = &turns[1].tool_calls[0].id;
+        assert!(minted.starts_with("call_"), "{minted}");
+        assert_eq!(turns[2].tool_result_for.as_deref(), Some(minted.as_str()));
+        assert_eq!(turns[2].content, "42");
+    }
+
+    #[test]
+    fn id_less_results_answer_parallel_calls_in_order() {
+        let turns = structured_turns(&[
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [
+                    { "function": { "name": "first", "arguments": "{}" } },
+                    { "function": { "name": "second", "arguments": "{}" } },
+                ],
+            }),
+            json!({ "role": "tool", "content": "one" }),
+            json!({ "role": "tool", "content": "two" }),
+        ])
+        .expect("maps");
+
+        let calls = &turns[0].tool_calls;
+        assert_eq!(turns[1].tool_result_for.as_ref(), Some(&calls[0].id));
+        assert_eq!(turns[2].tool_result_for.as_ref(), Some(&calls[1].id));
+    }
+
+    #[test]
+    fn a_call_nothing_answers_does_not_go_out() {
+        // An unanswered tool_use is refused just as an orphaned tool_result
+        // is. The call is removed; the text the model wrote with it is not.
+        let turns = structured_turns(&[
+            json!({
+                "role": "assistant", "content": "Looking that up.",
+                "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "user", "content": "never mind" }),
+        ])
+        .expect("maps");
+
+        assert!(turns[0].tool_calls.is_empty());
+        assert_eq!(turns[0].content, "Looking that up.");
+        assert_eq!(turns[1].content, "never mind");
+    }
+
+    #[test]
+    fn a_trailing_call_nothing_answers_does_not_go_out_either() {
+        let turns = structured_turns(&[json!({
+            "role": "assistant", "content": "",
+            "tool_calls": [{ "id": "call_1", "function": { "name": "search", "arguments": "{}" } }],
+        })])
+        .expect("maps");
+
+        // No calls left and no text, so nothing of the turn remains.
+        assert!(turns.is_empty());
+    }
+
+    #[test]
+    fn a_result_naming_a_call_that_is_not_open_travels_as_text() {
+        // The mixed case: the call's id was minted, so the result's own id
+        // points at nothing. Sent as a tool_result it would be refused.
+        let turns = structured_turns(&[
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_elsewhere", "content": "42" }),
+        ])
+        .expect("maps");
+
+        // The call it did not answer is removed, and with no text the turn
+        // that made it goes too.
+        assert_eq!(turns.len(), 1);
+        assert!(turns[0].tool_result_for.is_none());
+        assert_eq!(turns[0].content, "42");
+    }
+
+    #[test]
+    fn a_stray_result_does_not_come_between_a_call_and_its_result() {
+        // Sent where it arrived, the stray text would sit ahead of call_a's
+        // tool_result in the same user message, and the API refuses that.
+        let turns = structured_turns(&[
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "id": "call_a", "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_elsewhere", "content": "stray" }),
+            json!({ "role": "tool", "tool_call_id": "call_a", "content": "42" }),
+        ])
+        .expect("maps");
+
+        assert_eq!(turns.len(), 3);
+        assert_eq!(turns[0].tool_calls[0].id, "call_a");
+        assert_eq!(turns[1].tool_result_for.as_deref(), Some("call_a"));
+        assert_eq!(turns[1].content, "42");
+        assert!(turns[2].tool_result_for.is_none());
+        assert_eq!(turns[2].content, "stray");
+    }
+
+    #[test]
+    fn a_turn_left_with_no_calls_and_no_text_is_removed() {
+        let turns = structured_turns(&[
+            json!({ "role": "user", "content": "find x" }),
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [{ "function": { "name": "search", "arguments": "{}" } }],
+            }),
+            json!({ "role": "user", "content": "never mind" }),
+        ])
+        .expect("maps");
+
+        assert_eq!(turns.len(), 2);
+        assert_eq!(turns[0].content, "find x");
+        assert_eq!(turns[1].content, "never mind");
+    }
+
+    #[test]
+    fn the_harness_shape_passes_through_unchanged() {
+        // Ids on both sides, a result for every call: the only shape the
+        // harness produces, and none of the repairs above may touch it.
+        let turns = structured_turns(&[
+            json!({ "role": "user", "content": "go" }),
+            json!({
+                "role": "assistant", "content": "",
+                "tool_calls": [
+                    { "id": "call_a", "function": { "name": "first", "arguments": "{}" } },
+                    { "id": "call_b", "function": { "name": "second", "arguments": "{}" } },
+                ],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_b", "content": "two" }),
+            json!({ "role": "tool", "tool_call_id": "call_a", "content": "one" }),
+            json!({ "role": "assistant", "content": "done" }),
+        ])
+        .expect("maps");
+
+        assert_eq!(turns[1].tool_calls.len(), 2);
+        assert_eq!(turns[2].tool_result_for.as_deref(), Some("call_b"));
+        assert_eq!(turns[3].tool_result_for.as_deref(), Some("call_a"));
+        assert_eq!(turns[4].content, "done");
+    }
+
+    #[test]
+    fn an_assistant_turn_without_calls_stays_ordinary() {
+        let turn =
+            structured_turn(&json!({ "role": "assistant", "content": "done" })).expect("maps");
+
+        assert_eq!(turn.role, ChatRole::Assistant);
+        assert!(turn.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn a_system_turn_maps_to_system() {
+        let turn =
+            structured_turn(&json!({ "role": "system", "content": "be terse" })).expect("maps");
+        assert_eq!(turn.role, ChatRole::System);
+    }
+
+    #[test]
+    fn an_unknown_role_is_read_as_the_user_speaking() {
+        // Dropping it would lose text the model should see; the injected path
+        // would have passed it through too.
+        let turn =
+            structured_turn(&json!({ "role": "developer", "content": "note" })).expect("maps");
+        assert_eq!(turn.role, ChatRole::User);
+        assert_eq!(turn.content, "note");
+    }
+
+    #[test]
+    fn a_message_without_a_role_is_an_error_rather_than_a_guess() {
+        assert!(structured_turn(&json!({ "content": "orphan" })).is_err());
+    }
+
+    #[test]
+    fn array_content_is_flattened_the_same_way_as_on_the_injected_path() {
+        let turn = structured_turn(&json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": "one" }, { "type": "text", "text": "two" }],
+        }))
+        .expect("maps");
+
+        assert!(turn.content.contains("one"));
+        assert!(turn.content.contains("two"));
     }
 }

@@ -30,3 +30,4 @@ export * from "./types.js";
 export * from "./errors.js";
 export * from "./imports.js";
 export * from "./defineLanguage.js";
+export * from "./websocket.js";
