@@ -3,6 +3,10 @@ import { ChildProcess } from 'child_process';
 import { sleep } from "../utils/utils";
 
 export class TestContext {
+    /** False when the executors run with --run-holochain false: there are no
+     *  Holochain agent infos to exchange, so makeAll*NodesKnown() do nothing. */
+    holochain: boolean = true
+
     #alice: Ad4mClient | undefined
     #bob: Ad4mClient | undefined
     #jim: Ad4mClient | undefined
@@ -52,6 +56,7 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
+      if (!this.holochain) return;
       let lastError: unknown;
       for (let attempt = 1; attempt <= 5; attempt++) {
         try {
@@ -75,6 +80,7 @@ export class TestContext {
     }
 
     async makeAllThreeNodesKnown() {
+      if (!this.holochain) return;
       let lastError: unknown;
       for (let attempt = 1; attempt <= 5; attempt++) {
         try {

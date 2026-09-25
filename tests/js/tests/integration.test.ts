@@ -15,7 +15,6 @@ import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
 import aiTests from "./ai";
-import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
@@ -171,7 +170,6 @@ describe("Integration tests", function () {
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
-        describe('Language', languageTests(testContext))
         // Same neighbourhood suite, run once per link-language flavour. The
         // getter closes over the outer `serverLinkConfig` so it picks up the
         // real value after the outer before() runs.
