@@ -161,7 +161,7 @@ try {
 // Write the evidence, then the same press succeeds:
 await WorkLog.create(perspective, { note: "Picked up." },
   { parent: { id: task.id, predicate: "ad4m://has_child" } });
-const result = await instance.proposeTransition("InProgress", "I've started — see the log");
+const result = await started.proposeTransition("InProgress", "I've started — see the log");
 result.outcomes;      // [{ fromState: "Ready", toState: "InProgress", ... }] — n:1 fires
 result.derivedState;  // "InProgress"
 ```
@@ -429,7 +429,9 @@ It is the same name and the same check as the [`producedByFlow` model-query filt
   That is fail-open, and it is tracked in
   [#1144](https://github.com/coasys/ad4m/issues/1144). Until it is fixed, the
   test that catches it is a negative one: a vote from a holder with no minted
-  receipt must **not** settle the edge (Part 3 below).
+  receipt must **not** settle the edge (Part 3 below). A key that *is* known
+  but malformed does the opposite: `producedByFlow` without `state` refuses
+  the edge (above). The more obvious mistake is the one that fails open.
 </Callout>
 
 For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
@@ -460,6 +462,7 @@ The gate is **fail-closed**, and Part 3 pins each direction:
 - A settled grant run **without a minted receipt does not grant**. Bob's vote on the gated task did not count until someone called `mintFlowReceipt`. "The run completed" is not evidence. A receipt is.
 - Once the receipt exists, votes cast before the mint count on the next derivation — the vote was always valid, the gate just could not verify the grant yet. Nothing new needs to be written.
 - The receipt is bound to its instance by `(className, id)`. Alice's own role instance — same class, same `domain` — did not pass the gate, because no receipt names *her* instance. A receipt is never "flow F completed"; it is "flow F produced *this*".
+
 **Where the check runs, and what travels.** Each replica decides eligibility against its **own** graph, while it collects the evidence for a fold. The read-set then carries only the result: for each matched role instance, the grant date (`produced_at`, the granting run's `settled_at`). The granting receipt itself does not travel, and verifying a receipt never recurses into the granting flow's receipts.
 
 So a receipt minted for a *gated* flow proves that n people signed, and when. It does not, on its own, prove to a reader outside the neighbourhood that those people were allowed to sign: the minting replica decided that against its graph, and the verifier re-folds with the carried grant dates and trusts them, the same way it trusts that the carried grant links were all the links there were. Referencing the granting receipt by hash, optionally carrying it, and transitive verification are future work ([#1140](https://github.com/coasys/ad4m/issues/1140)).
