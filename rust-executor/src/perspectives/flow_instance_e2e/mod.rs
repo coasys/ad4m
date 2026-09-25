@@ -37,6 +37,7 @@ mod manual_path;
 mod outputs_commitment;
 mod produced_by;
 mod produced_by_gate;
+mod proposal_links;
 mod proposer_and_evidence;
 mod quorum_and_read_set;
 mod roles;
@@ -231,6 +232,33 @@ async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri
         .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None)
         .await
         .expect("sync a peer's fired mark");
+}
+
+/// A link claiming `author` over a signature that does not verify: what any
+/// peer can gossip in someone else's name. The store keeps it with a failed
+/// verdict.
+async fn sync_forged(f: &mut Fixture, author: &str, source: &str, predicate: &str, target: &str) {
+    f.perspective
+        .add_link_expression(
+            LinkExpression {
+                author: author.to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: source.to_string(),
+                    predicate: Some(predicate.to_string()),
+                    target: target.to_string(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: format!("{author}#key"),
+                    signature: "not-a-signature".to_string(),
+                },
+                status: Some(LinkStatus::Shared),
+            },
+            LinkStatus::Shared,
+            None,
+        )
+        .await
+        .expect("sync a forged link");
 }
 
 /// Every `currentState` link on the fixture's instance, whoever wrote it.
