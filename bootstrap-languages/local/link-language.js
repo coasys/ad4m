@@ -14,6 +14,14 @@ import {
 export const name = "local-link-language";
 export const version = "0.1.0";
 
+// Template variable: applyTemplateAndPublish({uid}) rewrites the line below,
+// so each neighbourhood gets its own copy of this language, with its own
+// address and its own storage. Without it every template would hash to this
+// language's address and all neighbourhoods on a node would share one link
+// store.
+//!@ad4m-template-variable
+const uid = "local-link-language";
+
 let links = [];
 let revision = 0;
 let synced = false;
