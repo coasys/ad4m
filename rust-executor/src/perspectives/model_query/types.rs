@@ -539,6 +539,16 @@ pub struct ModelQueryInput {
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
     pub prefer_classes: Option<Vec<String>>,
+    /// Hydrate from links whose signature did not verify as well.
+    ///
+    /// By default a row whose link does not carry a stored `proofValid` of
+    /// `"true"` is withheld (see
+    /// [`proof_valid_filter`](super::sparql_builder::proof_valid_filter)). This
+    /// is the opt-out for a caller that wants to *display* an unverified claim —
+    /// a UI marking a value "unverified". Anything that acts on the data (a vote
+    /// counter, a role check) must leave it off.
+    #[serde(default)]
+    pub include_unverified: Option<bool>,
     /// Return the individual links behind these properties, relations or
     /// predicate IRIs under the additive `__links` key — see
     /// [`super::links`]. Reaches predicates the shape does not declare

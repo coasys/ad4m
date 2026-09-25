@@ -41,6 +41,12 @@ class TestRoleGrant extends Ad4mModel {
 const MALLORY = "did:key:zMalloryTheSyncedPeer";
 const BOB = "did:key:zBobTheAppointee";
 
+/** `linkAs` links carry a signature that does not verify, and model queries
+ *  withhold those by default (#1113). This suite is about `author`, not
+ *  signatures, so every query opts in. The default is tested in
+ *  model-unverified-links.test.ts. */
+const UNVERIFIED = { includeUnverified: true } as const;
+
 describe("Ad4mModel — where author: nested per link, side by side both", function () {
   this.timeout(120_000);
 
@@ -75,9 +81,9 @@ describe("Ad4mModel — where author: nested per link, side by side both", funct
 
   /** Ids matching `where`, asserting findAll, count and the paged form agree. */
   async function idsFor(where: any): Promise<string[]> {
-    const rows = await TestRoleGrant.findAll(perspective, { where });
-    const count = await TestRoleGrant.count(perspective, { where });
-    const paged = await TestRoleGrant.findAllAndCount(perspective, { where, limit: 10 });
+    const rows = await TestRoleGrant.findAll(perspective, { where, ...UNVERIFIED });
+    const count = await TestRoleGrant.count(perspective, { where, ...UNVERIFIED });
+    const paged = await TestRoleGrant.findAllAndCount(perspective, { where, limit: 10, ...UNVERIFIED });
     const ids = rows.map((r) => r.id).sort();
     expect(count, `count for ${JSON.stringify(where)}`).to.equal(ids.length);
     expect(paged.results.map((r) => r.id).sort(), `paged rows for ${JSON.stringify(where)}`).to.deep.equal(ids);
@@ -88,7 +94,7 @@ describe("Ad4mModel — where author: nested per link, side by side both", funct
   async function refusal(where: any): Promise<string> {
     let error: unknown = null;
     try {
-      await TestRoleGrant.findAll(perspective, { where });
+      await TestRoleGrant.findAll(perspective, { where, ...UNVERIFIED });
     } catch (e) {
       error = e;
     }
@@ -124,7 +130,7 @@ describe("Ad4mModel — where author: nested per link, side by side both", funct
     await linkAs(MALLORY, id, "test://role_agent", Literal.from(MALLORY).toUrl());
 
     // Control: the link is there, and the instance JSON is unchanged.
-    const all = await TestRoleGrant.findAll(perspective, { where: { agent: MALLORY } });
+    const all = await TestRoleGrant.findAll(perspective, { where: { agent: MALLORY }, ...UNVERIFIED });
     expect(all).to.have.length(1);
     expect(all[0].author).to.equal(me, "hydrated author is still the earliest link's");
 
