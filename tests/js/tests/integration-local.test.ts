@@ -31,6 +31,7 @@ import flatLanguageTests from "./flat-language.test";
 import languageTests from "./language";
 import sharedLanguageStoreTests from "./shared-language-store";
 import neighbourhoodTests from "./neighbourhood";
+import agentLanguageTests from "./agent-language";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
 import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
 import { startLinkServer, LinkServerHandle } from "../utils/linkServer";
@@ -137,6 +138,7 @@ describe("Local integration tests (no Holochain)", function () {
         })
 
         describe('Shared stores', sharedLanguageStoreTests(testContext))
+        describe('Agent Language', agentLanguageTests(testContext, true))
         describe('Language', languageTests(testContext))
         describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, getServerLinkConfig))
         describe('Auto-processor (two executors) [server-link]', autoProcessorNeighbourhoodTests(testContext, getServerLinkConfig))
