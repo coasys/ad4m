@@ -329,6 +329,8 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
     use crate::perspectives::flow_evaluator::requires_query_input;
+    use crate::perspectives::flow_evaluator::RequiresQueryable;
+    use crate::perspectives::flow_evaluator::RoleGrantLinks;
     use crate::perspectives::shacl_parser::ModelQuery;
     use serde_json::json;
     /// A tombstone counts only from an author the grant's own rule accepts:
@@ -363,7 +365,7 @@ mod tests {
             let revokers: Vec<(&str, &str)> =
                 accepted.iter().chain(rejected.iter()).map(|by| (*by, T2)).collect();
             // The grant is the rule's first accepted granter's.
-            stub.histories.insert(ALICE().into(), history_by(accepted[0], ALICE(), Some(T1), &revokers));
+            stub.histories.insert("r0".into(), history_by(accepted[0], ALICE(), Some(T1), &revokers));
             let role = role(role_json);
             let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
                 .await
@@ -481,12 +483,13 @@ mod tests {
             rows_per_match: 2,
             ..members(&[ALICE(), BOB()])
         };
-        stub.histories.insert(
-            ALICE().into(),
-            history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]),
-        );
-        // Bob holds the stub's default: admin's grant link at T0, and nothing
-        // revoked it.
+        // Bob's instances are the same two. Admin granted him on both at T0,
+        // and nothing revoked it; every other link on them is about Alice.
+        for id in ["r0", "r1"] {
+            let mut held = history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]);
+            held.grant_links.push(grant_link(BOB(), T0));
+            stub.histories.insert(id.into(), held);
+        }
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let evidence = resolve_role_grants(
             &stub,
@@ -521,6 +524,243 @@ mod tests {
             .all(|w| w.granted_at == T0 && w.revocations.is_empty()));
         assert!(bob.eligible_at(NOW, None));
         assert!(!alice.eligible_at(NOW, None));
+    }
+
+    /// Two instances of one role, each with its own history: Alice's grant
+    /// on `r0` was revoked at T2, and she was granted again on `r1` at T3.
+    /// Each window is dated and closed by its own instance's links, and the
+    /// live one keeps her eligible.
+    ///
+    /// The stub could not express this before #1129's review. It handed every
+    /// matched instance the same `__links`, so both windows came out revoked.
+    #[tokio::test]
+    async fn each_instance_is_resolved_from_its_own_history() {
+        let mut stub = RoleStub {
+            rows_per_match: 2,
+            ..members(&[ALICE()])
+        };
+        stub.histories
+            .insert("r0".into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
+        stub.histories
+            .insert("r1".into(), history(ALICE(), Some(T3), &[]));
+        let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
+        let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
+            .await
+            .unwrap();
+        let carried: Vec<(&str, usize, usize)> = evidence[0]
+            .instances
+            .iter()
+            .map(|i| {
+                (
+                    i.instance_id.as_str(),
+                    i.grant_links.len(),
+                    i.revocation_links.len(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            carried,
+            vec![("r0", 1, 1), ("r1", 1, 0)],
+            "each instance carries its own links"
+        );
+
+        let grants = views(&evidence, &role);
+        let mut windows: Vec<(&str, Option<&str>)> = grants[0]
+            .windows
+            .iter()
+            .map(|w| (w.granted_at.as_str(), w.revoked_at()))
+            .collect();
+        windows.sort();
+        assert_eq!(windows, vec![(T1, Some(T2)), (T3, None)]);
+        assert!(
+            grants[0].eligible_at(NOW, None),
+            "the live grant on r1 keeps her a member"
+        );
+    }
+
+    /// The stub is total over `links` keys: a key it has no links for
+    /// answers `[]`, as the real store does for a predicate nobody wrote.
+    /// Before #1129's review, any key that was not the tombstone predicate got
+    /// grant links, so a misspelled key in `query_keys` passed every test.
+    /// `GateStore` in `flow_instance::grant` is pinned the same way
+    /// (`the_gate_store_answers_an_unknown_links_key_with_nothing`).
+    #[tokio::test]
+    async fn the_stub_answers_an_unknown_links_key_with_nothing() {
+        let mut stub = members(&[ALICE()]);
+        stub.histories
+            .insert("r0".into(), history(ALICE(), Some(T1), &[(ADMIN(), T2)]));
+        let tomb = crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE;
+        let query =
+            json!({ "where": { "agent": ALICE() }, "links": [STUB_GRANT_KEY, tomb, "agnet"] });
+        let raw = stub
+            .model_query("ns://Reviewer", &query.to_string())
+            .await
+            .unwrap();
+        let links = &serde_json::from_str::<Value>(&raw).unwrap()["instances"][0]["__links"];
+        assert_eq!(links[STUB_GRANT_KEY].as_array().map(Vec::len), Some(1));
+        assert_eq!(links[tomb].as_array().map(Vec::len), Some(1));
+        assert_eq!(links["agnet"], json!([]), "a key nobody wrote has no links");
+    }
+
+    /// What `resolve_role_grants` carries for Alice's one `agent` role
+    /// instance when the store's `__links` rows are `history`.
+    async fn carried_for_alice(history: RoleGrantLinks) -> RoleInstanceHistory {
+        carried_for_alice_under(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
+            history,
+        )
+        .await
+    }
+
+    /// [`carried_for_alice`] under the role rule `role_json`.
+    async fn carried_for_alice_under(
+        role_json: Value,
+        history: RoleGrantLinks,
+    ) -> RoleInstanceHistory {
+        let mut stub = members(&[ALICE()]);
+        stub.histories.insert("r0".into(), history);
+        let role = role(role_json);
+        let mut evidence =
+            resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
+                .await
+                .expect("resolve_role_grants");
+        evidence.remove(0).instances.remove(0)
+    }
+
+    /// The collection-side filters run on the `__links` rows (#1103), and
+    /// what they drop never reaches the read-set.
+    ///
+    /// These assert on the **carried** evidence, not on a verdict: `resolve`
+    /// re-applies the target, signature and granter filters itself, so a
+    /// verdict test passes whether or not collection filtered. Before #1103 the same
+    /// filters sat in the raw `get_links` impl, which no test reached.
+    #[tokio::test]
+    async fn collection_carries_only_links_that_speak_for_the_candidate() {
+        let genuine = grant_link(ALICE(), T1);
+        let mut undatable = grant_link(ALICE(), T0);
+        undatable.timestamp = "not a time".into();
+        let about_bob = grant_link(BOB(), T0);
+        let forged = role_link("agent", ALICE(), ADMIN(), false, T0);
+        let forged_tombstone = role_link(
+            crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE,
+            ALICE(),
+            ADMIN(),
+            false,
+            T2,
+        );
+        let signed_tombstone = tombstone(ALICE(), ADMIN(), T3);
+        let tombstone_for_bob = tombstone(BOB(), ADMIN(), T2);
+
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links: vec![undatable, about_bob, forged, genuine.clone()],
+            revocation_links: vec![
+                forged_tombstone,
+                tombstone_for_bob,
+                signed_tombstone.clone(),
+            ],
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            carried.grant_links,
+            vec![genuine],
+            "a grant link with no parseable timestamp can date nothing, one naming Bob says \
+             nothing about Alice, and a forged one was written by nobody: none travels"
+        );
+        assert_eq!(
+            carried.revocation_links,
+            vec![signed_tombstone],
+            "a tombstone whose signature fails, or that names Bob, does not travel"
+        );
+    }
+
+    /// At most [`MAX_GRANT_LINKS`] grant links travel, the earliest, and only
+    /// after every filter has run: forged early links are dropped before the
+    /// cap, so however many there are they cannot evict the genuine
+    /// assignment. Capped first, they would have, and the grant would go
+    /// undated.
+    #[tokio::test]
+    async fn the_grant_link_cap_keeps_the_earliest_and_runs_after_the_filters() {
+        use crate::perspectives::flow_evaluator::MAX_GRANT_LINKS;
+
+        let early = |i: usize| format!("2025-12-31T00:00:{i:02}.000Z");
+        let genuine = grant_link(ALICE(), T1);
+        let mut grant_links: Vec<LinkExpression> = (0..=MAX_GRANT_LINKS)
+            .map(|i| role_link("agent", ALICE(), ADMIN(), false, &early(i)))
+            .collect();
+        grant_links.push(genuine.clone());
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links,
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            carried.grant_links,
+            vec![genuine],
+            "{} forged earlier links neither travel nor evict the signed assignment",
+            MAX_GRANT_LINKS + 1
+        );
+
+        let signed: Vec<LinkExpression> = (0..=MAX_GRANT_LINKS)
+            .map(|i| grant_link(ALICE(), &early(i)))
+            .collect();
+        let carried = carried_for_alice(RoleGrantLinks {
+            grant_links: signed.clone(),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            carried.grant_links,
+            signed[..MAX_GRANT_LINKS].to_vec(),
+            "all verified: the earliest {MAX_GRANT_LINKS}, earliest first"
+        );
+    }
+
+    /// Under an admin-only rule a grant link from anyone else is dropped at
+    /// collection, before the cap, like a forged one: more than
+    /// [`MAX_GRANT_LINKS`] earlier links from Mallory neither travel nor
+    /// evict admin's. The self-granted half is collected the same way: only
+    /// the grantee's own verified links travel.
+    #[tokio::test]
+    async fn collection_drops_links_from_anyone_the_rule_does_not_accept_before_the_cap() {
+        use crate::perspectives::flow_evaluator::MAX_GRANT_LINKS;
+
+        let early = |i: usize| format!("2025-12-31T00:00:{i:02}.000Z");
+        let genuine = grant_link(ALICE(), T1);
+        let mut grant_links: Vec<LinkExpression> = (0..=MAX_GRANT_LINKS)
+            .map(|i| grant_link_by(MALLORY(), ALICE(), &early(i)))
+            .collect();
+        grant_links.push(genuine.clone());
+        let carried = carried_for_alice_under(
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } }),
+            RoleGrantLinks { grant_links, ..Default::default() },
+        )
+        .await;
+        assert_eq!(carried.grant_links, vec![genuine]);
+        assert!(
+            carried.grantees_own_links.is_empty(),
+            "the rule is not self-granted"
+        );
+
+        let by_alice = role_link("rank", "lead", ALICE(), true, T2);
+        let carried = carried_for_alice_under(
+            json!({ "className": "ns://Reviewer", "where": { "author": "$did", "rank": "lead" } }),
+            RoleGrantLinks {
+                grantees_own_links: vec![
+                    role_link("rank", "lead", ADMIN(), true, T0),
+                    role_link("rank", "lead", ALICE(), false, T1),
+                    by_alice.clone(),
+                ],
+                ..Default::default()
+            },
+        )
+        .await;
+        assert_eq!(
+            carried.grantees_own_links,
+            vec![by_alice],
+            "admin's link is not Alice's, and the forgery in her name was written by nobody"
+        );
+        assert!(carried.grant_links.is_empty(), "the rule has no DID field");
     }
 
     /// A tombstone whose signature does not check out is not a revocation —
@@ -687,19 +927,28 @@ mod tests {
     /// back to anything earlier.
     #[test]
     fn only_a_verified_link_from_an_accepted_granter_dates_a_grant() {
-        let admin_only =
-            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } });
+        let admin_only = json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } });
         let genuine = grant_link_by(ADMIN(), ALICE(), T2);
         let by_mallory = grant_link_by(MALLORY(), ALICE(), T0);
         let forged = role_link("agent", ALICE(), ADMIN(), false, T0);
 
         assert_eq!(
-            alice_granted_at(admin_only.clone(), vec![by_mallory, genuine.clone()], Vec::new()).as_deref(),
+            alice_granted_at(
+                admin_only.clone(),
+                vec![by_mallory, genuine.clone()],
+                Vec::new()
+            )
+            .as_deref(),
             Some(T2),
             "Mallory may not grant, so her earlier link does not move the edge"
         );
         assert_eq!(
-            alice_granted_at(admin_only.clone(), vec![forged.clone(), genuine], Vec::new()).as_deref(),
+            alice_granted_at(
+                admin_only.clone(),
+                vec![forged.clone(), genuine],
+                Vec::new()
+            )
+            .as_deref(),
             Some(T2),
             "a forged earlier link does not move the edge either"
         );
@@ -717,8 +966,12 @@ mod tests {
         );
         let on_another_instance = role_link_on("r1", "agent", ALICE(), ADMIN(), true, T0);
         assert_eq!(
-            alice_granted_at(anyone, vec![on_another_instance, grant_link(ALICE(), T2)], Vec::new())
-                .as_deref(),
+            alice_granted_at(
+                anyone,
+                vec![on_another_instance, grant_link(ALICE(), T2)],
+                Vec::new()
+            )
+            .as_deref(),
             Some(T2),
             "a genuine grant on another instance does not date this one"
         );
@@ -743,17 +996,27 @@ mod tests {
             .as_deref(),
             Some(T2)
         );
-        assert_eq!(alice_granted_at(self_granted, Vec::new(), vec![by_admin.clone()]), None);
+        assert_eq!(
+            alice_granted_at(self_granted, Vec::new(), vec![by_admin.clone()]),
+            None
+        );
 
         // `didProperty: "author"` is the same rule: the instance's author is
         // the candidate.
         let author_property = json!({ "className": "ns://Reviewer", "didProperty": "author" });
         assert_eq!(
-            alice_granted_at(author_property.clone(), Vec::new(), vec![by_admin.clone(), by_alice.clone()])
-                .as_deref(),
+            alice_granted_at(
+                author_property.clone(),
+                Vec::new(),
+                vec![by_admin.clone(), by_alice.clone()]
+            )
+            .as_deref(),
             Some(T2)
         );
-        assert_eq!(alice_granted_at(author_property, Vec::new(), vec![by_admin]), None);
+        assert_eq!(
+            alice_granted_at(author_property, Vec::new(), vec![by_admin]),
+            None
+        );
 
         // With a DID field as well, both must hold and the later one wins:
         // Alice's own earliest link is at T1, her `agent` link at T3.
@@ -761,8 +1024,12 @@ mod tests {
         let early_own = role_link("rank", "lead", ALICE(), true, T1);
         let assignment = grant_link_by(ALICE(), ALICE(), T3);
         assert_eq!(
-            alice_granted_at(both.clone(), vec![assignment.clone()], vec![early_own.clone(), assignment])
-                .as_deref(),
+            alice_granted_at(
+                both.clone(),
+                vec![assignment.clone()],
+                vec![early_own.clone(), assignment]
+            )
+            .as_deref(),
             Some(T3)
         );
         assert_eq!(

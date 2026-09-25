@@ -154,10 +154,13 @@ pub mod window;
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
-use crate::perspectives::flow_evaluator::{requires_query_input, run_query, RequiresQueryable};
+use crate::perspectives::flow_evaluator::{
+    requires_query_input, run_query, RequiresQueryable, RoleGrantLinks,
+};
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
 use dating::GrantDating;
 pub use evidence::{RoleGrantEvidence, RoleInstanceHistory};
+use serde_json::Value;
 pub use window::{RoleGrant, RoleGrantWindow};
 
 /// Ask a `fromRole` gate about each candidate and collect the links behind
@@ -180,13 +183,16 @@ pub use window::{RoleGrant, RoleGrantWindow};
 /// can date grants nothing in [`RoleGrantEvidence::resolve`], on both sides
 /// of the wire.
 ///
-/// Per matched instance there is one [`RequiresQueryable::role_grant_links`]
-/// call for the dating links and the signed tombstones: one `get_links` per
-/// DID field, one for the instance under `author: "$did"`, and one for the
-/// tombstones. The dating links are filtered by [`GrantDating`] there and
-/// again by the reader; the tombstones travel without the authority filter
-/// and the reader applies [`granter_authorised`](evidence::granter_authorised) itself, so a minter cannot
-/// silently mis-apply the rule. Nothing here is queried again by the fold.
+/// The dating links and the signed tombstones come back with the matches:
+/// the role query asks `model_query` for [`RoleGrantLinks::query_keys`] and
+/// [`RoleGrantLinks::from_instance`] reads each match's history off the
+/// result, so the fan-out is one `model_query` per candidate, plus one
+/// [`RequiresQueryable::class_predicates`] per role under `author: "$did"`.
+/// The dating links are filtered by [`GrantDating`] there and again by the
+/// reader; the tombstones travel without the authority filter and the reader
+/// applies [`granter_authorised`](evidence::granter_authorised) itself, so a
+/// minter cannot silently mis-apply the rule. Nothing here is queried again
+/// by the fold.
 pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     to_state: &str,
@@ -219,17 +225,28 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         None => None,
     };
 
+    // Under `author: "$did"` any link the grantee wrote on the instance can
+    // date the grant, so the role query asks for every predicate the class
+    // declares. Asked once per role; unused otherwise.
+    let mut own_link_keys: Option<Vec<String>> = None;
+
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
-        let input = requires_query_input(role, record, did)?;
-        let matched = run_query(perspective, &role.class_name, &input).await?;
+        // `links` is added to this read only. The translated query `resolve`
+        // reads the authority rule from is rebuilt by the reader without it.
+        let mut input = requires_query_input(role, record, did)?;
         let dating = GrantDating::new(role, &input, did)?;
+        if dating.by_grantee && own_link_keys.is_none() {
+            own_link_keys = Some(perspective.class_predicates(&role.class_name).await?);
+        }
+        let own_keys = own_link_keys.as_deref().unwrap_or_default();
+        input["links"] = Value::from(RoleGrantLinks::query_keys(&dating, own_keys));
+        let matched = run_query(perspective, &role.class_name, &input).await?;
 
         let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
-            let links = perspective
-                .role_grant_links(&role.class_name, &item.id, &dating)
-                .await?;
+            let content: Value = serde_json::from_str(&item.content)?;
+            let links = RoleGrantLinks::from_instance(&content, &dating, own_keys)?;
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
@@ -296,7 +313,8 @@ mod tests {
              json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
              vec![ALICE()], vec![ALICE(), BOB()], vec![ALICE()], Some(2)),
             ("shape 2: $did token substitutes per candidate",
-             json!({ "className": "ns://Member", "where": { "member": "$did" } }),
+             // `agent`, the stub's grant key: a `$did` field is dated by its own links.
+             json!({ "className": "ns://Member", "where": { "agent": "$did" } }),
              vec![BOB()], vec![ALICE(), BOB()], vec![BOB()], None),
             ("one role instance does not satisfy count.min = 2",
              json!({ "className": "ns://Reviewer", "didProperty": "agent", "count": { "min": 2 } }),

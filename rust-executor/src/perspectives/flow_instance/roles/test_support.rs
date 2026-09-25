@@ -1,7 +1,6 @@
 //! Fixtures shared by the roles tests: signed personas, links, histories
 //! and the query-aware store stub.
 
-use super::dating::GrantDating;
 use super::{RoleGrant, RoleGrantEvidence, RoleRevocation};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -11,7 +10,7 @@ use crate::perspectives::flow_evaluator::{
 use crate::perspectives::shacl_parser::{ModelQuery, ModelQueryCount};
 use crate::types::LinkExpression;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -149,8 +148,12 @@ pub(super) fn grant_link_by(granter: &str, did: &str, at: &str) -> LinkExpressio
 }
 
 /// The same link on another instance, signed again by the same key, or by
-/// the forger's when it did not verify.
+/// the forger's when it did not verify. A link already there is returned
+/// as it is, so a hand-damaged fixture stays damaged.
 fn on_instance(link: &LinkExpression, source: &str) -> LinkExpression {
+    if link.data.source == source {
+        return link.clone();
+    }
     role_link_on(
         source,
         link.data.predicate.as_deref().unwrap_or_default(),
@@ -232,17 +235,28 @@ pub(super) fn eligible_now<'g>(
 }
 
 /// Query-aware stub: a call whose JSON mentions one of `member_dids`
-/// returns `rows_per_match` instances (`r0`, `r1`, …);
-/// `unconditional_instances` (for DID-independent queries) wins over
-/// matching when set; `error` fails every call.
+/// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
+/// `undated_instances`); `unconditional_instances` (for DID-independent queries)
+/// wins over matching when set; `error` fails every call.
 ///
-/// `histories` is what the store holds on each DID's instances, the same on
-/// every instance. A member with no entry holds admin's grant link at [`T0`],
-/// unless `undated_instances`, where nothing dates any grant. It hands back
-/// the links on the rule's DID fields, and under `author: "$did"` every link
-/// the grantee wrote, without the signature and granter filters the store
-/// applies: [`RoleGrantEvidence::resolve`] applies them again, and the tests
-/// through this stub pin that it does.
+/// `histories` holds each **instance's** links, keyed by instance id, the
+/// way the real store holds them. A history can hold links about several
+/// DIDs. Picking out the candidate's links is `RoleGrantLinks::from_instance`'s
+/// job, not the stub's. An instance with no entry holds admin's grant link
+/// for the DID the query names, at [`T0`], unless `undated_instances`, where
+/// it holds nothing and so nothing dates a grant. Every link is handed back
+/// re-homed onto the instance asked about (re-signed by the same key, or by
+/// the forger's when it did not verify), so one history can serve several
+/// instances.
+///
+/// It answers `links` the way `model_query` does: under `__links`, one
+/// array per requested key. [`STUB_GRANT_KEY`] gets `grant_links`,
+/// [`STUB_OWN_KEY`] gets `grantees_own_links`, the tombstone predicate gets
+/// `revocation_links`, and any other key gets `[]`. A key nobody wrote has
+/// no links in the real store, so a misspelled or unexpected key reads as
+/// "none" here too. Its class declares the two predicates
+/// ([`RequiresQueryable::class_predicates`]), which is what an
+/// `author: "$did"` rule reads the grantee's own links from.
 #[derive(Default)]
 pub(super) struct RoleStub {
     pub(super) member_dids: Vec<String>,
@@ -253,6 +267,16 @@ pub(super) struct RoleStub {
     pub(super) calls: Mutex<Vec<String>>,
     pub(super) histories: HashMap<String, RoleGrantLinks>,
 }
+
+/// The `didProperty` every stubbed role query uses, and so the one `links`
+/// key the stub answers with grant links. [`grant_link`] writes it as the
+/// predicate.
+pub(super) const STUB_GRANT_KEY: &str = "agent";
+
+/// The other predicate the stubbed class declares: where `grantees_own_links`
+/// live. An `author: "$did"` rule reads it, with [`STUB_GRANT_KEY`], as the
+/// class's predicates.
+pub(super) const STUB_OWN_KEY: &str = "rank";
 
 #[async_trait]
 impl RequiresQueryable for RoleStub {
@@ -272,50 +296,59 @@ impl RequiresQueryable for RoleStub {
                 0
             }
         });
+        let query: Value = serde_json::from_str(query_json)?;
+        let keys: Option<Vec<&str>> = query["links"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(Value::as_str).collect());
+        let named = self
+            .member_dids
+            .iter()
+            .find(|d| query_json.contains(d.as_str()));
+        let links_of = |id: &str, keys: &[&str]| -> Map<String, Value> {
+            let history = match (self.histories.get(id), named) {
+                (Some(history), _) => history.clone(),
+                (None, Some(did)) if !self.undated_instances => history(did, Some(T0), &[]),
+                (None, _) => RoleGrantLinks::default(),
+            };
+            let here = |links: &[LinkExpression]| -> Value {
+                json!(links.iter().map(|l| on_instance(l, id)).collect::<Vec<_>>())
+            };
+            keys.iter()
+                .map(|&key| {
+                    let rows = if key
+                        == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
+                    {
+                        here(&history.revocation_links)
+                    } else if key == STUB_GRANT_KEY {
+                        here(&history.grant_links)
+                    } else if key == STUB_OWN_KEY {
+                        here(&history.grantees_own_links)
+                    } else {
+                        json!([])
+                    };
+                    (key.to_string(), rows)
+                })
+                .collect()
+        };
         let instances: Vec<Value> = (0..n)
             .map(|i| {
-                if self.undated_instances {
-                    json!({ "id": format!("r{i}") })
+                let id = format!("r{i}");
+                let mut inst = if self.undated_instances {
+                    json!({ "id": id })
                 } else {
-                    json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
+                    json!({ "id": id, "timestamp": T0, "author": ADMIN() })
+                };
+                if let Some(keys) = &keys {
+                    inst["__links"] = Value::Object(links_of(&id, keys));
                 }
+                inst
             })
             .collect();
         Ok(json!({ "instances": instances, "totalCount": n }).to_string())
     }
 
-    async fn role_grant_links(
-        &self,
-        _role_class: &str,
-        instance_id: &str,
-        dating: &GrantDating,
-    ) -> anyhow::Result<RoleGrantLinks> {
-        let did = dating.did.as_str();
-        let held = match self.histories.get(did) {
-            Some(held) => held.clone(),
-            None if self.undated_instances => RoleGrantLinks::default(),
-            None => history(did, Some(T0), &[]),
-        };
-        let on_here = |links: &[LinkExpression]| -> Vec<LinkExpression> {
-            links.iter().map(|l| on_instance(l, instance_id)).collect()
-        };
-        let every_link: Vec<LinkExpression> = on_here(&held.grant_links)
-            .into_iter()
-            .chain(on_here(&held.grantees_own_links))
-            .chain(on_here(&held.revocation_links))
-            .collect();
-        Ok(RoleGrantLinks {
-            grant_links: if dating.fields.is_empty() {
-                Vec::new()
-            } else {
-                on_here(&held.grant_links)
-            },
-            grantees_own_links: every_link
-                .into_iter()
-                .filter(|l| dating.by_grantee && l.author == did)
-                .collect(),
-            revocation_links: on_here(&held.revocation_links),
-        })
+    async fn class_predicates(&self, _class_name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(vec![STUB_GRANT_KEY.to_string(), STUB_OWN_KEY.to_string()])
     }
 }
 

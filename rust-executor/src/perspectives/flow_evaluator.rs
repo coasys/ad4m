@@ -48,7 +48,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::{
     ModelQuery, ModelQueryCount, PropertyCondition, SHACLFlow,
 };
-use crate::types::{DecoratedLinkExpression, LinkExpression, LinkQuery};
+use crate::types::LinkExpression;
 use anyhow::{anyhow, bail, Result};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -723,32 +723,151 @@ pub(crate) fn did_literal_url(did: &str) -> anyhow::Result<String> {
         .map_err(|e| anyhow::anyhow!("literal encode DID `{did}`: {e}"))
 }
 
+impl RoleGrantLinks {
+    /// The `links` entries a role query asks `model_query` for, so that
+    /// [`Self::from_instance`] can read each match's history off the result:
+    /// every DID field of the rule by **name**, the class's predicates when
+    /// the grantee's own links date the grant (`own_link_keys`, empty
+    /// otherwise), and the tombstone predicate.
+    ///
+    /// A field name is passed as the role query spells it. `model_query`
+    /// resolves it through the class shape (`model_query::links`), the same
+    /// translation its `where` applies to the membership condition, so the
+    /// grant links and the match cannot disagree about which predicate
+    /// carries the DID. Before #1065 they did: the name went verbatim into a
+    /// raw `get_links` as a predicate and matched nothing. A name the class
+    /// does not declare is a `model_query` error, never an empty list.
+    pub(crate) fn query_keys(dating: &GrantDating, own_link_keys: &[String]) -> Vec<String> {
+        let mut keys: Vec<String> = dating.fields.clone();
+        if dating.by_grantee {
+            keys.extend(own_link_keys.iter().cloned());
+        }
+        keys.push(ROLE_GRANT_REVOKED_PREDICATE.to_string());
+        keys
+    }
+
+    /// Collect one matched role instance's history for one DID from the
+    /// `__links` rows `model_query` attached to it (#1046 §3 + §4, #1103).
+    ///
+    /// `instance` — one entry of the role query's `instances`, run with
+    ///   `links: `[`Self::query_keys`]`(dating, own_link_keys)`.
+    /// `dating` — which links can date this candidate's grant
+    ///   ([`roles::dating`](crate::perspectives::flow_instance::roles::dating)).
+    /// `own_link_keys` — the keys the grantee's own links are read from under
+    ///   `author: "$did"`, as passed to [`Self::query_keys`].
+    ///
+    /// A requested key missing from the instance, or a row that is not a
+    /// [`LinkExpression`], is an `Err`. Reading either as "no links" fails
+    /// open for tombstones: no tombstone means "not revoked".
+    ///
+    /// The dating links are filtered by the same [`GrantDating`] the reader
+    /// applies, and every filter runs before the [`MAX_GRANT_LINKS`] cap:
+    /// capped first, early links that do not count could evict a later one
+    /// that does. Tombstones are filtered on
+    /// [`revocation_link_counts_for_did`]. Every verdict is computed here from
+    /// the signature, not read from the query.
+    pub(crate) fn from_instance(
+        instance: &Value,
+        dating: &GrantDating,
+        own_link_keys: &[String],
+    ) -> anyhow::Result<Self> {
+        use crate::perspectives::model_query::links_rows;
+
+        let did = dating.did.as_str();
+        let instance_id = instance["id"].as_str().unwrap_or("<no id>");
+        // A row carries its link's `status`: this executor's read-model flag,
+        // not signed link material. Carried evidence is plain signed links,
+        // and every consumer re-derives its verdict from the signature.
+        let rows = |key: &str| -> anyhow::Result<Vec<LinkExpression>> {
+            let rows: Vec<LinkExpression> = links_rows(instance, key).map_err(|e| {
+                anyhow!(
+                    "role grant links: role instance `{instance_id}`: {e}, so its grant \
+                     history for `{did}` cannot be read; refusing to gate (fail-closed)"
+                )
+            })?;
+            Ok(rows
+                .into_iter()
+                .map(|mut l| {
+                    l.status = None;
+                    l
+                })
+                .collect())
+        };
+
+        let mut grant_links = Vec::new();
+        for field in &dating.fields {
+            grant_links.extend(
+                rows(field)?
+                    .into_iter()
+                    .filter(|l| dating.is_grant_link(l, instance_id)),
+            );
+        }
+        earliest_first(&mut grant_links, MAX_GRANT_LINKS);
+
+        let mut grantees_own_links = Vec::new();
+        if dating.by_grantee {
+            for key in own_link_keys {
+                grantees_own_links.extend(
+                    rows(key)?
+                        .into_iter()
+                        .filter(|l| dating.is_grantees_own_link(l, instance_id)),
+                );
+            }
+            earliest_first(&mut grantees_own_links, MAX_GRANT_LINKS);
+        }
+
+        // The instance matched the rule, yet nothing dates the grant: it
+        // counts for nobody. Say so, because a rule whose grants never date
+        // looks like a rule nobody holds.
+        let undated = !dating.is_datable()
+            || (!dating.fields.is_empty() && grant_links.is_empty())
+            || (dating.by_grantee && grantees_own_links.is_empty());
+        if undated {
+            log::warn!(
+                "role grant links: role instance `{instance_id}` matched for `{did}`, but no \
+                 link dates the grant (DID fields {:?}, author $did: {}), so it grants nothing. \
+                 A grant is dated by a verified link from an accepted granter on a DID field, \
+                 or under `author: \"$did\"` by the grantee's own verified link.",
+                dating.fields,
+                dating.by_grantee,
+            );
+        }
+
+        let did_literal =
+            did_literal_url(did).map_err(|e| anyhow!("role grant links: {instance_id}: {e}"))?;
+        let revocation_links: Vec<LinkExpression> = rows(ROLE_GRANT_REVOKED_PREDICATE)?
+            .into_iter()
+            .filter(|l| revocation_link_counts_for_did(l, did, &did_literal))
+            .collect();
+
+        Ok(RoleGrantLinks {
+            grant_links,
+            grantees_own_links,
+            revocation_links,
+        })
+    }
+}
+
 /// The one perspective call the evaluator needs, behind a trait so the
 /// composition below can be unit-tested against a stub.
+///
+/// Role grant histories come through `model_query` too: the role query asks
+/// for [`RoleGrantLinks::query_keys`] and [`RoleGrantLinks::from_instance`]
+/// reads them off each match (#1103). There is no second link read to stub.
 #[async_trait]
 pub trait RequiresQueryable: Send + Sync {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String>;
 
-    /// The store's links for one matched role instance and one DID — see
-    /// [`RoleGrantLinks`].
+    /// Every predicate `class_name`'s shape declares: the links `model_query`
+    /// reads as an instance of it. A role query under `author: "$did"` asks
+    /// for all of them, because any link the grantee wrote on the instance
+    /// can date the grant ([`roles::dating`](crate::perspectives::flow_instance::roles::dating)).
     ///
-    /// `role_class` — the role query's class, needed because a DID field is
-    ///   a **property name** and only that class's shape says which RDF
-    ///   predicate carries it (see [`field_predicate`]).
-    /// `instance_id` — the instance URI `model_query` returned.
-    /// `dating` — which links can date this candidate's grant, and the
-    ///   candidate itself.
-    ///
-    /// The default knows nothing (no dating links, no tombstones), and
-    /// nothing dates a grant then: a stub that stays on this default grants
-    /// nobody.
-    async fn role_grant_links(
-        &self,
-        _role_class: &str,
-        _instance_id: &str,
-        _dating: &GrantDating,
-    ) -> anyhow::Result<RoleGrantLinks> {
-        Ok(RoleGrantLinks::default())
+    /// The default knows none, which is the fail-closed answer: nothing
+    /// dates a self-granted role, so a stub that stays on this default grants
+    /// it to nobody.
+    async fn class_predicates(&self, _class_name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
     }
 
     /// Every receipt filed under `flow_uri`'s index, read whole so the caller
@@ -795,148 +914,23 @@ pub(crate) fn target_names_did(target: &str, did: &str, did_literal: &str) -> bo
     target == did || crate::utils::normalize_legacy_literal(target).as_ref() == did_literal
 }
 
-impl PerspectiveInstance {
-    /// Resolve a DID field of a role query — a **property name** — to the RDF
-    /// predicate the grant links in the graph carry.
-    ///
-    /// `model_query` resolves names through the SDNA (`compile_leaf_condition`
-    /// matches `p.name` and emits `p.predicate`), but `get_links` forwards its
-    /// `predicate` string verbatim, so querying `predicate: "owner"` against a
-    /// graph holding `ns://owner` matches nothing (#1065).
-    ///
-    /// Both spellings resolve: the property name (`owner`, the SDNA form) and
-    /// the predicate itself (`ns://owner`), because a hand-written SDNA may
-    /// name either and a role rule must not gate differently depending on
-    /// which one its author picked.
-    ///
-    /// Unresolvable is an **`Err`**, not an empty predicate: a role rule
-    /// naming a property this class does not declare cannot be evaluated, and
-    /// per [`resolve_role_grants`](super::flow_instance::roles::resolve_role_grants)
-    /// a translation failure fails closed.
-    fn field_predicate(&self, role_class: &str, field: &str) -> anyhow::Result<String> {
-        let shape = self.get_shape(role_class).map_err(|e| {
-            anyhow::anyhow!(
-                "role_grant_links: cannot load shape for role class `{role_class}` to resolve \
-                 DID field `{field}`: {e}"
-            )
-        })?;
-        let by_name = shape
-            .properties
-            .iter()
-            .find(|p| p.name == field && !p.predicate.is_empty())
-            .map(|p| p.predicate.clone())
-            .or_else(|| {
-                shape
-                    .include_relations
-                    .iter()
-                    .find(|r| r.name == field && !r.predicate.is_empty())
-                    .map(|r| r.predicate.clone())
-            });
-        if let Some(predicate) = by_name {
-            return Ok(predicate);
-        }
-        let declares_predicate = shape.predicates().iter().any(|p| p == field);
-        if declares_predicate {
-            return Ok(field.to_string());
-        }
-        anyhow::bail!(
-            "role_grant_links: role class `{role_class}` declares no property or relation named \
-             `{field}` (and no predicate spelled that way), so the grant links for this \
-             role cannot be found; refusing to gate (fail-closed)"
-        )
-    }
-}
-
 #[async_trait]
 impl RequiresQueryable for PerspectiveInstance {
     async fn model_query(&self, class_name: &str, query_json: &str) -> Result<String> {
         PerspectiveInstance::model_query(self, class_name, query_json).await
     }
 
-    async fn role_grant_links(
-        &self,
-        role_class: &str,
-        instance_id: &str,
-        dating: &GrantDating,
-    ) -> anyhow::Result<RoleGrantLinks> {
-        let did = dating.did.as_str();
-        let did_literal = did_literal_url(did)
-            .map_err(|e| anyhow::anyhow!("role_grant_links: {instance_id}: {e}"))?;
-        // Decorated → plain at the boundary: `proof.valid` and `status` are
-        // this executor's read-model flags, not link material — carrying them
-        // would carry claims, and every consumer computes the verdict from
-        // the signature itself (see `RoleGrantLinks`).
-        let as_carried = |l: DecoratedLinkExpression| {
-            let mut l = LinkExpression::from(l);
-            l.status = None;
-            l
-        };
-        let links_on = |predicate: Option<String>| {
-            let query = LinkQuery {
-                source: Some(instance_id.to_string()),
-                predicate,
-                ..Default::default()
-            };
-            async move { self.get_links(&query).await }
-        };
-
-        // Every filter runs before the cap: capping first would let early
-        // links that do not count evict a later one that does.
-        let mut grant_links = Vec::new();
-        for field in &dating.fields {
-            let predicate = self.field_predicate(role_class, field)?;
-            grant_links.extend(
-                links_on(Some(predicate))
-                    .await?
-                    .into_iter()
-                    .map(as_carried)
-                    .filter(|l| dating.is_grant_link(l, instance_id)),
-            );
-        }
-        earliest_first(&mut grant_links, MAX_GRANT_LINKS);
-
-        let mut grantees_own_links = Vec::new();
-        if dating.by_grantee {
-            grantees_own_links = links_on(None)
-                .await?
-                .into_iter()
-                .map(as_carried)
-                .filter(|l| dating.is_grantees_own_link(l, instance_id))
-                .collect();
-            earliest_first(&mut grantees_own_links, MAX_GRANT_LINKS);
-        }
-
-        // The instance matched the rule, yet nothing dates the grant: it
-        // counts for nobody. Say so, because a rule whose grants never
-        // date looks like a rule nobody holds.
-        let undated = !dating.is_datable()
-            || (!dating.fields.is_empty() && grant_links.is_empty())
-            || (dating.by_grantee && grantees_own_links.is_empty());
-        if undated {
-            log::warn!(
-                "role_grant_links: role class `{role_class}` instance `{instance_id}` matched for \
-                 `{did}`, but no link dates the grant (DID fields {:?}, author $did: {}), so it \
-                 grants nothing. A grant is dated by a verified link from an accepted granter \
-                 on a DID field, or under `author: \"$did\"` by the grantee's own verified link.",
-                dating.fields,
-                dating.by_grantee,
-            );
-        }
-
-        let revocation_links: Vec<LinkExpression> = links_on(Some(
-            ROLE_GRANT_REVOKED_PREDICATE.to_string(),
-        ))
-        .await?
-        .into_iter()
-        .map(as_carried)
-        .filter(|l| revocation_link_counts_for_did(l, did, &did_literal))
-        .collect();
-
-        Ok(RoleGrantLinks {
-            grant_links,
-            grantees_own_links,
-            revocation_links,
-        })
+    /// The shape's predicates that `model_query`'s `links` can be asked for:
+    /// one that is not an emittable IRI would fail the whole role query.
+    async fn class_predicates(&self, class_name: &str) -> anyhow::Result<Vec<String>> {
+        let shape = self.get_shape(class_name).map_err(|e| {
+            anyhow!("class_predicates: cannot load shape for class `{class_name}`: {e}")
+        })?;
+        Ok(shape
+            .predicates()
+            .into_iter()
+            .filter(|p| crate::perspectives::model_query::utils::emittable_iri(p))
+            .collect())
     }
 
     /// `produced`'s loader, unchanged: scoped to the flow before it is
@@ -1591,6 +1585,81 @@ mod tests {
         assert!(target_names_did(&url, "did:key:zAlice", &url));
     }
 
+    /// How one candidate's grants of `role_json` are dated.
+    fn dating_for(role_json: Value, did: &str) -> GrantDating {
+        let role: ModelQuery = serde_json::from_value(role_json).unwrap();
+        GrantDating::new(&role, &qin(&role, did), did).unwrap()
+    }
+
+    /// The role query asks for every DID field by name, the class's
+    /// predicates under `author: "$did"` only, and always the tombstone
+    /// predicate. Dropping the tombstone key would leave `from_instance`
+    /// nothing to read revocations from.
+    #[test]
+    fn role_grant_query_keys_are_the_did_fields_the_own_links_and_the_tombstone() {
+        let did = "did:key:zAlice";
+        let tomb = ROLE_GRANT_REVOKED_PREDICATE.to_string();
+        let class_predicates = vec!["ns://owner".to_string(), "ns://rank".to_string()];
+        let keys = |role_json: Value| {
+            RoleGrantLinks::query_keys(&dating_for(role_json, did), &class_predicates)
+        };
+        assert_eq!(
+            keys(json!({ "className": "ns://R", "didProperty": "owner" })),
+            vec!["owner".to_string(), tomb.clone()]
+        );
+        assert_eq!(
+            keys(json!({ "className": "ns://R", "where": { "member": "$did", "owner": "$did" } })),
+            vec!["member".to_string(), "owner".to_string(), tomb.clone()]
+        );
+        assert_eq!(
+            keys(json!({ "className": "ns://R", "where": { "author": "$did" } })),
+            vec![
+                "ns://owner".to_string(),
+                "ns://rank".to_string(),
+                tomb.clone()
+            ]
+        );
+        assert_eq!(
+            keys(json!({ "className": "ns://R", "where": { "agent": { "in": ["$did"] } } })),
+            vec![tomb],
+            "nothing can date this rule, so only the tombstones are asked for"
+        );
+    }
+
+    /// `from_instance` reads what `model_query` attached under `__links`. A
+    /// requested key that is not there, or a row that is not a link, is an
+    /// error: read as "no links", a missing tombstone key is "not revoked",
+    /// which fails open.
+    #[test]
+    #[rustfmt::skip]
+    fn role_grant_links_missing_or_malformed_rows_are_errors_not_no_links() {
+        let did = "did:key:zAlice";
+        let tomb = ROLE_GRANT_REVOKED_PREDICATE;
+        let owner = json!({ "className": "ns://R", "didProperty": "owner" });
+        let undatable = json!({ "className": "ns://R", "where": { "agent": { "in": ["$did"] } } });
+        let cases: Vec<(&str, Value, &Value)> = vec![
+            ("no `__links` at all", json!({ "id": "r0" }), &owner),
+            ("the tombstone key is missing", json!({ "id": "r0", "__links": { "owner": [] } }), &owner),
+            ("the didProperty key is missing", json!({ "id": "r0", "__links": { tomb: [] } }), &owner),
+            ("no DID field, and the tombstone key is missing", json!({ "id": "r0", "__links": {} }), &undatable),
+            ("a tombstone row that is not a link", json!({ "id": "r0", "__links": { "owner": [], tomb: [{ "nope": 1 }] } }), &owner),
+            ("a grant row that is not a link", json!({ "id": "r0", "__links": { "owner": [{ "nope": 1 }], tomb: [] } }), &owner),
+        ];
+        for (name, instance, role_json) in cases {
+            let dating = dating_for(role_json.clone(), did);
+            assert!(
+                RoleGrantLinks::from_instance(&instance, &dating, &[]).is_err(),
+                "{name}: must be an Err, not an empty history"
+            );
+        }
+        // Asked and answered with nothing is the one empty history.
+        let answered = json!({ "id": "r0", "__links": { "owner": [], tomb: [] } });
+        assert_eq!(
+            RoleGrantLinks::from_instance(&answered, &dating_for(owner, did), &[]).expect("answered"),
+            RoleGrantLinks::default()
+        );
+    }
+
     fn mq(class: &str) -> ModelQuery {
         ModelQuery {
             class_name: class.to_string(),
@@ -1744,7 +1813,7 @@ mod tests {
     /// to sign it for real, and a forged one is one signed by a key that is
     /// not its stated author's.
     #[test]
-    fn grant_and_revocation_predicates_differ_only_on_the_signature_check() {
+    fn grant_and_revocation_predicates_match_alike_and_both_need_a_signature() {
         use crate::agent::signatures::TestSigner;
         use ad4m_client::literal::Literal;
         let did = "did:key:alice";
@@ -1753,12 +1822,10 @@ mod tests {
             .to_url()
             .unwrap();
         let legacy = did_literal.replace("literal:string:", "literal://string:");
-        let role: ModelQuery =
-            serde_json::from_value(json!({ "className": "ns://R", "didProperty": "agent" }))
-                .unwrap();
-        let dating =
-            GrantDating::new(&role, &qin(&role, did), did)
-                .unwrap();
+        let dating = dating_for(
+            json!({ "className": "ns://R", "didProperty": "agent" }),
+            did,
+        );
         let admin = TestSigner::generate();
         let forger = TestSigner::generate();
         let at = chrono::DateTime::parse_from_rfc3339("2026-01-01T00:00:00.000Z")

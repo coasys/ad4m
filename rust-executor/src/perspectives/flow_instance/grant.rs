@@ -179,8 +179,7 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_evaluator::{EvidenceItem, RoleGrantLinks};
-    use crate::perspectives::flow_instance::roles::dating::GrantDating;
+    use crate::perspectives::flow_evaluator::EvidenceItem;
     use crate::perspectives::flow_instance::atom::{
         outputs_hash, proposal_uri, OutputRef, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE,
         FROM_STATE_PREDICATE, OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
@@ -213,6 +212,10 @@ mod tests {
     const ROLE_INSTANCE_2: &str = "ad4m://role/reviewer/r1";
     const SOMEBODY_ELSE: &str = "ad4m://role/reviewer/somebody-else";
     const ROLE: &str = "coasys://Reviewer";
+    /// The role's `didProperty`, and so the one `links` key [`GateStore`]
+    /// answers with Alice's assignment link. [`assignment`] writes it as the
+    /// predicate.
+    const GRANT_KEY: &str = "agent";
     /// Another class a flow might commit the very same node as.
     const TASK_CLASS: &str = "coasys://Task";
     const ALICE: &str = "alice";
@@ -252,7 +255,7 @@ mod tests {
     /// The `Reviewer` role query, gated on `spec` when given. `None` is the
     /// same query as an ordinary `didProperty` role.
     fn role(spec: Option<&ProducedByFlow>) -> ModelQuery {
-        let mut query = json!({ "className": ROLE, "didProperty": "agent" });
+        let mut query = json!({ "className": ROLE, "didProperty": GRANT_KEY });
         if let Some(spec) = spec {
             query["producedByFlow"] = serde_json::to_value(spec).expect("spec serialises");
         }
@@ -371,7 +374,7 @@ mod tests {
     fn assignment(id: &str) -> LinkExpression {
         signed_link(
             id,
-            "agent",
+            GRANT_KEY,
             did_of(ALICE),
             "admin",
             true,
@@ -413,6 +416,16 @@ mod tests {
     /// nothing for anyone else), hands out Alice's signed assignment link on
     /// each, holds `catalogue`, and returns `receipts` as the granting flow's
     /// index. Records which flows' receipts were asked for.
+    ///
+    /// The history comes back the way `model_query` answers `links` (#1103):
+    /// under `__links`, one array per requested key. [`GRANT_KEY`] gets
+    /// Alice's assignment link, and every other key, the tombstone predicate
+    /// included, gets no rows.
+    ///
+    /// The store is total over `links` keys, like the roles module's
+    /// `RoleStub`: a key nobody wrote answers `[]`, as the real store does.
+    /// It used to hand the assignment link to any key but the tombstone, so a
+    /// misspelled key in `query_keys` passed every test here.
     struct GateStore {
         instances: Vec<&'static str>,
         catalogue: HashMap<String, SHACLFlow>,
@@ -423,32 +436,36 @@ mod tests {
     #[async_trait]
     impl RequiresQueryable for GateStore {
         async fn model_query(&self, _class: &str, query_json: &str) -> anyhow::Result<String> {
+            let query: Value = serde_json::from_str(query_json)?;
+            let keys: Vec<String> = query["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
             let instances: Vec<Value> = if query_json.contains(did_of(ALICE)) {
                 self.instances
                     .iter()
-                    .map(|id| json!({ "id": id, "timestamp": ASSIGNMENT_LINK_AT }))
+                    .map(|id| {
+                        let links: serde_json::Map<String, Value> = keys
+                            .iter()
+                            .map(|key| {
+                                let rows = if key == GRANT_KEY {
+                                    vec![assignment(id)]
+                                } else {
+                                    Vec::new()
+                                };
+                                (key.clone(), json!(rows))
+                            })
+                            .collect();
+                        json!({ "id": id, "timestamp": ASSIGNMENT_LINK_AT, "__links": links })
+                    })
                     .collect()
             } else {
                 Vec::new()
             };
             Ok(json!({ "totalCount": instances.len(), "instances": instances }).to_string())
-        }
-
-        async fn role_grant_links(
-            &self,
-            _role_class: &str,
-            instance_id: &str,
-            dating: &GrantDating,
-        ) -> anyhow::Result<RoleGrantLinks> {
-            Ok(RoleGrantLinks {
-                grant_links: if dating.did == did_of(ALICE) {
-                    vec![assignment(instance_id)]
-                } else {
-                    Vec::new()
-                },
-                grantees_own_links: Vec::new(),
-                revocation_links: Vec::new(),
-            })
         }
 
         async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
@@ -494,6 +511,27 @@ mod tests {
             .expect("evidence for Alice")
             .resolve(&translated(did_of(ALICE)), &gate)
             .expect("resolves")
+    }
+
+    /// [`GateStore`] is total over `links` keys: a key it has no links for
+    /// answers `[]`, as the real store does for a predicate nobody wrote.
+    ///
+    /// This pins the double, not the gate. Every other test here asks for the
+    /// right keys, so a store that handed the assignment link to any key but
+    /// the tombstone passed them all, and a misspelled key in `query_keys`
+    /// would have passed with it. The roles module's `RoleStub` is pinned the
+    /// same way (`the_stub_answers_an_unknown_links_key_with_nothing`). The
+    /// two doubles answer the same question and must not drift apart.
+    #[tokio::test]
+    async fn the_gate_store_answers_an_unknown_links_key_with_nothing() {
+        let db = store(&[], Vec::new());
+        let mut query = translated(did_of(ALICE));
+        query["links"] = json!([GRANT_KEY, ROLE_GRANT_REVOKED_PREDICATE, "agnet"]);
+        let raw = db.model_query(ROLE, &query.to_string()).await.unwrap();
+        let links = &serde_json::from_str::<Value>(&raw).unwrap()["instances"][0]["__links"];
+        assert_eq!(links[GRANT_KEY].as_array().map(Vec::len), Some(1));
+        assert_eq!(links[ROLE_GRANT_REVOKED_PREDICATE], json!([]));
+        assert_eq!(links["agnet"], json!([]), "a key nobody wrote has no links");
     }
 
     // ---- the grant itself, through the loader ------------------------------
