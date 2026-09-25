@@ -13,8 +13,8 @@ language-language.
 
 ## Shared mode: `storagePath`
 
-`language-language.js` and `neighbourhood-language.js` accept one language
-setting, `storagePath`. Put it in `<data>/ad4m/languages/<address>/settings.json`
+`language-language.js`, `neighbourhood-language.js` and `agent-language.js`
+accept one language setting, `storagePath`. Put it in `<data>/ad4m/languages/<address>/settings.json`
 before the executor loads the language:
 
 ```json
@@ -22,11 +22,12 @@ before the executor loads the language:
 ```
 
 With it, the language-language stores `meta-<address>.json` and
-`bundle-<address>.js` in that directory, and the neighbourhood store stores
-`neighbourhood-<address>.json`. They read and write through the optional File
+`bundle-<address>.js` in that directory, the neighbourhood store stores
+`neighbourhood-<address>.json`, and the agent-language stores
+`agent-<did>.json`. They read and write through the optional File
 I/O extension (`readStorageFile` / `writeStorageFile`). Every executor that
-points at the same directory sees the languages and neighbourhoods the others
-published. Without the setting they use the KV and see only their own.
+points at the same directory sees the languages, neighbourhoods and agent
+profiles the others published. Without the setting they use the KV and see only their own.
 
 The executor lets a system language access files in its own storage directory
 and in the executor's working directory, nowhere else, so the directory must lie

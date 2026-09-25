@@ -1,19 +1,49 @@
 // Local agent-language — stores agent expressions locally.
 //
-// Uses ad4m:host storageGet/storagePut for persistence. Each agent
-// expression holds a DID, public perspective links, and optional
-// direct-message language reference.
+// Each agent expression holds a DID, public perspective links, and
+// optional direct-message language reference. Two storage modes, chosen
+// once in init() from the language settings, like local/language-language.js:
+//
+// - Default (no `storagePath` setting): ad4m:host storageGet/storagePut,
+//   so an executor can only resolve its own agents' profiles.
+// - Shared (`{"storagePath": "<dir>"}`): files `agent-<did>.json` in <dir>,
+//   through the optional File I/O extension (readStorageFile /
+//   writeStorageFile), so executors pointed at the same directory resolve
+//   each other's profiles (agent.byDID, did:// expressions). <dir> must
+//   exist and lie inside the executor's working directory.
 import {
     agentDid,
     agentCreateSignedExpression,
+    languageSettings,
+    readStorageFile,
     storageGet,
     storagePut,
+    writeStorageFile,
 } from "ad4m:host";
 
 export const name = "local-agent-store";
-export const version = "0.1.0";
+export const version = "0.2.0";
 
-export async function init() {}
+// Shared directory, or "" for KV mode.
+let storagePath = "";
+
+function readSettings() {
+    try {
+        const parsed = JSON.parse(languageSettings() || "null");
+        return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_) {
+        return {};
+    }
+}
+
+function filePath(key) {
+    return (storagePath + "/" + key + ".json").replace(/\/+/g, "/");
+}
+
+export async function init() {
+    const settings = readSettings();
+    storagePath = typeof settings.storagePath === "string" ? settings.storagePath : "";
+}
 export function interactions() { return []; }
 export async function teardown() {}
 
@@ -38,14 +68,17 @@ export async function expressionCreate(content) {
         });
     }
 
-    const expression = agentCreateSignedExpression(content);
-    storagePut("agent-" + content.did, JSON.stringify(expression));
+    const expression = JSON.stringify(agentCreateSignedExpression(content));
+    const key = "agent-" + content.did;
+    if (storagePath) writeStorageFile(filePath(key), expression);
+    else storagePut(key, expression);
     return content.did;
 }
 
 export async function expressionGet(did) {
+    const key = "agent-" + did;
     try {
-        const raw = storageGet("agent-" + did);
+        const raw = storagePath ? readStorageFile(filePath(key)) : storageGet(key);
         if (!raw) return null;
         return JSON.parse(raw);
     } catch (_) {

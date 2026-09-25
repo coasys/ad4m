@@ -1,11 +1,13 @@
-// Shared mode for the local language-language and neighbourhood store.
+// Shared mode for the local language-language, neighbourhood store and
+// agent-language.
 //
 // Every test executor gets its own data path, so their ad4m:host KV stores
-// are separate. bootstrap-languages/local/language-language.js and
-// local/neighbourhood-language.js store in a directory instead when their
-// language settings carry a `storagePath`. Pointing all executors at the
-// same directories lets one executor publish a language or neighbourhood
-// and another fetch it, without Holochain.
+// are separate. bootstrap-languages/local/language-language.js,
+// local/neighbourhood-language.js and local/agent-language.js store in a
+// directory instead when their language settings carry a `storagePath`.
+// Pointing all executors at the same directories lets one executor publish
+// a language, neighbourhood or agent profile and another fetch it, without
+// Holochain.
 //
 // Settings live in `<data>/ad4m/languages/<address>/settings.json`, the file
 // the executor reads when it loads a language, so they are written after
@@ -23,6 +25,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // local-language-persistence blob used.
 export const SHARED_LANGUAGES_DIR = path.resolve(__dirname, "..", "tst-tmp", "languages");
 export const SHARED_NEIGHBOURHOODS_DIR = path.resolve(__dirname, "..", "tst-tmp", "neighbourhoods");
+// Not `tst-tmp/agents`: that holds the executors' data directories.
+export const SHARED_AGENT_PROFILES_DIR = path.resolve(__dirname, "..", "tst-tmp", "agent-profiles");
 
 const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -61,8 +65,9 @@ function writeSettings(dataPath: string, address: string, settings: object) {
     writeFileSync(path.join(dir, "settings.json"), JSON.stringify(settings));
 }
 
-/** Point the seed's language-language and neighbourhood language at the shared
- *  directories. Languages that don't read a `storagePath` setting ignore it. */
+/** Point the seed's language-language, neighbourhood language and agent
+ *  language at the shared directories. Languages that don't read a
+ *  `storagePath` setting ignore it. */
 export function configureSharedStores(dataPath: string, bootstrapSeedPath: string) {
     const seed = JSON.parse(readFileSync(bootstrapSeedPath, "utf8"));
     if (seed.languageLanguageBundle) {
@@ -72,6 +77,10 @@ export function configureSharedStores(dataPath: string, bootstrapSeedPath: strin
     if (seed.neighbourhoodLanguage) {
         mkdirSync(SHARED_NEIGHBOURHOODS_DIR, { recursive: true });
         writeSettings(dataPath, seed.neighbourhoodLanguage, { storagePath: SHARED_NEIGHBOURHOODS_DIR });
+    }
+    if (seed.agentLanguage) {
+        mkdirSync(SHARED_AGENT_PROFILES_DIR, { recursive: true });
+        writeSettings(dataPath, seed.agentLanguage, { storagePath: SHARED_AGENT_PROFILES_DIR });
     }
 }
 
