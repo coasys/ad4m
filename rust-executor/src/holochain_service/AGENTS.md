@@ -10,7 +10,7 @@ through an actor channel. Split plan: spec item 10.
 | `interface.rs` | `HolochainServiceInterface` (channel sender + signal receiver), `Envelope` (request + `queued_at` + `deadline`), `HolochainServiceRequest`/`Response` enums with `name`/`is_lifecycle`/`refuse`, one async method per request, the global service and its three accessors |
 | `holochain_service_extension.rs` + `.js` | 15 `#[op2]` ops exposed to Languages (`ad4m:host` holochain section) |
 
-Adding a zome-level operation currently means four edits: request enum variant
+Adding a Holochain request currently means four edits: request enum variant
 (plus its `name`/`refuse` arms), dispatch arm in `dispatch/mod.rs::ConductorDispatch`,
 method in `interface.rs`. Keep them in sync until item 10 collapses them. A new
 variant that mutates the conductor's app set must also be added to `is_lifecycle`,
