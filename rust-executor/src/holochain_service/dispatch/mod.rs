@@ -15,20 +15,26 @@ use holochain::conductor::api::AppInfo;
 use log::{debug, error, warn};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::sync::{RwLock, Semaphore};
-use tokio::task::{JoinError, JoinSet};
+use tokio::sync::mpsc::error::SendError;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore};
+use tokio::task::{JoinError, JoinHandle, JoinSet};
 use tokio::time::timeout;
 
 use super::interface::{Envelope, HolochainServiceRequest, HolochainServiceResponse};
 use super::HolochainService;
 
-/// Upper bound on non-lifecycle requests (zome calls, signing, agent infos, …) running at
-/// once. 32 is a guess sized for a desktop node with a few dozen joined perspectives: high
-/// enough that a burst of `sync()` zome calls across spaces never queues a presence
-/// broadcast, low enough that a runaway caller cannot flood the conductor. Not a config
-/// knob until a measurement says the guess is wrong.
+/// Upper bound on zome calls and the other conductor/network requests running at once. 32
+/// is a guess sized for a desktop node with a few dozen joined perspectives: high enough
+/// that a burst of `sync()` zome calls across spaces never queues a presence broadcast, low
+/// enough that a runaway caller cannot flood the conductor. Not a config knob until a
+/// measurement says the guess is wrong.
 pub(crate) const ZOME_CALL_CONCURRENCY: usize = 32;
+
+/// Upper bound on `HolochainServiceRequest::is_local` requests (keystore, app info) running
+/// at once. They have their own permits so a full zome call pool never delays them; the
+/// keystore answers one at a time anyway, so more would only queue inside it.
+pub(crate) const LOCAL_CONCURRENCY: usize = 4;
 
 /// Runs one request to completion and answers it on the request's oneshot.
 ///
@@ -47,15 +53,20 @@ pub(crate) trait RequestDispatch: Send + Sync + 'static {
 ///
 /// - **Lifecycle** (`HolochainServiceRequest::is_lifecycle`: install, remove, enable,
 ///   shutdown) runs inline, holding the `lifecycle` write lock. tokio's `RwLock` is
-///   write-preferring, so a lifecycle request first waits for every in-flight request to
-///   finish, and nothing new starts until it is done. `Shutdown` instead waits for the
-///   `JoinSet` to drain, is dispatched, and ends the loop; only this loop spawns, so after
-///   the drain nothing is running.
-/// - **Everything else** (zome calls, signing, agent infos, metrics, pack/unpack) is spawned
-///   onto the runtime holding a `lifecycle` read guard and one of `ZOME_CALL_CONCURRENCY`
-///   semaphore permits. Both are taken here, before the spawn, so "in flight" means exactly
-///   "spawned and not yet finished", and the loop itself stalls when every permit is taken:
-///   requests behind a full node wait in the channel instead of piling up as tasks.
+///   write-preferring, so a lifecycle request first waits for every request the loop handed
+///   to a lane before it, queued or running, to finish, and the loop reads nothing new until
+///   it is done. `Shutdown` instead closes both lanes, waits for them to drain, is
+///   dispatched, and ends the loop; only the lanes spawn, so after the drain nothing is
+///   running.
+/// - **Everything else** is handed, with a `lifecycle` read guard, to one of two lanes
+///   (`run_lane`): the **local** lane (`HolochainServiceRequest::is_local`: keystore and app
+///   info, `LOCAL_CONCURRENCY` permits) or the **conductor** lane (zome calls, agent infos,
+///   metrics, pack/unpack, `ZOME_CALL_CONCURRENCY` permits). A lane starts its requests in
+///   the order they arrived, each once it has a permit, and spawns it holding the permit and
+///   the read guard. The loop itself never waits for a permit, so it always reads the next
+///   request: a `Sign` reaches the local lane even while every conductor permit is held and
+///   more zome calls are queued behind them. Those queued calls stay entries in the
+///   conductor lane's channel, not tasks, exactly as they used to stay in this loop's.
 ///
 /// Once a request has what it waited for (the drain, the write lock, or a permit), `admit`
 /// logs its time in queue (`debug`; `warn` above 1 s) and, if its `deadline` has passed,
@@ -65,44 +76,99 @@ pub(crate) async fn run_dispatch_loop<D: RequestDispatch>(
     dispatcher: Arc<D>,
 ) {
     let lifecycle = Arc::new(RwLock::new(()));
-    let permits = Arc::new(Semaphore::new(ZOME_CALL_CONCURRENCY));
-    let mut in_flight: JoinSet<()> = JoinSet::new();
+    let (conductor, conductor_lane) = spawn_lane(ZOME_CALL_CONCURRENCY, dispatcher.clone());
+    let (local, local_lane) = spawn_lane(LOCAL_CONCURRENCY, dispatcher.clone());
 
     while let Some(envelope) = receiver.recv().await {
-        reap_finished(&mut in_flight);
-
-        let Envelope {
-            request,
-            queued_at,
-            deadline,
-        } = envelope;
-
-        if matches!(request, HolochainServiceRequest::Shutdown(_)) {
-            while let Some(finished) = in_flight.join_next().await {
-                log_task_failure(finished);
+        if matches!(envelope.request, HolochainServiceRequest::Shutdown(_)) {
+            drop((conductor, local));
+            for lane in [conductor_lane, local_lane] {
+                log_task_failure(lane.await);
             }
+            let Envelope {
+                request,
+                queued_at,
+                deadline,
+            } = envelope;
             if let Some(request) = admit(request, queued_at, deadline, 0) {
                 dispatcher.handle(request).await;
             }
             break;
         }
 
-        if request.is_lifecycle() {
+        if envelope.request.is_lifecycle() {
             let _exclusive = lifecycle.write().await;
+            let Envelope {
+                request,
+                queued_at,
+                deadline,
+            } = envelope;
             if let Some(request) = admit(request, queued_at, deadline, 0) {
                 dispatcher.handle(request).await;
             }
             continue;
         }
 
+        // Never waits: the loop is the only writer, and it holds the write lock only inline
+        // above.
+        let shared = lifecycle.clone().read_owned().await;
+        let lane = if envelope.request.is_local() {
+            &local
+        } else {
+            &conductor
+        };
+        // A lane ends only after its sender is dropped at `Shutdown`, or if it panicked.
+        if let Err(SendError((envelope, _))) = lane.send((envelope, shared)) {
+            let name = envelope.request.name();
+            envelope
+                .request
+                .refuse(anyhow!("{name}: the Holochain dispatch lane is gone"));
+        }
+    }
+    error!("Holochain service receiver closed");
+}
+
+/// A request handed to a lane, with the `lifecycle` read guard the loop took for it.
+type Admitted = (Envelope, OwnedRwLockReadGuard<()>);
+
+fn spawn_lane<D: RequestDispatch>(
+    permits: usize,
+    dispatcher: Arc<D>,
+) -> (UnboundedSender<Admitted>, JoinHandle<()>) {
+    let (sender, receiver) = unbounded_channel();
+    (
+        sender,
+        tokio::spawn(run_lane(receiver, permits, dispatcher)),
+    )
+}
+
+/// One lane of `run_dispatch_loop`: runs at most `capacity` requests at once, starting them
+/// in the order they arrived. Waiting for a permit here, not in the loop, is what keeps one
+/// full lane from holding up the other. Ends once the loop drops its sender and every
+/// request it spawned has finished.
+async fn run_lane<D: RequestDispatch>(
+    mut receiver: UnboundedReceiver<Admitted>,
+    capacity: usize,
+    dispatcher: Arc<D>,
+) {
+    let permits = Arc::new(Semaphore::new(capacity));
+    let mut in_flight: JoinSet<()> = JoinSet::new();
+
+    while let Some((envelope, shared)) = receiver.recv().await {
+        reap_finished(&mut in_flight);
+
         let permit = permits
             .clone()
             .acquire_owned()
             .await
             .expect("the semaphore is never closed");
-        let shared = lifecycle.clone().read_owned().await;
         // Not counting the permit just taken for this request.
-        let others = ZOME_CALL_CONCURRENCY - permits.available_permits() - 1;
+        let others = capacity - permits.available_permits() - 1;
+        let Envelope {
+            request,
+            queued_at,
+            deadline,
+        } = envelope;
         let Some(request) = admit(request, queued_at, deadline, others) else {
             continue;
         };
@@ -113,13 +179,17 @@ pub(crate) async fn run_dispatch_loop<D: RequestDispatch>(
             drop(permit);
         });
     }
-    error!("Holochain service receiver closed");
+
+    while let Some(finished) = in_flight.join_next().await {
+        log_task_failure(finished);
+    }
 }
 
 /// Called once the request is about to run (after the drain, the write lock or the permit it
 /// waited for): logs the time in queue and refuses the request if its deadline has passed.
 /// Checking here and not on dequeue means a request that waited for a permit behind
-/// `ZOME_CALL_CONCURRENCY` slow calls is caught too.
+/// `ZOME_CALL_CONCURRENCY` slow calls is caught too. `in_flight` is the number of other
+/// requests running in the same lane.
 fn admit(
     request: HolochainServiceRequest,
     queued_at: Instant,

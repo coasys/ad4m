@@ -105,6 +105,26 @@ impl HolochainServiceRequest {
         )
     }
 
+    /// Answered from the conductor's keystore or its local app state, in milliseconds,
+    /// never through a zome or the network. `run_dispatch_loop` runs these in their own lane
+    /// so a full zome call pool never delays them:
+    ///
+    /// - `Sign`, `SignWithKey`: one keystore signature.
+    /// - `GetAgentKey`: lists the keystore's public keys.
+    /// - `NewSignKeypair`: one keystore key generation.
+    /// - `GetAppInfo`: one read of the conductor's app state; no cell, no network.
+    ///
+    /// Not local: zome calls, `AgentInfos`/`AddAgentInfos` and the network metrics go
+    /// through kitsune2, and pack/unpack read and write bundles on disk with no bound on
+    /// their size.
+    pub fn is_local(&self) -> bool {
+        use HolochainServiceRequest::*;
+        matches!(
+            self,
+            Sign(..) | SignWithKey(..) | GetAgentKey(..) | NewSignKeypair(..) | GetAppInfo(..)
+        )
+    }
+
     /// Answer the request with `err` without running it. The caller's `await` on the
     /// matching interface method returns `Err(err)`.
     pub fn refuse(self, err: AnyError) {

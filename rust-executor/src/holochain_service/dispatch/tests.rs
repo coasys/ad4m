@@ -14,7 +14,9 @@
 //!    (`request_expiring_while_waiting_for_a_permit_is_refused`);
 //! 5. `Shutdown` is answered only after every in-flight request has finished
 //!    (`shutdown_drains_in_flight_calls`);
-//! 6. the `call_zome_function` op's deadline is the instant the op gives up: it starts only
+//! 6. a keystore request is answered while every zome call permit is held and another call
+//!    is queued for one (`sign_is_not_blocked_by_a_full_zome_call_pool`);
+//! 7. the `call_zome_function` op's deadline is the instant the op gives up: it starts only
 //!    once the conductor is up (`op_deadline_starts_after_the_conductor_is_up`) and it
 //!    reaches the loop (`op_passes_its_deadline_to_the_loop`).
 //!

@@ -6,15 +6,16 @@ through an actor channel. Split plan: spec item 10.
 | File | Role |
 |---|---|
 | `mod.rs` | `HolochainService::init` (spawns the thread, builds the `StreamMap` signal fan-in, spawns the dispatch loop), conductor construction, `install_app`, `call_zome_function`, agent infos, sign, pack/unpack dna+happ |
-| `dispatch/mod.rs` | `run_dispatch_loop` (the request loop: lifecycle requests inline under a write lock, everything else spawned under a read guard + `ZOME_CALL_CONCURRENCY` permits, time-in-queue log, deadline refusal), the `RequestDispatch` trait, `ConductorDispatch` (the big `match` over `HolochainServiceRequest`, one arm per variant with its timeout). `dispatch/tests.rs` checks the loop against a mock, no conductor. |
-| `interface.rs` | `HolochainServiceInterface` (channel sender + signal receiver), `Envelope` (request + `queued_at` + `deadline`), `HolochainServiceRequest`/`Response` enums with `name`/`is_lifecycle`/`refuse`, one async method per request, the global service and its three accessors |
+| `dispatch/mod.rs` | `run_dispatch_loop` (the request loop: lifecycle requests inline under a write lock, everything else handed with a read guard to one of two FIFO lanes that each spawn under their own permits: `is_local` keystore/app-info requests (`LOCAL_CONCURRENCY`) and the rest (`ZOME_CALL_CONCURRENCY`); time-in-queue log, deadline refusal), the `RequestDispatch` trait, `ConductorDispatch` (the big `match` over `HolochainServiceRequest`, one arm per variant with its timeout). `dispatch/tests.rs` checks the loop against a mock, no conductor. |
+| `interface.rs` | `HolochainServiceInterface` (channel sender + signal receiver), `Envelope` (request + `queued_at` + `deadline`), `HolochainServiceRequest`/`Response` enums with `name`/`is_lifecycle`/`is_local`/`refuse`, one async method per request, the global service and its three accessors |
 | `holochain_service_extension.rs` + `.js` | 15 `#[op2]` ops exposed to Languages (`ad4m:host` holochain section) |
 
 Adding a Holochain request currently means four edits: request enum variant
 (plus its `name`/`refuse` arms), dispatch arm in `dispatch/mod.rs::ConductorDispatch`,
 method in `interface.rs`. Keep them in sync until item 10 collapses them. A new
 variant that mutates the conductor's app set must also be added to `is_lifecycle`,
-or it will run concurrently with zome calls (#1133).
+or it will run concurrently with zome calls (#1133). Add a variant to `is_local` only
+if it never reaches a zome or the network: local requests bypass the zome call bound.
 
 Zome calls run concurrently, including two on the same cell. Language code is
 serialized per language by its runtime; a Rust caller that writes to a cell from
