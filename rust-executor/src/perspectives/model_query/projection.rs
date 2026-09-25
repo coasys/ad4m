@@ -631,7 +631,7 @@ pub(super) fn projection_verified_pattern(
     } else {
         format!(
             "   {}\n",
-            verified_link_exists("?parent", safe_pred, "?t", include_unverified)
+            verified_link_exists("?parent", safe_pred, "?t", None, include_unverified)
         )
     }
 }

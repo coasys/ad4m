@@ -745,6 +745,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
     }

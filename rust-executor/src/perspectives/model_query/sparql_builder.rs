@@ -286,6 +286,7 @@ pub(super) fn build_instance_sparql(
                     "?source",
                     predicate,
                     "?_sort_raw",
+                    None,
                     query.include_unverified,
                 );
                 format!(
@@ -301,6 +302,7 @@ pub(super) fn build_instance_sparql(
                     "?source",
                     predicate,
                     "?_proj_t",
+                    None,
                     query.include_unverified,
                 );
                 format!(
@@ -315,12 +317,18 @@ pub(super) fn build_instance_sparql(
                 rel_pred,
                 prop_pred,
             } => {
-                let rel_verified =
-                    verified_link_exists("?source", rel_pred, "?_rp_rel", query.include_unverified);
+                let rel_verified = verified_link_exists(
+                    "?source",
+                    rel_pred,
+                    "?_rp_rel",
+                    None,
+                    query.include_unverified,
+                );
                 let prop_verified = verified_link_exists(
                     "?_rp_rel",
                     prop_pred,
                     "?_rp_raw",
+                    None,
                     query.include_unverified,
                 );
                 format!(
@@ -375,10 +383,12 @@ pub(super) fn build_instance_sparql(
 /// verify is withheld under `Some(Local)` unless `include_unverified` is set.
 ///
 /// Scope: this filters the rows that hydrate an instance, in both query plans,
-/// and the `__links` rows, and [`reverse_triple_filter`] does the same for the
-/// reverse-relation reads. Instance *selection* (conformance, `where`, `COUNT`,
-/// projections) and the two-phase plan's order keys match the bare triple and
-/// are not restricted, the same limit as #1120.
+/// including the include and `$` projection sub-queries that hydrate related
+/// instances, and the `__links` rows. [`verified_link_exists`] does the same
+/// for the reverse-relation reads and a typed relation's generated getter.
+/// Instance *selection* (conformance, `where`, `COUNT`, which targets a
+/// projection lists or counts) and the two-phase plan's order keys match the
+/// bare triple and are not restricted, the same limit as #1120.
 ///
 /// Empty when no status is requested.
 pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
@@ -440,60 +450,46 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
     }
 }
 
-/// [`link_status_filter`] and [`proof_valid_filter`] for reads that match the
-/// bare triple `?source <predicate> ?target` instead of joining one reifier per
-/// row: the reverse-relation reads in `relations.rs`, which hydrate
-/// `belongsToOne` / `belongsToMany` values. The row is kept when at least one
-/// link asserting the triple passes **both** checks on the **same** reifier.
-/// Two separate `FILTER EXISTS` clauses would let a verified Local link and an
-/// unverified Shared link over one triple jointly pass a Shared, verified-only
-/// read. `FILTER EXISTS` rather than a join, so two passing links over one
-/// triple do not return the source twice.
+/// [`link_status_filter`] and [`proof_valid_filter`] for a read that matches
+/// the bare triple `subject <predicate> object` instead of joining one reifier
+/// per row. The row is kept when at least one link asserting the triple passes
+/// **both** checks on the **same** reifier. Two separate `FILTER EXISTS`
+/// clauses would let a verified Local link and an unverified Shared link over
+/// one triple jointly pass a Shared, verified-only read. `FILTER EXISTS`
+/// rather than a join, so two passing links over one triple do not return the
+/// subject twice.
+///
+/// Callers that hydrate pass the query's `status`: the reverse relations in
+/// `relations.rs` and a typed relation's generated getter
+/// (`getters::verify_relation_getter`). Callers that select or order pass
+/// `None` and get only the proof check: the order keys of the two-phase plan's
+/// pagination subquery, the non-transitive projections and a relation's
+/// `where`. `linkStatus` on selection is #1120.
 ///
 /// Empty when no status is requested and `include_unverified` is `Some(true)`.
-pub(super) fn reverse_triple_filter(
+pub(super) fn verified_link_exists(
+    subject: &str,
     predicate: &str,
+    object: &str,
     status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
 ) -> String {
     let status = match status {
         None => String::new(),
-        Some(s) => format!(" ?_rl <ad4m://ontology/status> \"{}\" .", status_str(s)),
+        Some(s) => format!(" ?_pv <ad4m://ontology/status> \"{}\" .", status_str(s)),
     };
     let verified = if include_unverified.unwrap_or(false) {
         ""
     } else {
-        " ?_rl <ad4m://ontology/proofValid> \"true\" ."
+        " ?_pv <ad4m://ontology/proofValid> \"true\" ."
     };
     if status.is_empty() && verified.is_empty() {
         return String::new();
     }
     format!(
-        " FILTER EXISTS {{ ?_rl <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
-         <<( ?source <{predicate}> ?target )>> .{status}{verified} }}"
+        " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+         <<( {subject} <{predicate}> {object} )>> .{status}{verified} }}"
     )
-}
-
-/// The proof-valid `FILTER EXISTS` for any `subject <predicate> object`
-/// pattern: the pagination subquery's sort keys, the non-transitive
-/// projections and the generated relation getters use it with their own
-/// variables.
-///
-/// Empty when `include_unverified` is `Some(true)`.
-pub(super) fn verified_link_exists(
-    subject: &str,
-    predicate: &str,
-    object: &str,
-    include_unverified: Option<bool>,
-) -> String {
-    if include_unverified.unwrap_or(false) {
-        String::new()
-    } else {
-        format!(
-            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
-             <<( {subject} <{predicate}> {object} )>> . ?_pv <ad4m://ontology/proofValid> \"true\" . }}"
-        )
-    }
 }
 
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.

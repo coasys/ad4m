@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
-use super::sparql_builder::reverse_triple_filter;
+use super::sparql_builder::verified_link_exists;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
@@ -37,7 +37,7 @@ use crate::types::LinkStatus;
 /// With a `link_status` (#1116), only links of that status are read, and a
 /// link whose signature did not verify is not read unless the query opted in
 /// with `include_unverified` (#1113). Both are checked on one reifier
-/// ([`reverse_triple_filter`]).
+/// ([`verified_link_exists`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -67,7 +67,13 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
-        let filter = reverse_triple_filter(safe_pred, link_status, include_unverified);
+        let filter = verified_link_exists(
+            "?source",
+            safe_pred,
+            "?target",
+            link_status,
+            include_unverified,
+        );
         let sparql = format!(
             "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
             target_constraint
@@ -577,8 +583,10 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
-    let filter = reverse_triple_filter(
+    let filter = verified_link_exists(
+        "?source",
         safe_pred,
+        "?target",
         sub_query.link_status.as_ref(),
         sub_query.include_unverified,
     );
