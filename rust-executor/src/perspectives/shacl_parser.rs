@@ -819,13 +819,20 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
 /// error, the same as a missing required field: serde would drop it, and on a
 /// role gate a dropped key widens the gate or removes it (#1144). See
 /// [`role_gate_keys`].
+///
+/// The rule is decoded from the string, not from the checked `Value`: a
+/// `Value` keeps only the last of duplicate keys, so decoding from it would
+/// read a rule the author did not write. The key check parses its own `Value`
+/// with duplicates refused at every level.
 fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
-    let value: serde_json::Value = decode_json_literal(target)?;
+    let s = decode_literal_string(target)
+        .ok_or_else(|| "target is not a url-decodable `literal:string:`".to_string())?;
+    let value = role_gate_keys::parse_refusing_duplicate_keys(&s)?;
     let errors = role_gate_keys::role_gate_key_errors(&value);
     if !errors.is_empty() {
         return Err(errors.join("; "));
     }
-    serde_json::from_value(value).map_err(|e| e.to_string())
+    serde_json::from_str(&s).map_err(|e| e.to_string())
 }
 
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
