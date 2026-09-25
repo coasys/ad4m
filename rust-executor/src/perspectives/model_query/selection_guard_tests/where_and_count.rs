@@ -307,6 +307,18 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
                 "literal:string:approved",
                 4,
             ),
+            // g/4 -> v/4 genuinely, and v/4 is genuinely `approved`, but
+            // v/4's Vote flag is forged.
+            signed(&admin, "sg://g/4", "ad4m://type", "sg://Grant", 1),
+            signed(&admin, "sg://g/4", "sg://vote", "sg://v/4", 6),
+            forged(&admin, "sg://v/4", "ad4m://type", "sg://Vote", 6),
+            signed(
+                &admin,
+                "sg://v/4",
+                "sg://verdict",
+                "literal:string:approved",
+                6,
+            ),
             // A Note has no flag and no required property. n/1 is one by a
             // signed `text`, n/2 by a forged one only.
             signed(&admin, "sg://n/1", "sg://text", "literal:string:a", 5),
@@ -362,7 +374,7 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
     );
     assert_eq!(
         sorted(run_class("Grant", opted_in(approved)).await),
-        vec!["sg://g/1", "sg://g/2", "sg://g/3"],
+        vec!["sg://g/1", "sg://g/2", "sg://g/3", "sg://g/4"],
         "with the opt-in"
     );
 
