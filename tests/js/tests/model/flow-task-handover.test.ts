@@ -757,7 +757,8 @@ describe("flow task handover — WE-facing API with roles", function () {
     // for nothing, and Bob's vote predates his grant.
     // Fail-on-old-code: the grant started at the earliest `agent` link naming
     // Bob from ANY author, which was his own, written before his vote, so the
-    // vote counted and the run settled Done here.
+    // vote counted, the run had already settled Done, and this press failed
+    // with "`Done` is not reachable from `Done`".
     const alicePress = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
     expect(
       alicePress.outcomes,
