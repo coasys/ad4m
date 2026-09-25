@@ -10,19 +10,21 @@ pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
-mod wallet;
+pub mod wallet;
 
 pub mod agent;
 pub mod ai_service;
 pub mod billing;
 mod dapp_server;
 pub mod db;
+pub mod db_backend;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -303,6 +305,87 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
 
+    // Initialise the wallet backend based on config.
+    // "shared" mode connects to an external HTTP wallet service;
+    // everything else (including unset) uses the in-process LocalWallet.
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::wallet::WalletBackend> = match config.wallet_backend.as_deref()
+        {
+            Some("shared") => {
+                let url = config
+                    .wallet_backend_url
+                    .as_ref()
+                    .expect("WALLET_BACKEND_URL required when wallet_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared wallet backend at {}", url);
+                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local wallet backend");
+                Arc::new(crate::wallet::LocalWallet::new())
+            }
+        };
+        crate::wallet::init_wallet_backend(backend);
+    }
+
+    // Initialise the database backend.
+    // "shared" mode delegates to the platform Worker's internal DB API;
+    // everything else uses the in-process Ad4mDb (LocalDb).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::db_backend::DbBackend> = match config.db_backend.as_deref() {
+            Some("shared") => {
+                let url = config
+                    .db_backend_url
+                    .as_ref()
+                    .expect("DB_BACKEND_URL required when db_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared database backend at {}", url);
+                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local database backend");
+                Arc::new(crate::db_backend::LocalDb::new())
+            }
+        };
+        crate::db_backend::init_db_backend(backend);
+    }
+
+    // Restore perspective data from the platform backend if running in shared mode.
+    // Downloads the tar.gz snapshot and extracts to the data directory
+    // before perspectives initialise (so OxiGraph opens with restored data).
+    if config.wallet_backend.as_deref() == Some("shared") {
+        match crate::perspective_snapshot::restore_perspectives(&config) {
+            Ok(true) => info!("Restored perspectives from remote snapshot"),
+            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+        }
+    }
+
+    // ── Token separation assertion ──────────────────────────────────────
+    // internal_api_token (executor → Worker) must differ from admin_credential
+    // (client → executor) to maintain trust boundary separation. Same value
+    // means compromise of any admin-capable client leaks platform-internal auth.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        if let (Some(internal), Some(admin)) =
+            (&config.internal_api_token, &config.admin_credential)
+        {
+            if internal == admin {
+                panic!(
+                    "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
+                     Using the same value collapses two trust boundaries."
+                );
+            }
+        }
+    }
+
     // Create data directories that were previously created by the JS executor's Config.init().
     // These must exist before any service tries to write to them.
     {
@@ -413,14 +496,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig"),
     );
 
-    if let Some(admin_credential) = &config.admin_credential {
-        if admin_credential.is_empty() {
-            warn!(
-                "adminCredential is not set or empty, empty token will possess admin capabilities."
-            );
-        }
-    } else {
-        warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+    if config
+        .admin_credential
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
+        warn!("╔══════════════════════════════════════════════════════════════╗");
+        warn!("║  SECURITY WARNING: no adminCredential configured             ║");
+        warn!("║  Every request — including unauthenticated ones — receives  ║");
+        warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
+        warn!("║  This mode is intended for local testing ONLY.               ║");
+        warn!("║  Set adminCredential in your config before going to prod.    ║");
+        warn!("╚══════════════════════════════════════════════════════════════╝");
     }
 
     {
@@ -450,13 +538,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance();
 
-    // NOTE: load_system_languages() is called directly from Rust in
-    // agent_generate/agent_unlock mutation resolvers.
+    // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
+    // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.
 
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
+
+    // Start periodic perspective snapshots in shared mode.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+    }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
     // per-perspective data structure sizes every 30s).
@@ -622,6 +715,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside REST API...");
         let admin_credential = config.admin_credential.clone();
+        // Cloned out here, not read inside the closure: a non-Copy field read
+        // in there would move `config`, which the API server thread below
+        // still needs.
+        let mcp_tls = config.tls.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -631,6 +728,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 .unwrap();
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
+                dynamic_class_tools: config.dynamic_class_tools.unwrap_or(false),
+                // The same certificate the RPC port terminates with. MCP has
+                // none of its own to issue or renew.
+                tls: mcp_tls,
                 ..Default::default()
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(

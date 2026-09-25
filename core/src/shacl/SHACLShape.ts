@@ -128,7 +128,7 @@ export interface SHACLPropertyShape {
    * CRDT ordering strategy for this collection ("linkedList"), when it has one.
    *
    * Declared in the shape rather than passed per query so the executor applies
-   * it to every writer — the ORM, MCP agents, raw GraphQL callers, another app
+   * it to every writer — the ORM, MCP agents, raw WS-RPC callers, another app
    * on the same neighbourhood.
    */
   ordering?: string;
@@ -1116,6 +1116,11 @@ export class SHACLShape {
         transform: p.transform,
         interpretation_hint: p.interpretationHint,
         identity: p.identity,
+        // The backend reads the ordering declaration back from the
+        // `ad4m://ordering` link that `parse_shacl_to_links` writes from this
+        // field. `ensureSubjectClass` ships `toJSON()`, so omitting it here
+        // leaves `@HasMany({ ordering })` inert no matter what `toLinks()` does.
+        ordering: p.ordering,
       })),
       constructor_actions: this.constructor_actions,
       destructor_actions: this.destructor_actions,
@@ -1168,6 +1173,7 @@ export class SHACLShape {
         transform: p.transform,
         interpretationHint: p.interpretation_hint,
         identity: p.identity,
+        ordering: p.ordering,
       });
     }
 

@@ -147,7 +147,7 @@ While Expressions can contain any type of data, there are several common pattern
 
 1. **Literal Expressions**
    - Simple data types (strings, numbers, objects)
-   - Encoded directly in the address
+   - Encoded directly in the address, percent-encoded the same way as `Literal.from(value).toUrl()`
    - Example: `literal:base64encoded-content`
 
 2. **Content Expressions**
