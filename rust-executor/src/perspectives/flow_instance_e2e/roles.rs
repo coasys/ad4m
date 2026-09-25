@@ -471,3 +471,39 @@ async fn a_forged_admin_authored_grant_does_not_make_a_vote_count() {
         assert_eq!(f.derived().await.state, expected, "{why}");
     }
 }
+
+/// Carried role evidence is plain signed links: no `proof.valid`, and no
+/// `status`, which is not signed and says only where the minter's copy sat.
+/// `RoleGrantEvidence` serialises that way, and the reader re-derives
+/// everything it decides from the signatures.
+///
+/// Pinned because the role read's source changes shape under it: a
+/// `model_query` `__links` row carries its link's status (#1103), so a
+/// collection that deserialises rows into `LinkExpression` must clear it the
+/// way the raw read's `as_carried` does.
+#[tokio::test(flavor = "multi_thread")]
+async fn carried_role_evidence_has_no_status() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    f.mint_one().await;
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+
+    let read_set = f.read_set().await;
+    let carried: Vec<&LinkExpression> = read_set
+        .role_grants
+        .iter()
+        .flat_map(|g| &g.instances)
+        .flat_map(|i| i.grant_links.iter().chain(&i.revocation_links))
+        .collect();
+    assert!(
+        carried.len() >= 2,
+        "fixture: the grant and the tombstone are carried: {read_set:?}"
+    );
+    assert!(
+        carried.iter().all(|l| l.status.is_none()),
+        "carried role evidence has no status: {carried:?}"
+    );
+}

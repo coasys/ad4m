@@ -539,7 +539,14 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
             .as_array()
             .unwrap_or_else(|| panic!("`{key}` rows through model_query: {task}"))
             .iter()
-            .map(|r| serde_json::from_value(r.clone()).expect("row is a LinkExpression"))
+            .map(|r| {
+                let mut l: LinkExpression =
+                    serde_json::from_value(r.clone()).expect("row is a LinkExpression");
+                // A row carries its link's status; carried role evidence
+                // does not (`as_carried`).
+                l.status = None;
+                l
+            })
             .collect()
     };
 

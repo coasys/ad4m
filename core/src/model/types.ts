@@ -438,6 +438,12 @@ export interface LinkRow {
   timestamp: string;
   data: { source: string; predicate: string; target: string };
   proof: { key: string; signature: string; valid: boolean; invalid: boolean };
+  /**
+   * Where this executor holds the link, spelled as `perspective.get()` spells
+   * it. Absent only when the store recorded none. Not signed: it says nothing
+   * about who wrote the link.
+   */
+  status?: "SHARED" | "LOCAL";
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
