@@ -27,6 +27,7 @@ import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
+import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -39,7 +40,12 @@ class CrossPeerNote extends Ad4mModel {
   body: string = "";
 }
 
-export default function crossPeerShapeSyncTests(testContext: TestContext) {
+export default function crossPeerShapeSyncTests(
+  testContext: TestContext,
+  // Which link language carries the sync. Defaults to p-diff-sync; the
+  // local suite passes the server-link-language config.
+  getLinkLang: () => LinkLangConfig = () => holochainLinkLang(DIFF_SYNC_OFFICIAL),
+) {
   return () => {
     describe("Cross-peer SHACL shape sync", function () {
       // Wait budgets sized for Holochain gossip on CI:
@@ -55,10 +61,7 @@ export default function crossPeerShapeSyncTests(testContext: TestContext) {
         // cross-peer barrier so we're not measuring carry-over from
         // any prior test's shared perspective.
         const aliceHandle = await alice.perspective.add(`shape-sync-${uuidv4()}`);
-        const socialContext = await alice.languages.applyTemplateAndPublish(
-          DIFF_SYNC_OFFICIAL,
-          JSON.stringify({ uid: uuidv4(), name: "cross-peer shape sync" }),
-        );
+        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "cross-peer shape sync");
         const url = await alice.neighbourhood.publishFromPerspective(
           aliceHandle.uuid,
           socialContext.address,
