@@ -139,6 +139,22 @@ pub async fn run_flow_consensus_pass(
         // this instance has no derivable verdict this pass. Folding on with a
         // candidate's grants missing could fire an edge that contention would
         // otherwise have held — see `role_grant_views`.
+        //
+        // The raw read-set, not `reverified()` — and this is the ONE production
+        // fold that does not re-verify. The invariant everywhere else is "no
+        // fold consumes a verdict it did not compute"; the exception is sound
+        // here only because `read_set` was just read from *this replica's own*
+        // store, so every `proof.valid` and every `status` on it is already
+        // this replica's own conclusion. There is nothing to re-derive, and
+        // `status` in particular could not be re-derived at all — locality is
+        // a fact about whose store a link sits in, not a property of its bytes.
+        //
+        // That reason lives outside this function, which is why it is written
+        // here: if any sync path ever writes a *sender's* `proof.valid` into
+        // the store, this call becomes the hole in the invariant and nothing
+        // near it would say so. Anything that arrived from elsewhere must be
+        // folded through `ReadSet::reverified` instead — see `verify.rs`
+        // and <https://github.com/coasys/ad4m/issues/1068>.
         let derived = match fold_read_set(flow, &read_set) {
             Ok(d) => d,
             Err(e) => {
