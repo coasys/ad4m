@@ -14,11 +14,13 @@ references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
 # Self-hosted machine runners on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04), two pools:
-# - coasys/marvin: build-and-test (Rust release build + clippy) and llm-e2e (local Ollama).
-#   Few runners, each with a warm ~28GB target/ cache.
-# - coasys/marvin-light: every job that only restores the stashed binaries (integration
-#   tests, CLI, plugin). More runners; no Rust release build, so small working dirs.
-#   A burst of pushes then waits on the one Rust build per pipeline, not behind other tests.
+# - coasys/marvin: every job that compiles Rust (build, clippy, rust-tests) and llm-e2e
+#   (local Ollama). Few runners, each with a warm ~28GB target/ cache.
+# - coasys/marvin-light: every job that compiles no Rust. These jobs restore the stashed
+#   binaries (integration tests, CLI), run Node only (js-unit-tests, plugin) or only parse
+#   Rust (fmt). More runners, with small working dirs.
+# Only `build` gates the integration tests. clippy and rust-tests start after it and run
+# next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
 
 commands:
   fix_workdir:
@@ -134,8 +136,21 @@ commands:
           name: Build link-server
           command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
 
+  restore_rust_compile_inputs:
+    description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
+    steps:
+      - run:
+          name: Restore generated Rust compile inputs from build
+          command: |
+            set -eo pipefail
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
+            test -s "$src" || { echo "missing $src: rerun build"; exit 1; }
+            rm -rf dapp/dist
+            tar -xf "$src"
+
 jobs:
-  build-and-test:
+  build:
     machine: true
     resource_class: coasys/marvin
     steps:
@@ -149,7 +164,7 @@ jobs:
             find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
-          # Cargo.lock. Needed here (in build-and-test) because pnpm
+          # Cargo.lock. Needed here (in build) because pnpm
           # build-libs -> the bootstrap-languages build.sh files pack DNAs
           # with `hc`, and downstream integration tests spawn
           # `kitsune2-bootstrap-srv`. Both must match what the executor is
@@ -159,9 +174,6 @@ jobs:
           name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
           command: bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
-      - run:
-          name: cargo fmt --check
-          command: cargo fmt --check
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -183,15 +195,84 @@ jobs:
           command: pnpm run build-libs
           no_output_timeout: 30m
       - run:
-          name: cargo clippy
-          no_output_timeout: 30m
-          command: cargo clippy --all --exclude ad4m-launcher
-      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             mkdir -p "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             cp target/release/ad4m target/release/ad4m-executor "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
+      - run:
+          # clippy and rust-tests compile on other runners. These generated files are
+          # embedded by that compile (include_bytes!/include!/include_dir!) and are
+          # not in git.
+          name: Stash generated Rust compile inputs for clippy and rust-tests
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            tar -cf "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar" \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.bin \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
+              dapp/dist
+
+  clippy:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          name: cargo clippy
+          no_output_timeout: 30m
+          command: cargo clippy --all --exclude ad4m-launcher
+
+  fmt:
+    # rustfmt only parses the sources, so it needs no build and no warm target/.
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: cargo fmt --check
+          command: cargo fmt --check
+
+  rust-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          # Unit tests, the crate's integration tests and doc-tests; the same command as
+          # the crate's `pnpm test` script.
+          name: rust-executor tests
+          command: cd rust-executor && cargo test --release -- --test-threads=1
+          no_output_timeout: 30m
+      - run:
+          name: cli tests
+          command: cd cli && cargo test --release
+          no_output_timeout: 30m
+
+  js-unit-tests:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -202,8 +283,9 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
-          name: Root tests
-          command: pnpm test
+          # The root `pnpm test` minus the two cargo packages, which run in rust-tests.
+          name: JS unit tests
+          command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
 
   integration-tests-js:
@@ -377,23 +459,31 @@ workflows:
     when:
       not: << pipeline.parameters.run-nightly-llm >>
     jobs:
-      - build-and-test
+      - build
       - plugin-ad4m-tests
+      - js-unit-tests
+      - fmt
+      - clippy:
+          requires:
+            - build
+      - rust-tests:
+          requires:
+            - build
       - integration-tests-js:
           requires:
-            - build-and-test
+            - build
       - integration-tests-multi-user-simple:
           requires:
-            - build-and-test
+            - build
       - integration-tests-email-verification:
           requires:
-            - build-and-test
+            - build
       - integration-tests-mcp:
           requires:
-            - build-and-test
+            - build
       - integration-tests-model:
           requires:
-            - build-and-test
+            - build
 
   # Nightly against `dev`. Fired by a CircleCI *scheduled pipeline*
   # (visible under Project → Triggers), not by in-config cron.
