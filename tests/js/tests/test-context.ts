@@ -1,6 +1,6 @@
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { ChildProcess } from 'child_process';
-import { sleep } from "../utils/utils";
+import { pollUntil } from "../utils/utils";
 
 export class TestContext {
     #alice: Ad4mClient | undefined
@@ -52,51 +52,26 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-
-          await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-          await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
-          console.log(`Agent info exchange attempt ${attempt} successful`);
-          lastError = undefined;
-          break;
-        } catch (error) {
-          lastError = error;
-          console.log(`Agent info exchange attempt ${attempt} failed:`, error);
-          if (attempt < 5) {
-            await sleep(3000);
-          }
-        }
-      }
-      if (lastError) throw lastError;
+      await pollUntil(async () => {
+        const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+        const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+        await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
+        await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
+        console.log("Agent info exchange successful");
+        return true;
+      }, { timeoutMs: 15000, intervalMs: 3000, label: "agent info exchange (alice ↔ bob)" });
     }
 
     async makeAllThreeNodesKnown() {
-      let lastError: unknown;
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-          const jimAgentInfo = await this.#jim!.runtime.hcAgentInfos();
-
-          const allInfos = [...aliceAgentInfo, ...bobAgentInfo, ...jimAgentInfo];
-          await this.#alice!.runtime.hcAddAgentInfos([...bobAgentInfo, ...jimAgentInfo]);
-          await this.#bob!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...jimAgentInfo]);
-          await this.#jim!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...bobAgentInfo]);
-          console.log(`Three-node agent info exchange attempt ${attempt} successful`);
-          lastError = undefined;
-          break;
-        } catch (error) {
-          lastError = error;
-          console.log(`Three-node agent info exchange attempt ${attempt} failed:`, error);
-          if (attempt < 5) {
-            await sleep(3000);
-          }
-        }
-      }
-      if (lastError) throw lastError;
+      await pollUntil(async () => {
+        const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
+        const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
+        const jimAgentInfo = await this.#jim!.runtime.hcAgentInfos();
+        await this.#alice!.runtime.hcAddAgentInfos([...bobAgentInfo, ...jimAgentInfo]);
+        await this.#bob!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...jimAgentInfo]);
+        await this.#jim!.runtime.hcAddAgentInfos([...aliceAgentInfo, ...bobAgentInfo]);
+        console.log("Three-node agent info exchange successful");
+        return true;
+      }, { timeoutMs: 15000, intervalMs: 3000, label: "agent info exchange (alice ↔ bob ↔ jim)" });
     }
 }
