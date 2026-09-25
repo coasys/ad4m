@@ -22,6 +22,7 @@ import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
 import agentLanguageTests from "./agent-language";
+import languageTests from "./language";
 import shaclRpcTests from "./shacl-rpc";
 
 // Both link-language hashes are required — prepare-test must publish both.
@@ -170,6 +171,7 @@ describe("Integration tests", function () {
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
+        describe('Language', languageTests(testContext))
         // Same neighbourhood suite, run once per link-language flavour. The
         // getter closes over the outer `serverLinkConfig` so it picks up the
         // real value after the outer before() runs.
