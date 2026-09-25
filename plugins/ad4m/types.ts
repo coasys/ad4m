@@ -11,22 +11,25 @@ export interface McpTool {
   inputSchema?: Record<string, any>;
 }
 
-// WakerSubscription is defined in wakerSubscriptionManager.ts (kept import-free for testability)
+// WakerSubscription comes from core via ./wakerSubscriptionManager (a pure re-export).
 export type { WakerSubscription } from "./wakerSubscriptionManager";
 
 export interface PluginConfig {
   mode?: "managed" | "external";
   mcpEndpoint?: string;
+  /** Opt in to sending credentials to a non-loopback plaintext http:// mcpEndpoint. */
+  allowInsecureHttp?: boolean;
   /** Auth token — JWT in external mode, admin credential in managed mode (internal). */
   token?: string;
   agentPassphrase?: string;
   ad4mBinaryPath?: string;
-  toolRefreshIntervalMs?: number;
   wakerEnabled?: boolean;
   executorUrl?: string;
   wakeUrl?: string;
   wakeToken?: string;
   debounceMs?: number;
+  /** How long (ms) the executor gets to answer a waker subscribe handshake before the subscription is queued for re-attempt instead of hanging the tool call (default 15000). */
+  subscribeTimeoutMs?: number;
   /** RUST_LOG value for the ad4m-executor process (e.g. "holochain=debug,kitsune=trace"). Only applies when the plugin spawns the executor (managed mode). */
   rustLog?: string;
   /** Where to send executor logs: "file" (default) = ~/.ad4m/ad4m.log only, "openclaw" = openclaw logs only, "both" = both. */

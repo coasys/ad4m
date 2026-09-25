@@ -3,7 +3,7 @@ use super::core::{
     ExpressionProof, Link, ModelType, Notification, TriggeredNotification,
 };
 use crate::agent::capabilities::{AuthInfo, Capability};
-use crate::agent::signatures::verify;
+use crate::agent::signatures::verify_or_false;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -493,7 +493,10 @@ impl PerspectiveExpression {
             timestamp: self.timestamp.clone(),
         };
 
-        let valid = verify(&perspective_expression).unwrap_or(false);
+        let valid = verify_or_false(
+            &perspective_expression,
+            "PerspectiveExpression::verify_signatures",
+        );
 
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
@@ -819,6 +822,9 @@ pub struct ModelApiInput {
     pub api_key: String,
     pub model: String,
     pub api_type: String,
+    /// Optional ceiling for the provider's context window, in tokens.
+    /// See [`crate::types::ModelApi::max_num_ctx`].
+    pub max_num_ctx: Option<u32>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]

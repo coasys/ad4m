@@ -61,6 +61,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
@@ -216,6 +217,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()

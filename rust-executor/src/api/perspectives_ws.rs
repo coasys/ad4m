@@ -23,16 +23,93 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
 // ── Helpers ──
 
-fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
-    get_perspective(uuid)
-        .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))
+/// Async wrapper: `rehydrate_perspective_from_backend` calls
+/// `DbBackend::get`, which is a blocking `reqwest::blocking` HTTP call on
+/// `SharedDb`. Running it directly on the async request thread stalls the
+/// tokio runtime for the whole RPC round-trip. Wrap it in
+/// `spawn_blocking` so only a blocking-pool worker waits on the network.
+async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
+    if let Some(p) = get_perspective(uuid) {
+        return Ok(p);
+    }
+
+    // Shared-backend fallback: try to rehydrate perspective from the platform DB
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let uuid_owned = uuid.to_string();
+        let rehydrated =
+            tokio::task::spawn_blocking(move || rehydrate_perspective_from_backend(&uuid_owned))
+                .await
+                .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+        if let Ok(Some(perspective)) = rehydrated {
+            return Ok(perspective);
+        }
+    }
+
+    Err(WsRpcError::not_found(format!(
+        "Perspective {} not found",
+        uuid
+    )))
+}
+
+/// Fetch perspective metadata from the shared backend, create it locally, and populate links.
+fn rehydrate_perspective_from_backend(uuid: &str) -> Result<Option<PerspectiveInstance>, String> {
+    let backend = crate::db_backend::db_backend();
+
+    // Fetch perspective metadata
+    let meta = backend
+        .get("shared:platform", "perspectives", uuid)
+        .map_err(|e| format!("Shared-backend perspective lookup failed: {}", e))?;
+
+    let meta = match meta {
+        Some(m) => m,
+        None => return Ok(None),
+    };
+
+    let name = meta
+        .get("name")
+        .and_then(|n| n.as_str())
+        .map(|s| s.to_string());
+    let owners: Option<Vec<String>> = meta
+        .get("owners")
+        .and_then(|o| serde_json::from_value(o.clone()).ok());
+
+    // Build PerspectiveHandle with the stored UUID (not a new one)
+    let handle = PerspectiveHandle {
+        uuid: uuid.to_string(),
+        name,
+        neighbourhood: None,
+        shared_url: None,
+        state: PerspectiveState::Synced,
+        owners,
+    };
+
+    // Store in local DB
+    Ad4mDb::global_instance()
+        .lock()
+        .expect("Couldn't get write lock on Ad4mDb")
+        .as_ref()
+        .expect("Ad4mDb not initialized")
+        .add_perspective(&handle)
+        .map_err(|e| e.to_string())?;
+
+    // Create the PerspectiveInstance
+    let p = PerspectiveInstance::new(handle.clone(), None);
+
+    // Register in the global PERSPECTIVES map
+    crate::perspectives::register_perspective(uuid.to_string(), p.clone());
+
+    // Start background tasks
+    tokio::task::spawn(p.clone().start_background_tasks());
+
+    Ok(Some(p))
 }
 
 async fn get_perspective_with_access(
     uuid: &str,
     ctx: &RequestContext,
 ) -> Result<PerspectiveInstance, WsRpcError> {
-    let perspective = get_perspective_or_404(uuid)?;
+    let perspective = get_perspective_or_404(uuid).await?;
 
     if !ctx.is_admin_credential {
         let handle = perspective.persisted.lock().await.clone();
@@ -140,6 +217,31 @@ async fn list_perspectives(_params: Value, ctx: Arc<RequestContext>) -> Result<V
         &perspective_query_capability(vec![WILD_CARD.to_string()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+
+    // In shared mode, rehydrate any backend perspectives not yet loaded
+    // locally. Both `DbBackend::list` (network) and
+    // `rehydrate_perspective_from_backend` (network + DB writes) are
+    // synchronous blocking calls; running them on the async request
+    // thread stalls the tokio runtime while a slow platform Worker
+    // responds. Wrap the whole scan in `spawn_blocking`.
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        tokio::task::spawn_blocking(|| {
+            let backend = crate::db_backend::db_backend();
+            if let Ok(remote_perspectives) = backend.list("shared:platform", "perspectives") {
+                for meta in remote_perspectives {
+                    if let Some(uuid) = meta.get("uuid").and_then(|u| u.as_str()) {
+                        // Only rehydrate if not already loaded
+                        if crate::perspectives::get_perspective(uuid).is_none() {
+                            let _ = rehydrate_perspective_from_backend(uuid);
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|e| WsRpcError::internal(format!("rehydrate task join: {}", e)))?;
+    }
 
     let all: Vec<PerspectiveInstance> = crate::perspectives::all_perspectives();
 
@@ -1572,11 +1674,17 @@ async fn run_interpretation_with_harness_handler(
             // the caller that passes `true`.
             false,
             credit_gate,
+            // Direct WS runs default to all flows on the perspective; a
+            // `flows` request field can narrow this later (per-run flow
+            // targeting, Nico 2026-09-04 — processor configs already have it).
+            None,
         ),
     )
     .await
     {
-        Ok(Ok(bases)) => bases,
+        // Wire contract stays a bare array of base URIs; the outcome's
+        // flow-proposal URIs are not surfaced over WS-RPC yet.
+        Ok(Ok(outcome)) => outcome.bases,
         Ok(Err(e)) => return Err(WsRpcError::internal(e.to_string())),
         Err(_) => {
             log::warn!(
@@ -1767,6 +1875,7 @@ async fn add_auto_processor_handler(
         source_scope_query: body.source_scope_query,
         base_prefix: body.base_prefix,
         interpretation_classes: body.interpretation_classes,
+        flows: body.flows.unwrap_or_default(),
         debounce_ms: body.debounce_ms,
         batch_min: body.batch_min.unwrap_or(1),
         batch_max: body.batch_max,
@@ -1912,6 +2021,200 @@ async fn interpretation_overlays_handler(
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(overlays)?)
+}
+
+// ── Flow consensus accept / reject ──
+
+async fn accept_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let fired = crate::perspectives::flow_instance::accept::accept_flow_proposal(
+        &mut perspective,
+        &proposal_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(fired)?)
+}
+
+async fn reject_flow_proposal_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let proposal_uri = params.require_str("proposalUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let retracted = crate::perspectives::flow_instance::accept::reject_flow_proposal(
+        &mut perspective,
+        &proposal_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // How many of OUR links went, not a bare `true`: withdrawing one vote and
+    // retracting a proposal we opened are different events on the same call.
+    Ok(serde_json::json!({ "retractedLinks": retracted }))
+}
+
+async fn propose_flow_transition_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let instance_uri = params.require_str("instanceUri")?;
+    let to_state = params.require_str("toState")?;
+    let rationale = params
+        .get("rationale")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    // The run's outputs, named by the caller for a proposal into a terminal
+    // state as `{ className, id }` pairs (#1104). Absent means none; anything
+    // else that is not an array of such pairs is refused rather than read as
+    // none.
+    let outputs: Vec<crate::perspectives::flow_instance::atom::OutputRef> =
+        match params.get("outputs") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!(
+                    "`outputs` must be an array of {{ className, id }} objects: {e}"
+                ))
+            })?,
+        };
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    // A `ProposeOutcome`, not a bare outcome list: an empty list cannot say
+    // whether the click queued a live proposal, re-pressed one this agent had
+    // already voted on, or landed on a stalled instance — and those want
+    // different UI. See `flow_instance::propose`.
+    let outcome = crate::perspectives::flow_instance::propose::propose_flow_transition(
+        &mut perspective,
+        &instance_uri,
+        &to_state,
+        &outputs,
+        rationale.as_deref(),
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(outcome)?)
+}
+
+async fn verify_flow_receipt_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    // The receipt travels as its stored JSON body. Anything that does not
+    // parse as one is a bad request, not an "unverified receipt" — the
+    // three-kind verdict is reserved for material that could be examined.
+    let receipt: crate::perspectives::flow_instance::receipt::FlowReceipt =
+        match params.get("receipt") {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
+                WsRpcError::bad_request(format!("`receipt` does not parse as a FlowReceipt: {e}"))
+            })?,
+            None => return Err(WsRpcError::bad_request("`receipt` is required".to_string())),
+        };
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let verdict =
+        crate::perspectives::flow_instance::produced::verify_flow_receipt(&perspective, &receipt)
+            .await
+            .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(crate::perspectives::flow_instance::produced::verdict_wire(
+        &verdict,
+    ))
+}
+
+/// The optional `state` param of `perspective.flowValidOutputs`: absent or
+/// `null` is "any terminal state", a string names one. Any other value is a
+/// bad request — read as `None` it would answer a wider question than the
+/// caller asked, and the `producedByFlow` filter refuses the same input.
+pub(crate) fn flow_valid_outputs_state(params: &Value) -> Result<Option<String>, WsRpcError> {
+    match params.get("state") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(WsRpcError::bad_request(format!(
+            "`state` must be a terminal-state name (a string), got {other}"
+        ))),
+    }
+}
+
+async fn flow_valid_outputs_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let flow = params.require_str("flow")?;
+    let state = flow_valid_outputs_state(&params)?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let outputs = crate::perspectives::flow_instance::produced::flow_valid_outputs(
+        &perspective,
+        &flow,
+        state.as_deref(),
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::to_value(outputs)?)
+}
+
+async fn mint_flow_receipt_handler(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    let instance_uri = params.require_str("instanceUri")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let receipt = crate::perspectives::flow_instance::produced::mint_flow_receipt(
+        &mut perspective,
+        &instance_uri,
+        &agent_context,
+    )
+    .await
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    let uri = receipt
+        .uri()
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    Ok(serde_json::json!({
+        "receiptUri": uri,
+        "receipt": serde_json::to_value(&receipt)?,
+    }))
 }
 
 // ── SHACL resolution endpoints ──
@@ -2327,6 +2630,21 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.interpretationOverlays",
         interpretation_overlays_handler,
     );
+    map.register(
+        "perspective.acceptFlowProposal",
+        accept_flow_proposal_handler,
+    );
+    map.register(
+        "perspective.rejectFlowProposal",
+        reject_flow_proposal_handler,
+    );
+    map.register(
+        "perspective.proposeFlowTransition",
+        propose_flow_transition_handler,
+    );
+    map.register("perspective.verifyFlowReceipt", verify_flow_receipt_handler);
+    map.register("perspective.flowValidOutputs", flow_valid_outputs_handler);
+    map.register("perspective.mintFlowReceipt", mint_flow_receipt_handler);
     map.register("perspective.getShaclNames", get_shacl_names);
     map.register("perspective.getShaclTargetClass", get_shacl_target_class);
     map.register("perspective.getShacl", get_shacl);

@@ -296,7 +296,7 @@ Given a channel `C` in a neighborhood, whose graph scope reaches flow instances 
               └───────────┬─────────────┘
                           │
                           ▼
-                (GraphQL subscriptions)
+                (WS-RPC subscriptions)
                  UI, other flows, bots
 ```
 

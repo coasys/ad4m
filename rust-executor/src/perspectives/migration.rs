@@ -12,7 +12,7 @@
 /// 3. Remove migration calls from perspective initialization
 /// 4. Optionally remove migration-tracking methods from db.rs
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression};
+use crate::types::LinkExpression;
 
 /// Result of a migration operation.
 #[derive(Debug, Clone)]
@@ -45,7 +45,7 @@ pub fn convert_literal_uri(uri: &str) -> (String, bool) {
 /// Convert all `literal://` URIs in a link's source, predicate, and target fields.
 ///
 /// Modifies the link in place and returns the number of fields converted.
-pub fn convert_link_literal_uris(link: &mut DecoratedLinkExpression) -> usize {
+pub fn convert_link_literal_uris(link: &mut LinkExpression) -> usize {
     let mut conversions = 0;
 
     let (new_source, changed) = convert_literal_uri(&link.data.source);
@@ -134,25 +134,16 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     let mut total_literal_conversions = 0;
 
     for (link_expr, status) in &links {
-        let mut decorated_link = DecoratedLinkExpression {
-            author: link_expr.author.clone(),
-            timestamp: link_expr.timestamp.clone(),
-            data: link_expr.data.clone(),
-            proof: DecoratedExpressionProof {
-                key: link_expr.proof.key.clone(),
-                signature: link_expr.proof.signature.clone(),
-                valid: None,
-                invalid: None,
+        let mut link_expr = link_expr.clone();
+        link_expr.status = Some(status.clone());
 
-                ..Default::default()
-            },
-            status: Some(status.clone()),
-        };
+        // Convert literal:// → literal: in all URI fields. Operates on
+        // `LinkExpression` because that is what `add_link` takes; wrapping a
+        // decorated read-view just to convert URIs and convert back was a
+        // no-op besides the clone.
+        total_literal_conversions += convert_link_literal_uris(&mut link_expr);
 
-        // Convert literal:// → literal: in all URI fields
-        total_literal_conversions += convert_link_literal_uris(&mut decorated_link);
-
-        match sparql_store.add_link(&decorated_link) {
+        match sparql_store.add_link(&link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -303,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_source_and_target() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -311,12 +302,9 @@ mod tests {
                 predicate: Some("ad4m://has_child".to_string()),
                 target: "literal://string:target_val".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "key".to_string(),
                 signature: "sig".to_string(),
-                valid: None,
-                invalid: None,
-
                 ..Default::default()
             },
             status: None,
@@ -331,7 +319,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_all_three() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -339,12 +327,9 @@ mod tests {
                 predicate: Some("literal://string:p".to_string()),
                 target: "literal://string:t".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
-
                 ..Default::default()
             },
             status: None,
@@ -359,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_none_needed() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -367,12 +352,9 @@ mod tests {
                 predicate: Some("flux://has_channel".to_string()),
                 target: "literal:string:already_canonical".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
-
                 ..Default::default()
             },
             status: None,
@@ -387,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_convert_link_literal_uris_none_predicate() {
-        let mut link = DecoratedLinkExpression {
+        let mut link = LinkExpression {
             author: "did:test:alice".to_string(),
             timestamp: Utc::now().to_rfc3339(),
             data: Link {
@@ -395,12 +377,9 @@ mod tests {
                 predicate: None,
                 target: "literal://json:%7B%7D".to_string(),
             },
-            proof: DecoratedExpressionProof {
+            proof: ExpressionProof {
                 key: "k".to_string(),
                 signature: "s".to_string(),
-                valid: None,
-                invalid: None,
-
                 ..Default::default()
             },
             status: None,
