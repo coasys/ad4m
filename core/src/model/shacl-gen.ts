@@ -124,6 +124,18 @@ export function buildSHACL(
 
         if (!propMeta.through) continue; // Skip properties without predicates
 
+        // `@BelongsToOne`/`@BelongsToMany` register in both maps: the relation
+        // registry describes the edge, and `applyPropertyMetadata` marks the
+        // accessor read-only so the non-owning side gets no setter. Both loops
+        // then emitted a shape for it, so an inverse relation appeared twice in
+        // the generated SHACL — once thinly, from here, and once with its target
+        // class, polymorphism and ordering, from the relation loop below.
+        //
+        // The relation loop is the complete description, so this one stands
+        // aside. Skipping by presence in the relation map rather than by kind
+        // keeps it right for any future decorator that registers in both.
+        if (allRelationsMeta[propName]) continue;
+
         const propShape: SHACLPropertyShape = {
             name: propName,
             path: propMeta.through,
@@ -469,6 +481,26 @@ export function buildSHACL(
         }
 
         shape.addProperty(relShape);
+    }
+
+    // ── Ordering links ─────────────────────────────────────────────────
+    // Ordering entries are stored on the *parent*, under one shared predicate,
+    // so that reconstruction needs no extra query: they arrive with the
+    // instance's own links. That only works if the instance query asks for them,
+    // and it builds its predicate filter from the shape's declared paths — so a
+    // class owning any ordered collection has to declare the predicate, or the
+    // very links the ordering depends on are filtered out of the read that needs
+    // them.
+    //
+    // One entry covers every ordered relation on the class; each entry names the
+    // relation it belongs to.
+    const hasOrderedRelation = Object.values(allRelationsMeta).some((m) => m.ordering);
+    if (hasOrderedRelation) {
+        shape.addProperty({
+            name: '_collectionOrder',
+            path: 'ad4m://collection_order',
+            nodeKind: 'IRI',
+        });
     }
 
     // Always set constructor and destructor actions on the shape, even

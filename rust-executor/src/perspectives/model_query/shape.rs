@@ -249,8 +249,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // expressed through the absence of a setter action; just keep
         // the flag available on ShapeProperty for downstream consumers.
         let _ = writable;
-        let _ = local;
         let _ = filter_enabled;
+
+        // `ad4m://local` marks a property whose links are written with
+        // `LinkStatus::Local` (executor-private, never gossiped). Absent or
+        // `false` means shared, which is the default for every property.
+        let is_local = local.unwrap_or(false);
 
         if is_relation {
             // Relations participate in the standard ShapeProperty list so
@@ -274,6 +278,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 interpretation_hint: interpretation_hint.clone(),
                 identity,
                 ordering: ordering.clone(),
+                local: is_local,
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -316,6 +321,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 interpretation_hint,
                 identity,
                 ordering: ordering.clone(),
+                local: is_local,
             });
         }
     }
@@ -593,6 +599,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 interpretation_hint: None,
                 identity: false,
                 ordering: None,
+                local: prop_meta["local"].as_bool().unwrap_or(false),
             });
         }
     }
@@ -644,6 +651,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 interpretation_hint: None,
                 identity: false,
                 ordering: ordering.clone(),
+                local: rel_meta["local"].as_bool().unwrap_or(false),
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {

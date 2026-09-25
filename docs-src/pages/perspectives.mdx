@@ -257,5 +257,14 @@ What you get back will be an array of [LinkExpressions](/jsdoc/classes/LinkExpre
 ]
 ```
 
+Each link comes back with the exact `target` it was signed over. The store
+indexes `literal:string:`, `literal:number:`, `literal:boolean:` and
+`literal:json:` targets as typed values, so a query finds a value however it
+was percent-encoded, but `get()` still returns the target as written, including
+literals not built with `Literal.from(value).toUrl()` (for example
+`literal:string:Hello world` with a raw space). That keeps the `proof` valid
+when a read-back link is passed on, for example when the Perspective is later
+published as a Neighbourhood.
+
 Even though this Perspective is not shared (yet) but just our private, local
 graph database, we might want to share it as [Neighbourhood](/neighbourhoods).

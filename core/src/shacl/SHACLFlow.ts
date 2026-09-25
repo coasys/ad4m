@@ -45,8 +45,8 @@ export type PropertyCondition =
  *
  * See design doc §3 principle 2 ("Guards talk about models, not raw graph")
  * and §4.1 for the full field spec. Template variables allowed inside
- * `where` string values: `$flow.base`, `$flow.uri`, `$did` — the engine
- * substitutes at evaluation time.
+ * `where` string values: `$flow.base`, `$flow.uri` (alias:
+ * `$flow.instance`), `$did` — the engine substitutes at evaluation time.
  */
 export interface ModelQuery {
   /** Subject-class URI to search for. */
@@ -62,9 +62,19 @@ export interface ModelQuery {
    */
   count?: { min?: number; max?: number };
   /**
-   * How the matched instance connects back to the flow — `"flow"` /
-   * `"base"` for the two canonical anchors; the object form names a
-   * predicate `via` and one of the two anchors as `to`.
+   * Scope the query to instances linked from a flow anchor. The anchor
+   * (base subject or flow instance URI) is the **source** of the link and
+   * the matched item is the **target**: `linkedTo: "base"` finds items
+   * where the base subject links TO them via the default predicate
+   * `ad4m://has_child`.
+   *
+   * `"base"` / `"flow"` use `ad4m://has_child`; the object form
+   * `{ via, to }` names a custom predicate (e.g.
+   * `{ via: "ns://about", to: "flow" }`).
+   *
+   * For the reverse direction (matched instance → anchor), use
+   * `where: { about: "$flow.base" }` instead — `linkedTo` cannot
+   * express that direction.
    */
   linkedTo?: "flow" | "base" | { via: string; to: "flow" | "base" };
   /**
@@ -84,9 +94,14 @@ export interface ModelQuery {
   /**
    * OR-compose a role expression across multiple ModelQueries. Semantics:
    * a DID counts if it appears in the result of ANY branch (design §7.3
-   * multi-role hybrid example — "either reviewer OR admin"). Each branch
-   * is a full ModelQuery, so branches can each carry their own
-   * `didProperty` / `where` / `linkedTo`.
+   * multi-role hybrid example — "either reviewer OR admin"). Branches
+   * can carry their own `didProperty` / `where`, but NOT `linkedTo`
+   * (which must be on the outer query — `linkedTo` on a branch is
+   * rejected at translation time).
+   *
+   * Every branch must use the same `className` as the outer query and
+   * cannot declare its own `count` — the outer query's class and
+   * cardinality apply to the combined result set.
    *
    * A ModelQuery with a non-empty `or` array acts as a composition node;
    * its own `className` / `where` etc. still count as an additional
@@ -97,6 +112,50 @@ export interface ModelQuery {
    * §7.4). Ignored when the query is used as a state guard or context.
    */
   or?: ModelQuery[];
+  /**
+   * When this query is used as a `ConsensusRule.fromRole`, require each
+   * matched instance to be a valid output of a completed run of another
+   * flow, and date the grant from that run's quorum instead of from an
+   * assignment link.
+   *
+   * The same name and the same check as the model-query filter
+   * `where: { producedByFlow }`: a receipt filed under `flow`'s index must
+   * verify against this replica's own flow definitions, be for `flow`, have
+   * settled into `state`, and name this instance (as this query's
+   * `className`) among its outputs. Each replica checks this against its
+   * own graph; the read-set carries only the resulting grant date.
+   *
+   * Two things to know before configuring one:
+   * - An instance no verified receipt produced is simply not a member.
+   *   There is no fallback to the assignment link — if there were, writing
+   *   that link would grant the role and this gate would be decorative.
+   * - **A granted role is not un-granted by undoing the flow.** Retracting
+   *   a settling vote moves the live flow back; the receipt keeps
+   *   verifying. The only un-grant is a new signed
+   *   `ad4m://flow/role_grant_revoked` tombstone on the instance, from an
+   *   author this query's own `where.author` accepts — so a query with no
+   *   author condition can be revoked by anyone, and one naming an author
+   *   who is not around cannot be revoked at all.
+   *
+   * Ignored when the query is used as a state guard (`requires`) or
+   * background `context`.
+   */
+  producedByFlow?: ProducedByFlow;
+}
+
+/**
+ * The granting-flow reference on a `fromRole` query's `producedByFlow`.
+ *
+ * The same shape as the model-query filter's `{ flow, state? }`, except
+ * that `state` is required here: without it, a run that settled into a
+ * flow's `rejected` state would grant what its `approved` state was meant
+ * to.
+ */
+export interface ProducedByFlow {
+  /** The granting flow's URI — `{namespace}{name}Flow`. */
+  flow: string;
+  /** The state that run must have settled into. */
+  state: string;
 }
 
 /**

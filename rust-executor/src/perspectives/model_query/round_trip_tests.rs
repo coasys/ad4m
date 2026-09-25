@@ -11,31 +11,23 @@
 
 use super::shape::load_shape;
 use super::types::ModelShape;
+use crate::agent::signatures::TestSigner;
 use crate::perspectives::shacl_parser::parse_shacl_to_links;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{Link, LinkExpression};
 
-fn make_link_for_round_trip(link: Link) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
-        author: "did:key:test_writer".to_string(),
-        timestamp: "1700000000000".to_string(),
-        data: link,
-        proof: DecoratedExpressionProof {
-            key: "k".to_string(),
-            signature: "s".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
-
-            ..Default::default()
-        },
-        status: None,
-    }
+fn make_link_for_round_trip(signer: &TestSigner, link: Link) -> LinkExpression {
+    let mut le = LinkExpression::from(signer.sign(link));
+    // The store refuses status-less inserts.
+    le.status = Some(crate::types::LinkStatus::Shared);
+    le
 }
 
 /// Helper: parse the SHACL JSON, fan it out into links, ingest those links
 /// into a fresh in-memory store, then ask the loader to rebuild a shape.
 fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
     let links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
     // The shape <ad4m://shape> URI link is normally emitted by add_sdna_inner;
     // synthesize the SubjectClass-pointing-at-shape pair load_shape relies on.
@@ -55,7 +47,9 @@ fn round_trip(class_name: &str, shacl_json: &str) -> ModelShape {
     ];
     all_links.extend(links);
     for link in all_links {
-        store.add_link(&make_link_for_round_trip(link)).unwrap();
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
     }
     load_shape(&store, class_name).expect("load shape")
 }
@@ -191,12 +185,16 @@ fn round_trip_preserves_relation_kind_and_target() {
 
 #[test]
 fn round_trip_scalar_relation_is_rendered_scalar() {
+    // Named `writer`, not `author`: `author` collides with the hydration
+    // metadata field of the same name (#974) and parse_shacl_to_links now
+    // rejects it — this test is about scalar-relation rendering, not that
+    // guard, so it uses a name the guard doesn't touch.
     let shacl_json = r#"{
         "target_class": "ns://Post",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "hasOne",
                 "max_count": 1,
@@ -208,8 +206,8 @@ fn round_trip_scalar_relation_is_rendered_scalar() {
     let prop = shape
         .properties
         .iter()
-        .find(|p| p.name == "author")
-        .expect("author");
+        .find(|p| p.name == "writer")
+        .expect("writer");
     // Scalar relations stay `is_collection: true` so the hydration pipeline
     // accumulates link targets; the renderer uses `is_scalar_relation` to
     // unwrap the array down to a single value.
@@ -219,12 +217,13 @@ fn round_trip_scalar_relation_is_rendered_scalar() {
 
 #[test]
 fn round_trip_belongs_to_relation_is_reverse() {
+    // `writer`, not `author` — see the note on round_trip_scalar_relation_is_rendered_scalar.
     let shacl_json = r#"{
         "target_class": "ns://Comment",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "belongsToOne",
                 "target_class_name": "User"
@@ -235,8 +234,8 @@ fn round_trip_belongs_to_relation_is_reverse() {
     let prop = shape
         .properties
         .iter()
-        .find(|p| p.name == "author")
-        .expect("author");
+        .find(|p| p.name == "writer")
+        .expect("writer");
     assert_eq!(prop.direction.as_deref(), Some("reverse"));
     assert!(prop.is_scalar_relation);
 }
@@ -327,12 +326,13 @@ fn round_trip_picks_up_max_count_for_relations() {
 
 #[test]
 fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
+    // `writer`, not `author` — see the note on round_trip_scalar_relation_is_rendered_scalar.
     let shacl_json = r#"{
         "target_class": "ns://Post",
         "properties": [
             {
-                "path": "ns://author",
-                "name": "author",
+                "path": "ns://writer",
+                "name": "writer",
                 "node_kind": "IRI",
                 "relation_kind": "hasOne",
                 "class": "ns://UserShape"
@@ -343,8 +343,8 @@ fn round_trip_target_class_name_falls_back_to_sh_class_suffix() {
     let rel = shape
         .include_relations
         .iter()
-        .find(|r| r.name == "author")
-        .expect("author relation");
+        .find(|r| r.name == "writer")
+        .expect("writer relation");
     // Without an explicit target_class_name link the loader falls back to
     // extracting the local-name from the sh:class URI.  A trailing `Shape`
     // suffix is normalised away so the cache/resolver lookup uses the bare
@@ -611,6 +611,7 @@ async fn e2e_shacl_shape_with_where_ops() {
     let class_name = "TestPost";
     let target_class_uri = "ns://TestPost";
     let shape_uri = "ns://TestPostShape";
+    let signer = TestSigner::generate();
 
     let shacl_links = parse_shacl_to_links(shacl_json, class_name).expect("parse SHACL");
     let mut all_links = vec![
@@ -627,7 +628,9 @@ async fn e2e_shacl_shape_with_where_ops() {
     ];
     all_links.extend(shacl_links);
     for link in all_links {
-        store.add_link(&make_link_for_round_trip(link)).unwrap();
+        store
+            .add_link(&make_link_for_round_trip(&signer, link))
+            .unwrap();
     }
 
     let shape = load_shape(&store, class_name).expect("load shape");
@@ -652,24 +655,30 @@ async fn e2e_shacl_shape_with_where_ops() {
 
     for (i, item) in items.iter().enumerate() {
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://post_type".to_string()),
-                target: "test://post".to_string(),
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://post_type".to_string()),
+                    target: "test://post".to_string(),
+                },
+            ))
             .unwrap();
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://title".to_string()),
-                target: format!(
-                    "literal:string:{}",
-                    percent_encoding::utf8_percent_encode(
-                        titles[i],
-                        percent_encoding::NON_ALPHANUMERIC
-                    )
-                ),
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://title".to_string()),
+                    target: format!(
+                        "literal:string:{}",
+                        percent_encoding::utf8_percent_encode(
+                            titles[i],
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    ),
+                },
+            ))
             .unwrap();
         let count_target = if counts[i].fract() == 0.0 {
             format!("literal:number:{}", counts[i] as i64)
@@ -677,11 +686,14 @@ async fn e2e_shacl_shape_with_where_ops() {
             format!("literal:number:{}", counts[i])
         };
         store
-            .add_link(&make_link_for_round_trip(Link {
-                source: item.to_string(),
-                predicate: Some("test://view_count".to_string()),
-                target: count_target,
-            }))
+            .add_link(&make_link_for_round_trip(
+                &signer,
+                Link {
+                    source: item.to_string(),
+                    predicate: Some("test://view_count".to_string()),
+                    target: count_target,
+                },
+            ))
             .unwrap();
     }
 
