@@ -328,7 +328,7 @@ pub(super) fn link_author_join(
         .map(|cond| author_expr(&author, cond))
         .collect::<Option<Vec<_>>>()
         .ok_or(())?;
-    let checks = guard.on_reifier(&reifier, &format!("<{predicate}>"));
+    let checks = guard.on_reifier(&reifier);
     let checks = if checks.is_empty() {
         String::new()
     } else {
@@ -383,7 +383,7 @@ pub(super) fn instance_author_filter(
         lines.push(format!("FILTER(isIRI({p}))"));
         lines.push(format!("{r} <{ONT_AUTHOR}> ?_ia{tag}a{n} ."));
         lines.push(format!("{r} <{ONT_TIMESTAMP}> ?_ia{tag}t{n} ."));
-        let checks = guard.on_reifier(&r, &p);
+        let checks = guard.on_reifier(&r);
         if !checks.is_empty() {
             lines.push(checks.trim_start().to_string());
         }

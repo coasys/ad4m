@@ -716,8 +716,7 @@ pub(super) async fn execute_model_query_inner(
                     // Phase 1 pages over conformance, which the guard already
                     // scopes to the viewer; the rows themselves are filtered
                     // here the same way the single plan filters them.
-                    let viewer =
-                        viewer_author_filter(viewer_did, "_reifier", "author", "predicate");
+                    let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}

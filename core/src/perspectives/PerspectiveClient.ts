@@ -403,14 +403,6 @@ export class PerspectiveClient {
         )
     }
 
-    /** Start a flow instance on `baseExpression`. The executor mints it and
-     *  writes the initial state; resolves to the new instance's URI. */
-    async startFlowInstance(uuid: string, flowUri: string, baseExpression: string): Promise<string> {
-        return this.#apiClient.call<string>(
-            'perspective.startFlowInstance', { uuid, flowUri, baseExpression },
-        )
-    }
-
     async proposeFlowTransition(
         uuid: string,
         instanceUri: string,

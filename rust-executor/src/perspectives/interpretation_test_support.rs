@@ -1132,27 +1132,3 @@ pub(crate) async fn seed_flow(
             .expect("add_link(flow definition)");
     }
 }
-
-/// Store `link` as if it had arrived from a peer through the link language.
-///
-/// Peer links do not pass through the user-facing write methods, so they are
-/// not subject to the engine-reserved predicate guard
-/// (`link_visibility::ensure_not_engine_reserved`). Tests that simulate a
-/// peer's write on such a predicate go through here instead of `add_link`.
-/// Unlike the real inbound path, no flow pass is scheduled.
-pub(crate) async fn store_as_peer_link(
-    perspective: &PerspectiveInstance,
-    link: crate::types::LinkExpression,
-    status: crate::types::LinkStatus,
-) {
-    let mut link = link;
-    link.status = Some(status);
-    let diff = crate::types::PerspectiveDiff {
-        additions: vec![link],
-        removals: vec![],
-    };
-    perspective
-        .persist_link_diff(&diff)
-        .await
-        .expect("persist a peer's link");
-}

@@ -415,8 +415,6 @@ const availableFlows = await perspective.availableFlows("task://sprint-3/T-42");
 
 // Mint a fresh FlowInstance in the flow's initial state (states[0] — the
 // lowest-valued state). Takes the flow *name*; the shape is loaded for you.
-// The executor writes the instance and its initial state
-// (`perspective.startFlowInstance(flowUri, subject)` underneath).
 const instance = await FlowInstance.start(
   perspective,
   "Delivery",
@@ -429,9 +427,10 @@ const instance = await FlowInstance.start(
 const instances = await FlowInstance.findAll(perspective, "Delivery");
 
 // Where is it now? `currentState` resolves to the FlowState on the shape,
-// so the interpretationHint the LLM sees is right there. The executor's flow
-// engine maintains this value (`ad4m://flow/current_state`); clients cannot
-// write that predicate, and a direct `add` / `update` of it is refused.
+// so the interpretationHint the LLM sees is right there. The value is the
+// engine's cache (`ad4m://flow/current_state`), a local link of your own:
+// every read of FlowInstance rows derives the state for the reading user
+// and refreshes that user's cache first.
 console.log(instance.currentStateName);            // "Identified"
 console.log(instance.currentState.interpretationHint);
 

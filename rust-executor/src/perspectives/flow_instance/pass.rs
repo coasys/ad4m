@@ -34,8 +34,9 @@
 //!   already recorded this consensus event?" test (so [`FireOutcome`]s are
 //!   emitted once per event per replica). Never an input to the fold.
 //!
-//! Both are written **`Local`** (#987): every replica materialises only its
-//! own derivation. Shared, they were a claim a UI would display unverified,
+//! Both are written **`Local`** (#987): every replica — and, on a multi-user
+//! host, every user, since a Local link is private to its author (#1024) —
+//! materialises only its own derivation. Shared, they were a claim a UI would display unverified,
 //! a value two replicas with different partial views would overwrite in each
 //! other, and — for marks — a way for a forged link to mute another
 //! replica's once-only [`FireOutcome`]. Local, they are exactly what they
@@ -46,15 +47,24 @@
 //! Because the marks are per replica, a replica that joins a flow with
 //! history would, on its first pass, find every settled edge unmarked and
 //! report each one as new. It must not: those events happened before this
-//! replica was watching. So the **first** pass this replica runs over an
-//! instance — no `Local` cache and no `Local` mark on it yet, i.e. never
-//! derived here — is a silent catch-up: it marks what has settled and
-//! writes the cache, and emits nothing. From then on the instance *has* a
-//! local cache, so every later pass reports normally. The invariant: **no
-//! event flood on join; no missed events for edges that settle after
-//! catch-up.** The replica that mints an instance writes its cache at the
-//! mint, so its own first pass is not a catch-up and its first settle is
-//! reported. See `first_pass_here` in [`run_flow_consensus_pass`].
+//! replica was watching. So the **first** pass a user runs over an
+//! instance, with no verified `Local` cache of their own on it yet, is a
+//! silent catch-up: it marks what has settled and writes
+//! the cache, and emits nothing. From then on the user *has* a cache, so
+//! every later pass reports normally. The invariant: **no event flood on
+//! join; no missed events for edges that settle after catch-up.** The user
+//! who mints an instance writes their cache at the mint, and a user whose
+//! first act on an instance is a vote catches up just before it
+//! ([`catch_up_before_voting`]), so the edge their vote settles is reported.
+//!
+//! The evidence is the acting user's own cache, never another user's and
+//! never a mark: on a multi-user host any user may write a Local
+//! `currentState` or mark with any value, so evidence someone else wrote
+//! would let them switch the catch-up off for everyone. The cost is that a
+//! user's first pass over an instance another user of this replica already
+//! derived is silent too; the edges it records were reported to that other
+//! user's pass, or settled before this user acted. See `first_pass_here` in
+//! [`run_flow_consensus_pass`].
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
@@ -118,6 +128,14 @@ pub async fn run_flow_consensus_pass(
         records.retain(|r| only.contains(&r.instance_uri));
     }
     records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
+    // The cache this pass reads and writes is the acting user's own.
+    let viewer_did = match crate::agent::did_for_context(context) {
+        Ok(did) => did,
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: no DID for the acting agent, skipping: {e:#}");
+            return Vec::new();
+        }
+    };
 
     let mut outcomes = Vec::new();
     for record in &records {
@@ -167,25 +185,30 @@ pub async fn run_flow_consensus_pass(
         };
         let already_marked = read_set.marked_proposals();
 
-        // Catch-up (module doc): never derived here = no Local mark and no
-        // Local cache. Marks are per replica, so on a join every settled
-        // edge is unmarked, and reporting them all would be a flood of
+        // Catch-up (module doc): never derived by this user = no verified
+        // Local cache of their own. Marks are per replica, so on a join every
+        // settled edge is unmarked, and reporting them all would be a flood of
         // events that happened before this replica watched. The pass still
         // marks them and ALWAYS writes the cache — that is what makes the
         // next pass an ordinary one, so an edge settling afterwards is not
         // missed. Invariant: no event flood on join; no missed events for
         // edges that settle after catch-up.
-        let first_pass_here = already_marked.is_empty()
-            && match has_local_cache(perspective, &record.instance_uri).await {
-                Ok(cached) => !cached,
-                Err(e) => {
-                    log::warn!(
+        let own_cache = match local_cached_state(perspective, &record.instance_uri, &viewer_did)
+            .await
+        {
+            Ok(cached) => cached,
+            Err(e) => {
+                log::warn!(
                         "run_flow_consensus_pass: reading the cache of {} failed; skipping instance this pass: {e:#}",
                         record.instance_uri
                     );
-                    continue;
-                }
-            };
+                continue;
+            }
+        };
+        // Catch-up is per user: only the acting user's own verified cache
+        // says they derived this instance before. Another user's Local cache
+        // or mark is not evidence, since any user may write one.
+        let first_pass_here = own_cache.is_none();
 
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
@@ -211,7 +234,7 @@ pub async fn run_flow_consensus_pass(
                 contributing_proposal_uris: edge.atom_uris.clone(),
             });
         }
-        let stale_cache = record.current_state != derived.state;
+        let stale_cache = own_cache.as_deref() != Some(derived.state.as_str());
         let write_cache = stale_cache || first_pass_here;
         if !write_cache && to_mark.is_empty() {
             continue;
@@ -220,7 +243,7 @@ pub async fn run_flow_consensus_pass(
             log::debug!(
                 "run_flow_consensus_pass: healing {} — cached `{}`, derived `{}`",
                 record.instance_uri,
-                record.current_state,
+                own_cache.as_deref().unwrap_or(""),
                 derived.state
             );
         }
@@ -249,65 +272,76 @@ pub async fn run_flow_consensus_pass(
     outcomes
 }
 
-/// Read this replica's own cached state for `instance_uri` — the value
-/// carried by the `Local` `currentState` link, if one is present.
+/// Read `viewer_did`'s own cached state of `instance_uri`: the value of a
+/// `Local` `currentState` link that `viewer_did` wrote.
 ///
-/// `None` means the cache is absent: either no `currentState` link at all,
-/// or only `Shared` links a peer wrote before #987.
+/// A cache is read only for the user who wrote it. On a multi-user host
+/// every user keeps their own (`super::viewer_cache`), and any user may write
+/// a Local link with any value, so another user's cache says nothing about
+/// what this viewer derived. A link counts only when its author is
+/// `viewer_did` and its signature verifies for that author: a link that
+/// merely names the viewer as its author is not theirs. There is no
+/// executor-scope form: a reader without a viewer derives.
 ///
-/// This read is raw links because it predates #1028.  Since #1028 landed on
-/// `dev`, hydration enforces the class's `local: true` flag itself — it drops
-/// any `currentState` link not annotated `Local` — so the hydrated record can
-/// now answer this, and the two paths agree
-/// (`a_peer_written_shared_cache_is_overridden_not_deleted` pins that).  Two
-/// things still have no home on the hydrated path: the fall-back-to-derive on
-/// zero-or-multiple `Local` links, and the literal-parse fall-back below.
-/// Collapsing this to a field read is #1026's follow-up, with tests of its
-/// own — not a rename.
+/// `None` means the viewer has no usable cache: no `currentState` link of
+/// their own, only `Shared` links a peer wrote before #987, a target that is
+/// not a string literal, or several own links with different values (a bug
+/// or test artefact; `write_local_current_state` removes the writer's own
+/// links before adding one). The caller then derives, which is always safe.
 ///
-/// `write_local_current_state` removes all `Local` links before adding one,
-/// so the normal write path never leaves more than one.  If somehow more
-/// than one `Local` link exists (a bug or test artefact), `None` is returned
-/// so the caller falls back to derive, which is always safe.
+/// This read is raw links because it predates #1028. Since #1028, hydration
+/// enforces the class's `local: true` flag itself, so the hydrated record
+/// could answer the value; the author and signature checks and the
+/// literal-parse fall-back have no home there. Collapsing this to a field
+/// read is #1026's follow-up.
 pub(crate) async fn local_cached_state(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
+    viewer_did: &str,
 ) -> anyhow::Result<Option<String>> {
     use ad4m_client::literal::{Literal, LiteralValue};
     let links = perspective
-        .get_links(&LinkQuery {
-            source: Some(instance_uri.to_string()),
-            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-            ..Default::default()
-        })
+        .get_links_for_viewer(
+            &LinkQuery {
+                source: Some(instance_uri.to_string()),
+                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                ..Default::default()
+            },
+            Some(viewer_did),
+        )
         .await?;
-    let mut local_targets: Vec<String> = links
+    let mut values: Vec<String> = links
         .into_iter()
-        .filter(|l| l.status == Some(LinkStatus::Local))
-        .map(|l| l.data.target.clone())
-        .collect();
-    match local_targets.len() {
-        0 => Ok(None),
-        1 => {
-            let target = local_targets.remove(0);
-            match Literal::from_url(target.clone())
+        .filter(|l| {
+            l.status == Some(LinkStatus::Local)
+                && l.author == viewer_did
+                && l.compute_proof_valid()
+        })
+        .filter_map(|l| {
+            match Literal::from_url(l.data.target.clone())
                 .ok()
                 .and_then(|lit| lit.get().ok())
             {
-                Some(LiteralValue::String(s)) => Ok(Some(s)),
+                Some(LiteralValue::String(s)) => Some(s),
                 _ => {
                     log::warn!(
                         "local_cached_state: {} has a Local currentState link whose target `{}` is not a string literal; treating as absent",
                         instance_uri,
-                        target
+                        l.data.target
                     );
-                    Ok(None)
+                    None
                 }
             }
-        }
+        })
+        .collect();
+    values.sort();
+    values.dedup();
+    match values.len() {
+        0 => Ok(None),
+        1 => Ok(Some(values.remove(0))),
         n => {
             log::warn!(
-                "local_cached_state: {} has {} Local currentState links (expected at most 1); treating as absent",
+                "local_cached_state: {} has {} Local currentState values for one viewer (expected at most 1); treating as absent",
                 instance_uri,
                 n
             );
@@ -316,13 +350,34 @@ pub(crate) async fn local_cached_state(
     }
 }
 
-async fn has_local_cache(
-    perspective: &PerspectiveInstance,
+/// Catch up before the acting user writes a vote or a proposal on
+/// `instance_uri`, if they have never derived it.
+///
+/// The catch-up is per user (module doc), so without this a user whose
+/// first act on an instance is a vote would take the edge that vote
+/// settles for history and report nothing. Deriving first records the
+/// history silently and writes the user's cache, so the pass after the vote
+/// reports exactly what the vote settled. Returns what this pass recorded
+/// as new, which is empty unless another user of this replica had already
+/// marked some of the history. A user who holds their own cache costs one
+/// cache read.
+pub(crate) async fn catch_up_before_voting(
+    perspective: &mut PerspectiveInstance,
     instance_uri: &str,
-) -> anyhow::Result<bool> {
-    local_cached_state(perspective, instance_uri)
-        .await
-        .map(|o| o.is_some())
+    context: &AgentContext,
+) -> Vec<FireOutcome> {
+    let viewer_did = match crate::agent::did_for_context(context) {
+        Ok(did) => did,
+        // The vote itself needs the DID and fails with its own message.
+        Err(_) => return Vec::new(),
+    };
+    match local_cached_state(perspective, instance_uri, &viewer_did).await {
+        Ok(Some(_)) => Vec::new(),
+        Ok(None) | Err(_) => {
+            let only = [instance_uri.to_string()];
+            run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await
+        }
+    }
 }
 
 /// Write the cache and the marks in one batch, so a crash between them can
@@ -385,9 +440,7 @@ mod tests {
     use crate::perspectives::flow_classes::{
         advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
     };
-    use crate::perspectives::interpretation_test_support::{
-        setup_perspective_no_llm, store_as_peer_link,
-    };
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::types::{Link, LinkStatus};
 
@@ -402,25 +455,29 @@ mod tests {
         let target = Literal::from_string(state.to_string())
             .to_url()
             .expect("encode state");
-        // A peer's link: the user-facing write methods refuse this
-        // engine-reserved predicate.
-        let link = crate::agent::create_signed_expression(
-            Link {
-                source: INST_URI.to_string(),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                target,
-            }
-            .normalize(),
-            ctx,
-        )
-        .expect("sign currentState link");
-        store_as_peer_link(perspective, link.into(), LinkStatus::Shared).await;
+        perspective
+            .add_link(
+                Link {
+                    source: INST_URI.to_string(),
+                    predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                    target,
+                },
+                LinkStatus::Shared,
+                None,
+                ctx,
+            )
+            .await
+            .expect("add Shared currentState link");
+    }
+
+    fn did(ctx: &AgentContext) -> String {
+        crate::agent::did_for_context(ctx).expect("did_for_context")
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn local_cached_state_absent_when_no_link() {
-        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
-        let result = local_cached_state(&perspective, INST_URI)
+        let (perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let result = local_cached_state(&perspective, INST_URI, &did(&ctx))
             .await
             .expect("local_cached_state must not fail on empty graph");
         assert!(
@@ -435,7 +492,7 @@ mod tests {
         advance_flow_instance_state(&mut perspective, INST_URI, "identified", None, &ctx)
             .await
             .expect("write Local currentState link");
-        let result = local_cached_state(&perspective, INST_URI)
+        let result = local_cached_state(&perspective, INST_URI, &did(&ctx))
             .await
             .expect("local_cached_state");
         assert_eq!(
@@ -449,7 +506,7 @@ mod tests {
     async fn local_cached_state_absent_when_only_shared_link_present() {
         let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
         write_shared_state(&mut perspective, "scoped", &ctx).await;
-        let result = local_cached_state(&perspective, INST_URI)
+        let result = local_cached_state(&perspective, INST_URI, &did(&ctx))
             .await
             .expect("local_cached_state");
         assert!(

@@ -64,8 +64,10 @@ Three consequences, all intended:
 <Callout type="info" emoji="ℹ️">
   The engine does write a `currentState` value onto each flow instance, but it
   is a **cache for readers, never authority**. It is a `Local` link — it never
-  syncs — and nothing in the derivation reads it. Read it for display. Never
-  decide anything on it.
+  syncs — and nothing in the derivation reads it. On a multi-user host it is
+  also per user: a `Local` link is private to its author, so a read of
+  `FlowInstance` rows derives the state for the reading user and writes that
+  user's own cache first. Read it for display. Never decide anything on it.
 </Callout>
 
 ## States and transitions
@@ -505,8 +507,8 @@ The refusals a developer will meet, what each one means, and what to do:
 
 Limits that are absences, not errors — do not go looking for these:
 
-- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or the `currentStateName` cache.
-- **No read that re-derives without voting.** `currentStateName` is the engine's cache. The calls that re-derive are the ones that act (`proposeTransition`, `acceptProposal`); their `derivedState` and their refusal messages name the derived state.
+- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or `currentStateName`. A model subscription on `FlowInstance` does not refresh the cache: it shows the cache as the subscribing user last wrote it, and does not change when another user's transition settles.
+- **`currentStateName` is a cache, refreshed by the read.** A `FlowInstance` read (`findAll`, `findOne`) derives the state for the reading user from the signed proposals on this replica and updates that user's own cache before answering (not for a token that may only read the perspective, which sees the cache as it is); it does not re-verify peers' links the way `proposeTransition` and `acceptProposal` do. Those calls also return `derivedState`, and their refusal messages name the derived state.
 - **No automatic receipt minting.** A settled run gets a receipt only when someone calls `mintFlowReceipt`.
 - **No direct fire.** An edge fires only by reaching quorum. `FlowTransition.actions` is declared and not executed.
 
