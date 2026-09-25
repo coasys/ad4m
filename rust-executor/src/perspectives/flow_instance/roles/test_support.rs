@@ -10,7 +10,7 @@ use crate::perspectives::flow_evaluator::{
 use crate::perspectives::shacl_parser::{ModelQuery, ModelQueryCount};
 use crate::types::LinkExpression;
 use async_trait::async_trait;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -193,7 +193,10 @@ pub(super) fn eligible_now<'g>(
 /// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
 /// `undated_instances`); `unconditional_instances` (for DID-independent queries)
 /// wins over matching when set; `error` fails every call. `histories`
-/// is what the store says about each DID's instances.
+/// is what the store says about each DID's instances, answered the way
+/// `model_query` answers `links`: under `__links`, one array per
+/// requested key — the tombstone predicate gets `revocation_links`, any
+/// other key `grant_links`.
 #[derive(Default)]
 pub(super) struct RoleStub {
     pub(super) member_dids: Vec<String>,
@@ -223,26 +226,42 @@ impl RequiresQueryable for RoleStub {
                 0
             }
         });
+        let query: Value = serde_json::from_str(query_json)?;
+        let history = self
+            .histories
+            .iter()
+            .find(|(did, _)| query_json.contains(did.as_str()))
+            .map(|(_, h)| h.clone())
+            .unwrap_or_default();
+        let links: Option<Map<String, Value>> = query["links"].as_array().map(|keys| {
+            keys.iter()
+                .filter_map(Value::as_str)
+                .map(|key| {
+                    let rows = if key
+                        == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
+                    {
+                        &history.revocation_links
+                    } else {
+                        &history.grant_links
+                    };
+                    (key.to_string(), json!(rows))
+                })
+                .collect()
+        });
         let instances: Vec<Value> = (0..n)
             .map(|i| {
-                if self.undated_instances {
+                let mut inst = if self.undated_instances {
                     json!({ "id": format!("r{i}") })
                 } else {
                     json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
+                };
+                if let Some(links) = &links {
+                    inst["__links"] = Value::Object(links.clone());
                 }
+                inst
             })
             .collect();
         Ok(json!({ "instances": instances, "totalCount": n }).to_string())
-    }
-
-    async fn role_grant_links(
-        &self,
-        _role_class: &str,
-        _instance_id: &str,
-        _did_property: Option<&str>,
-        did: &str,
-    ) -> anyhow::Result<RoleGrantLinks> {
-        Ok(self.histories.get(did).cloned().unwrap_or_default())
     }
 }
 
