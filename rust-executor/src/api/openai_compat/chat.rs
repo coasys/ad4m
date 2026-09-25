@@ -15,6 +15,9 @@
 //! any tool calls are recovered from the text afterwards.  Assistant
 //! `tool_calls` and `role:"tool"` results are folded back into prompt text
 //! because the local chat template has no tool role.
+//!
+//! A model whose provider carries tools as data skips all of that and goes
+//! through [`super::native_tools`] instead.
 
 use std::convert::Infallible;
 use std::time::SystemTime;
@@ -29,6 +32,7 @@ use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
+use super::native_tools;
 use super::tool_grammar::{self, ExtractedToolCall, ToolChoice};
 use super::types::{
     ChatChoice, ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, ChatCompletionRequest,
@@ -60,6 +64,20 @@ pub async fn chat_completions(
     // Tools are "active" (rendered + potentially constrained + parsed out)
     // unless the caller explicitly disabled them with tool_choice: "none".
     let tools_active = has_tools && choice != ToolChoice::None;
+
+    // A provider that carries tools as data gets them that way, and answers
+    // with structured calls instead of text to parse them out of.
+    if tools_active && AIService::model_supports_native_tools(&model_id) {
+        return native_tools::chat_with_native_tools(
+            auth,
+            req.model.clone(),
+            model_id,
+            &req.messages,
+            &tools,
+            req.stream,
+        )
+        .await;
+    }
 
     // Assemble (role, content) pairs.  Fold assistant tool calls and
     // `role:"tool"` results into text, and prepend the tools system prompt.
@@ -460,7 +478,7 @@ fn to_openai_tool_calls(extracted: Vec<ExtractedToolCall>) -> Vec<ToolCall> {
 /// calls and `role:"tool"` results are rendered into text using the Qwen
 /// `<tool_call>` / `<tool_response>` convention, since the local chat
 /// template has no tool role.
-fn flatten_message(m: &ChatMessage) -> (String, String) {
+pub(super) fn flatten_message(m: &ChatMessage) -> (String, String) {
     let base_text = m
         .content
         .as_ref()
@@ -470,11 +488,16 @@ fn flatten_message(m: &ChatMessage) -> (String, String) {
     match m.role {
         // Tool result → a `<tool_response>` block in a user turn. Shared
         // renderer with harness_bridge so a fix in one place propagates.
-        // Legacy: `ChatMessage` doesn't carry `tool_call_id` on `Role::Tool`
-        // today; passing `None` matches the pre-refactor bare-tag output.
+        //
+        // The id is carried through when the caller sent one, so a turn that
+        // dispatched several tools at once can be matched back to which call
+        // each result answers. Without it the model sees an unordered pile of
+        // `<tool_response>` blocks and has to guess — which it does badly, and
+        // silently. Absent id still renders the bare tag, for callers that
+        // send none and for the hand-written messages in tests.
         Role::Tool => (
             "user".to_string(),
-            tool_grammar::render_tool_response_block(&base_text, None),
+            tool_grammar::render_tool_response_block(&base_text, m.tool_call_id.as_deref()),
         ),
         // Assistant turn that called tools → re-render the calls so the model
         // sees its own prior invocations.
@@ -508,14 +531,14 @@ fn role_to_str(role: &Role) -> &'static str {
     }
 }
 
-fn epoch_seconds() -> i64 {
+pub(super) fn epoch_seconds() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
 }
 
-fn user_email(auth: &AuthContext) -> Option<String> {
+pub(super) fn user_email(auth: &AuthContext) -> Option<String> {
     crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
 }
 

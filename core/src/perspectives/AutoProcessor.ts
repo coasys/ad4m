@@ -244,6 +244,14 @@ export interface AddAutoProcessorConfig {
   basePrefix?: string;
   /** Class URIs (SHACL `target_class`) to materialize each pass. */
   interpretationClasses: string[];
+  /**
+   * Canonical flow URIs (`SHACLFlow` `{namespace}{name}Flow`) this processor
+   * is flow-aware of. Flow features — the flow-aware prompt, the
+   * transition-proposal pass, and auto-spawn on freshly created items — run
+   * only on the flows listed here, mirroring the class selection above.
+   * Omit (or pass `[]`) for no flow processing.
+   */
+  flows?: string[];
   /** Quiet-window (ms) after the last new item before a pass runs. */
   debounceMs: number;
   /** Minimum items before a pass runs (Flux "wait for N inputs"). Default 1. */

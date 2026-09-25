@@ -1448,6 +1448,301 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(callArg).toHaveProperty("pageSize", 10);
     expect(callArg).toHaveProperty("pageNumber", 1);
   });
+
+  it("paginateSubscribe coalesces overlapping dispatches into a trailing fetch", async () => {
+    // Two server dispatches arrive while the first re-fetch is still in
+    // flight. A generation counter (#1020) would start both and could keep
+    // the one that read 1 model while dropping the one that read 2. The
+    // server then has nothing further to dispatch — "Paginate callback did
+    // not see second model save". Coalesce: one in-flight read, then a
+    // trailing fetch after the last dispatch.
+    const mockSubscriptionId = "paginate-stale-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    // First call is the initial fetch (resolves immediately, empty). Later
+    // re-fetches are deferred so the test can see coalescing.
+    const deferred: Array<(v: any) => void> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise(resolve => { deferred.push(resolve); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "StaleTest" })
+    class StaleTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://stale" })
+      type: string = "test://stale";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = StaleTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    // In-flight read saw only the first model.
+    deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
+    await new Promise(r => setTimeout(r, 10));
+    // Trailing fetch started because a dispatch arrived during that read.
+    expect(deferred.length).toBe(2);
+
+    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe still runs the trailing fetch when the in-flight read rejects", async () => {
+    const mockSubscriptionId = "paginate-reject-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "RejectTest" })
+    class RejectTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://reject" })
+      type: string = "test://reject";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = RejectTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    deferred[0].reject(new Error("re-fetch failed"));
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(2);
+
+    deferred[1].resolve({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(userCallback).toHaveBeenCalled();
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe handles a rejection from the trailing fetch", async () => {
+    // The trailing fetch is started from the in-flight read's finally block,
+    // detached from any caller. If it also rejects, only its own .catch()
+    // observes the error; without one it is an unhandled rejection.
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const mockSubscriptionId = "paginate-reject-twice-sub";
+      let capturedCallback: ((result: any) => void) | null = null;
+
+      const mockClient = {
+        modelSubscribe: jest.fn().mockResolvedValue({
+          subscriptionId: mockSubscriptionId,
+          result: { instances: [], totalCount: 0 },
+        }),
+        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+          capturedCallback = cb;
+          return () => {};
+        }),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      };
+
+      const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+      let call = 0;
+      const mockPerspective = {
+        uuid: "test-uuid",
+        client: mockClient,
+        modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+          return mockClient.modelSubscribe("test-uuid", className, queryJson);
+        }),
+        modelQuery: jest.fn().mockImplementation(() => {
+          call++;
+          if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+          return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+        }),
+      } as any;
+
+      const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+      @Model({ name: "RejectTwiceTest" })
+      class RejectTwiceTest extends Ad4mModel {
+        @Flag({ through: "test://type", value: "test://reject-twice" })
+        type: string = "test://reject-twice";
+        @Property({ through: "test://name" })
+        name: string = "";
+      }
+
+      const userCallback = jest.fn();
+      const builder = RejectTwiceTest.query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, userCallback);
+
+      capturedCallback!({});
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+
+      deferred[0].reject(new Error("in-flight read failed"));
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(2);
+
+      deferred[1].reject(new Error("trailing read failed"));
+      await new Promise(r => setTimeout(r, 10));
+
+      const logged = errorSpy.mock.calls
+        .filter(args => args[0] === "Paginate subscription error:")
+        .map(args => (args[1] as Error).message);
+      expect(logged).toEqual(["in-flight read failed", "trailing read failed"]);
+      expect(userCallback).not.toHaveBeenCalled();
+
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("paginateSubscribe delivers nothing and starts no trailing fetch after dispose", async () => {
+    // dispose() while a read is in flight and a trailing fetch is pending.
+    const mockSubscriptionId = "paginate-dispose-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeMidReadTest" })
+    class DisposeMidReadTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://dispose-mid-read" })
+      type: string = "test://dispose-mid-read";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = DisposeMidReadTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    builder.dispose();
+
+    // The in-flight read's finally block still sees pending === true, so the
+    // coalescing log must not claim a trailing fetch that the disposed guard
+    // then drops.
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(userCallback).not.toHaveBeenCalled();
+      expect(deferred.length).toBe(1);
+      expect(
+        debugSpy.mock.calls.filter(args =>
+          String(args[0]).includes("coalesced into one trailing fetch")
+        )
+      ).toEqual([]);
+
+      // A dispatch that races the unsubscribe starts no read either.
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
 });
 
 // ============================================================================
@@ -3060,5 +3355,162 @@ describe("Polymorphic relations", () => {
     });
 
     expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
+  });
+});
+
+describe("Ordered relations", () => {
+  @Model({ name: "OrderedColumn" })
+  class OrderedColumn extends Ad4mModel {
+    @HasMany({ through: "kanban://has_task", ordering: { strategy: "linkedList" } })
+    tasks: string[] = [];
+
+    @HasMany({ through: "kanban://archived" })
+    archived: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("declares its ordering in SHACL", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const tasks = shape.properties.find((p: any) => p.name === "tasks");
+    expect(tasks.ordering).toBe("linkedList");
+  });
+
+  it("declares the predicate the ordering entries are stored under", () => {
+    // Entries live on the parent under one shared predicate. The instance query
+    // builds its predicate filter from the shape's declared paths, so without
+    // this the read that needs the ordering links filters them out.
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const orderProp = shape.properties.find(
+      (p: any) => p.path === "ad4m://collection_order"
+    );
+    expect(orderProp).toBeDefined();
+  });
+
+  it("omits that predicate when nothing on the class is ordered", () => {
+    @Model({ name: "UnorderedOnly" })
+    class UnorderedOnly extends Ad4mModel {
+      @HasMany({ through: "kanban://archived" })
+      archived: string[] = [];
+    }
+    const { shape } = (UnorderedOnly as any).generateSHACL();
+    expect(
+      shape.properties.find((p: any) => p.path === "ad4m://collection_order")
+    ).toBeUndefined();
+  });
+
+  it("treats a reorder as a change", () => {
+    // The whole point: for an ordered relation the sequence *is* the state, so
+    // sorting before comparing would make save() a no-op for the one edit this
+    // feature exists to support.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.tasks = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.tasks = ["c", "a", "b"];
+    expect(column.changedFields()).toContain("tasks");
+  });
+
+  it("still treats a reorder of an unordered relation as no change", () => {
+    // An unordered relation is a set — the executor returns it by link
+    // timestamp, so assigning the same members in another order changed nothing.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.archived = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.archived = ["c", "a", "b"];
+    expect(column.changedFields()).not.toContain("archived");
+  });
+
+  it("round-trips ordering through SHACL links", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const links = shape.toLinks().map((l: any) => ({
+      source: l.source,
+      predicate: l.predicate,
+      target: l.target,
+    }));
+    const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
+    const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
+    expect(tasks!.ordering).toBe("linkedList");
+  });
+});
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
   });
 });

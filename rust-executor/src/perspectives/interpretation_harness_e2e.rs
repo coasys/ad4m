@@ -446,7 +446,7 @@ async fn harness_intention_links_to_seeded_beliefs() {
 #[ignore = "llm-e2e"]
 async fn harness_intention_selects_only_relevant_beliefs() {
     use crate::perspectives::interpretation_test_support::{
-        graph_count_by_type, seed_instance, setup_interpretation_e2e,
+        graph_count_by_type, persisted_ids, seed_instance, setup_interpretation_e2e,
     };
 
     // Cluster A — LLM tool-calling / interpretation (RELEVANT to transcript)
@@ -569,8 +569,22 @@ async fn harness_intention_selects_only_relevant_beliefs() {
             }
         }
 
-        let guard_ok =
-            intentions >= 1 && !relevant_targets.is_empty() && distractor_targets.is_empty();
+        // Guard has to cover every invariant asserted after the loop, not just
+        // the navigation-across-distractors ones. Gemma3-12B occasionally
+        // returns a template placeholder in a URI field (e.g.
+        // `soa://ext/intention/...[intention_create response]`); the placement
+        // then satisfies the navigation guards but the subsequent
+        // `assert_persisted` panics because the placeholder isn't a real
+        // subject. Fold the persisted-check in so any malformed URI drives
+        // retry, same shape as db3909341's fix for
+        // `harness_intention_links_to_seeded_beliefs`.
+        let ids = persisted_ids(&perspective, &shapes).await;
+        let all_bases_persisted = placements.iter().all(|(b, _)| ids.contains(b));
+
+        let guard_ok = intentions >= 1
+            && !relevant_targets.is_empty()
+            && distractor_targets.is_empty()
+            && all_bases_persisted;
 
         last = Some((
             perspective,
@@ -591,7 +605,8 @@ async fn harness_intention_selects_only_relevant_beliefs() {
 
         eprintln!(
             "[harness-e2e] attempt {attempt}/{MAX_ATTEMPTS}: intentions={intentions} \
-             relevant={relevant_targets:?} distractors={distractor_targets:?}; retrying"
+             relevant={relevant_targets:?} distractors={distractor_targets:?} \
+             all_bases_persisted={all_bases_persisted}; retrying"
         );
     }
 

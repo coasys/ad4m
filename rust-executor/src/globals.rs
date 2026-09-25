@@ -7,7 +7,7 @@ lazy_static! {
     pub static ref AD4M_VERSION: String = String::from("0.13.0-test-interpretation-2");
 }
 
-/// Global shutdown signal sender. Used by `runtime_quit` GQL mutation and signal handlers
+/// Global shutdown signal sender. Used by the `runtime_quit` WS-RPC method and signal handlers
 /// to trigger a graceful shutdown of the executor.
 /// Wrapped in Mutex<Option<...>> so we can take() the sender from a shared static reference.
 pub static SHUTDOWN_TX: Mutex<Option<oneshot::Sender<()>>> = Mutex::new(None);
