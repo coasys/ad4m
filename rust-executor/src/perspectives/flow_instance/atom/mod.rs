@@ -391,9 +391,10 @@ pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
 }
 
 impl TransitionAtom {
-    /// Build an atom from one proposal's raw links, or say why it is not one.
-    /// `links` is every link with the proposal as source, from every author —
-    /// the filtering is the point of this function.
+    /// Build an atom from one proposal's links, or say why it is not one.
+    /// `links` are the proposal's links from every author, one per link with
+    /// its own author and verdict, never a hydrated instance — the filtering
+    /// is the point of this function.
     pub fn from_links(
         instance_uri: &str,
         uri: &str,
