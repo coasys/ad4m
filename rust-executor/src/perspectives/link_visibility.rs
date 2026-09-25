@@ -59,12 +59,19 @@
 //! 3. [`viewer_reifier_filter`] — the same rule inside the model-query link
 //!    guard (`model_query::sparql_builder::LinkGuard`), which every link that
 //!    *selects* an instance passes: `where`, the class's flags, the count,
-//!    order keys, scopes and walks. It sits on the same reifier as the
+//!    order keys, scopes and walks, and the targets a typed relation's
+//!    generated getter lists. It sits on the same reifier as the
 //!    `linkStatus` and signature checks, so two different links cannot pass
 //!    them between them.
 //!
 //! Neither is a new mechanism nor a per-user materialised cache: both are
 //! query-time predicates over data that is already stored per link.
+//!
+//! The per-owner `link-added`, `link-removed` and `link-updated` events go
+//! only to owners [`decorated_visible_to`] admits. The user-facing reads that
+//! still run in executor scope (raw SPARQL, `evaluateGetters`, hand-written
+//! getters, `getSubjectData`'s author and timestamp) are tracked in
+//! <https://github.com/coasys/ad4m/issues/1152>.
 
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE;

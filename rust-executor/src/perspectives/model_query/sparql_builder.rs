@@ -434,8 +434,9 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
 /// two-phase plan's pagination subquery ([`build_timestamp_probe`] on its own
 /// reifier), scopes, `$` projections and the reverse relations. A transitive
 /// scope or projection is walked one guarded step at a time
-/// (`query::guarded_reach`). A typed relation's generated getter gets it in
-/// `getters::verify_relation_getter`; a hand-written getter runs as written.
+/// (`query::guarded_reach`). A typed relation's generated getter and its
+/// `where` get it, and the viewer, in `getters.rs`; a hand-written getter runs
+/// as written.
 ///
 /// Empty when the query opts in with `includeUnverified`.
 pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
@@ -567,28 +568,6 @@ impl<'a> LinkGuard<'a> {
     }
 }
 
-/// [`LinkGuard::exists`] for an IRI predicate, with the two options passed
-/// separately: the reverse relations in `relations.rs`, and a typed relation's
-/// generated getter and a relation's `where` (`getters.rs`).
-///
-/// Executor scope: these reads carry no viewer.
-///
-/// Empty when no status is requested and `include_unverified` is `Some(true)`.
-pub(super) fn verified_link_exists(
-    subject: &str,
-    predicate: &str,
-    object: &str,
-    status: Option<&LinkStatus>,
-    include_unverified: Option<bool>,
-) -> String {
-    LinkGuard {
-        status,
-        include_unverified,
-        viewer: None,
-    }
-    .exists(subject, &format!("<{predicate}>"), object)
-}
-
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
 ///
 /// A peer can gossip a Shared link on a predicate the class declared local; without
@@ -677,6 +656,13 @@ pub(super) fn build_count_sparql(
 /// The predicate restriction is necessary. Any visible link on the source,
 /// for example a Shared link on a predicate the shape does not declare, would
 /// otherwise satisfy the guard while hydration drops the source.
+///
+/// Conformance alone does not do this when what selects the instance is not
+/// one of its own rows: a class with no flag and no required property,
+/// selected by a parent scope's link on the parent. Then every row of the
+/// instance can be another user's Local link, and only this guard keeps the
+/// instance out of the count
+/// (`total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate`).
 ///
 /// What this does not hide is that an instance exists. Conformance reads the
 /// class's own links (its flag, its required properties), and those are rows
@@ -3309,6 +3295,27 @@ mod traverse_scope_tests {
         assert!(
             conformance.contains("?_anchor <test://comment>+ ?source ."),
             "transitive should emit a `+` path: {conformance}"
+        );
+    }
+
+    /// A transitive scope read for a viewer that was not walked matches
+    /// nothing. The `+` path would reach through every agent's links,
+    /// another user's Local ones included, and `execute_model_query` always
+    /// walks for a viewer, so only a direct caller of the builder gets here.
+    /// Executor scope keeps the path.
+    #[test]
+    fn traverse_scope_transitive_unwalked_for_a_viewer_matches_nothing() {
+        let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
+        assert!(q.walked.is_none());
+        let (conformance, where_extra) =
+            build_query_patterns(&traverse_shape(), &q, None, Some("did:key:z6MkBob"));
+        assert_eq!(conformance, "    FILTER(false)");
+        assert_eq!(where_extra, "");
+
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
+        assert!(
+            conformance.contains("?_anchor <test://comment>+ ?source ."),
+            "executor scope: {conformance}"
         );
     }
 

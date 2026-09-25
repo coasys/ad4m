@@ -723,6 +723,101 @@ describe("Multi-User Simple integration tests", () => {
             const afterUpdate = await (PrivNote as any).findOne(pb, { where: { id: note.id } });
             expect(afterUpdate.title, "Bob's update did write").to.equal("bob-title");
         });
+
+        it("hides a co-owner's Local links from typed relations and link events", async function () {
+            this.timeout(300000);
+
+            const { Model, Flag, HasMany, Ad4mModel } = await import("@coasys/ad4m");
+
+            @Model({ name: "PrivRemark" })
+            class PrivRemark extends Ad4mModel {
+                @Flag({ through: "priv://type", value: "priv://remark" })
+                type = "priv://remark";
+            }
+
+            // A target class with a flag, so the SDK fills `remarks` with its
+            // generated conformance getter.
+            @Model({ name: "PrivCard" })
+            class PrivCard extends Ad4mModel {
+                @Flag({ through: "priv://type", value: "priv://card" })
+                type = "priv://card";
+                @HasMany(() => PrivRemark, { through: "priv://remark" })
+                remarks: string[] = [];
+            }
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privrel1@example.com", "password1");
+            await createTestUser("privrel2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privrel1@example.com", "password1"), false);
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privrel2@example.com", "password2"), false);
+
+            const aliceHandle = await alice.perspective.add("Local Link Privacy: relations and events");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Local Link Privacy: relations and events" }),
+            );
+            const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(
+                aliceHandle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+            const bobHandle = (await bob.perspective.all()).find((p) => p.sharedUrl === neighbourhoodUrl);
+            expect(bobHandle, "Bob joined the neighbourhood").to.not.be.undefined;
+
+            const pa = (await alice.perspective.byUUID(aliceHandle.uuid))!;
+            const pb = (await bob.perspective.byUUID(bobHandle!.uuid))!;
+            await (PrivRemark as any).register(pa);
+            await (PrivCard as any).register(pa);
+            await (PrivRemark as any).register(pb);
+            await (PrivCard as any).register(pb);
+
+            // Typed relation: the card's only `remark` link is Alice's Local link.
+            const card = await (PrivCard as any).create(pa, {});
+            const remark = await (PrivRemark as any).create(pa, {});
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source: card.id, predicate: "priv://remark", target: remark.id }), "local");
+            const asAlice = await (PrivCard as any).findOne(pa, { where: { id: card.id } });
+            expect(asAlice.remarks, "Alice reads her own Local relation link").to.deep.equal([remark.id]);
+            const asBob = await (PrivCard as any).findOne(pb, { where: { id: card.id } });
+            expect(asBob, "Bob still finds the Shared card").to.not.be.null;
+            expect(asBob.remarks ?? [], "the generated getter does not list Alice's Local relation link for Bob").to.deep.equal([]);
+
+            // Events: Alice adds, updates and removes a Local link, then does
+            // the same with a Shared link. Each event kind is delivered in
+            // order, so once Bob has the Shared link's events, any event for
+            // the Local link would have reached him already.
+            type Seen = { added: string[]; updated: string[]; removed: string[] };
+            const listen = async (p: typeof pa) => {
+                const seen: Seen = { added: [], updated: [], removed: [] };
+                await p.addListener("link-added", (l: any) => { seen.added.push(l.data.target); });
+                await p.addListener("link-updated", (u: any) => { seen.updated.push(`${u.oldLink.data.target} -> ${u.newLink.data.target}`); });
+                await p.addListener("link-removed", (l: any) => { seen.removed.push(l.data.target); });
+                return seen;
+            };
+            const aliceSeen = await listen(pa);
+            const bobSeen = await listen(pb);
+
+            for (const status of ["local", "shared"] as const) {
+                const first = await pa.add(new Link({ source: card.id, predicate: "priv://event", target: `priv://${status}-1` }), status);
+                const second = await pa.update(first, new Link({ source: card.id, predicate: "priv://event", target: `priv://${status}-2` }));
+                await pa.remove(second);
+            }
+
+            const everything = (s: Seen) =>
+                s.removed.includes("priv://shared-2") && s.updated.includes("priv://shared-1 -> priv://shared-2") && s.added.includes("priv://shared-1");
+            for (let i = 0; i < 100 && !(everything(aliceSeen) && everything(bobSeen)); i++) {
+                await sleep(200);
+            }
+            expect(everything(bobSeen), `Bob gets the Shared link's events: ${JSON.stringify(bobSeen)}`).to.be.true;
+            expect(everything(aliceSeen), `Alice gets the Shared link's events: ${JSON.stringify(aliceSeen)}`).to.be.true;
+            const local = (s: Seen) => [...s.added, ...s.updated, ...s.removed].filter((t) => t.includes("priv://local-"));
+            expect(local(bobSeen), "Bob gets no event for Alice's Local link").to.deep.equal([]);
+            expect(local(aliceSeen).sort(), "Alice gets all three").to.deep.equal(
+                ["priv://local-1", "priv://local-1 -> priv://local-2", "priv://local-2"],
+            );
+        });
     });
 
     describe("Agent Profiles and Status", () => {
