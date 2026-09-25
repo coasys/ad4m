@@ -6,10 +6,10 @@
  * executor's perspective DB.
  */
 
-// ─── Scope ─────────────────────────────────────────────────────────────────
+// ─── KeyScope ─────────────────────────────────────────────────────────────────
 
 /** What a delegated key may do. */
-export interface Scope {
+export interface KeyScope {
   /** Allowed lanes (empty = all). */
   lanes: Lane[];
   /** Allowed operations (empty = all). */
@@ -37,7 +37,7 @@ export interface KeyEntry {
   /** X25519 encryption public key (hex). */
   encryptionKey?: string;
   /** What this key may do. */
-  scope: Scope;
+  scope: KeyScope;
 }
 
 /** Key validity produced by the resolver. */
@@ -92,7 +92,7 @@ export interface RosterEntry {
   /** Which lane the key operates in. */
   lane: Lane;
   /** The scope granted at delegation. */
-  scope: Scope;
+  scope: KeyScope;
   /** The KEL sequence at which this key was delegated. */
   delegatedAtSeq: number;
   /** Whether this key has been revoked. */
@@ -114,7 +114,7 @@ export interface EnrolOffer {
   /** Challenge nonce for freshness. */
   challenge: string;
   /** Requested scope. */
-  scope: Scope;
+  scope: KeyScope;
 }
 
 /** An enrolment request from a hosted executor. */
@@ -125,8 +125,8 @@ export interface HostedEnrolRequest {
   label: string;
   /** Challenge nonce. */
   challenge: string;
-  /** Scope: always sign-only for hosted executors. */
-  scope: Scope;
+  /** KeyScope: always sign-only for hosted executors. */
+  scope: KeyScope;
 }
 
 // ─── Assistants ────────────────────────────────────────────────────────────

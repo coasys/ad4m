@@ -9,7 +9,7 @@
  * language). No perspective DB access.
  */
 
-import type { IdentityClient, AgentType, Scope, EnrolOffer } from "@coasys/ad4m";
+import type { IdentityClient, AgentType, KeyScope, EnrolOffer } from "@coasys/ad4m";
 
 // ─── C1: Create identity ─────────────────────────────────────────────────
 
@@ -184,10 +184,10 @@ export async function advanceConnect(
   client: IdentityClient,
   action:
     | { type: "choose-method"; method: ConnectMethod }
-    | { type: "create-offer"; label: string; scope: Scope }
+    | { type: "create-offer"; label: string; scope: KeyScope }
     | { type: "approve-offer"; offer: EnrolOffer }
     | { type: "submit-mnemonic"; mnemonic: string; label: string }
-    | { type: "approve-hosted"; publicKey: string; label: string; challenge: string; scope: Scope }
+    | { type: "approve-hosted"; publicKey: string; label: string; challenge: string; scope: KeyScope }
 ): Promise<void> {
   switch (action.type) {
     case "choose-method": {

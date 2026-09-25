@@ -21,7 +21,7 @@ import type {
   RecoveryRequestState,
   ResolvedAgent,
   RosterEntry,
-  Scope,
+  KeyScope,
 } from "./Identity";
 
 /** Callbacks for identity state changes. */
@@ -117,7 +117,7 @@ export class IdentityClient {
    * Create an enrolment offer (from the new device).
    * Returns the offer to display as QR or share manually.
    */
-  async createEnrolOffer(label: string, scope: Scope): Promise<EnrolOffer> {
+  async createEnrolOffer(label: string, scope: KeyScope): Promise<EnrolOffer> {
     return this.#apiClient.call<EnrolOffer>(
       "identity.createEnrolOffer",
       { label, scope }
