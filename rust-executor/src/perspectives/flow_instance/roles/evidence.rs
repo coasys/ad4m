@@ -1,10 +1,10 @@
 //! The carried role evidence — grant links and tombstones — and how a
 //! window is derived from it by whoever reads it.
 
+use super::dating::GrantDating;
 use super::{RoleGrant, RoleGrantWindow, RoleRevocation};
 use crate::perspectives::flow_evaluator::{
-    cardinality_satisfied, did_literal_url, grant_link_names_did, revocation_link_counts_for_did,
-    EvidenceItem,
+    cardinality_satisfied, did_literal_url, revocation_link_counts_for_did,
 };
 use crate::perspectives::flow_instance::time::parse_link_timestamp;
 use crate::perspectives::model_query::{matches_condition, WhereCondition};
@@ -24,27 +24,25 @@ use serde_json::{Map, Value};
 pub struct RoleInstanceHistory {
     /// URI of the instance the role query matched for this DID.
     pub instance_id: String,
-    /// Every `instance --<didProperty>--> did` link, as read from the store —
-    /// carried as plain [`LinkExpression`]: the decorated form's
-    /// `proof.valid` / `status` are one executor's read-model flags, and on
-    /// carried material they would be the minter's claims, so the type
+    /// The grant links on the rule's DID fields ([`GrantDating`]), as read
+    /// from the store — carried as plain [`LinkExpression`]: the decorated
+    /// form's `proof.valid` / `status` are one executor's read-model flags,
+    /// and on carried material they would be the minter's claims, so the type
     /// refuses to carry them (see
     /// [`RoleGrantLinks`](crate::perspectives::flow_evaluator::RoleGrantLinks)).
-    /// Not signature-filtered — see the module header and #1063. May be empty:
-    /// non-`didProperty` queries, or membership acquired without a dated
-    /// assignment link.
+    /// The reader re-applies every filter. Empty when the rule has no DID
+    /// field.
     pub grant_links: Vec<LinkExpression>,
+    /// Under `author: "$did"`, the grantee's own links on the instance
+    /// ([`GrantDating`]); empty otherwise. The reader re-applies every
+    /// filter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grantees_own_links: Vec<LinkExpression>,
     /// Every signed tombstone on the instance naming this DID, carried
     /// **before** authority filtering so the reader applies
-    /// [`revocation_authorised`] itself against the flow definition it holds.
+    /// [`granter_authorised`] itself against the flow definition it holds.
     /// Never truncated: dropping a tombstone can only widen a window.
     pub revocation_links: Vec<LinkExpression>,
-    /// Fallback dating when `grant_links` yields nothing: the instance's
-    /// hydrated timestamp. **Asserted** by the minter — a hydration product
-    /// with no single link behind it, and the one field here that stays
-    /// audit-grade until `model_query` results carry per-link signatures.
-    /// Flows whose role queries use `didProperty` never need it.
-    pub asserted_instance_timestamp: Option<String>,
     /// For a role query that declares `producedByFlow`: when the granting
     /// flow first produced this instance — the earliest verified receipt's
     /// quorum time, as the collecting replica checked it against its own
@@ -88,39 +86,29 @@ impl RoleGrantEvidence {
     /// it, so it must be the query for *this* `did`.
     ///
     /// Per instance:
-    /// - `granted_at` = earliest RFC 3339-parseable timestamp among the grant
-    ///   links naming this DID ([`grant_link_names_did`]). No qualifying link:
-    ///   the asserted instance timestamp, if parseable. Neither: **`Err`**,
-    ///   the same fail-closed rule the loader applies — a grant that cannot be
-    ///   placed in time gates nothing rather than gating everything.
+    /// - `granted_at` by the one dating rule ([`GrantDating::granted_at`],
+    ///   stated in the [`roles`](super) module doc): verified links from an
+    ///   accepted granter on a DID field, and under `author: "$did"` the
+    ///   grantee's own verified links. Nothing dates it: the instance
+    ///   contributes no window, which is "not a member".
     /// - revocations = the carried tombstones that count for this DID
     ///   ([`revocation_link_counts_for_did`] — signed, and naming the DID) and
-    ///   whose author [`revocation_authorised`] accepts, as `(by, at)`.
+    ///   whose author [`granter_authorised`] accepts, as `(by, at)`.
     ///
     /// # Signatures
     ///
-    /// Grant links are **not** signature-filtered here, matching the
-    /// collection side and the pre-#1027 behaviour; see the module header and
-    /// <https://github.com/coasys/ad4m/issues/1063>.
-    ///
-    /// A tombstone counts only when its signature verifies, and that verdict
-    /// is **computed, never carried**: the evidence types hold plain
-    /// [`LinkExpression`], whose proof has no verdict field, so a read-set
-    /// cannot even state one — and [`revocation_link_counts_for_did`] runs
-    /// the check itself, from the signature, on every call. A forged
-    /// `"valid": true` on a tombstone would have ended a grant early,
-    /// changing who counted toward quorum; that attack is now unrepresentable
-    /// rather than filtered. Doing the check inside the shared predicate
-    /// makes it **unskippable**: there is no path from carried evidence to a
-    /// [`RoleGrantWindow`] that does not go through it, so a future ingest
-    /// seam cannot forget the step.
+    /// A dating link or a tombstone counts only when its signature verifies,
+    /// and that verdict is **computed, never carried**: the evidence types
+    /// hold plain [`LinkExpression`], whose proof has no verdict field, so a
+    /// read-set cannot even state one — and the shared predicates run the
+    /// check themselves, from the signature, on every call. Doing the check
+    /// inside them makes it **unskippable**: there is no path from carried
+    /// evidence to a [`RoleGrantWindow`] that does not go through it, so a
+    /// future ingest seam cannot forget the step.
     ///
     /// This keeps `resolve` pure — the check is SHA256 plus an Ed25519
     /// verification against the author's own `did:key`: no store, no clock,
-    /// no network — at a cost bounded by the number of tombstones carried.
-    ///
-    /// Grant links get no such treatment because they are not
-    /// signature-filtered on either side; see above and #1063.
+    /// no network — at a cost bounded by the number of links carried.
     ///
     /// # `producedByFlow`
     ///
@@ -130,17 +118,16 @@ impl RoleGrantEvidence {
     ///
     /// When it declares `producedByFlow`, the instance counts only when it
     /// carries a [`RoleInstanceHistory::produced_at`], and **that date
-    /// replaces every other dating**: the assignment links and
-    /// `asserted_instance_timestamp` are not consulted, not even as a
-    /// fallback. Were they, writing a plain assignment link would grant the
-    /// role with no receipt at all and the gate would be decorative.
+    /// replaces every other dating**: the dating links are not consulted,
+    /// not even as a fallback. Were they, writing a plain assignment link
+    /// would grant the role with no receipt at all and the gate would be
+    /// decorative.
     ///
     /// An instance with no `produced_at` contributes no window, exactly as if
-    /// the role query had not matched it. That is an ordinary "not a member",
-    /// distinct from the `Err` above — which exists for a grant that *is*
-    /// claimed and cannot be placed in time. Tombstones still apply, and are
-    /// the only way such a grant ever ends; see [`grant`](super::super::grant)
-    /// § *Revocation*.
+    /// the role query had not matched it: an ordinary "not a member", the
+    /// same outcome as an instance nothing dates. Tombstones still apply, and
+    /// are the only way such a grant ever ends; see
+    /// [`grant`](super::super::grant) § *Revocation*.
     ///
     /// `count` is here only to refuse one shape outright: a `count` that is
     /// satisfied by **zero** matching instances, such as `{ max: 0 }`. Paired
@@ -163,7 +150,14 @@ impl RoleGrantEvidence {
             );
         }
         let did_literal = did_literal_url(&self.did)?;
-        let grant_counts = |l: &&LinkExpression| grant_link_names_did(l, &self.did, &did_literal);
+        let dating = GrantDating::new(role, translated_role_query, &self.did)?;
+        if !dating.is_datable() && produced_by.is_none() {
+            log::warn!(
+                "the `{}` role rule names `$did` neither as a field's value nor as `author`, so \
+                 no link can date a grant and it grants nobody",
+                role.class_name
+            );
+        }
 
         let mut windows = Vec::with_capacity(self.instances.len());
         for instance in &self.instances {
@@ -193,26 +187,18 @@ impl RoleGrantEvidence {
                 continue;
             }
 
-            // Earliest by parsed instant, never by string: timestamps are
-            // client-asserted and clients disagree on RFC 3339 flavour, so
-            // string order diverges from instant order inside a second (#1000).
-            let from_links = instance
-                .grant_links
-                .iter()
-                .filter(grant_counts)
-                .filter_map(|l| parse_link_timestamp(&l.timestamp).map(|dt| (dt, &l.timestamp)))
-                .min()
-                .map(|(_, ts)| ts.clone());
-            let Some(granted_at) = from_links
-                .or_else(|| instance.asserted_instance_timestamp.clone())
-                .filter(|t| parse_link_timestamp(t).is_some())
-            else {
-                anyhow::bail!(
-                    "RoleGrantEvidence::resolve: role instance `{}` (`{}`) for `{}` carries no RFC 3339-parseable grant link and no parseable instance timestamp, so the grant cannot be placed in time; refusing to gate (fail-closed)",
+            let Some(granted_at) = dating.granted_at(
+                &instance.instance_id,
+                &instance.grant_links,
+                &instance.grantees_own_links,
+            ) else {
+                log::debug!(
+                    "`{}` does not count toward `{}` for `{}`: no link dates the grant",
                     instance.instance_id,
-                    self.role_class,
+                    role.class_name,
                     self.did
                 );
+                continue;
             };
 
             windows.push(RoleGrantWindow {
@@ -249,7 +235,7 @@ impl RoleGrantEvidence {
     /// Shared by both dating branches on purpose. A `producedByFlow` grant is
     /// dated by a quorum instead of by a link, but it ends exactly the way
     /// every other role grant ends: a new signed tombstone from an author
-    /// [`revocation_authorised`] accepts. Splitting the two branches'
+    /// [`granter_authorised`] accepts. Splitting the two branches'
     /// revocation handling is how that would quietly stop being true.
     fn revocations_on(
         &self,
@@ -263,7 +249,7 @@ impl RoleGrantEvidence {
             .revocation_links
             .iter()
             .filter(|l| revocation_link_counts_for_did(l, &self.did, did_literal))
-            .filter(|l| revocation_authorised(translated_role_query, &l.author))
+            .filter(|l| granter_authorised(translated_role_query, &l.author))
             .map(|l| RoleRevocation {
                 by: l.author.clone(),
                 at: l.timestamp.clone(),
@@ -282,7 +268,8 @@ impl RoleGrantEvidence {
 }
 
 /// Whether `author` could have written a grant the translated role query
-/// accepts — and may therefore revoke one.
+/// accepts: the one authority rule, for the grant links that date a grant
+/// ([`GrantDating`]) and for the tombstones that end one.
 ///
 /// Reads only the `author` conditions of the translated `where`, level by
 /// level (the top, and each `OR` branch, of which at least one must accept),
@@ -304,7 +291,7 @@ impl RoleGrantEvidence {
 /// `matches_where` reads. A reader who knows `matches_where` also handles
 /// `AND`/`NOT` on other paths should not wait for them here: the role-query
 /// translator cannot produce them.
-pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
+pub fn granter_authorised(translated_query: &Value, author: &str) -> bool {
     fn accepted(where_clause: &Map<String, Value>, author: &str) -> bool {
         let conditions = where_clause
             .iter()
@@ -332,17 +319,6 @@ pub fn revocation_authorised(translated_query: &Value, author: &str) -> bool {
         Some(Value::Object(w)) => accepted(w, author),
         Some(_) => false,
     }
-}
-
-/// The `timestamp` `model_query` reports for a hydrated instance: its earliest
-/// link. Absent only for an instance that hydration could not date.
-pub(super) fn instance_timestamp(item: &EvidenceItem) -> Option<String> {
-    serde_json::from_str::<Value>(&item.content)
-        .ok()?
-        .get("timestamp")?
-        .as_str()
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
 }
 
 #[cfg(test)]
@@ -384,7 +360,8 @@ mod tests {
             let mut stub = members(&[ALICE()]);
             let revokers: Vec<(&str, &str)> =
                 accepted.iter().chain(rejected.iter()).map(|by| (*by, T2)).collect();
-            stub.histories.insert(ALICE().into(), history(ALICE(), Some(T1), &revokers));
+            // The grant is the rule's first accepted granter's.
+            stub.histories.insert(ALICE().into(), history_by(accepted[0], ALICE(), Some(T1), &revokers));
             let role = role(role_json);
             let evidence = resolve_role_grants(&stub, "approved", &role, &record(), &dids(&[ALICE()]))
                 .await
@@ -417,9 +394,9 @@ mod tests {
             json!({ "eq": ALICE(), "author": ADMIN() }),
             "the grant is admin's `agent` link, per link"
         );
-        assert!(revocation_authorised(&translated, ADMIN()));
+        assert!(granter_authorised(&translated, ADMIN()));
         for revoker in [MALLORY(), ALICE(), LEAD()] {
-            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
+            assert!(!granter_authorised(&translated, revoker), "{revoker}");
         }
         // With more fields the same author sits under each, in the plain form,
         // inside an `or` arm, and inside arms that inherit the level's author;
@@ -439,18 +416,18 @@ mod tests {
                 ALICE(),
             )
             .unwrap();
-            assert!(revocation_authorised(&translated, ADMIN()), "{rule}");
+            assert!(granter_authorised(&translated, ADMIN()), "{rule}");
             for revoker in [MALLORY(), ALICE(), LEAD()] {
                 assert!(
-                    !revocation_authorised(&translated, revoker),
+                    !granter_authorised(&translated, revoker),
                     "{revoker}: {rule}"
                 );
             }
         }
         // Every author condition at a level must accept, whichever key holds it.
         let both = json!({ "where": { "agent": { "eq": ALICE(), "author": [ADMIN(), LEAD()] }, "author": LEAD() } });
-        assert!(revocation_authorised(&both, LEAD()));
-        assert!(!revocation_authorised(&both, ADMIN()));
+        assert!(granter_authorised(&both, LEAD()));
+        assert!(!granter_authorised(&both, ADMIN()));
     }
 
     /// A level with fields and no `author`, beside `or` arms that name granters
@@ -486,16 +463,16 @@ mod tests {
         );
         let translated = requires_query_input(&distributed, &record(), ALICE()).unwrap();
         for revoker in [ADMIN(), LEAD()] {
-            assert!(revocation_authorised(&translated, revoker), "{revoker}");
+            assert!(granter_authorised(&translated, revoker), "{revoker}");
         }
         for revoker in [MALLORY(), ALICE()] {
-            assert!(!revocation_authorised(&translated, revoker), "{revoker}");
+            assert!(!granter_authorised(&translated, revoker), "{revoker}");
         }
     }
 
     /// The window is derived from the carried links, in a deterministic order:
-    /// the grant link's timestamp when there is one, else the instance's own;
-    /// the authorised tombstones earliest first.
+    /// the grant link's timestamp, and the authorised tombstones earliest
+    /// first.
     #[tokio::test]
     async fn windows_are_derived_from_the_carried_links() {
         let mut stub = RoleStub {
@@ -506,8 +483,8 @@ mod tests {
             ALICE().into(),
             history(ALICE(), Some(T1), &[(MALLORY(), T3), (ADMIN(), T2)]),
         );
-        // Bob's instances have no `didProperty` link the store could date: they
-        // date from the instances themselves (T0), and nothing revoked them.
+        // Bob holds the stub's default: admin's grant link at T0, and nothing
+        // revoked it.
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let evidence = resolve_role_grants(
             &stub,
@@ -519,9 +496,8 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            evidence[1].instances[0].asserted_instance_timestamp.as_deref(),
-            Some(T0),
-            "with no grant link to carry, the instance's hydrated timestamp is what travels — asserted, and named as such"
+            evidence[1].instances[0].grant_links[0].timestamp, T0,
+            "the grant link itself travels, not a date derived from it"
         );
         let grants = views(&evidence, &role);
         let alice = &grants[0];
@@ -560,7 +536,6 @@ mod tests {
     /// at all — the signature is the only thing a sender controls, and it is
     /// exactly what this test forges (r4076927995).
     ///
-    /// Grant links deliberately have no such check yet; see #1063.
     #[test]
     fn a_tombstone_whose_signature_fails_does_not_revoke_whatever_it_claims() {
         let role = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
@@ -583,7 +558,7 @@ mod tests {
                 instance_id: "r0".into(),
                 grant_links: vec![grant_link(ALICE(), T1)],
                 revocation_links: vec![forged],
-                asserted_instance_timestamp: None,
+                grantees_own_links: Vec::new(),
                 produced_at: None,
             }],
         }
@@ -613,7 +588,7 @@ mod tests {
                 instance_id: "r0".into(),
                 grant_links: vec![grant_link(BOB(), T0), grant_link(ALICE(), T3)],
                 revocation_links: vec![tombstone(BOB(), ADMIN(), T4)],
-                asserted_instance_timestamp: None,
+                grantees_own_links: Vec::new(),
                 produced_at: None,
             }],
         }
@@ -627,5 +602,170 @@ mod tests {
             grant.windows[0].revocations.is_empty(),
             "Bob's tombstone does not revoke Alice"
         );
+    }
+
+    /// Alice's evidence on one instance `r0`, carrying `grant_links` and
+    /// `grantees_own_links` exactly as given.
+    fn alice_on_r0(
+        grant_links: Vec<LinkExpression>,
+        grantees_own_links: Vec<LinkExpression>,
+    ) -> RoleGrantEvidence {
+        RoleGrantEvidence {
+            to_state: "approved".into(),
+            role_class: "ns://Reviewer".into(),
+            did: ALICE().into(),
+            instances: vec![RoleInstanceHistory {
+                instance_id: "r0".into(),
+                grant_links,
+                grantees_own_links,
+                revocation_links: Vec::new(),
+                produced_at: None,
+            }],
+        }
+    }
+
+    /// When Alice's grant on `r0` starts under `role_json`, if it does.
+    fn alice_granted_at(
+        role_json: Value,
+        grant_links: Vec<LinkExpression>,
+        grantees_own_links: Vec<LinkExpression>,
+    ) -> Option<String> {
+        let role = role(role_json);
+        let grant = alice_on_r0(grant_links, grantees_own_links)
+            .resolve(&translated(&role, ALICE()), &role)
+            .expect("resolves");
+        assert!(grant.windows.len() <= 1);
+        grant.windows.first().map(|w| w.granted_at.clone())
+    }
+
+    /// The same rule decides who may date a grant and who may end it: for
+    /// every rule and every author, a grant link from that author dates the
+    /// grant exactly when a tombstone from that author revokes it.
+    #[test]
+    #[rustfmt::skip]
+    fn a_link_dates_a_grant_exactly_when_its_author_could_revoke_it() {
+        let rules: Vec<(Value, Vec<&str>)> = vec![
+            (json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
+             vec![ADMIN(), LEAD(), MALLORY(), ALICE()]),
+            (json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } }),
+             vec![ADMIN()]),
+            (json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": { "in": [ADMIN(), LEAD()] } } }),
+             vec![ADMIN(), LEAD()]),
+            (json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                     "or": [ { "className": "ns://Reviewer", "where": { "author": ADMIN() } },
+                             { "className": "ns://Reviewer", "where": { "author": LEAD() } } ] }),
+             vec![ADMIN(), LEAD()]),
+            (json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": "$did" } }),
+             vec![ALICE()]),
+        ];
+        for (rule, granters) in rules {
+            let role = role(rule.clone());
+            let query = translated(&role, ALICE());
+            for author in [ADMIN(), LEAD(), MALLORY(), ALICE()] {
+                let link = grant_link_by(author, ALICE(), T1);
+                let dates = alice_granted_at(rule.clone(), vec![link.clone()], vec![link]).is_some();
+
+                // A grant this rule accepts, and `author`'s tombstone on it.
+                let granted = grant_link_by(granters[0], ALICE(), T1);
+                let mut evidence = alice_on_r0(vec![granted.clone()], vec![granted]);
+                evidence.instances[0].revocation_links = vec![tombstone(ALICE(), author, T2)];
+                let grant = evidence.resolve(&query, &role).expect("resolves");
+                let revokes = !grant.windows[0].revocations.is_empty();
+
+                assert_eq!(dates, granters.contains(&author), "{author} dating under {rule}");
+                assert_eq!(revokes, dates, "{author} under {rule}: dating and revoking disagree");
+            }
+        }
+    }
+
+    /// A non-granter's earlier grant link does not date the grant, and
+    /// neither does a forged one claiming the granter: the grant starts at
+    /// the granter's own link. With only the forgery, nothing dates it and
+    /// there is no grant — the window narrows to nothing rather than falling
+    /// back to anything earlier.
+    #[test]
+    fn only_a_verified_link_from_an_accepted_granter_dates_a_grant() {
+        let admin_only =
+            json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": ADMIN() } });
+        let genuine = grant_link_by(ADMIN(), ALICE(), T2);
+        let by_mallory = grant_link_by(MALLORY(), ALICE(), T0);
+        let forged = role_link("agent", ALICE(), ADMIN(), false, T0);
+
+        assert_eq!(
+            alice_granted_at(admin_only.clone(), vec![by_mallory, genuine.clone()], Vec::new()).as_deref(),
+            Some(T2),
+            "Mallory may not grant, so her earlier link does not move the edge"
+        );
+        assert_eq!(
+            alice_granted_at(admin_only.clone(), vec![forged.clone(), genuine], Vec::new()).as_deref(),
+            Some(T2),
+            "a forged earlier link does not move the edge either"
+        );
+        assert_eq!(
+            alice_granted_at(admin_only, vec![forged.clone()], Vec::new()),
+            None,
+            "with only the forgery nothing dates the grant, so there is none"
+        );
+
+        let anyone = json!({ "className": "ns://Reviewer", "didProperty": "agent" });
+        assert_eq!(
+            alice_granted_at(anyone.clone(), vec![forged], Vec::new()),
+            None,
+            "a rule that lets anyone grant still needs a link someone wrote"
+        );
+        let on_another_instance = role_link_on("r1", "agent", ALICE(), ADMIN(), true, T0);
+        assert_eq!(
+            alice_granted_at(anyone, vec![on_another_instance, grant_link(ALICE(), T2)], Vec::new())
+                .as_deref(),
+            Some(T2),
+            "a genuine grant on another instance does not date this one"
+        );
+    }
+
+    /// Under `author: "$did"` the grant is the grantee's own: it starts at the
+    /// earliest verified link Alice wrote on the instance. Admin's earlier
+    /// link and a forgery in Alice's name do not date it.
+    #[test]
+    fn a_self_granted_role_is_dated_by_the_grantees_own_verified_link() {
+        let self_granted =
+            json!({ "className": "ns://Reviewer", "where": { "author": "$did", "rank": "lead" } });
+        let by_admin = role_link("rank", "lead", ADMIN(), true, T0);
+        let forged_as_alice = role_link("rank", "lead", ALICE(), false, T1);
+        let by_alice = role_link("rank", "lead", ALICE(), true, T2);
+        assert_eq!(
+            alice_granted_at(
+                self_granted.clone(),
+                Vec::new(),
+                vec![by_admin.clone(), forged_as_alice, by_alice.clone()]
+            )
+            .as_deref(),
+            Some(T2)
+        );
+        assert_eq!(alice_granted_at(self_granted, Vec::new(), vec![by_admin]), None);
+
+        // With a DID field as well, both must hold and the later one wins:
+        // Alice's own earliest link is at T1, her `agent` link at T3.
+        let both = json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": "$did" } });
+        let early_own = role_link("rank", "lead", ALICE(), true, T1);
+        let assignment = grant_link_by(ALICE(), ALICE(), T3);
+        assert_eq!(
+            alice_granted_at(both.clone(), vec![assignment.clone()], vec![early_own.clone(), assignment])
+                .as_deref(),
+            Some(T3)
+        );
+        assert_eq!(
+            alice_granted_at(both, Vec::new(), vec![early_own]),
+            None,
+            "without the `agent` link one half is missing, so there is no grant"
+        );
+    }
+
+    /// A rule that names `$did` where no link can date it — inside an `in`
+    /// list, with no `author: "$did"` — grants nothing, whatever is carried.
+    #[test]
+    fn a_rule_with_no_datable_did_grants_nothing() {
+        let rule = json!({ "className": "ns://Reviewer", "where": { "agent": { "in": ["$did", "did:key:x"] } } });
+        let link = grant_link(ALICE(), T1);
+        assert_eq!(alice_granted_at(rule, vec![link.clone()], vec![link]), None);
     }
 }

@@ -1,6 +1,7 @@
 //! Fixtures shared by the roles tests: signed personas, links, histories
 //! and the query-aware store stub.
 
+use super::dating::GrantDating;
 use super::{RoleGrant, RoleGrantEvidence, RoleRevocation};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::flow_context::FlowInstanceRecord;
@@ -102,6 +103,18 @@ pub(super) fn role_link(
     valid: bool,
     timestamp: &str,
 ) -> LinkExpression {
+    role_link_on("r0", predicate, target, author, valid, timestamp)
+}
+
+/// [`role_link`] on the instance `source`.
+pub(super) fn role_link_on(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    author: &str,
+    valid: bool,
+    timestamp: &str,
+) -> LinkExpression {
     use crate::types::Link as CoreLink;
     let at = chrono::DateTime::parse_from_rfc3339(timestamp)
         .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
@@ -113,7 +126,7 @@ pub(super) fn role_link(
     let signing_key = if valid { signer } else { persona("forger") };
     let mut expr = signing_key.sign_at(
         CoreLink {
-            source: "r0".to_string(),
+            source: source.to_string(),
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         }
@@ -125,9 +138,27 @@ pub(super) fn role_link(
     LinkExpression::from(expr)
 }
 
-/// A signed `instance --agent--> did` grant link at `at`.
+/// A signed `instance --agent--> did` grant link by admin at `at`.
 pub(super) fn grant_link(did: &str, at: &str) -> LinkExpression {
-    role_link("agent", did, ADMIN(), true, at)
+    grant_link_by(ADMIN(), did, at)
+}
+
+/// A signed `instance --agent--> did` grant link by `granter` at `at`.
+pub(super) fn grant_link_by(granter: &str, did: &str, at: &str) -> LinkExpression {
+    role_link("agent", did, granter, true, at)
+}
+
+/// The same link on another instance, signed again by the same key, or by
+/// the forger's when it did not verify.
+fn on_instance(link: &LinkExpression, source: &str) -> LinkExpression {
+    role_link_on(
+        source,
+        link.data.predicate.as_deref().unwrap_or_default(),
+        &link.data.target,
+        &link.author,
+        link.compute_proof_valid(),
+        &link.timestamp,
+    )
 }
 
 /// A signed tombstone by `by` at `at`.
@@ -141,18 +172,29 @@ pub(super) fn tombstone(did: &str, by: &str, at: &str) -> LinkExpression {
     )
 }
 
-/// The store's answer for one DID: a grant link at `granted_at` (when
+/// The store's answer for one DID: admin's grant link at `granted_at` (when
 /// given) plus one signed tombstone per `(by, at)`.
 pub(super) fn history(
     did: &str,
     granted_at: Option<&str>,
     revocations: &[(&str, &str)],
 ) -> RoleGrantLinks {
+    history_by(ADMIN(), did, granted_at, revocations)
+}
+
+/// [`history`] with the grant link written by `granter`.
+pub(super) fn history_by(
+    granter: &str,
+    did: &str,
+    granted_at: Option<&str>,
+    revocations: &[(&str, &str)],
+) -> RoleGrantLinks {
     RoleGrantLinks {
         grant_links: granted_at
-            .map(|at| grant_link(did, at))
+            .map(|at| grant_link_by(granter, did, at))
             .into_iter()
             .collect(),
+        grantees_own_links: Vec::new(),
         revocation_links: revocations
             .iter()
             .map(|(by, at)| tombstone(did, by, at))
@@ -190,10 +232,17 @@ pub(super) fn eligible_now<'g>(
 }
 
 /// Query-aware stub: a call whose JSON mentions one of `member_dids`
-/// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
-/// `undated_instances`); `unconditional_instances` (for DID-independent queries)
-/// wins over matching when set; `error` fails every call. `histories`
-/// is what the store says about each DID's instances.
+/// returns `rows_per_match` instances (`r0`, `r1`, …);
+/// `unconditional_instances` (for DID-independent queries) wins over
+/// matching when set; `error` fails every call.
+///
+/// `histories` is what the store holds on each DID's instances, the same on
+/// every instance. A member with no entry holds admin's grant link at [`T0`],
+/// unless `undated_instances`, where nothing dates any grant. It hands back
+/// the links on the rule's DID fields, and under `author: "$did"` every link
+/// the grantee wrote, without the signature and granter filters the store
+/// applies: [`RoleGrantEvidence::resolve`] applies them again, and the tests
+/// through this stub pin that it does.
 #[derive(Default)]
 pub(super) struct RoleStub {
     pub(super) member_dids: Vec<String>,
@@ -238,11 +287,35 @@ impl RequiresQueryable for RoleStub {
     async fn role_grant_links(
         &self,
         _role_class: &str,
-        _instance_id: &str,
-        _did_property: Option<&str>,
-        did: &str,
+        instance_id: &str,
+        dating: &GrantDating,
     ) -> anyhow::Result<RoleGrantLinks> {
-        Ok(self.histories.get(did).cloned().unwrap_or_default())
+        let did = dating.did.as_str();
+        let held = match self.histories.get(did) {
+            Some(held) => held.clone(),
+            None if self.undated_instances => RoleGrantLinks::default(),
+            None => history(did, Some(T0), &[]),
+        };
+        let on_here = |links: &[LinkExpression]| -> Vec<LinkExpression> {
+            links.iter().map(|l| on_instance(l, instance_id)).collect()
+        };
+        let every_link: Vec<LinkExpression> = on_here(&held.grant_links)
+            .into_iter()
+            .chain(on_here(&held.grantees_own_links))
+            .chain(on_here(&held.revocation_links))
+            .collect();
+        Ok(RoleGrantLinks {
+            grant_links: if dating.fields.is_empty() {
+                Vec::new()
+            } else {
+                on_here(&held.grant_links)
+            },
+            grantees_own_links: every_link
+                .into_iter()
+                .filter(|l| dating.by_grantee && l.author == did)
+                .collect(),
+            revocation_links: on_here(&held.revocation_links),
+        })
     }
 }
 

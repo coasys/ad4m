@@ -371,15 +371,14 @@ async fn the_engine_pass_never_reaches_quorum_by_itself_however_many_dids_run_it
 /// 2. the predicate spelling finds the same link (a hand-written SDNA may use
 ///    either, and a role rule must not gate differently depending on which);
 /// 3. a name the class does not declare is an `Err`, never an empty predicate;
-/// 4. the window `resolve` recomputes is dated from the **assignment**, and is
-///    strictly later than the fallback it used to silently take.
+/// 4. the window `resolve` recomputes is dated from the **assignment**.
 ///
 /// Fails on `8bb33678d~1` at assertion 1: `grant_links` comes back empty.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_did_property_grant_link_travels_through_the_real_store() {
     use crate::perspectives::flow_evaluator::{requires_query_input, RequiresQueryable};
+    use crate::perspectives::flow_instance::roles::dating::GrantDating;
     use crate::perspectives::flow_instance::roles::resolve_role_grants;
-    use crate::perspectives::flow_instance::time::parse_link_timestamp;
     use crate::perspectives::shacl_parser::ModelQuery;
 
     let mut f = seed_satisfied_fixture(None).await;
@@ -389,12 +388,20 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     tick().await;
     grant_owner_role(&mut f).await;
     let me = acting_did(&f);
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
+    // The rule's DID field spelled `field`, as the translator would emit it.
+    let dating = |field: &str| {
+        GrantDating::new(&role, &serde_json::json!({ "where": { field: me } }), &me)
+            .expect("dating")
+    };
 
     // 1. The store boundary: `owner` is the SDNA property NAME; the graph
     //    holds `ns://owner`. Before the fix this vector was empty.
     let by_name = f
         .perspective
-        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .role_grant_links("ns://Task", TASK, &dating("owner"))
         .await
         .expect("role_grant_links by property name");
     assert_eq!(
@@ -413,7 +420,7 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     // 2. Either spelling, one answer.
     let by_predicate = f
         .perspective
-        .role_grant_links("ns://Task", TASK, Some("ns://owner"), &me)
+        .role_grant_links("ns://Task", TASK, &dating("ns://owner"))
         .await
         .expect("role_grant_links by predicate");
     assert_eq!(
@@ -425,7 +432,7 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
     //    predicate — which is what "granted since forever" looked like.
     let err = f
         .perspective
-        .role_grant_links("ns://Task", TASK, Some("noSuchProperty"), &me)
+        .role_grant_links("ns://Task", TASK, &dating("noSuchProperty"))
         .await
         .expect_err("a didProperty the class does not declare must be an Err");
     assert!(
@@ -435,9 +442,6 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
 
     // 4. End to end: the evidence that travels in a receipt carries the
     //    assignment, and the window is dated from it.
-    let role: ModelQuery =
-        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
-            .expect("role query");
     let record = f.instances().await.remove(0);
     let evidence = resolve_role_grants(
         &f.perspective,
@@ -472,18 +476,6 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
         window.granted_at, instance.grant_links[0].timestamp,
         "granted_at is the assignment link's own timestamp"
     );
-
-    let fallback = instance
-        .asserted_instance_timestamp
-        .clone()
-        .expect("the instance is datable, so the fallback exists and is the wrong answer");
-    assert!(
-        parse_link_timestamp(&window.granted_at) > parse_link_timestamp(&fallback),
-        "the assignment must date the grant STRICTLY LATER than the instance fallback \
-         ({} vs {}) — taking the fallback is what widened every didProperty window",
-        window.granted_at,
-        fallback
-    );
 }
 
 /// #1111 + #1112: everything `role_grant_links` reads through raw `get_links`
@@ -502,8 +494,10 @@ async fn a_did_property_grant_link_travels_through_the_real_store() {
 #[tokio::test(flavor = "multi_thread")]
 async fn role_grant_evidence_is_reachable_through_model_query() {
     use crate::perspectives::flow_evaluator::{
-        did_literal_url, grant_link_names_did, revocation_link_counts_for_did, RequiresQueryable,
+        did_literal_url, revocation_link_counts_for_did, RequiresQueryable,
     };
+    use crate::perspectives::flow_instance::roles::dating::GrantDating;
+    use crate::perspectives::shacl_parser::ModelQuery;
 
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
@@ -513,10 +507,19 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
     revoke_own_role(&mut f, TASK).await;
     let me = acting_did(&f);
     let me_literal = did_literal_url(&me).expect("literal");
+    let role: ModelQuery =
+        serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+            .expect("role query");
+    let dating = GrantDating::new(
+        &role,
+        &serde_json::json!({ "where": { "owner": me } }),
+        &me,
+    )
+    .expect("dating");
 
     let raw = f
         .perspective
-        .role_grant_links("ns://Task", TASK, Some("owner"), &me)
+        .role_grant_links("ns://Task", TASK, &dating)
         .await
         .expect("role_grant_links");
     assert_eq!(raw.grant_links.len(), 1, "fixture: one assignment");
@@ -552,7 +555,7 @@ async fn role_grant_evidence_is_reachable_through_model_query() {
 
     let grants: Vec<LinkExpression> = carried("owner")
         .into_iter()
-        .filter(|l| grant_link_names_did(l, &me, &me_literal))
+        .filter(|l| dating.is_grant_link(l, TASK))
         .collect();
     let revocations: Vec<LinkExpression> = carried(ROLE_GRANT_REVOKED_PREDICATE)
         .into_iter()

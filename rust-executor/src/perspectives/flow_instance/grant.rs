@@ -87,13 +87,13 @@
 //!
 //! An instance with no `produced_at` contributes **no window**, exactly as if
 //! the role query had not matched it. It is an ordinary "not a member"
-//! answer, not the fail-closed abort that
+//! answer, the same one
 //! [`RoleGrantEvidence::resolve`](super::roles::RoleGrantEvidence::resolve)
-//! raises for a grant it cannot place in time.
+//! gives for any grant no link can date.
 //!
 //! **There is no fallback.** When a role query carries `producedByFlow`,
-//! neither the assignment links nor `asserted_instance_timestamp` can date the
-//! grant — if they could, writing a plain assignment link would grant the role
+//! the links that date other grants ([`roles`](super::roles) § *Where the
+//! timestamps come from*) cannot date this one — if they could, writing a plain assignment link would grant the role
 //! with no receipt at all, and the gate would be decorative.
 //!
 //! **A `count` satisfied by zero is refused** (`{ max: 0 }` with the gate):
@@ -114,7 +114,7 @@
 //! tombstone — a new signed event, per [`roles`](super::roles) § *What a grant
 //! is*: `instance --ad4m://flow/role_grant_revoked--> did`, honoured from its
 //! own timestamp, and only from an author
-//! [`revocation_authorised`](super::roles::evidence::revocation_authorised) accepts.
+//! [`granter_authorised`](super::roles::evidence::granter_authorised) accepts.
 //! So, concretely, for anyone writing social DNA:
 //!
 //! | Role query's `where.author` | Who can un-grant |
@@ -180,6 +180,7 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
 mod tests {
     use super::*;
     use crate::perspectives::flow_evaluator::{EvidenceItem, RoleGrantLinks};
+    use crate::perspectives::flow_instance::roles::dating::GrantDating;
     use crate::perspectives::flow_instance::atom::{
         outputs_hash, proposal_uri, OutputRef, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE,
         FROM_STATE_PREDICATE, OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
@@ -390,8 +391,8 @@ mod tests {
             instances: vec![RoleInstanceHistory {
                 instance_id: ROLE_INSTANCE.into(),
                 grant_links: vec![assignment(ROLE_INSTANCE)],
+                grantees_own_links: Vec::new(),
                 revocation_links: revocations,
-                asserted_instance_timestamp: Some(ASSIGNMENT_LINK_AT.into()),
                 produced_at: produced_at.map(str::to_string),
             }],
         }
@@ -437,15 +438,15 @@ mod tests {
             &self,
             _role_class: &str,
             instance_id: &str,
-            _did_property: Option<&str>,
-            did: &str,
+            dating: &GrantDating,
         ) -> anyhow::Result<RoleGrantLinks> {
             Ok(RoleGrantLinks {
-                grant_links: if did == did_of(ALICE) {
+                grant_links: if dating.did == did_of(ALICE) {
                     vec![assignment(instance_id)]
                 } else {
                     Vec::new()
                 },
+                grantees_own_links: Vec::new(),
                 revocation_links: Vec::new(),
             })
         }
