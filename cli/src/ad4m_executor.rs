@@ -151,6 +151,8 @@ enum Domain {
         hc_relay_url: Option<String>,
         #[arg(short, long, action)]
         connect_holochain: Option<bool>,
+        #[arg(long, action)]
+        run_holochain: Option<bool>,
         /// Admin credential granting full capabilities to whoever presents it.
         /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
         /// visible to every user on the host via `ps` and stays in shell history.
@@ -223,6 +225,7 @@ async fn main() -> Result<()> {
         hc_bootstrap_url,
         hc_relay_url,
         connect_holochain,
+        run_holochain,
         admin_credential,
         localhost,
         tls_cert_file,
@@ -265,6 +268,7 @@ async fn main() -> Result<()> {
                 hc_bootstrap_url,
                 hc_relay_url,
                 connect_holochain,
+                run_holochain,
                 admin_credential,
                 localhost,
                 auto_permit_cap_requests: Some(true),

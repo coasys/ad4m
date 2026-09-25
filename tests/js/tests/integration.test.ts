@@ -1,100 +1,37 @@
+// Re-export TestContext for backwards compat (any file still importing from here)
+export { TestContext } from './test-context'
+import { TestContext } from './test-context'
+
 import fs from 'fs-extra'
 import path from 'path'
-import { isProcessRunning, sleep } from "../utils/utils";
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
 import { startExecutor, baseUrl, runHcLocalServices, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { startLinkServer, LinkServerHandle } from "../utils/linkServer";
-import { LinkLangConfig, holochainLinkLang, serverLinkLang } from "../utils/linkLangConfig";
+import { LinkLangConfig, holochainLinkLang } from "../utils/linkLangConfig";
 import { ChildProcess } from 'child_process';
 import perspectiveTests from "./perspective";
 import agentTests from "./agent";
 import aiTests from "./ai";
-import languageTests from "./language";
 import expressionTests from "./expression";
 import neighbourhoodTests from "./neighbourhood";
 import autoProcessorNeighbourhoodTests from "./auto-processor-neighbourhood";
 import crossPeerShapeSyncTests from "./cross-peer-shape-sync";
 import runtimeTests from "./runtime";
 import flatLanguageTests from "./flat-language.test";
-//import { Crypto } from "@peculiar/webcrypto"
 import agentLanguageTests from "./agent-language";
+import languageTests from "./language";
 import shaclRpcTests from "./shacl-rpc";
 
-// Both link-language hashes are required — prepare-test must publish both.
-// The absence check happens in the outer before(), so a missing file fails
-// loudly rather than silently dropping half the matrix.
-const SERVER_LINK_HASH_PATH = "./scripts/server-link-language-hash";
-const SERVER_LINK_HASH = fs.existsSync(SERVER_LINK_HASH_PATH)
-    ? fs.readFileSync(SERVER_LINK_HASH_PATH).toString().trim()
-    : "";
+// Published by prepare-test (publishTestLangs.ts).
 const DIFF_SYNC_HASH = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString().trim();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-//@ts-ignore
-//global.crypto = new Crypto();
-
 const TEST_DIR = `${__dirname}/../tst-tmp`
 
-export class TestContext {
-    //#ad4mClient: Ad4mClient | undefined
-    #alice: Ad4mClient | undefined
-    #bob: Ad4mClient | undefined
-
-    #aliceCore: ChildProcess | undefined
-    #bobCore: ChildProcess | undefined
-
-    get ad4mClient(): Ad4mClient {
-      return this.#alice!
-    }
-
-    get alice(): Ad4mClient {
-      return this.#alice!
-    }
-
-    get bob(): Ad4mClient {
-      return this.#bob!
-    }
-
-    set alice(client: Ad4mClient) {
-      this.#alice = client
-    }
-
-    set bob(client: Ad4mClient) {
-      this.#bob = client
-    }
-
-    set aliceCore(aliceCore: ChildProcess) {
-      this.#aliceCore = aliceCore
-    }
-
-    set bobCore(bobCore: ChildProcess) {
-      this.#bobCore = bobCore
-    }
-
-    async makeAllNodesKnown() {
-      for (let attempt = 1; attempt <= 5; attempt++) {
-        try {
-          const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
-          const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
-
-          await this.#alice!.runtime.hcAddAgentInfos(bobAgentInfo);
-          await this.#bob!.runtime.hcAddAgentInfos(aliceAgentInfo);
-          console.log(`Agent info exchange attempt ${attempt} successful`);
-          break;
-        } catch (error) {
-          console.log(`Agent info exchange attempt ${attempt} failed:`, error);
-          if (attempt < 5) {
-            await sleep(3000);
-          }
-        }
-      }
-    }
-}
 let testContext: TestContext = new TestContext()
 
 describe("Integration tests", function () {
@@ -160,12 +97,6 @@ describe("Integration tests", function () {
         let bobApiPort: number;
         let bobHcAdminPort: number;
         let bobHcAppPort: number;
-        // Link-server for the server-link-language matrix leg. Lives here (not
-        // per-neighbourhood test) so multiple describe blocks share a single
-        // server instance; ROOM_ID uniqueness per neighbourhood comes from
-        // linkLangConfig.buildTemplateParams.
-        let linkServer: LinkServerHandle | null = null;
-        let serverLinkConfig: LinkLangConfig | null = null;
         const holochainConfig: LinkLangConfig = holochainLinkLang(DIFF_SYNC_HASH);
         before(async () => {
           const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob')
@@ -199,43 +130,20 @@ describe("Integration tests", function () {
           await testContext.bob.agent.updatePublicPerspective(new Perspective([link]))
 
           await testContext.makeAllNodesKnown()
-
-          // Boot a link-server for the server-link-language matrix leg.
-          // Fail hard if the hash file is missing — a broken prepare-test
-          // must not silently drop half the matrix; that's the exact drift
-          // this suite exists to catch.
-          if (!SERVER_LINK_HASH) {
-              throw new Error(
-                  `[integration] ${SERVER_LINK_HASH_PATH} is missing or empty. ` +
-                  `Server-link-language did not publish during prepare-test — ` +
-                  `fix that before running the integration suite (this test must not run without it).`,
-              );
-          }
-          linkServer = await startLinkServer();
-          serverLinkConfig = serverLinkLang(SERVER_LINK_HASH, linkServer.url);
         })
 
         after(async () => {
           if (bobExecutorProcess) {
             await quitExecutor(bobExecutorProcess, bobApiPort);
           }
-          if (linkServer) {
-              await linkServer.kill();
-              linkServer = null;
-          }
           deregisterPorts([bobApiPort, bobHcAdminPort, bobHcAppPort]);
         })
 
         describe('Agent Language', agentLanguageTests(testContext))
         describe('Language', languageTests(testContext))
-        // Same neighbourhood suite, run once per link-language flavour. The
-        // getter closes over the outer `serverLinkConfig` so it picks up the
-        // real value after the outer before() runs.
+        // The [server-link] leg of this suite runs in integration-local.test.ts:
+        // the server-link-language syncs over HTTP/WS and needs no Holochain.
         describe('Neighbourhood [holochain]', neighbourhoodTests(testContext, () => holochainConfig))
-        describe('Neighbourhood [server-link]', neighbourhoodTests(testContext, () => {
-            if (!serverLinkConfig) throw new Error("server-link config not initialised — before() didn't run?");
-            return serverLinkConfig;
-        }))
         describe('Auto-processor (two executors)', autoProcessorNeighbourhoodTests(testContext))
         describe('Cross-peer SHACL shape sync', crossPeerShapeSyncTests(testContext))
     })

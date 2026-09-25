@@ -23,6 +23,7 @@ import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
 import { ConversationSubgroup } from "./model/auto-processor-models";
+import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -61,7 +62,12 @@ const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
-export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
+export default function autoProcessorNeighbourhoodTests(
+  testContext: TestContext,
+  // Which link language carries the sync. Defaults to p-diff-sync; the
+  // local suite passes the server-link-language config.
+  getLinkLang: () => LinkLangConfig = () => holochainLinkLang(DIFF_SYNC_OFFICIAL),
+) {
   return () => {
     describeIfLLM("Auto-processor across two executors", function () {
       // Cumulative wait budget in the slowest test:
@@ -90,10 +96,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await registerLlm(bob);
 
         const aliceHandle = await alice.perspective.add(`ap-channel-${processorId}`);
-        const socialContext = await alice.languages.applyTemplateAndPublish(
-          DIFF_SYNC_OFFICIAL,
-          JSON.stringify({ uid: uuidv4(), name: "auto-processor neighbourhood" }),
-        );
+        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "auto-processor neighbourhood");
         const url = await alice.neighbourhood.publishFromPerspective(
           aliceHandle.uuid,
           socialContext.address,
