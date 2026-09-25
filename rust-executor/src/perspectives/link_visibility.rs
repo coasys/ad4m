@@ -314,83 +314,10 @@ fn author_filter(
     // from the wallet / agent store, not from request parameters), but a read
     // filter is the wrong place to rely on that.
     let escaped = escape_sparql_string(did);
-    let engine_derived = ENGINE_DERIVED_PREDICATES
-        .iter()
-        .map(|p| format!("<{p}>"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let engine_derived = engine_derived_terms();
 
     format!(
         "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!BOUND(?{status_var}) || ?{status_var} != \"{STATUS_LOCAL_LITERAL}\" || ?{author_var} = \"{escaped}\" || {predicate_term} IN ({engine_derived}))\n"
-    )
-}
-
-/// The predicate term of a `?s <p> ?o` pattern built by the model-query code.
-///
-/// Falls back to a term that matches no engine-derived predicate, so a
-/// pattern this cannot read keeps the plain author rule.
-fn pattern_predicate(triple_pattern: &str) -> &str {
-    triple_pattern
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("<ad4m://no-predicate>")
-}
-
-/// Keep a row only if the viewer may see at least one link that asserts
-/// `triple_pattern`, whose variables the surrounding query has already bound.
-///
-/// For the edge a query walks to reach `?source` (a parent scope, a traversal
-/// step). The edge itself is not read back, so the check is a
-/// `FILTER EXISTS`: a join would repeat the row once per visible link on the
-/// same triple.
-///
-/// The variables inside are named `?_{tag}_reifier`, `?_{tag}_author` and
-/// `?_{tag}_status`. An outer variable with the same name would constrain
-/// them, so each caller picks a tag no other filter in the query uses.
-///
-/// Returns an empty string in executor scope.
-pub fn viewer_edge_filter(viewer_did: Option<&str>, triple_pattern: &str, tag: &str) -> String {
-    let reifier = format!("_{tag}_reifier");
-    let author = format!("_{tag}_author");
-    let filter = author_filter(
-        viewer_did,
-        &reifier,
-        &author,
-        &format!("_{tag}_status"),
-        pattern_predicate(triple_pattern),
-    );
-    if filter.is_empty() {
-        return String::new();
-    }
-    format!(
-        "    FILTER EXISTS {{\n    ?{reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {triple_pattern} )>> .\n    ?{reifier} <ad4m://ontology/author> ?{author} .\n{filter}    }}\n"
-    )
-}
-
-/// [`viewer_author_filter`] for a query that matches a *triple pattern* rather
-/// than one that has already bound a reifier and an author.
-///
-/// Generated queries that walk edges directly — reverse relations, projection
-/// counts — read the raw triple, which carries no author at all. This binds the
-/// reifier for `triple_pattern` (given without the surrounding `<<( )>>`, e.g.
-/// `?parent <ad4m://has> ?t`), binds its author, and applies the same rule.
-/// Emit it at most once per query: like [`viewer_author_filter`] it uses fixed
-/// variable names.
-///
-/// Returns an empty string in executor scope.
-pub fn viewer_triple_filter(viewer_did: Option<&str>, triple_pattern: &str) -> String {
-    let filter = author_filter(
-        viewer_did,
-        "_vis_reifier",
-        "_vis_author",
-        "_viewer_status",
-        pattern_predicate(triple_pattern),
-    );
-    if filter.is_empty() {
-        return String::new();
-    }
-    format!(
-        "    ?_vis_reifier <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( {triple_pattern} )>> .\n    ?_vis_reifier <ad4m://ontology/author> ?_vis_author .\n{filter}"
     )
 }
 
@@ -457,16 +384,18 @@ mod tests {
     }
 
     #[test]
-    fn triple_filter_is_identity_in_executor_scope() {
-        assert_eq!(viewer_triple_filter(None, "?parent <ad4m://p> ?t"), "");
+    fn reifier_filter_is_identity_in_executor_scope() {
+        assert_eq!(viewer_reifier_filter(None, "?_sr", "<ad4m://p>"), "");
     }
 
     #[test]
-    fn triple_filter_binds_the_reifier_of_the_pattern_it_is_given() {
-        let filter = viewer_triple_filter(Some(ALICE), "?parent <ad4m://p> ?t");
-        assert!(filter.contains("<<( ?parent <ad4m://p> ?t )>>"));
-        assert!(filter.contains("?_vis_reifier <ad4m://ontology/author> ?_vis_author"));
-        assert!(filter.contains(ALICE));
+    fn reifier_filter_names_its_variables_after_the_reifier() {
+        let filter = viewer_reifier_filter(Some(ALICE), "?_sr", "<ad4m://p>");
+        assert!(filter.contains("?_sr <ad4m://ontology/author> ?_sr_va ."));
+        // Required, not OPTIONAL: see the function's docs.
+        assert!(filter.contains("?_sr <ad4m://ontology/status> ?_sr_vs ."));
+        assert!(!filter.contains("OPTIONAL"));
+        assert!(filter.contains(&format!("?_sr_va = \"{ALICE}\"")));
     }
 
     /// A main-agent request with no resolvable DID must be refused. Before this
@@ -531,8 +460,8 @@ mod tests {
     fn filters_let_engine_derived_predicates_through() {
         let filter = viewer_author_filter(Some(ALICE), "_reifier", "author", "predicate");
         assert!(filter.contains(&format!("?predicate IN (<{FLOW_CURRENT_STATE_PREDICATE}>)")));
-        let edge = viewer_edge_filter(Some(ALICE), "?from <ad4m://p> ?to", "t");
-        assert!(edge.contains(&format!("<ad4m://p> IN (<{FLOW_CURRENT_STATE_PREDICATE}>)")));
+        let guard = viewer_reifier_filter(Some(ALICE), "?_sr", "<ad4m://p>");
+        assert!(guard.contains(&format!("<ad4m://p> IN (<{FLOW_CURRENT_STATE_PREDICATE}>)")));
     }
 
     fn cache_link() -> Link {
