@@ -243,10 +243,20 @@ impl KeyEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KelError {
-    SeqGap { expected: u64, got: u64 },
-    HashMismatch { seq: u64 },
-    UnauthorizedSigner { key_id: String },
-    ScopeViolation { key_id: String, attempted: String },
+    SeqGap {
+        expected: u64,
+        got: u64,
+    },
+    HashMismatch {
+        seq: u64,
+    },
+    UnauthorizedSigner {
+        key_id: String,
+    },
+    ScopeViolation {
+        key_id: String,
+        attempted: String,
+    },
     InvalidInception(String),
     RecoveryCommitmentMismatch,
     MissingOwnerBinding,
