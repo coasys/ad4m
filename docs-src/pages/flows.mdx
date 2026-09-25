@@ -434,6 +434,8 @@ It is the same name and the same check as the [`producedByFlow` model-query filt
   and its `or` arms, `count`, `producedByFlow`, an object `linkedTo`, and
   each object-valued `where` condition. It does not cover `requires` guards or
   `context`, which still ignore unknown keys.
+  A key written twice anywhere in the rule (possible in a hand-written JSON
+  literal) is refused the same way; the last one does not win.
 </Callout>
 
 For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
