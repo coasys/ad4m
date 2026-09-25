@@ -242,7 +242,9 @@ jobs:
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
             mkdir -p "$dst"
             for bin in ad4m ad4m-executor; do
-              cp "target/release/$bin" "$dst/$bin.tmp" && mv "$dst/$bin.tmp" "$dst/$bin"
+              # `a && b` inside a loop does not stop the step under bash -e.
+              cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
+              mv "$dst/$bin.tmp" "$dst/$bin"
             done
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
