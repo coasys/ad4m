@@ -181,6 +181,15 @@ pub(crate) fn status_str(status: &LinkStatus) -> &'static str {
     }
 }
 
+/// The inverse of [`status_str`]: `None` when the store recorded no status.
+pub(crate) fn status_from_str(stored: &str) -> Option<LinkStatus> {
+    match stored {
+        "Shared" => Some(LinkStatus::Shared),
+        "Local" => Some(LinkStatus::Local),
+        _ => None,
+    }
+}
+
 /// Decode a stored `proofValid` annotation into a verdict.
 ///
 /// The store holds a *boolean*, never a third "unevaluated" state:
@@ -1080,11 +1089,7 @@ impl SparqlStore {
                 }
 
                 let proof_valid = decode_proof_valid(&proof_valid_str);
-                let status = match status_val.as_str() {
-                    "Local" => Some(LinkStatus::Local),
-                    "Shared" => Some(LinkStatus::Shared),
-                    _ => None,
-                };
+                let status = status_from_str(&status_val);
 
                 let link = DecoratedLinkExpression {
                     author,
@@ -1227,13 +1232,7 @@ impl SparqlStore {
         let proof_sig = get_str("proofSig");
         let proof_valid_str = get_str("proofValid");
         let proof_valid = decode_proof_valid(&proof_valid_str);
-        let status_val = get_str("status");
-        let status = match status_val.as_str() {
-            "Local" => Some(LinkStatus::Local),
-            "Shared" => Some(LinkStatus::Shared),
-            "" => None,
-            _ => None,
-        };
+        let status = status_from_str(&get_str("status"));
 
         Some(DecoratedLinkExpression {
             author,
@@ -1465,6 +1464,15 @@ impl SparqlStore {
 mod tests {
     use super::*;
     use crate::agent::signatures::TestSigner;
+
+    /// Every status reads back as itself; no annotation reads as `None`.
+    #[test]
+    fn a_stored_status_decodes_to_the_status_written() {
+        for status in [LinkStatus::Shared, LinkStatus::Local] {
+            assert_eq!(status_from_str(status_str(&status)), Some(status));
+        }
+        assert_eq!(status_from_str(""), None);
+    }
 
     fn make_link(
         signer: &TestSigner,

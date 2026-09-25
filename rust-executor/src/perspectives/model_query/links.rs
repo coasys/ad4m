@@ -45,19 +45,41 @@
 //! the window.
 
 use deno_core::anyhow::{anyhow, Error};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{status_from_str, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
 /// name in `shacl_parser`, so a class cannot declare a property it would
 /// overwrite.
 pub(crate) const LINKS_KEY: &str = "__links";
+
+/// The rows of one requested `links` key on one result instance, each read as
+/// a `T`. A key missing from [`LINKS_KEY`], or a row that is not a `T`, is an
+/// `Err`, never an empty list: read as "no links", a missing `acceptedBy` or
+/// grant key would silently drop every vote or grant.
+pub(crate) fn links_rows<T: DeserializeOwned>(
+    instance: &Value,
+    key: &str,
+) -> Result<Vec<T>, Error> {
+    instance
+        .get(LINKS_KEY)
+        .and_then(|links| links.get(key))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no `{LINKS_KEY}.{key}` rows"))?
+        .iter()
+        .map(|row| {
+            serde_json::from_value(row.clone())
+                .map_err(|e| anyhow!("a `{key}` row is not a link ({e}): {row}"))
+        })
+        .collect()
+}
 
 /// Resolve each requested entry to the predicate it reads, as
 /// `(requested spelling, predicate)`.
@@ -262,12 +284,7 @@ pub(super) async fn attach_links(
             });
             // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
             // and absent when the store recorded none, like `status` there.
-            let status = match s(row, "rowStatus").as_str() {
-                "Local" => Some(LinkStatus::Local),
-                "Shared" => Some(LinkStatus::Shared),
-                _ => None,
-            };
-            if let Some(status) = status {
+            if let Some(status) = status_from_str(&s(row, "rowStatus")) {
                 link["status"] = serde_json::to_value(status)?;
             }
             found
