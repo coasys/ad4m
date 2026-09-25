@@ -73,10 +73,10 @@ pub(super) fn guarded_reach(
         guard.join("?_wr", subject, &pred, object)
     );
     let mut edges: HashMap<String, Vec<String>> = HashMap::new();
-    let mut expanded: HashSet<String> = HashSet::new();
+    // Every node queued so far, so each is expanded once.
+    let mut discovered: HashSet<String> = starts.iter().cloned().collect();
     let mut frontier: Vec<String> = starts.to_vec();
     while !frontier.is_empty() {
-        expanded.extend(frontier.iter().cloned());
         let sparql = format!(
             "SELECT ?s ?o WHERE {{ {step} {} }}",
             values_or_str_filter("s", &frontier)
@@ -88,7 +88,7 @@ pub(super) fn guarded_reach(
                 continue;
             };
             edges.entry(s.to_string()).or_default().push(o.to_string());
-            if !expanded.contains(o) && !next.iter().any(|n| n == o) {
+            if discovered.insert(o.to_string()) {
                 next.push(o.to_string());
             }
         }
