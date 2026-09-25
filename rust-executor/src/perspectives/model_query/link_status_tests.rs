@@ -68,7 +68,23 @@ pub(super) fn ls_link(
     l
 }
 
-/// Card `ls://c/1`: its type and `title` are Shared, its `note` is Local.
+/// The flag link that makes `id` an instance of `class` in Local links.
+///
+/// Selection reads links of the requested status too (#1120), so an instance
+/// a `linkStatus: local` read returns must be flagged in a Local link. The
+/// fixtures flag it in both: an instance a Shared-only read returns carries a
+/// Shared flag as well.
+pub(super) fn ls_local_type(
+    signer: &TestSigner,
+    id: &str,
+    class: &str,
+    second: u32,
+) -> LinkExpression {
+    ls_link(signer, id, "ad4m://type", class, second, LinkStatus::Local)
+}
+
+/// Card `ls://c/1`: its type and `title` are Shared, its `note` is Local, and
+/// it is typed in a Local link as well.
 pub(super) fn ls_seed(store: &SparqlStore) -> TestSigner {
     let signer = TestSigner::generate();
     let c = "ls://c/1";
@@ -81,6 +97,7 @@ pub(super) fn ls_seed(store: &SparqlStore) -> TestSigner {
             0,
             LinkStatus::Shared,
         ),
+        ls_local_type(&signer, c, "ls://Card", 1),
         ls_link(
             &signer,
             c,
@@ -191,6 +208,7 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
             3,
             LinkStatus::Shared,
         ),
+        ls_local_type(&signer, r, "ls://Remark", 4),
         ls_link(
             &signer,
             r,
@@ -458,6 +476,9 @@ async fn link_status_and_include_unverified_both_apply_to_a_local_unverified_lin
             0,
             LinkStatus::Shared,
         ))
+        .unwrap();
+    store
+        .add_link(&ls_local_type(&signer, c, "ls://Card", 1))
         .unwrap();
     // A verified Local `title`, so every read has at least one row and returns
     // the card: the question is only whether `note` hydrates.

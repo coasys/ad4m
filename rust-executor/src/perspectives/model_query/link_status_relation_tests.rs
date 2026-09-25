@@ -7,7 +7,9 @@
 //! and once through a Local one, or has a Local link as the relation's only
 //! link, so a read that ignores `linkStatus` returns the Local value.
 
-use super::link_status_tests::{ls_link, ls_seed, unset, LS_REMARK_SHAPE_JSON, LS_SHAPE_JSON};
+use super::link_status_tests::{
+    ls_link, ls_local_type, ls_seed, unset, LS_REMARK_SHAPE_JSON, LS_SHAPE_JSON,
+};
 use super::shape::parse_shape_from_json;
 use super::test_helpers::StaticShapeResolver;
 use super::types::{IncludeValue, ModelQueryInput, ProjectionInput};
@@ -16,8 +18,8 @@ use crate::types::LinkStatus;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-/// Remark `ls://r/1`, typed by a Shared link, with a Shared `body` and a Local
-/// `aside`. Not yet related to the card.
+/// Remark `ls://r/1`, typed by a Shared and a Local link, with a Shared
+/// `body` and a Local `aside`. Not yet related to the card.
 fn ls_seed_remark(store: &SparqlStore, signer: &crate::agent::signatures::TestSigner) {
     let r = "ls://r/1";
     for l in [
@@ -29,6 +31,7 @@ fn ls_seed_remark(store: &SparqlStore, signer: &crate::agent::signatures::TestSi
             3,
             LinkStatus::Shared,
         ),
+        ls_local_type(signer, r, "ls://Remark", 4),
         ls_link(
             signer,
             r,
@@ -264,8 +267,9 @@ async fn link_status_applies_to_a_reverse_include() {
 
 /// A `$` projection with a target class hydrates each target in a sub-query.
 /// That sub-query inherits the caller's `linkStatus`, so the target's Local
-/// `aside` is withheld under Shared. Which targets are listed is selection and
-/// not restricted (#1120); the relation link here is Shared.
+/// `aside` is withheld under Shared. The relation link here is Shared, so the
+/// target is listed; which targets are listed follows `linkStatus` too
+/// (#1120).
 #[tokio::test]
 async fn link_status_applies_to_a_projection_target() {
     let store = SparqlStore::new(None).unwrap();

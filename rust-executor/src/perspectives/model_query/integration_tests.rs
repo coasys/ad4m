@@ -6,7 +6,7 @@ use super::projection::{
     build_projection_order_clause, build_projection_where_patterns, resolve_projections,
 };
 use super::shape::parse_shape_from_json;
-use super::sparql_builder::build_instance_sparql;
+use super::sparql_builder::{build_instance_sparql, LinkGuard};
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
@@ -706,7 +706,10 @@ async fn test_build_projection_where_patterns_empty_when_no_clause() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
+    assert_eq!(
+        build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY),
+        ""
+    );
 }
 
 #[tokio::test]
@@ -726,7 +729,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
         "expected id IRI filter, got: {patterns}"
@@ -764,7 +767,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         "Signal",
         parse_shape_from_json(target_shape_json, "Signal").unwrap(),
     );
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("?t <signal://type>"),
         "expected triple pattern for signal://type, got: {patterns}"
