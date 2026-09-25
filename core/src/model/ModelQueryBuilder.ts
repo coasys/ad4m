@@ -270,7 +270,10 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *
    * `'shared'` leaves out every Local link, both from the values returned and
    * from what decides which instances are returned. Use it when the data is
-   * shown to another user. See {@link Query.linkStatus}.
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
    *
    * @param status - `'shared'` or `'local'`
    * @returns The query builder for chaining

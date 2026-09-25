@@ -989,6 +989,14 @@ Use `linkStatus: "shared"` when the result is shown to another user: no Local li
 | `"local"` | `true` | yes |
 | `"shared"` | unset or `true` | no (Local) |
 
+The class's flag is read the same way, so which status the flag link has decides whether an instance is returned at all. A Local note on an instance flagged only in a Shared link (your private note on a shared card) is read with no `linkStatus`, but the instance is not returned under `"local"`:
+
+| Flag link | `linkStatus` unset | `"local"` | `"shared"` |
+| --- | --- | --- | --- |
+| Shared only | returned | not returned | returned |
+| Local only | returned | returned | not returned |
+| both | returned | returned | returned |
+
 ### Query Engine
 
 `Ad4mModel` uses the **SPARQL query engine** for all query operations. The executor compiles queries to SPARQL for Oxigraph to execute, then hydrates results back into model instances.
