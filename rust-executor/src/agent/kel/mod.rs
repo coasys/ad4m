@@ -171,6 +171,13 @@ pub enum KeyEventBody {
     ControllerOp {
         op: Box<KeyEventBody>,
     },
+    /// Recovery-authority wrapper — carries the full descriptor so fold can
+    /// verify hash(proof) == recovery_commitment and signer ∈ proof.keys.
+    /// The inner op executes with recovery authority (bypasses normal scope).
+    RecoveryOp {
+        op: Box<KeyEventBody>,
+        proof: RecoveryAuthority,
+    },
     SetRecoveryAuthority {
         commitment: String,
     },
@@ -383,6 +390,15 @@ impl KeyState {
         self.key_history.len()
     }
 
+    /// Every key_id that has ever appeared in the KEL (regardless of validity).
+    /// Used to populate the reverse index so revoked keys still resolve.
+    pub fn all_key_ids(&self) -> Vec<&str> {
+        self.key_history
+            .iter()
+            .map(|kv| kv.entry.id.as_str())
+            .collect()
+    }
+
     /// Whether the identity has permanently deactivated.
     pub fn is_deactivated(&self) -> bool {
         self.deactivated
@@ -571,16 +587,37 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
         // The signer must hold authority at the previous seq (before this event applies).
         let prior_seq = ev.seq - 1;
 
-        // Unwrap ControllerOp to get the inner body for state application.
-        let (effective_body, is_controller_op) = match &ev.body {
-            KeyEventBody::ControllerOp { op } => (op.as_ref(), true),
-            other => (other, false),
+        // Unwrap ControllerOp / RecoveryOp to get the inner body for state
+        // application. Both bypass normal scope checks with their own auth.
+        enum OpWrapper {
+            Controller,
+            Recovery,
+            Normal,
+        }
+        let (effective_body, op_kind) = match &ev.body {
+            KeyEventBody::ControllerOp { op } => (op.as_ref(), OpWrapper::Controller),
+            KeyEventBody::RecoveryOp { op, proof } => {
+                // Verify the recovery proof: hash must match commitment,
+                // and signer's did:key must appear in the descriptor.
+                let hash = recovery::recovery_commitment(proof);
+                if hash != state.recovery_commitment {
+                    return Err(KelError::RecoveryCommitmentMismatch);
+                }
+                let signer_did = ev.signer.split('#').next().unwrap_or(&ev.signer);
+                if !proof.keys.iter().any(|k| k == signer_did) {
+                    return Err(KelError::UnauthorizedSigner {
+                        key_id: ev.signer.clone(),
+                    });
+                }
+                (op.as_ref(), OpWrapper::Recovery)
+            }
+            other => (other, OpWrapper::Normal),
         };
 
         // ControllerOp: the signer must match the controller SCID. The
         // controller operates from outside this KEL — scope checks run
         // against the controller's own KEL (verified by PR3's adapter).
-        if is_controller_op {
+        if matches!(op_kind, OpWrapper::Controller) {
             match &state.controller {
                 Some(ctrl) if ev.signer == *ctrl => {
                     // Authorized — the controller can perform any op.
@@ -596,8 +633,31 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
                     });
                 }
             }
+        } else if matches!(op_kind, OpWrapper::Recovery) {
+            // Recovery ops bypass normal scope checks — the proof was already
+            // verified above. Only check structural invariants.
+            match effective_body {
+                KeyEventBody::Delegate { key, .. } => {
+                    if state.key_history.iter().any(|kv| kv.entry.id == key.id) {
+                        return Err(KelError::DuplicateKeyId(key.id.clone()));
+                    }
+                }
+                KeyEventBody::Inception { .. } => {
+                    return Err(KelError::InvalidInception(
+                        "inception event at non-zero seq".into(),
+                    ));
+                }
+                KeyEventBody::ControllerOp { .. } | KeyEventBody::RecoveryOp { .. } => {
+                    return Err(KelError::InvalidInception("nested wrapper op".into()));
+                }
+                // Revoke, Rotate, SetRecoveryAuthority, Deactivate — all
+                // allowed under recovery authority.
+                _ => {}
+            }
+            // Recovery signer verified via external did:key extraction.
+            verify_external_signer(ev)?;
         } else {
-            // Non-controller event: check scope against this KEL's key state.
+            // Normal event: check scope against this KEL's key state.
             match effective_body {
                 KeyEventBody::Inception { .. } => {
                     return Err(KelError::InvalidInception(
@@ -643,11 +703,11 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
                         });
                     }
                 }
-                KeyEventBody::ControllerOp { .. } => {
-                    return Err(KelError::InvalidInception("nested ControllerOp".into()));
+                KeyEventBody::ControllerOp { .. } | KeyEventBody::RecoveryOp { .. } => {
+                    return Err(KelError::InvalidInception("nested wrapper op".into()));
                 }
             }
-            // Verify signature against this KEL's key state.
+            // Normal signature verification against the key_history.
             verify_event_signature(ev, &state.key_history, prior_seq)?;
         }
 
