@@ -6,6 +6,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: a `consensusRule` with a key the executor does not know is refused** [#1144](https://github.com/coasys/ad4m/issues/1144)
+  - Before, the key was dropped: `grantedByFlow` (renamed to `producedByFlow` in #1076) left a plain `fromRole` gate, and `formRole` left no gate at all. Now the rule is read as unreadable, like one that does not decode (#1078), so the edge it governs fires for nobody, and the executor log names the key, e.g. `` unknown key `fromRole.grantedByFlow` ``.
+  - Checked: the rule, `fromRole` and its `or` arms, `count`, `producedByFlow`, an object `linkedTo`, and each object-valued `where` condition (including one with two operators, of which one was dropped). Not checked: `requires` guards and `context`, which still ignore unknown keys.
 - **Breaking: on a multi-user host, a Local link is private to the user who wrote it** [#1058](https://github.com/coasys/ad4m/pull/1058)
   - Fixes [#1024](https://github.com/coasys/ad4m/issues/1024). Users of one host who join the same Neighbourhood share one perspective. They no longer read, match or remove each other's Local links: `queryLinks`, snapshots, model queries and the MCP instance tools skip them. In a model query that covers the values, `__links`, relations, `$` projections, and what selects an instance: `where`, the class's flags, `count` / `totalCount`, the order behind `limit`/`offset`, parent scopes and walks. Shared links are unchanged.
   - So a `where` on a value another user stored as a Local link does not match. An instance whose class links (its flag) you can see is still returned and counted when every other value on it is another user's Local link; those properties come back empty.

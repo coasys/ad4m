@@ -423,13 +423,17 @@ consensusRule: {
 It is the same name and the same check as the [`producedByFlow` model-query filter](#producedbyflow-querying-what-a-flow-produced), with one difference: on a role, **both fields are required**. Without `state`, a run that settled into the flow's "rejected" state would grant what its "approved" state was meant to. A `producedByFlow` without `state` does not decode, and an undecodable rule refuses the edge rather than falling back to a default.
 
 <Callout type="warning" emoji="⚠️">
-  Spell the key exactly. The role query ignores keys it does not know, so a
-  misspelt key — or `grantedByFlow`, the name this gate had before it was
-  renamed — is silently dropped, and the gate falls back to plain `fromRole`.
-  That is fail-open, and it is tracked in
-  [#1144](https://github.com/coasys/ad4m/issues/1144). Until it is fixed, the
-  test that catches it is a negative one: a vote from a holder with no minted
-  receipt must **not** settle the edge (Part 3 below).
+  Spell the key exactly. A `consensusRule` with a key the engine does not
+  know — a misspelt key, or `grantedByFlow`, the name this gate had before it
+  was renamed — is refused, the same as a rule that does not decode: the edge
+  it governs fires for nobody, and the executor log names the key (for
+  example `` unknown key `fromRole.grantedByFlow` ``). The key is not dropped,
+  so the gate never falls back to plain `fromRole`
+  ([#1144](https://github.com/coasys/ad4m/issues/1144); `flow-task-handover.test.ts`
+  Part 4). This covers every object in the rule: the rule itself, `fromRole`
+  and its `or` arms, `count`, `producedByFlow`, an object `linkedTo`, and
+  each object-valued `where` condition. It does not cover `requires` guards or
+  `context`, which still ignore unknown keys.
 </Callout>
 
 For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
@@ -493,6 +497,7 @@ The refusals a developer will meet, what each one means, and what to do:
 | a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
 | a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
 | a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
+| a `consensusRule` with a key the engine does not know (e.g. `grantedByFlow`, `formRole`, `count: { mxa }`) | the rule is refused; the edge fires for nobody; the executor log names the key | a dropped key would widen the gate or remove it | fix the key named in the log |
 | a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
 
 Limits that are absences, not errors — do not go looking for these:
