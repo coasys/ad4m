@@ -7,16 +7,19 @@ import os from "node:os";
 // --local flag: use all-local bootstrap languages (no Holochain)
 const useLocal = Deno.args.includes("--local");
 
-// Holochain mode (default): HC agent/p-diff-sync/perspective + local persistence blobs
+// Holochain mode (default): HC agent/p-diff-sync/perspective. Both modes use
+// the local language-language and neighbourhood store; startExecutor() puts
+// them in shared mode (utils/sharedStores.ts) so executors see each other's
+// published languages and neighbourhoods.
 const hcLanguages = {
   "agent-expression-store": {
     bundle: "../../bootstrap-languages/agent-language/build/bundle.js",
   },
   languages: {
-    bundle: "../../bootstrap-languages/local-language-persistence-0.0.9.js",
+    bundle: "../../bootstrap-languages/local/language-language.js",
   },
   "neighbourhood-store": {
-    bundle: "../../bootstrap-languages/local-neighbourhood-persistence-0.0.6.js",
+    bundle: "../../bootstrap-languages/local/neighbourhood-language.js",
   },
   "perspective-diff-sync": {
     bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",

@@ -150,35 +150,6 @@ async function publish() {
         }
         injectSystemLanguages();
         injectLangAliasHashes();
-
-        // Copy published language bundles to a shared directory so test executors
-        // with different data paths can find them on disk. In HC mode the HC DHT
-        // handles distribution; in local mode there is no shared network, so we
-        // use a filesystem copy instead.
-        //
-        // Strategy: copy from the SOURCE bundles using the published hashes as
-        // directory names. This avoids depending on where the executor stores
-        // its internal data (which may differ from appDataPath due to the
-        // temp-dir hashing in startExecutor).
-        const sharedLangsDir = path.resolve(TEST_DIR, "published-languages");
-        const langFolderToHash: Record<string, keyof typeof languageHashes> = {
-            "agent-expression-store": "agentLanguage",
-            "neighbourhood-store": "neighbourhoodLanguage",
-            "perspective-diff-sync": "perspectiveDiffSync",
-            "perspective-language": "perspectiveLanguage",
-            "server-link-language": "serverLinkLanguage",
-        };
-        for (const [langFolder, hashKey] of Object.entries(langFolderToHash)) {
-            const srcBundle = path.join(publishLanguagesPath, langFolder, "build", "bundle.js");
-            const hash = languageHashes[hashKey];
-            if (hash && fs.existsSync(srcBundle)) {
-                const destDir = path.join(sharedLangsDir, hash);
-                fs.ensureDirSync(destDir);
-                fs.copySync(srcBundle, path.join(destDir, "bundle.js"), { overwrite: true });
-                console.log(`Published ${langFolder} → ${destDir}/bundle.js`);
-            }
-        }
-        console.log(`Published languages staged in ${sharedLangsDir}`);
     } finally {
         // Always kill the executor on the way out — success or failure.
         // Uses TCP:LISTEN filter so we only kill the listening server (the executor),

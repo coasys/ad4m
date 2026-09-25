@@ -1,10 +1,11 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { configureSharedStores } from './sharedStores';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -222,6 +223,7 @@ export async function startExecutor(dataPath: string,
     // instance_* surface is advertised.
     dynamicClassTools: boolean = false,
     runHolochain: boolean = true,
+    sharedStores: boolean = true,
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -248,18 +250,11 @@ export async function startExecutor(dataPath: string,
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
 
-    // Pre-populate published language bundles so the executor finds them on
-    // disk during bootstrap. In HC mode the language-language distributes
-    // bundles via the DHT; in local mode (local-language-store) there is no
-    // shared network, so we copy the bundles that publishTestLangs.ts placed
-    // in tst-tmp/published-languages/ into the executor's data directory.
-    const sharedLangsDir = path.join(__dirname, '..', 'tst-tmp', 'published-languages');
-    if (existsSync(sharedLangsDir)) {
-        const targetLangsDir = path.join(effectiveDataPath, 'ad4m', 'languages');
-        mkdirSync(targetLangsDir, { recursive: true });
-        cpSync(sharedLangsDir, targetLangsDir, { recursive: true });
-        const copied = readdirSync(sharedLangsDir).length;
-        console.log(`Pre-populated ${copied} published language(s) from shared directory`);
+    // Shared mode for the local language-language and neighbourhood store,
+    // so executors see each other's published languages and neighbourhoods
+    // (see sharedStores.ts). Off only for tests of the default KV mode.
+    if (sharedStores) {
+        configureSharedStores(effectiveDataPath, bootstrapSeedPath);
     }
 
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
