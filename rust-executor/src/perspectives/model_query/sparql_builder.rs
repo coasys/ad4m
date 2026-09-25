@@ -113,7 +113,7 @@ fn typed_number_literal(n: f64) -> Option<String> {
 pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
-    let verified = |_predicate: &str| guard.on_reifier("?_r");
+    let verified = guard.on_reifier("?_r");
 
     if let Some(prop) = shape.properties.iter().find(|p| {
         // `emittable_iri` on the initial: the value is inlined as `<…>`
@@ -128,7 +128,6 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
             && validate_iri(&p.predicate).is_ok()
     }) {
         let initial = prop.initial_value.as_ref().unwrap();
-        let verified = verified(&format!("<{}>", prop.predicate));
         return format!(
             "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
@@ -141,14 +140,12 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> Str
         .find(|p| p.is_required && !p.predicate.is_empty() && validate_iri(&p.predicate).is_ok())
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
-        let verified = verified(&format!("<{}>", prop.predicate));
         return format!(
             "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
 
-    let verified = verified("?_anyP");
     format!(
         "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}"
     )

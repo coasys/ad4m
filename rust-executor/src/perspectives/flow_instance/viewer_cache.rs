@@ -20,17 +20,64 @@
 //! the rows outside the page stale, and a `where` on `currentState` itself
 //! must not be answered from a stale cache.
 //!
+//! The refresh is best effort ([`refresh_for_read`]). It is not billed and
+//! needs no credits (the writer skips `add_link`'s billing), a failure is
+//! logged and the query still answers from whatever cache the user holds,
+//! and a token that may only read the perspective gets no refresh at all:
+//! it must not make the executor sign links for the user.
+//!
 //! [`crate::perspectives::flow_instance::derive_states`] is the derivation
 //! (`read_set` + `fold_read_set`), and
 //! [`crate::perspectives::flow_classes::write_local_current_state`] the
 //! writer, which replaces only the acting user's own Local link.
 
+use crate::agent::capabilities::{check_capability, perspective_update_capability, Capability};
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{write_local_current_state, FLOW_INSTANCE_CLASS};
 use crate::perspectives::flow_context::{load_shacl_flows, parse_flow_instance_from_hydrated};
 use crate::perspectives::flow_instance::derive_states;
 use crate::perspectives::link_visibility::viewer_did_for_context;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+
+/// What a `FlowInstance` read did to the reader's own cache.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ReadRefresh {
+    /// The token may not write to the perspective, so nothing was written.
+    ReadOnly,
+    /// This many cache links were written.
+    Refreshed(usize),
+    /// The refresh failed and was logged; the read goes on.
+    Failed,
+}
+
+/// The `perspective.modelQuery` hook for a `FlowInstance` read: refresh the
+/// reader's own cache if their token may write to perspective `uuid`, and
+/// never fail the read because of it.
+pub(crate) async fn refresh_for_read(
+    perspective: &mut PerspectiveInstance,
+    uuid: &str,
+    query_json: &str,
+    capabilities: &Result<Vec<Capability>, String>,
+    context: &AgentContext,
+) -> ReadRefresh {
+    if check_capability(
+        capabilities,
+        &perspective_update_capability(vec![uuid.to_string()]),
+    )
+    .is_err()
+    {
+        return ReadRefresh::ReadOnly;
+    }
+    match sync_for_context(perspective, query_json, context).await {
+        Ok(written) => ReadRefresh::Refreshed(written),
+        Err(e) => {
+            log::warn!(
+                "FlowInstance read on {uuid}: refreshing the reader's currentState cache failed, answering from the cache as it is: {e:#}"
+            );
+            ReadRefresh::Failed
+        }
+    }
+}
 
 /// Derive the state of the `FlowInstance`s that `query_json` selects, as the
 /// agent behind `context`, and bring that agent's own Local `currentState`
@@ -374,33 +421,67 @@ mod tests {
         assert_eq!(by_author(&other_did), vec!["identified".to_string()]);
     }
 
-    /// Executor scope has no cache of its own: it takes the users' caches
-    /// only when they agree.
+    fn capabilities_of(can: Capability) -> Result<Vec<Capability>, String> {
+        Ok(vec![can])
+    }
+
+    /// A token that may only read the perspective gets no refresh: the
+    /// executor does not sign links for the user on its behalf.
     #[tokio::test(flavor = "multi_thread")]
-    async fn executor_scope_trusts_the_users_caches_only_when_they_agree() {
-        use crate::perspectives::flow_instance::local_cached_state;
-        let (mut perspective, main_ctx, _main_did, uri) = seeded().await;
+    async fn a_read_only_token_gets_no_refresh() {
+        use crate::agent::capabilities::perspective_query_capability;
+        let (mut perspective, _main_ctx, _main_did, uri) = seeded().await;
         let (other_ctx, _other_did) = other_user();
-        sync_for_context(&mut perspective, "{}", &other_ctx)
-            .await
-            .expect("sync");
+        let uuid = perspective.persisted.lock().await.uuid.clone();
+
+        let outcome = refresh_for_read(
+            &mut perspective,
+            &uuid,
+            "{}",
+            &capabilities_of(perspective_query_capability(vec![uuid.clone()])),
+            &other_ctx,
+        )
+        .await;
+        assert_eq!(outcome, ReadRefresh::ReadOnly);
         assert_eq!(
-            local_cached_state(&perspective, &uri, None)
-                .await
-                .expect("read")
-                .as_deref(),
-            Some("identified"),
-            "two caches, one value"
+            cache_links(&perspective, &uri).await.len(),
+            1,
+            "only the minter's cache"
         );
-        advance_flow_instance_state(&mut perspective, &uri, "scoped", None, &main_ctx)
-            .await
-            .expect("advance as main");
+
+        let outcome = refresh_for_read(
+            &mut perspective,
+            &uuid,
+            "{}",
+            &capabilities_of(perspective_update_capability(vec![uuid.clone()])),
+            &other_ctx,
+        )
+        .await;
+        assert_eq!(outcome, ReadRefresh::Refreshed(1), "a token that may write");
+    }
+
+    /// A failed refresh does not fail the read: the hook reports it and the
+    /// reader's own query still answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_refresh_leaves_the_read_answering() {
+        let (mut perspective, _main_ctx, _main_did, uri) = seeded().await;
+        let (other_ctx, other_did) = other_user();
+        let uuid = perspective.persisted.lock().await.uuid.clone();
+
+        perspective.fail_next_add_link(0);
+        let outcome = refresh_for_read(
+            &mut perspective,
+            &uuid,
+            "{}",
+            &capabilities_of(perspective_update_capability(vec![uuid.clone()])),
+            &other_ctx,
+        )
+        .await;
+        assert_eq!(outcome, ReadRefresh::Failed);
         assert_eq!(
-            local_cached_state(&perspective, &uri, None)
-                .await
-                .expect("read"),
-            None,
-            "two caches, two values: derive instead"
+            state_seen_by(&perspective, &uri, &other_did).await,
+            "",
+            "the query answers, from the reader's cache as it is (none yet)"
         );
     }
 

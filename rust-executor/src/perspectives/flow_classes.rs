@@ -22,7 +22,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use ad4m_client::literal::Literal;
 
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
@@ -374,6 +374,12 @@ pub(crate) async fn advance_flow_instance_state(
 /// touched. A `Shared` value some peer wrote (the pre-#987 executor did) is
 /// left where it is — this engine deletes nothing shared, and hydration
 /// prefers the later write, which is ours.
+///
+/// The link is signed as the acting user but is not billed and needs no
+/// compute credits: it is the engine's bookkeeping of a state the fold
+/// derived, and a `FlowInstance` read writes it too
+/// (`viewer_cache::sync_for_context`). A read must not fail or cost credits
+/// because of it.
 pub(crate) async fn write_local_current_state(
     perspective: &mut PerspectiveInstance,
     flow_instance_uri: &str,
@@ -404,17 +410,17 @@ pub(crate) async fn write_local_current_state(
     let target = Literal::from_string(state.to_string())
         .to_url()
         .map_err(|e| anyhow::anyhow!("encoding state `{state}` failed: {e:#}"))?;
+    let link = Link {
+        source: flow_instance_uri.to_string(),
+        predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+        target,
+    };
+    link.validate()?;
+    // `add_link` minus its credit check and billing (see above).
+    let signed: LinkExpression =
+        crate::agent::create_signed_expression(link.normalize(), context)?.into();
     perspective
-        .add_link(
-            Link {
-                source: flow_instance_uri.to_string(),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                target,
-            },
-            LinkStatus::Local,
-            batch_id,
-            context,
-        )
+        .add_link_expression(signed, LinkStatus::Local, batch_id)
         .await
         .map_err(|e| anyhow::anyhow!("writing the currentState cache failed: {e:#}"))?;
     Ok(())

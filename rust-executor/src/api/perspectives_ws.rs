@@ -1172,20 +1172,19 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // `currentState` cache is a Local link private to whoever's request wrote
     // it. So the state is derived for the requesting user first and their
     // own cache brought in line with it; the query below then returns it.
-    // Only this class pays for the derivation; see `flow_instance::viewer_cache`.
+    // Only this class pays for the derivation. Best effort: a read-only token
+    // gets no refresh, and a failed one is logged, never the read's error.
+    // See `flow_instance::viewer_cache`.
     if class_name == crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS {
         let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-        crate::perspectives::flow_instance::viewer_cache::sync_for_context(
+        crate::perspectives::flow_instance::viewer_cache::refresh_for_read(
             &mut perspective,
+            &uuid,
             &query_json,
+            &ctx.capabilities,
             &agent_context,
         )
-        .await
-        .map_err(|e| {
-            WsRpcError::internal(format!(
-                "deriving the flow states for the requesting user failed: {e:#}"
-            ))
-        })?;
+        .await;
     }
 
     // Run async model query with timeout

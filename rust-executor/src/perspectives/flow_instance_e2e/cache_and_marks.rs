@@ -381,6 +381,11 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
     );
 
     // An edge that settles after catch-up is an event for B.
+    //
+    // Seeding B made new keys for this process's main agent, so A's acting
+    // user is new to A's instance too, and its first pass there is a catch-up
+    // of its own (the catch-up is per user).
+    assert!(consensus_pass(&mut a).await.is_empty());
     let h3 = settle(&mut a, "h3", "review", "approved").await;
     replicate_proposals(&a, &mut b, &[&h3]).await;
     let later = consensus_pass(&mut b).await;
