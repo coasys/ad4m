@@ -22,10 +22,10 @@
  * signature does not verify is read only with `includeUnverified`, and never
  * under `linkStatus: 'shared'`.
  *
- * Not covered here, and still open: which instances are *selected* (`where`,
- * the class's flags, `count`) is not restricted by `linkStatus`. See the
- * `#[ignore]`d Rust test `link_status_shared_does_not_select_on_a_local_value`
- * and #1120.
+ * Which instances are *selected* follows the same rule (#1120): a Shared-only
+ * `where` on the Local note does not return the card, nor count it. For the
+ * same reason the card is flagged in a Local link as well as a Shared one, so
+ * that it is an instance under `linkStatus: 'local'` too.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-link-status.test.ts
@@ -117,6 +117,14 @@ describe("Ad4mModel — linkStatus reads", function () {
       "local"
     );
 
+    // The card's flag, written Local as well. Selection reads links of the
+    // requested status (#1120), so without it the card is not an instance
+    // under `linkStatus: 'local'`.
+    await perspective.add(
+      new Link({ source: cardId, predicate: "lsc://type", target: "lsc://card" }),
+      "local"
+    );
+
     // A conforming remark (its own links Shared), related to the card only by
     // a Local link.
     const remark = new LinkStatusRemark(perspective);
@@ -172,6 +180,21 @@ describe("Ad4mModel — linkStatus reads", function () {
     const card = await find({ linkStatus: "local" });
     expect(card.note).to.equal("local note");
     expect(card.title).to.not.equal("shared title");
+  });
+
+  it("does not select or count by a Local value under linkStatus: 'shared'", async () => {
+    const byNote = { where: { note: "local note" } };
+    const ids = async (query: object) =>
+      (await LinkStatusCard.findAll(perspective, query)).map((c) => c.id);
+
+    expect(await ids(byNote), "without linkStatus the note selects").to.include(cardId);
+    expect(await ids({ ...byNote, linkStatus: "shared" })).to.not.include(cardId);
+    expect(await ids({ ...byNote, linkStatus: "shared", limit: 10 })).to.not.include(cardId);
+    expect(await LinkStatusCard.count(perspective, byNote)).to.equal(1);
+    expect(
+      await LinkStatusCard.count(perspective, { ...byNote, linkStatus: "shared" }),
+      "a Local value must not be counted under 'shared'"
+    ).to.equal(0);
   });
 
   it("restricts the `__links` rows to the same status", async () => {

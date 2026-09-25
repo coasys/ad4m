@@ -17,9 +17,9 @@
  * `limit` (a forged link must not reorder a page), and a typed relation, whose
  * generated conformance getter and `where` the executor filters too.
  *
- * Not covered here, and still open: which instances are *selected* (`where`,
- * the class's flags, `count`) still matches unverified links. See the
- * `#[ignore]`d Rust test `proof_valid_where_does_not_select_on_a_forged_value`.
+ * Which instances are *selected* (`where`, the class's flags, `count`) follows
+ * the same rule since #1120; that is tested in
+ * `model-selection-unverified.test.ts`.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-unverified-links.test.ts
