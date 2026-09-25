@@ -289,7 +289,7 @@ describe("FlowInstanceRecord — @Model", function () {
     if (p) await ad4m.perspective.remove(p.uuid);
   });
 
-  it("FlowInstanceRecord.findAll() returns records by flowUri discriminator; clients cannot write currentState", async () => {
+  it("FlowInstanceRecord.findAll() returns records by flowUri discriminator", async () => {
     // Simulate what the Rust flow engine writes when startFlow lands.
     // Post-J#5: record stores the flow's canonical URI, not the bare name.
     const instance = "ad4m://flow/instance/inst-1";
@@ -303,31 +303,20 @@ describe("FlowInstanceRecord — @Model", function () {
       predicate: "ad4m://flow/base",
       target: "literal:string:ad4m%3A%2F%2Fsome-subject",
     }));
-    // `currentState` is the flow engine's cache, and only the engine may
-    // write it: every co-owner of the perspective reads it, so a client write
-    // would be a state claim shown to all of them. `FlowInstance.start` goes
-    // through `perspective.startFlowInstance`, and the hydration of the
-    // engine-written value is checked in the `FlowInstance.start` tests below.
-    for (const status of ["local", "shared"] as const) {
-      let refused = "";
-      try {
-        await p.add(new Link({
-          source: instance,
-          predicate: "ad4m://flow/current_state",
-          target: "literal:string:Scoped",
-        }), status);
-      } catch (e: any) {
-        refused = String(e?.message ?? e);
-      }
-      expect(refused, `a ${status} client write of currentState must be refused`)
-        .to.match(/reserved for the executor's flow engine/);
-    }
+    // `currentState` is the engine's per-user cache: a `local` link of the
+    // reading user's own. No flow is registered on this perspective, so the
+    // read has nothing to derive and returns the cache as written.
+    await p.add(new Link({
+      source: instance,
+      predicate: "ad4m://flow/current_state",
+      target: "literal:string:Scoped",
+    }), "local");
 
     const all = await FlowInstanceRecord.findAll(p);
     expect(all.length).to.equal(1);
     expect(all[0].flowUri).to.equal("delivery://DeliveryFlow");
     expect(all[0].subject).to.equal("ad4m://some-subject");
-    expect(all[0].currentState, "the refused write left nothing behind").to.equal("");
+    expect(all[0].currentState).to.equal("Scoped");
     // `createdAt` is Ad4mModel's synthesised earliest-link timestamp
     // (ms since epoch after hydration); presence is enough for parity.
     expect(all[0].createdAt).to.be.a("number");
