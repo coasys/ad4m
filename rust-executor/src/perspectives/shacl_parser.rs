@@ -815,6 +815,19 @@ fn find_links<'a>(links: &'a [Link], source: &str, predicate: &str) -> Vec<&'a L
         .collect()
 }
 
+/// Decode one `consensusRule` literal. A key the reader does not know is an
+/// error, the same as a missing required field: serde would drop it, and on a
+/// role gate a dropped key widens the gate or removes it (#1144). See
+/// [`role_gate_keys`].
+fn decode_consensus_rule(target: &str) -> Result<ConsensusRule, String> {
+    let value: serde_json::Value = decode_json_literal(target)?;
+    let errors = role_gate_keys::role_gate_key_errors(&value);
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
+    }
+    serde_json::from_value(value).map_err(|e| e.to_string())
+}
+
 /// Read the `consensusRule` at ONE scope — a flow URI, or one state URI —
 /// into the `(rule, unreadable)` pair the parser stores. Both scopes go
 /// through here so that one place decides what an unreadable rule is.
@@ -889,7 +902,7 @@ fn read_consensus_rule(links: &[Link], source: &str, scope: &str) -> (Option<Con
 
         // Exactly one authored rule. Unchanged #1079 behaviour: decode it,
         // and record a decode failure rather than erasing it.
-        [only] => match decode_json_literal::<ConsensusRule>(only) {
+        [only] => match decode_consensus_rule(only) {
             Ok(rule) => (Some(rule), false),
             Err(e) => {
                 log::warn!(
