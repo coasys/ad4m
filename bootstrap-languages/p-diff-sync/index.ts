@@ -20,6 +20,7 @@ import {
     languageAddress,
     languageSettings,
 } from "@coasys/ad4m-ldk";
+import { getOnlineAgents } from "./online-agents.ts";
 
 // =============================================================================
 // Module-level state
@@ -321,19 +322,10 @@ const language = defineLanguage({
         },
 
         async getOnlineAgents() {
-            const active: any[] = (await holochainCall(dnaRole, zomeName, "get_active_agents", null)) as any[];
-            const calls = active.map((agent: any) => ({
-                dnaNick: dnaRole,
-                zomeName,
-                fnName: "get_agents_status",
-                params: agent,
-            }));
-            // holochainCallAsync exposes a single-call wrapper; loop one-at-a-time to preserve semantics.
-            const results: any[] = [];
-            for (const call of calls) {
-                results.push(await holochainCallAsync(call.dnaNick, call.zomeName, call.fnName, call.params));
-            }
-            return results;
+            return getOnlineAgents(
+                async () => (await holochainCall(dnaRole, zomeName, "get_active_agents", null)) as any[],
+                (agent) => holochainCallAsync(dnaRole, zomeName, "get_agents_status", agent),
+            );
         },
 
         async sendSignal(remoteDid: string, payload: unknown) {

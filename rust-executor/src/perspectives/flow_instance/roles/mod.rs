@@ -59,10 +59,12 @@
 //!   precise one the widest one available. Every such grant was therefore
 //!   retroactive to the instance's creation, and votes cast between then and
 //!   the DID actually being assigned counted toward quorum. `didProperty` is
-//!   resolved through the class shape at the store boundary since #1065
-//!   (`flow_evaluator::PerspectiveInstance::did_property_predicate`); the
-//!   sentence above is true from that commit forward and from no earlier one.
-//!   Receipts minted before it date their grants from the instance.
+//!   resolved through the class shape since #1065 — by a hand-rolled lookup
+//!   at first, and since #1103 by `model_query` itself, which reads the
+//!   assignment links through its `links` option
+//!   ([`RoleGrantLinks::query_keys`]); the sentence above is true from #1065
+//!   forward and from no earlier commit. Receipts minted before it date their
+//!   grants from the instance.
 //! - `granted_at` is **the granting run's quorum time** when the role query
 //!   declares `producedByFlow`, and then nothing else may date it — not the
 //!   assignment link, not the instance timestamp, not even as a fallback. See
@@ -159,10 +161,13 @@ pub mod window;
 use super::atom::{TransitionAtom, Vote};
 use crate::perspectives::flow_context::FlowInstanceRecord;
 pub use crate::perspectives::flow_evaluator::RoleRevocation;
-use crate::perspectives::flow_evaluator::{requires_query_input, run_query, RequiresQueryable};
+use crate::perspectives::flow_evaluator::{
+    requires_query_input, run_query, RequiresQueryable, RoleGrantLinks,
+};
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
 use evidence::instance_timestamp;
 pub use evidence::{RoleGrantEvidence, RoleInstanceHistory};
+use serde_json::Value;
 pub use window::{RoleGrant, RoleGrantWindow};
 
 /// Ask a `fromRole` gate about each candidate and collect the links behind
@@ -185,10 +190,12 @@ pub use window::{RoleGrant, RoleGrantWindow};
 /// that cannot be placed in time fails closed in [`RoleGrantEvidence::resolve`],
 /// on both sides of the wire, rather than only on this one.
 ///
-/// Per matched instance there is one [`RequiresQueryable::role_grant_links`]
-/// call for the grant links and the signed tombstones — two `get_links`
-/// queries under the live impl, so the store fan-out is
-/// candidates × instances × 2. Authority is deliberately **not** applied
+/// The grant links and the signed tombstones come back with the matches: the
+/// role query asks `model_query` for [`RoleGrantLinks::query_keys`] and
+/// [`RoleGrantLinks::from_instance`] reads each match's history off the
+/// result, so the fan-out is one `model_query` per candidate (it was
+/// candidates × instances × 2 `get_links` before #1103). Authority is
+/// deliberately **not** applied
 /// here: the tombstones travel unfiltered and the reader applies
 /// [`revocation_authorised`] itself, so a minter cannot silently mis-apply
 /// the rule. Nothing here is queried again by the fold.
@@ -212,9 +219,9 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         );
     }
 
-    // A property NAME, not a predicate. The store boundary resolves it
-    // through the class's shape before querying links — see
-    // `flow_evaluator::PerspectiveInstance::did_property_predicate`.
+    // A property NAME, not a predicate. `model_query` resolves it through
+    // the class's shape, for the `where` that matches and for the `links`
+    // that date the match alike — see `RoleGrantLinks::query_keys`.
     let did_property = role.did_property.as_deref();
 
     // A `producedByFlow` gate is decided here, against this replica's own
@@ -231,14 +238,16 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
 
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
-        let input = requires_query_input(role, record, did)?;
+        // `links` is added to this read only. The translated query `resolve`
+        // reads the authority rule from is rebuilt by the reader without it.
+        let mut input = requires_query_input(role, record, did)?;
+        input["links"] = Value::from(RoleGrantLinks::query_keys(did_property));
         let matched = run_query(perspective, &role.class_name, &input).await?;
 
         let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
-            let links = perspective
-                .role_grant_links(&role.class_name, &item.id, did_property, did)
-                .await?;
+            let content: Value = serde_json::from_str(&item.content)?;
+            let links = RoleGrantLinks::from_instance(&content, did_property, did)?;
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,

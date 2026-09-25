@@ -348,7 +348,12 @@ describe("flow task handover — WE-facing API with roles", function () {
     } catch (e: any) {
       unreachable = String(e?.message ?? e);
     }
-    expect(unreachable).to.match(/not reachable|Done/i);
+    // Exact wording from `flow_instance/propose.rs`. A loose pattern such as
+    // `/not reachable|Done/i` or `/guard/i` also passes on an unrelated error
+    // that merely mentions `Done` or a guard, including one thrown before
+    // these checks run. The reachability check runs before the guard, so each
+    // call produces one deterministic message and exact matching cannot flake.
+    expect(unreachable).to.match(/`Done` is not reachable from `Ready`/);
 
     // Unmet guard is an error. Fail-on-old-code: InProgress requires a WorkLog.
     let unmet = "";
@@ -357,7 +362,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     } catch (e: any) {
       unmet = String(e?.message ?? e);
     }
-    expect(unmet).to.match(/not satisfied|guard|InProgress/i);
+    expect(unmet).to.match(/guard for `InProgress` is not satisfied on this replica/);
 
     await advanceToInReview(aliceP, bobP, task.id);
     await createUnder<ReviewNote>(ReviewNote, aliceP, task.id, { body: "LGTM" });
