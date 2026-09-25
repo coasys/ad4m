@@ -1,19 +1,34 @@
 pub mod auto_processor;
+pub(crate) mod content_address;
 pub(crate) mod flow_classes;
 pub(crate) mod flow_context;
+pub(crate) mod flow_evaluator;
+#[cfg(test)]
+mod flow_evaluator_e2e;
+pub(crate) mod flow_instance;
+#[cfg(test)]
+mod flow_instance_e2e;
+pub(crate) mod flow_semantic_check;
+pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
+// `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
+// tools, which read flow state through the same loaders) can seed a real
+// `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
+// so it never reaches a release build.
 #[cfg(test)]
-mod interpretation_test_support;
+pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
 pub mod ordering;
 pub mod perspective_instance;
+#[cfg(test)]
+mod read_back_round_trip_tests;
 pub mod sdna;
 pub mod shacl_parser;
 pub mod shacl_to_prolog;
@@ -119,18 +134,13 @@ pub fn initialize_from_db() {
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
             }
 
-            // Run named-graph → reifier migration (idempotent)
-            match p.sparql_store.migrate_named_graphs_to_reifiers() {
-                Ok(count) if count > 0 => {
-                    log::info!(
-                        "🔄 Reifier migration for {}: {} links migrated",
-                        handle_clone.uuid,
-                        count
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Reifier migration for {}: {}", handle_clone.uuid, e),
-            }
+            // No named-graph → reifier migration. The named-graph storage model
+            // never shipped: `git tag --contains` on the commit that replaced it
+            // (`7aeeb8982`) is empty, and the last release tag carrying
+            // `perspectives/` has no `sparql_store.rs` at all. Carrying a
+            // migration for a format nobody holds meant carrying a third
+            // `proofValid` read path, and with it the "never evaluated" verdict
+            // it decoded (#1046).
 
             // No literal-encoding migration on boot. A scalar rides the API as a
             // `literal:*` wire target and is stored as a native typed RDF literal
@@ -224,6 +234,25 @@ pub async fn add_perspective(
         .add_perspective(&handle)
         .map_err(|e| e.to_string())?;
 
+    // Sync perspective metadata to shared DB for cross-executor rehydration.
+    // Store the creating executor's DID so other executors can fetch links
+    // from the correct path (links are keyed by DID + perspective UUID).
+    let config = crate::config::get_global_config();
+    if config.db_backend.as_deref() == Some("shared") {
+        let backend = crate::db_backend::db_backend();
+        let creator_did = crate::agent::did();
+        let meta = serde_json::json!({
+            "uuid": &handle.uuid,
+            "name": &handle.name,
+            "owners": &handle.owners,
+            "state": format!("{:?}", handle.state),
+            "creator_did": &creator_did,
+        });
+        if let Err(e) = backend.upsert("shared:platform", "perspectives", &handle.uuid, meta) {
+            log::warn!("Failed to sync perspective metadata to shared DB: {}", e);
+        }
+    }
+
     let p = PerspectiveInstance::new(handle.clone(), created_from_join);
     tokio::spawn(p.clone().start_background_tasks());
 
@@ -277,6 +306,21 @@ pub fn all_perspectives() -> Vec<PerspectiveInstance> {
                 .clone()
         })
         .collect()
+}
+
+/// Register a fully-constructed PerspectiveInstance in the global map.
+/// Used by the rehydration path (shared backend → local) to avoid exposing the PERSPECTIVES static.
+pub(crate) fn register_perspective(uuid: String, instance: PerspectiveInstance) {
+    let mut perspectives = PERSPECTIVES.write().unwrap();
+    perspectives.insert(uuid, RwLock::new(instance));
+}
+
+/// Remove an instance from the global map without touching the persistence
+/// backend. Test-only: lets fixtures that used `register_perspective` leave
+/// global state clean for tests that assert on it.
+#[cfg(test)]
+pub(crate) fn unregister_perspective(uuid: &str) {
+    PERSPECTIVES.write().unwrap().remove(uuid);
 }
 
 pub fn get_perspective(uuid: &str) -> Option<PerspectiveInstance> {
@@ -689,23 +733,25 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    let decorated_links: Vec<crate::types::DecoratedLinkExpression> = instance
+    // `instance.links` is already `LinkExpression`. Decorating just to persist
+    // would convert back at the store boundary. Missing status defaults to
+    // Local, matching the previous decorate path (not Shared).
+    let additions: Vec<crate::types::LinkExpression> = instance
         .links
         .into_iter()
-        .map(|link| {
-            let status = link.status.clone().unwrap_or(LinkStatus::Local);
-            crate::types::DecoratedLinkExpression::from((link, status))
+        .map(|mut link| {
+            if link.status.is_none() {
+                link.status = Some(LinkStatus::Local);
+            }
+            link
         })
         .collect();
 
-    let diff = crate::types::DecoratedPerspectiveDiff {
-        additions: decorated_links,
-        removals: vec![],
-    };
-
-    // Write to SPARQL store
     perspective
-        .persist_link_diff(&diff)
+        .persist_link_diff(&crate::types::PerspectiveDiff {
+            additions,
+            removals: vec![],
+        })
         .await
         .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
 

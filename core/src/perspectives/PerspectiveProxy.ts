@@ -1,4 +1,8 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -79,6 +83,7 @@ export class QuerySubscriptionProxy {
     #callbacks: Set<QueryCallback>;
     #keepaliveTimer: number;
     #unsubscribe?: () => void;
+    #reconnectUnsub?: () => void;
     #latestResult: AllInstancesResult|null;
     #disposed: boolean = false;
     #initialized: Promise<boolean>;
@@ -86,6 +91,15 @@ export class QuerySubscriptionProxy {
     #initReject?: (reason?: any) => void;
     #initTimeoutId?: NodeJS.Timeout;
     #query: string;
+    // Monotonic token guarding the three concurrent writers of
+    // `#unsubscribe`/`#subscriptionId` (full subscribe() from the keepalive
+    // and init-timeout retry paths, and the reconnect swap handler). Each
+    // writer bumps it on entry and re-checks after every await; a mismatch
+    // means a newer writer took over while we were suspended, so the stale
+    // continuation must back out instead of clobbering the newer state
+    // (worst case otherwise: an overwritten-but-never-called unsubscribe
+    // leaks its callback in ApiClient._wsCallbacks for the client lifetime).
+    #generation: number = 0;
 
     /** Creates a new query subscription
      * @param uuid - The UUID of the perspective
@@ -107,12 +121,33 @@ export class QuerySubscriptionProxy {
     }
 
     async subscribe() {
+        // Invalidate any suspended writer (older subscribe() or reconnect
+        // swap parked on an await) — see #generation.
+        const generation = ++this.#generation;
+
+        // Remove any prior reconnect listener FIRST — before we touch
+        // `#unsubscribe`. Rationale: `#unsubscribe()` calls into
+        // `ApiClient.subscribe()`'s deleter, which closes the WebSocket
+        // whenever this query owned the last `_wsCallbacks` entry (and no
+        // RPCs are pending). The subsequent `subscribeQuery()` below then
+        // re-opens a fresh socket, and that fresh `onopen` fires the
+        // reconnect callback set. If the OLD reconnect listener is still
+        // in that set, it re-enters this method, closes the socket again,
+        // reopens again … an endless resubscribe loop. Clearing the
+        // listener up-front breaks the cycle; a fresh listener is
+        // installed at the end of a successful subscribe(), and a
+        // full-retry recovery listener in the catch block on failure.
+        if (this.#reconnectUnsub) {
+            this.#reconnectUnsub();
+            this.#reconnectUnsub = undefined;
+        }
+
         // Clean up previous subscription attempt if retrying
         if (this.#unsubscribe) {
             this.#unsubscribe();
             this.#unsubscribe = undefined;
         }
-        
+
         // Clear any existing timeout
         if (this.#initTimeoutId) {
             clearTimeout(this.#initTimeoutId);
@@ -129,6 +164,17 @@ export class QuerySubscriptionProxy {
             // Initialize the query subscription
             let initialResult;
             initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
+
+            // A newer writer (another subscribe() or a reconnect swap) took
+            // over while we awaited — back out without touching shared state,
+            // and release the now-orphaned server-side subscription so it
+            // doesn't linger until its keepalive TTL expires.
+            if (this.#disposed || this.#generation !== generation) {
+                this.#client.disposeQuerySubscription(this.#uuid, initialResult.subscriptionId)
+                    .catch(e => console.error('Error disposing superseded query subscription:', e));
+                return;
+            }
+
             this.#subscriptionId = initialResult.subscriptionId;
 
             // Process the initial result immediately for fast UX.
@@ -136,14 +182,7 @@ export class QuerySubscriptionProxy {
             // so treat that as successful initialization instead of waiting for a
             // follow-up WebSocket update that may never arrive until the query changes.
             if (initialResult.result !== undefined) {
-                this.#latestResult = initialResult.result;
-                this.#notifyCallbacks(initialResult.result);
-
-                if (this.#initResolve) {
-                    this.#initResolve(true);
-                    this.#initResolve = undefined;
-                    this.#initReject = undefined;
-                }
+                this.#deliverResult(initialResult.result);
             } else {
                 console.warn('⚠️ No initial result returned from subscribeQuery!');
 
@@ -161,65 +200,139 @@ export class QuerySubscriptionProxy {
             // Subscribe to query updates
             this.#unsubscribe = this.#client.subscribeToQueryUpdates(
                 this.#subscriptionId,
-                (updateResult) => {
-                    // Clear timeout on first message
-                    if (this.#initTimeoutId) {
-                        clearTimeout(this.#initTimeoutId);
-                        this.#initTimeoutId = undefined;
-                    }
-                    
-                    // Resolve the initialization promise (only resolves once)
-                    if (this.#initResolve) {
-                        this.#initResolve(true);
-                        this.#initResolve = undefined;  // Prevent double-resolve
-                        this.#initReject = undefined;
-                    }
-
-                    this.#latestResult = updateResult;
-                    this.#notifyCallbacks(updateResult);
-                }
+                (updateResult) => this.#deliverResult(updateResult)
             );
         } catch (error) {
             console.error('Error setting up subscription:', error);
-            
+
             // Reject the promise if this is the first attempt
             if (this.#initReject) {
                 this.#initReject(error);
                 this.#initResolve = undefined;
                 this.#initReject = undefined;
             }
-            
+
+            // Restore reconnect recovery before rethrowing. The listener was
+            // removed at the top of this method; without re-installing one
+            // here, a single failed resubscribe (e.g. subscribeQuery timing
+            // out during a network flap) would leave the proxy permanently
+            // dead: the keepalive loop stops itself on resubscribe failure,
+            // and nothing else retries. The recovery listener runs the FULL
+            // subscribe() (not the swap-in-place handler) because after a
+            // failed attempt there is no keepalive loop left to feed the new
+            // server subscription — subscribe() restarts it. This is
+            // loop-safe: in this failed state the proxy owns no
+            // `_wsCallbacks` entry (the old one was unsubscribed at the top
+            // of this method and no new one got registered), so the
+            // subscribe() it triggers has nothing to unsubscribe → the
+            // socket never closes/reopens under it → no re-entrant onopen.
+            if (!this.#disposed && this.#generation === generation && this.#client.onReconnect) {
+                this.#reconnectUnsub = this.#client.onReconnect(() => {
+                    if (this.#disposed) return;
+                    console.log('WebSocket reconnected — retrying failed subscription for query:', this.#query);
+                    this.subscribe().catch(e => {
+                        console.error('Error during subscription retry after reconnect:', e);
+                    });
+                });
+            }
+
             throw error; // Re-throw so caller knows it failed
         }
 
-        // Start keepalive loop using platform-agnostic setTimeout
-        const keepaliveLoop = async () => {
-            if (this.#disposed) return;
-            
-            try {
-                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-            } catch (e) {
-                console.error('Error in keepalive:', e);
-                // try to reinitialize the subscription
-                console.log('Reinitializing subscription for query:', this.#query);
+        // Start keepalive loop
+        this.#startKeepalive(generation);
+
+        // Register for reconnect notification — on WebSocket reconnect,
+        // immediately re-establish a fresh server-side subscription instead
+        // of waiting up to 30s for the keepalive to fail.
+        //
+        // We deliberately do NOT call `this.subscribe()` here. Full subscribe
+        // runs `#unsubscribe` first, which delegates to `ApiClient.subscribe`'s
+        // deleter — that closes the WebSocket when this query owned the LAST
+        // `_wsCallbacks` entry. The subsequent `subscribeQuery` reopens the
+        // socket, whose fresh `onopen` fires every registered reconnect
+        // callback again → recursion (CodeRabbit's original finding). And
+        // during that close→reopen gap, RPCs in flight from OTHER proxies
+        // fail with `503 WebSocket not connected` (observed in
+        // integration-tests-mcp `should fire onWake when mention uses agent DID`
+        // after PR #899's initial fix — the WakerSubscriptionManager tests
+        // share a wakerClient across cases, so any dying reconnect handler
+        // interferes with sibling subscriptions).
+        //
+        // The correct shape is a swap-in-place: get a new server-side
+        // subscription ID via `subscribeQuery`, register a new client-side
+        // callback FIRST, and only then unsubscribe the old one. That way
+        // `_wsCallbacks.size` never dips to 0 during the transition, so the
+        // socket doesn't close, no reconnect loop, and no cross-proxy 503s.
+        // Any prior listener was already removed at the top of this method
+        // (see the note there for why cleanup must run before `#unsubscribe`,
+        // not here).
+        if (this.#client.onReconnect) {
+            this.#reconnectUnsub = this.#client.onReconnect(async () => {
+                if (this.#disposed) return;
+                // The handler is a writer of `#unsubscribe`/`#subscriptionId`
+                // too, so it takes its own generation — see #generation.
+                const swapGeneration = ++this.#generation;
+                console.log(
+                    'WebSocket reconnected — re-establishing server subscription for query:',
+                    this.#query,
+                );
                 try {
-                    await this.subscribe();
-                    console.log('Subscription reinitialized');
-                } catch (resubscribeError) {
-                    console.error('Error during resubscription from keepalive:', resubscribeError);
-                    // Don't schedule another keepalive on resubscribe failure
-                    return;
+                    const newInitial = await this.#client.subscribeQuery(this.#uuid, this.#query);
+                    if (this.#disposed || this.#generation !== swapGeneration) {
+                        // A newer writer took over while we awaited — back out
+                        // and release the orphaned server-side subscription.
+                        this.#client.disposeQuerySubscription(this.#uuid, newInitial.subscriptionId)
+                            .catch(e => console.error('Error disposing superseded query subscription:', e));
+                        return;
+                    }
+                    const newSubId = newInitial.subscriptionId;
+
+                    // Register the NEW client-side callback BEFORE removing the
+                    // old one — keeps `_wsCallbacks.size >= 1` across the swap.
+                    const newUnsub = this.#client.subscribeToQueryUpdates(
+                        newSubId,
+                        (updateResult) => this.#deliverResult(updateResult),
+                    );
+                    const oldUnsub = this.#unsubscribe;
+                    this.#unsubscribe = newUnsub;
+                    this.#subscriptionId = newSubId;
+                    if (oldUnsub) oldUnsub();
+
+                    // Our generation bump invalidated the running keepalive
+                    // loop — restart it under our generation so the new
+                    // server subscription keeps receiving keepalives.
+                    clearTimeout(this.#keepaliveTimer);
+                    this.#startKeepalive(swapGeneration);
+
+                    // Deliver the fresh initial result if the server included one
+                    // (matches the eager-delivery path in the main subscribe() body).
+                    // #deliverResult also clears a still-pending init timeout and
+                    // resolves #initialized, keeping this path symmetric with the
+                    // update callback in subscribe() — without it, a swap landing
+                    // while initialization was pending would leave the 30s init
+                    // timer armed and trigger a spurious full resubscribe.
+                    if (newInitial.result !== undefined) {
+                        this.#deliverResult(newInitial.result);
+                    }
+                } catch (error) {
+                    console.error(
+                        'Error re-establishing subscription after reconnect:',
+                        error,
+                    );
+                    // Our generation bump invalidated the running keepalive
+                    // loop; if nothing newer superseded us, restart it so
+                    // liveness is preserved — its keepAliveQuery against the
+                    // dead old subscription will fail and fall back to a
+                    // full subscribe(). The reconnect listener also remains
+                    // installed, so a later reconnect retries this handler.
+                    if (!this.#disposed && this.#generation === swapGeneration) {
+                        clearTimeout(this.#keepaliveTimer);
+                        this.#startKeepalive(swapGeneration);
+                    }
                 }
-            }
-
-            // Schedule next keepalive if not disposed
-            if (!this.#disposed) {
-                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
-            }
-        };
-
-        // Start the first keepalive loop
-        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+            });
+        }
     }
 
     /** Get the subscription ID for this query subscription
@@ -285,6 +398,69 @@ export class QuerySubscriptionProxy {
         return () => this.#callbacks.delete(callback);
     }
 
+    /** Deliver a result to consumers: complete a still-pending
+     *  initialization (clear the 30s init timeout, resolve #initialized),
+     *  record the result as latest, and notify all callbacks. Shared by the
+     *  initial-result path, the update callback, and the reconnect swap
+     *  handler so all three stay lifecycle-symmetric. */
+    #deliverResult(result: AllInstancesResult) {
+        if (this.#initTimeoutId) {
+            clearTimeout(this.#initTimeoutId);
+            this.#initTimeoutId = undefined;
+        }
+        // Resolve the initialization promise (only resolves once)
+        if (this.#initResolve) {
+            this.#initResolve(true);
+            this.#initResolve = undefined;  // Prevent double-resolve
+            this.#initReject = undefined;
+        }
+        this.#latestResult = result;
+        this.#notifyCallbacks(result);
+    }
+
+    /** Start the keepalive loop for the given generation. The loop runs
+     *  every 30s until it is superseded (generation mismatch — a newer
+     *  subscribe() or reconnect swap took over) or the proxy is disposed.
+     *  On a keepalive error it falls back to a full subscribe(). */
+    #startKeepalive(generation: number) {
+        const keepaliveLoop = async () => {
+            // Generation check kills orphaned loops: a loop whose
+            // keepAliveQuery was in flight while a newer writer ran is not
+            // cancelled by clearTimeout and would otherwise reschedule
+            // itself alongside the newer loop.
+            if (this.#disposed || this.#generation !== generation) return;
+
+            try {
+                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
+            } catch (e) {
+                if (this.#disposed || this.#generation !== generation) return;
+                console.error('Error in keepalive:', e);
+                // try to reinitialize the subscription
+                console.log('Reinitializing subscription for query:', this.#query);
+                try {
+                    await this.subscribe();
+                    console.log('Subscription reinitialized');
+                } catch (resubscribeError) {
+                    console.error('Error during resubscription from keepalive:', resubscribeError);
+                    // Don't schedule another keepalive on resubscribe failure.
+                    // Recovery is not lost: the failed subscribe() installed a
+                    // reconnect listener that retries the full subscribe.
+                    return;
+                }
+                // subscribe() succeeded and started its own keepalive loop
+                // under a new generation — this loop is done.
+                return;
+            }
+
+            // Schedule next keepalive if still the active generation
+            if (!this.#disposed && this.#generation === generation) {
+                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+            }
+        };
+
+        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
+    }
+
     /** Internal method to notify all callbacks of a new result */
     #notifyCallbacks(result: AllInstancesResult) {
         for (const callback of this.#callbacks) {
@@ -309,9 +485,16 @@ export class QuerySubscriptionProxy {
      */
     dispose() {
         this.#disposed = true;
+        // Invalidate any suspended writer so a mid-flight subscribe() or
+        // reconnect swap backs out instead of resurrecting state.
+        this.#generation++;
         clearTimeout(this.#keepaliveTimer);
         if (this.#unsubscribe) {
             this.#unsubscribe();
+        }
+        if (this.#reconnectUnsub) {
+            this.#reconnectUnsub();
+            this.#reconnectUnsub = undefined;
         }
         this.#callbacks.clear();
         if (this.#initTimeoutId) {
@@ -689,6 +872,58 @@ export class PerspectiveProxy {
         return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
     }
 
+    /**
+     * `outputs` names the instances a run produces, as `{ className, id }`
+     * pairs, for a transition into a terminal state. The proposal signs a
+     * hash over their content, and a receipt for the run can only speak for
+     * exactly these instances, as they stood at completion. Naming outputs
+     * for a non-terminal state is refused.
+     */
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
+        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
+    }
+
+    async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
+        return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /** Withdraw our own links from a proposal; resolves to how many went. */
+    async rejectFlowProposal(proposalUri: string): Promise<number> {
+        return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /**
+     * Re-decide a flow receipt under this perspective's own flow catalogue.
+     * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
+     * `outcome`, never on a boolean you derive from it.
+     */
+    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+        return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
+    }
+
+    /**
+     * Which instances are, as they stand, valid outputs of `flow`?
+     *
+     * Backed by receipt verification executor-side (see
+     * {@link FlowValidOutput}); an instance without a verifying receipt, or
+     * edited since its run completed, is not listed. The same predicate is
+     * available as a model-query filter:
+     * `where: { producedByFlow: { flow, state? } }`.
+     *
+     * Rejects — never resolves to `[]` — when the flow is not on this
+     * perspective, or when it carries more receipt candidates than the
+     * executor's per-flow budget (256): "could not read every receipt" is not
+     * "no valid outputs". The filter rejects the same way.
+     */
+    async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /** Mint and store the receipt for a completed flow run. */
+    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
+        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
+    }
+
     /** Subscribe to this perspective's auto-processor step signals. */
     async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
         return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
@@ -952,12 +1187,50 @@ export class PerspectiveProxy {
 
     /**
      * Removes a link from the perspective.
-     * 
-     * @param link - The link to remove
+     *
+     * Accepts either a full `LinkExpressionInput` (as returned by `add`) or a bare
+     * `Link` (source/predicate/target only).  When a bare Link is passed the method
+     * resolves it to the first stored `LinkExpression` whose source, predicate, and
+     * target match, then removes that expression.  A bare Link without a predicate
+     * (or with the constructor's `""` stand-in) matches only stored links that
+     * themselves have no predicate.  If no match is found an error is thrown
+     * naming the link so the caller knows what was expected.
+     *
+     * @param link - The link to remove (LinkExpressionInput or bare Link)
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        const result = await this.#client.removeLink(this.#handle.uuid, link, batchId)
+    async remove(link: LinkExpressionInput | Link, batchId?: string): Promise<boolean> {
+        let resolvedLink: LinkExpressionInput;
+        if (!('data' in link) || (link as any).data === undefined) {
+            // bare Link — resolve to stored expression
+            const bare = link as Link;
+            // The Link constructor coerces an absent predicate to "" and the
+            // store reports predicate-less links as predicate null — so ""
+            // and undefined both mean "no predicate" here, and neither may
+            // widen the query: dropping the filter would resolve (and
+            // remove!) an arbitrary source→target link under a *different*
+            // predicate. LinkQuery cannot express "predicate is absent", so
+            // in that case we query on source/target only and require the
+            // absence ourselves.
+            const predicateGiven = bare.predicate !== undefined && bare.predicate !== '';
+            const candidates = await this.get(new LinkQuery({
+                source: bare.source || undefined,
+                predicate: predicateGiven ? bare.predicate : undefined,
+                target: bare.target || undefined,
+            }));
+            const matches = predicateGiven
+                ? candidates
+                : candidates.filter(m => !m.data.predicate);
+            if (matches.length === 0) {
+                throw new Error(
+                    `PerspectiveProxy.remove: no stored LinkExpression matches Link { source: "${bare.source}", predicate: "${bare.predicate}", target: "${bare.target}" }`
+                );
+            }
+            resolvedLink = matches[0] as unknown as LinkExpressionInput;
+        } else {
+            resolvedLink = link as LinkExpressionInput;
+        }
+        const result = await this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
@@ -1588,6 +1861,38 @@ export class PerspectiveProxy {
         }
     }
 
+    /**
+     * Return the full target-class URIs of every registered SubjectClass.
+     *
+     * Unlike {@link subjectClasses}, which strips the namespace and returns bare
+     * names (`"Space"`, `"Channel"`), this method returns the complete URIs
+     * (`"we://Space"`, `"flux://Channel"`).  The full URI is the key that
+     * `load_shape` resolves against, so it is the only collision-safe identifier
+     * — two apps can both declare a class called `"Template"` under different
+     * namespaces, and the bare name cannot distinguish them.
+     *
+     * Callers that need to check whether a *set* of models are already
+     * registered should call this once and test membership against the returned
+     * set, rather than issuing one `queryLinks` per model.
+     *
+     * One `queryLinks` round trip, no executor-side changes.
+     */
+    async subjectClassTargetClasses(): Promise<string[]> {
+        try {
+            const classLinks = await this.get(new LinkQuery({
+                predicate: "rdf://type",
+                target: "ad4m://SubjectClass"
+            }));
+            const uris = classLinks
+                .map(l => l.data.source)
+                .filter(source => source.length > 0);
+            return [...new Set(uris)];
+        } catch (e) {
+            console.warn('subjectClassTargetClasses: lookup failed:', e);
+            return [];
+        }
+    }
+
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
         if(typeof subjectClass === "string")
             return subjectClass
@@ -1609,7 +1914,9 @@ export class PerspectiveProxy {
      * with the properties of the subject class.
      * @param exprAddr The address of the expression to be turned into a subject instance
      * @param initialValues Optional initial values for properties. If provided, these will be
-     * merged with constructor actions for better performance.
+     * merged with constructor actions for better performance. A collection property accepts
+     * an array value and stores one entry per element; scalar properties store arrays/objects
+     * as a single JSON value.
      * @param batchId Optional batch ID for grouping operations. If provided, returns the expression address
      * instead of the subject proxy since the subject won't exist until the batch is committed.
      * @returns A proxy object for the created subject, or just the expression address if in batch mode

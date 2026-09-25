@@ -23,9 +23,10 @@ use super::model_query::types::{ModelShape, Scope};
 use super::perspective_instance::{PerspectiveInstance, SdnaType, SubjectClassOption};
 use super::shacl_parser::parse_shacl_to_links;
 use super::sparql_store::SparqlStore;
+use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{Link, LinkExpression};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
 
@@ -183,23 +184,13 @@ pub(crate) fn shape_from_sdna(class: &str, sdna: &str) -> ModelShape {
         },
     ];
     links.extend(parse_shacl_to_links(sdna, class).unwrap());
+    let signer = TestSigner::generate();
     for l in links {
-        store
-            .add_link(&DecoratedLinkExpression {
-                author: "did:key:test".into(),
-                timestamp: "1700000000000".into(),
-                data: l,
-                proof: DecoratedExpressionProof {
-                    key: "k".into(),
-                    signature: "s".into(),
-                    valid: Some(true),
-                    invalid: Some(false),
-
-                    ..Default::default()
-                },
-                status: None,
-            })
-            .unwrap();
+        let signed = signer.sign(l);
+        let mut le = LinkExpression::from(signed);
+        // The store refuses status-less inserts.
+        le.status = Some(crate::types::LinkStatus::Shared);
+        store.add_link(&le).unwrap();
     }
     load_shape(&store, class).unwrap()
 }
@@ -302,6 +293,7 @@ pub(crate) async fn setup_interpretation_e2e(
                     .unwrap_or_else(|_| "ollama".into()),
                 model,
                 api_type: crate::types::ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
         })
         .await
@@ -490,9 +482,12 @@ pub(crate) async fn run_interpretation_harness_e2e(
         // the ledger deltas are zero regardless, and asserting on
         // billing side-effects is not part of these scenarios.
         None,
+        // All flows visible — flow-targeting is exercised by its own tests.
+        None,
     )
     .await
-    .expect("run_interpretation_with_harness against real LLM to succeed");
+    .expect("run_interpretation_with_harness against real LLM to succeed")
+    .bases;
     let placements = read_back_placements(perspective, &bases).await;
     print_placements(&placements);
     placements
@@ -824,6 +819,29 @@ pub(crate) async fn graph_owners_lower(
     owners
 }
 
+/// Set of every base URI persisted (readable back via `model_query`) across the
+/// given shape classes. Extracted so retry-loop gates can pre-check the same
+/// invariant [`assert_persisted`] enforces post-loop — otherwise a run where the
+/// LLM emits a malformed URI (e.g. a template placeholder like
+/// `soa://ext/intention/...[intention_create response]`) can satisfy every
+/// content-level guard on the successful attempt yet still panic on the
+/// post-loop persisted assertion.
+pub(crate) async fn persisted_ids(
+    perspective: &PerspectiveInstance,
+    shapes: &[ModelShape],
+) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    for shape in shapes {
+        let class = class_local_name(&shape.target_class);
+        for inst in model_instances(perspective, class, &["title"]).await {
+            if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+    ids
+}
+
 /// Every affected base must be readable back as a persisted instance via
 /// `model_query` (proves the writes happened, not just that the interpretation
 /// computed some ids). Reads each class's instances through the model-query API
@@ -834,19 +852,11 @@ pub(crate) async fn assert_persisted(
     shapes: &[ModelShape],
     placements: &[(String, Vec<Link>)],
 ) {
-    let mut persisted_ids = std::collections::HashSet::new();
-    for shape in shapes {
-        let class = class_local_name(&shape.target_class);
-        for inst in model_instances(perspective, class, &["title"]).await {
-            if let Some(id) = inst.get("id").and_then(|v| v.as_str()) {
-                persisted_ids.insert(id.to_string());
-            }
-        }
-    }
+    let ids = persisted_ids(perspective, shapes).await;
     for (base, _links) in placements {
         assert!(
-            persisted_ids.contains(base),
-            "base {base} not readable back as a model instance; persisted ids: {persisted_ids:?}"
+            ids.contains(base),
+            "base {base} not readable back as a model instance; persisted ids: {ids:?}"
         );
     }
 }
@@ -1075,4 +1085,50 @@ pub(crate) async fn seed_message(
         )
         .await
         .expect("seed_message author");
+}
+
+/// Two-state Delivery flow (`identified → scoped`) parameterized by
+/// `input_type` (the class *name*, not a URI). Minimal fields — no
+/// `state_check`, `interpretationHint`, or `requires` — so it compiles
+/// cleanly in pure-unit tests that don't need LLM context.
+pub(crate) fn delivery_flow_json_for(input_type: &str) -> String {
+    serde_json::json!({
+        "name": "Delivery",
+        "namespace": "delivery://",
+        "start_action": [],
+        "states": [
+            { "name": "identified", "value": 0.0 },
+            { "name": "scoped", "value": 0.5 },
+        ],
+        "transitions": [
+            {
+                "action_name": "Scope",
+                "from_state": "identified",
+                "to_state": "scoped",
+                "actions": []
+            }
+        ],
+        "inputTypes": [input_type],
+        "outputTypes": [],
+    })
+    .to_string()
+}
+
+/// Parse `flow_json` into links and add them all to `perspective`.
+/// Panics on any parse or add_link error; only for test scaffolding.
+pub(crate) async fn seed_flow(
+    perspective: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    flow_json: &str,
+    flow_name: &str,
+) {
+    use crate::types::LinkStatus;
+    for link in
+        super::shacl_parser::parse_flow_to_links(flow_json, flow_name).expect("parse_flow_to_links")
+    {
+        perspective
+            .add_link(link, LinkStatus::Local, None, ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
 }
