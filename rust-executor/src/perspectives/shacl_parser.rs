@@ -2,6 +2,8 @@ use crate::types::Link;
 use deno_core::error::AnyError;
 use serde::{Deserialize, Serialize};
 
+mod role_gate_keys;
+
 /// AD4M Action - represents a link operation (e.g., addLink, removeLink, setSingleTarget)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AD4MAction {
