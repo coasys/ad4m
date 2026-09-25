@@ -58,17 +58,23 @@ commands:
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
-            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
-            cargo install wasm-bindgen-cli --version 0.2.118
+            # Only the language build (agent-language rust-impl) needs wasm-bindgen.
+            # Skip the cargo install when it is already there: even a no-op
+            # `cargo install` takes the shared ~/.cargo package-cache lock, which
+            # every job on this host then queues on behind any running build.
+            if wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.118$'; then
+              echo "wasm-bindgen 0.2.118 already installed"
+            else
+              echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+              cargo install wasm-bindgen-cli --version 0.2.118
+            fi
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
-  setup_integration_test_environment:
-    description: "Setup common integration test environment"
+  restore_binaries:
+    description: "Restore the ad4m + ad4m-executor binaries that build stashed on this host"
     steps:
-      - fix_workdir
-      - checkout
       - run:
           name: Restore binaries from local stash (no CircleCI network storage needed — same host)
           command: |
@@ -80,12 +86,46 @@ commands:
             # once at install time. Long-term this should move to GitLab CI
             # (Nico's 2026-08-27 review); the /var/lib default is the short-term
             # de-marvin-ification step.
+            set -eo pipefail
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            for bin in ad4m ad4m-executor; do
+              test -s "$src/$bin" || { echo "missing $src/$bin: rerun build"; exit 1; }
+            done
             mkdir -p target/release
             # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
             rm -f target/release/ad4m target/release/ad4m-executor
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
+            cp "$src/ad4m" "$src/ad4m-executor" target/release/
+
+  restore_integration_inputs:
+    description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
+    steps:
+      - run:
+          # `build` compiles the bootstrap languages (rollup + Holochain wasm
+          # DNAs) once and stashes every gitignored output the integration
+          # tests read; see "Stash integration inputs" in the build job for
+          # the list. Restoring here replaces the per-job `pnpm run
+          # build-languages`, which put ~8 parallel cargo/wasm builds per
+          # pipeline on this one host and stalled for 10 min on the shared
+          # ~/.cargo package-cache lock (PR #1156, 2026-09-25).
+          name: Restore integration inputs from build
+          command: |
+            set -eo pipefail
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
+            test -s "$src" || { echo "missing $src: rerun build"; exit 1; }
+            # Drop the previous branch's outputs first (cross-branch shared
+            # workdir) so nothing stale survives next to this SHA's files.
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build \
+                   ad4m-ldk/js/lib core/lib link-server/dist
+            tar -xf "$src"
+
+  setup_integration_test_environment:
+    description: "Setup common integration test environment"
+    steps:
+      - fix_workdir
+      - checkout
+      - restore_binaries
       - setup_env
       - run:
           name: Install dependencies
@@ -93,34 +133,28 @@ commands:
       - run:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
+      - restore_integration_inputs
       - run:
-          name: Build core package
-          command: cd ./core && pnpm run build
+          # core/lib itself comes from the tarball; this is the remaining
+          # half of core's build script (`patch-package && tsc && bundle`),
+          # which patches core/node_modules, not lib/.
+          name: Apply core's patch-package patches
+          command: cd ./core && pnpm exec patch-package
       - run:
-          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
-          command: |
-            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
-      - run:
-          # Isolate `hc` AND `kitsune2-bootstrap-srv` per CI run so the host's
-          # global copies (shared across branches / other PRs on this
-          # self-hosted runner) don't drift out of sync with Cargo.lock.
-          # The workspace's Cargo.lock is the source of truth; this script
-          # installs matching `hc` (from coasys/holochain rev) and
-          # `kitsune2-bootstrap-srv` (from crates.io version) into
-          # $REPO/.hc-toolchain/bin/. Consumers: prepareTestDirectory.sh,
-          # bootstrap-language build.sh files, tests/js/utils/utils.ts.
-          # Fixes: `Failed to unpack hApp: unknown field 'signal_url'`
-          # (hc mismatch) and multi-user signal-routing timeouts
-          # (kitsune2-bootstrap-srv wire-protocol drift).
-          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
+          # Tests need `hc` (tests/js/scripts/prepareTestDirectory.sh symlinks
+          # it into tst-tmp/) and `kitsune2-bootstrap-srv` (spawned by
+          # tests/js/utils/utils.ts) at RUNTIME, so the toolchain stays here.
+          # The binaries and the version stamps were just restored from build's
+          # tarball, so this script only compares the stamps against Cargo.lock
+          # and exits in well under a second; it rebuilds only on drift.
+          name: Verify pinned Holochain + kitsune2 CLIs (restored from build; matches Cargo.lock)
           command: bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
       - run:
-          name: Build bootstrap languages
-          command: pnpm run build-languages
-      - run:
-          name: Build link-server
-          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
+          # dist/ was restored above; this only makes sure the native
+          # better-sqlite3 module for link-server's runtime is installed.
+          name: Install link-server dependencies
+          command: pnpm --filter @coasys/link-server install
 
   restore_rust_compile_inputs:
     description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
@@ -150,13 +184,14 @@ jobs:
             find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
-          # Cargo.lock. Needed here (in build) because pnpm
-          # build-libs -> the bootstrap-languages build.sh files pack DNAs
-          # with `hc`, and downstream integration tests spawn
-          # `kitsune2-bootstrap-srv`. Both must match what the executor is
-          # linked against, otherwise packed bundles trip `unknown field
-          # 'signal_url'` at install time and cross-node signals never
-          # route between agents.
+          # Cargo.lock. Needed here (in build) because the bootstrap-languages
+          # build.sh files pack DNAs with `hc`, and downstream integration
+          # tests spawn `kitsune2-bootstrap-srv`. Both must match what the
+          # executor is linked against, otherwise packed bundles trip
+          # `unknown field 'signal_url'` at install time and cross-node
+          # signals never route between agents. The binaries are stashed
+          # with the language bundles below so the integration jobs do not
+          # each build `hc` from source after a Holochain bump.
           name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
           command: bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
@@ -181,6 +216,21 @@ jobs:
           command: pnpm run build-libs
           no_output_timeout: 30m
       - run:
+          # Same clear the integration jobs used to do before their own
+          # language build: turbo's cache (.turbo/cache in turbo 2) does not
+          # hash the `hc` binary, so a replayed cache entry could carry a happ
+          # packed by a previous Holochain version.
+          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
+          command: |
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
+      - run:
+          # Built ONCE here instead of in every integration job (Nico,
+          # 2026-09-25). Rollup bundles + Holochain wasm DNAs packed with the
+          # pinned `hc` above; the integration jobs restore the outputs.
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+          no_output_timeout: 30m
+      - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
@@ -198,6 +248,34 @@ jobs:
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
               dapp/dist
+      - run:
+          # Everything gitignored that the integration jobs read and used to
+          # rebuild themselves (restored by restore_integration_inputs):
+          #   bootstrap-languages/*/build      esbuild/rollup bundles; tests copy
+          #                                    build/bundle.js (get-builtin-test-langs.js)
+          #   hc-dna/workdir/*.dna|*.happ      packed DNAs/hApps (dna.yaml/happ.yaml names)
+          #   ad4m-ldk/js/lib                  ALDK, bundled into the languages
+          #   core/lib                         @coasys/ad4m, linked from tests/js
+          #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
+          #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
+          #                                    needed at test runtime
+          # A branch that adds a language output dir (e.g. #918's
+          # bootstrap-languages/local/dist) must add it to this list.
+          name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            tar -cf "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar" \
+              bootstrap-languages/*/build \
+              bootstrap-languages/*/hc-dna/workdir/*.dna \
+              bootstrap-languages/*/hc-dna/workdir/*.happ \
+              ad4m-ldk/js/lib \
+              core/lib \
+              link-server/dist \
+              .hc-toolchain/bin/hc \
+              .hc-toolchain/bin/kitsune2-bootstrap-srv \
+              .hc-toolchain/.installed_rev \
+              .hc-toolchain/.installed_kitsune_version
+            ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
   clippy:
     machine: true
@@ -406,13 +484,7 @@ jobs:
     steps:
       - fix_workdir
       - checkout
-      - run:
-          name: Restore binaries from local stash
-          command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            mkdir -p target/release
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
+      - restore_binaries
       - setup_env
       - run:
           name: git submodule
