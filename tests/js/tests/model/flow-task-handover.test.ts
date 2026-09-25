@@ -66,6 +66,8 @@
  *         },
  *       }
  *     `fromRole` is an ordinary ModelQuery. Roles are not special objects.
+ *     A key the engine does not know anywhere in the rule refuses the edge
+ *     (Part 4); it is not dropped.
  *
  *  7. GRANTING A ROLE IS ITSELF A FLOW  (the fractal stretch)
  *     A `ReviewerRoleGrant` flow runs over a `HandoverReviewerRole` instance
@@ -539,9 +541,8 @@ describe("flow task handover — WE-facing API with roles", function () {
     // receipt yet, so there is nothing for the gate to verify and Bob must
     // NOT count. "The run completed" is not evidence; a receipt is.
     // Fail-on-old-code: if producedByFlow is dropped on the floor, this
-    // n:1 edge fires the same way the hole did. So does a misspelt key:
-    // the fromRole query ignores keys it does not know, so the pre-#1076
-    // name `grantedByFlow` silently degrades to the plain fromRole above.
+    // n:1 edge fires the same way the hole did. (A misspelt key, or the
+    // pre-#1076 name `grantedByFlow`, refuses the edge instead: Part 4.)
     // Distinct flow name so this definition does not collide with TaskFlow
     // above. flowUri is handover://GatedTaskFlowFlow.
     await aliceP.addFlow(
@@ -667,5 +668,45 @@ describe("flow task handover — WE-facing API with roles", function () {
       aliceDid,
     );
     expect(bobDone.derivedState).to.equal("Done");
+  });
+
+  // ── Part 4: a role gate with a key the engine does not know ──────────────
+
+  it("Part 4 — a fromRole with an unknown key refuses the edge, even for the role holder", async () => {
+    const { aliceP, bobP } = await sharedPerspective("handover-unknown-key");
+    // Built from JSON, the way an untyped client or a stored definition
+    // arrives: the TS types would reject `grantedByFlow` in an object
+    // literal, but nothing checks a parsed one. `grantedByFlow` is the name
+    // #1076 renamed to `producedByFlow`.
+    const staleGate = JSON.parse(`{
+      "n": 1,
+      "fromRole": {
+        "className": "HandoverReviewerRole",
+        "where": { "domain": "frontend" },
+        "didProperty": "agent",
+        "grantedByFlow": { "flow": "${GRANT_FLOW_URI}", "state": "Granted" }
+      }
+    }`) as ConsensusRule;
+    await aliceP.addFlow("TaskFlow", makeTaskFlow(staleGate));
+
+    const task = (await (Task as any).create(aliceP, { title: "Stale gate" })) as Task;
+    await FlowInstance.start(aliceP, "TaskFlow", task.id);
+    await advanceToInReview(aliceP, bobP, task.id);
+    await createUnder<ReviewNote>(ReviewNote, aliceP, task.id, { body: "Looks good" });
+    await createUnder<ReviewerRole>(ReviewerRole, aliceP, task.id, {
+      agent: bobDid,
+      domain: "frontend",
+    });
+
+    // Bob holds the role exactly as in Part 2, where this click fires Done.
+    // Fail-on-old-code: the engine dropped `grantedByFlow`, read the gate as
+    // Part 2's plain fromRole, and this n:1 edge fired with no receipt.
+    const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Done");
+    expect(
+      bobPress.outcomes,
+      "a rule with an unknown key is refused — if this fires, the key was dropped and the gate widened",
+    ).to.have.lengthOf(0);
+    expect(bobPress.recordedVote, "the click is recorded; the rule refuses to count it").to.be.true;
+    expect(bobPress.derivedState).to.equal("InReview");
   });
 });
