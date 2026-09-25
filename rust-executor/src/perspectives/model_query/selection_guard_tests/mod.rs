@@ -21,8 +21,10 @@
 //! | `where_and_count.rs` | `where` (per-link and side-by-side `author`, membership, quantifiers, `NOT`), conformance, `count` / `totalCount`, the page, scopes, a projection's `where`, a typed relation's target flags, deduplication |
 //! | `link_status.rs` | the same under `linkStatus`, and one reifier for status and verdict |
 //! | `walks.rs` | transitive projections and scopes, walked one guarded step at a time; the guard's cost |
+//! | `viewer.rs` | another agent's `Local` link, for a viewer (#1024): with the verdict on one reifier, and under `linkStatus` |
 
 mod link_status;
+mod viewer;
 mod walks;
 mod where_and_count;
 

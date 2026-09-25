@@ -702,6 +702,16 @@ describe("Multi-User Simple integration tests", () => {
             const asAlice = await (PrivNote as any).findOne(pa, { where: { id: note.id } });
             expect(String(asAlice.body ?? "")).to.contain("alice-body");
 
+            // Selection follows the same rule: a `where` on a value only Alice
+            // can read does not match for Bob, and does not count for him.
+            // Alice's own Local value still selects for her.
+            const byAliceBody = { where: { body: "alice-body" } };
+            expect(await (PrivNote as any).findAll(pb, byAliceBody), "Alice's Local value does not select for Bob").to.have.length(0);
+            expect(await (PrivNote as any).count(pb, byAliceBody), "nor count").to.equal(0);
+            expect(await (PrivNote as any).findAll(pb, { where: { title: "alice-title" } }), "nor does Alice's Local title").to.have.length(0);
+            const aliceByBody = await (PrivNote as any).findAll(pa, byAliceBody);
+            expect(aliceByBody.map((n: any) => n.id)).to.deep.equal([note.id]);
+
             // Write: Bob replaces `title`. That removes the values Bob can see
             // and must leave Alice's Local value alone.
             await (PrivNote as any).update(pb, note.id, { title: "bob-title" });

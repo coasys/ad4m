@@ -514,7 +514,8 @@ async fn engine_derived_local_links_are_visible_to_co_owners_and_nothing_else_is
 /// told Bob that an instance exists that he cannot read.
 ///
 /// `listed` has a Shared type flag and Alice's Local state. Bob gets it back
-/// (with no state), so counting it is correct.
+/// with no state, so counting it is correct: the count says the instance
+/// exists, as the rows do, and hides only what the rows hide.
 #[tokio::test]
 async fn total_count_matches_what_the_viewer_can_hydrate() {
     use crate::types::LinkStatus;
@@ -599,6 +600,13 @@ async fn total_count_matches_what_the_viewer_can_hydrate() {
         ids,
         vec![listed],
         "Bob gets back only the instance he can read"
+    );
+    // `listed` is an empty shell for Bob: counted and returned, with no value
+    // for the property he cannot read. The count hides nothing more.
+    assert!(
+        rows.instances[0]["state"].is_null(),
+        "Alice's Local state must not hydrate for Bob: {}",
+        rows.instances[0]
     );
 
     // count(): the COUNT-only fast path.
