@@ -18,7 +18,6 @@ import { fileURLToPath } from "url";
 import { v4 as uuidv4 } from "uuid";
 import { TestContext } from "./test-context";
 import { baseUrl, quitExecutor, startExecutor } from "../utils/utils";
-import { holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 import { SHARED_LANGUAGES_DIR, SHARED_NEIGHBOURHOODS_DIR, sharedLanguageExists } from "../utils/sharedStores";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
@@ -43,7 +42,6 @@ export default function sharedLanguageStoreTests(testContext: TestContext) {
 
             const published = await alice.languages.publish(uniqueBundle("lang"),
                 new LanguageMetaInput("shared-store language", "published by Alice"));
-            expect(sharedLanguageExists(published.address), `meta-${published.address}.json in ${SHARED_LANGUAGES_DIR}`).to.be.true;
 
             const expression = await bob.expression.get(`lang://${published.address}`);
             expect(expression, "Bob's language-language returned nothing").to.not.be.null;
@@ -54,26 +52,31 @@ export default function sharedLanguageStoreTests(testContext: TestContext) {
             const meta = await bob.languages.meta(published.address);
             expect(meta.address).to.equal(published.address);
             expect(meta.author).to.equal((await alice.agent.me()).did);
+
+            expect(sharedLanguageExists(published.address), `meta-${published.address}.json in ${SHARED_LANGUAGES_DIR}`).to.be.true;
         });
 
         it("Bob fetches and joins a neighbourhood that Alice published", async () => {
             const alice = testContext.alice;
             const bob = testContext.bob;
 
+            // The seed's link language itself, not a template of it: this test
+            // is about the neighbourhood store, so it avoids publishing another
+            // language through the language-language.
             const perspective = await alice.perspective.add("shared-store neighbourhood");
-            const linkLanguage = await publishLinkLanguage(alice, holochainLinkLang(DIFF_SYNC_HASH), "shared-store link language");
-            const url = await alice.neighbourhood.publishFromPerspective(perspective.uuid, linkLanguage.address, new Perspective());
-            const address = url.split("://")[1];
-            expect(fs.existsSync(path.join(SHARED_NEIGHBOURHOODS_DIR, `neighbourhood-${address}.json`))).to.be.true;
+            const url = await alice.neighbourhood.publishFromPerspective(perspective.uuid, DIFF_SYNC_HASH, new Perspective());
 
             const expression = await bob.expression.get(url);
             expect(expression, "Bob's neighbourhood store returned nothing").to.not.be.null;
             expect(expression.author).to.equal((await alice.agent.me()).did);
-            expect(JSON.parse(expression.data).linkLanguage).to.equal(linkLanguage.address);
+            expect(JSON.parse(expression.data).linkLanguage).to.equal(DIFF_SYNC_HASH);
 
             const joined = await bob.neighbourhood.joinFromUrl(url);
             expect(joined.sharedUrl).to.equal(url);
-            expect(joined.neighbourhood!.data.linkLanguage).to.equal(linkLanguage.address);
+            expect(joined.neighbourhood!.data.linkLanguage).to.equal(DIFF_SYNC_HASH);
+
+            const address = url.split("://")[1];
+            expect(fs.existsSync(path.join(SHARED_NEIGHBOURHOODS_DIR, `neighbourhood-${address}.json`))).to.be.true;
         });
 
         describe("without a storagePath setting (KV mode)", () => {
