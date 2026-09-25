@@ -366,6 +366,8 @@ While these methods are available, we recommend using the `Ad4mModel` system for
 
 Flows describe how a group advances an expression through a state machine, with each transition backed by an on-graph `FlowTransitionProposal` and (optionally) a `ConsensusRule` gating when a proposal fires. Each `FlowState` carries an `interpretationHint` — a short English sentence the interpretation engine surfaces to the LLM so agent-authored proposals stay coherent with the flow's intent.
 
+This section introduces flows as social DNA. The [Flows](/flows) page covers the engine: the on-graph objects, how state is derived rather than stored, `proposeTransition` / accept / reject, role gates including `producedByFlow`, and a worked end-to-end example.
+
 <Callout type="info" emoji="ℹ️">
   Flow state is tracked on-graph via `FlowInstance` (per-subject state) and
   `FlowTransitionProposal` (per-vote), not by the ad-hoc `todo://state`-style
@@ -443,10 +445,14 @@ const proposals = await instance.proposals();
 ```
 
 <Callout type="info" emoji="ℹ️">
-  This is the read surface. Writing transitions — proposing one, voting on
-  it, and firing it once a `ConsensusRule` is met — lands with the consensus
-  engine and is not part of this API yet. Until then `FlowTransitionProposal`
-  records only exist where a client wrote one directly.
+  That is the read surface. The write surface is on the same wrapper:
+  `instance.proposeTransition(toState, rationale?)` is the button click
+  (mint or co-sign), `instance.acceptProposal(p)` adds a signature to a
+  listed proposal, `instance.rejectProposal(p)` withdraws the links you
+  signed. Reject is not a cancel — retracting a settling vote moves the
+  flow back. See [Flows](/flows) for `FlowProposeResult`, role gates, and
+  a worked end-to-end example. The executable twin is
+  `tests/js/tests/model/flow-task-handover.test.ts`.
 </Callout>
 
 ### Adding Flows to a Perspective

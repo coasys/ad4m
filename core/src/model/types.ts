@@ -10,11 +10,21 @@
 // Forward type-only reference to Ad4mModel (no runtime circular dependency)
 // ---------------------------------------------------------------------------
 import type { Ad4mModel } from "./Ad4mModel";
+import type { LinkStatus } from "../perspectives/PerspectiveProxy";
 import type { NodeExpression } from "../shacl/NodeExpression";
 
 // ---------------------------------------------------------------------------
 // Query DSL types
 // ---------------------------------------------------------------------------
+
+/**
+ * Who wrote a link: a DID, any of several DIDs, or `{ not }` / `{ contains }`
+ * over the author DID.
+ */
+export type AuthorCondition =
+  | string
+  | string[]
+  | { not?: string | string[]; contains?: string };
 
 export type WhereOps = {
   not: string | number | boolean | string[] | number[];
@@ -24,6 +34,16 @@ export type WhereOps = {
   gt: number; // greater than
   gte: number; // greater than or equal to
   contains: string | number; // substring/element check
+  /** Equality as an operator: `{ eq: X }` is the bare value `X` (an array
+   *  means any of). It lets a value sit beside `author`, and cannot be
+   *  combined with the other value operators. */
+  eq: string | number | boolean | string[] | number[];
+  /** Per-link author: the link that satisfies this property's condition was
+   *  written by this author, e.g. `{ agent: { eq: did, author: admin } }`.
+   *  Alone, `{ agent: { author: admin } }`: admin wrote some `agent` link.
+   *  Only on properties and relations stored as links (not getters,
+   *  `timestamp` or `id`). See "Filtering by Author" in the model-classes guide. */
+  author: AuthorCondition;
 };
 export type WhereCondition =
   | string
@@ -42,8 +62,23 @@ export type Where = {
   AND?: Where[];
   /** Logical NOT: instance must NOT satisfy the given sub-clause. */
   NOT?: Where;
+  /**
+   * Only instances that are valid outputs of a completed run of `flow`
+   * (optionally: of a run settled into terminal state `state`).
+   *
+   * Decided executor-side by cryptographic receipt verification, not by a
+   * property: an instance passes only when a verified receipt of the flow
+   * names it among the outputs its quorum committed to AND its live content
+   * still matches that commitment. Fail-closed — a forged, unverifiable or
+   * stale receipt excludes the instance — and applied BEFORE `limit`/
+   * `offset`, so a page of N is N valid outputs. Only supported as a
+   * top-level key on the queried class; anywhere else the query errors.
+   */
+  producedByFlow?: ProducedByFlowFilter;
   [propertyName: string]: WhereCondition | undefined;
 };
+/** The `where.producedByFlow` filter — see {@link Where.producedByFlow}. */
+export type ProducedByFlowFilter = { flow: string; state?: string };
 export type Order = { [propertyName: string]: "ASC" | "DESC" };
 
 /**
@@ -305,8 +340,66 @@ export type Query = {
    */
   deepQuery?: boolean;
   /**
+   * Read instances as they exist in links of one status only.
+   *
+   * `'shared'` hydrates from Shared links only: every property, relation,
+   * `author` and `updatedAt` comes from links that are gossiped to the
+   * neighbourhood, and none from this executor's Local links. That is the
+   * read to use when showing data to another user (#1024). `'local'` is the
+   * converse. Unset or `null` (the default) reads both, and a property
+   * declared `local: true` still reads only its Local links.
+   *
+   * Relations include typed `@HasMany` / `@HasOne` relations, which are filled
+   * by the conformance getter the SDK generates: the executor adds the status
+   * check to that getter's relation link. A hand-written `getter` is run as
+   * written, so it reads links of any status unless it checks
+   * `<ad4m://ontology/status>` itself.
+   *
+   * Included relations and the instances a `$` projection hydrates inherit
+   * the setting, unless an include's sub-query sets its own. The `__links`
+   * rows (see {@link Query.links}) are restricted the same way.
+   *
+   * Combines with {@link Query.includeUnverified}: a link must have the
+   * requested status **and** pass the signature check, both on the same link.
+   * So a Local link whose signature did not verify is withheld under
+   * `linkStatus: 'local'` too, and comes back only with
+   * `linkStatus: 'local', includeUnverified: true` (or with no `linkStatus`
+   * and `includeUnverified: true`).
+   *
+   * Scope: this restricts the links that hydrate an instance and the links
+   * that *select* it (`where`, the class's flags, `count`/`totalCount`, `$`
+   * projections, `parent` scopes and the order behind `limit`/`offset`). So an
+   * instance is returned under `'local'` only when it is flagged in a Local
+   * link, and under `'shared'` only when it is flagged in a Shared one.
+   */
+  linkStatus?: LinkStatus;
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * By default the executor withholds every link whose stored signature
+   * verdict is not valid, so a forged or tampered link never becomes a
+   * property value, a relation target, `author` or `updatedAt`. That
+   * includes a typed relation's generated conformance getter. A `getter` you
+   * write yourself runs as written, so it reads unverified links unless it
+   * joins the link's `ad4m://ontology/proofValid` itself. Set this to
+   * `true` only to *display* an unverified claim, e.g. a UI that marks a value
+   * as unverified. Anything that acts on the data, such as a vote counter or a
+   * role check, must leave it off.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * The same applies to the rows under `__links` and to what *selects* an
+   * instance: `where` (including a per-link `author`), the class's flags,
+   * `count`/`totalCount`, the order behind `limit`/`offset`, `parent` scopes
+   * and `$` projections, `transitive` ones included. With `true`, selection
+   * reads unverified links too.
+   */
+  includeUnverified?: boolean;
+  /**
    * Return the individual links behind each instance, with their own author,
-   * timestamp and signature, under `instance.__links`.
+   * timestamp, signature and signature verdict, under `instance.__links`. For
+   * a collection this is per-item provenance: who added each member, when, and
+   * whether their signature holds.
    *
    * Each entry is a property or relation name the model declares, or an
    * absolute predicate IRI — including one the model does **not** declare
@@ -324,17 +417,27 @@ export type Query = {
 };
 
 /**
- * One stored link as returned under `__links` — the same shape as a
- * `LinkExpression`, so `proof` can be verified by the consumer.
+ * One stored link as returned under `__links` — the same shape as the
+ * `LinkExpression` `perspective.get()` returns, including the signature
+ * verdict the executor recorded when the link was stored.
  *
+ * `proof.valid` is `true` only when the signature verifies against `author`.
  * A link stored without a proof arrives with `key` and `signature` set to
- * `""`; that is an unverifiable link, not a valid unsigned one.
+ * `""` and `valid: false`; that is an unverifiable link, not a valid unsigned
+ * one. Anything that acts on a row (counting a vote, granting a role) should
+ * require `proof.valid`.
+ *
+ * `valid` is never `null` here and `invalid` is always `!valid`, the same
+ * convention as `perspective.get()`. So `invalid: true` does not by itself mean
+ * a signature failed: it also covers a link with no proof, or with no recorded
+ * verdict. To tell an unsigned link from a failed signature, check whether
+ * `proof.signature` is `""`.
  */
 export interface LinkRow {
   author: string;
   timestamp: string;
   data: { source: string; predicate: string; target: string };
-  proof: { key: string; signature: string };
+  proof: { key: string; signature: string; valid: boolean; invalid: boolean };
 }
 
 /** `instance.__links`: requested entry (spelled as requested) → its rows, oldest first. */
@@ -419,6 +522,10 @@ type HasNoTypedFields<T extends Ad4mModel> =
 export type StringWhereOps = {
   not?: string | string[];
   contains?: string;
+  /** See {@link WhereOps.eq}. */
+  eq?: string | string[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type NumericWhereOps = {
@@ -428,12 +535,16 @@ export type NumericWhereOps = {
   gt?: number;
   gte?: number;
   between?: [number, number];
+  /** See {@link WhereOps.eq}. */
+  eq?: number | number[];
+  /** See {@link WhereOps.author}. */
+  author?: AuthorCondition;
 };
 
 export type TypedWhereCondition<V> =
     V extends string  ? string | string[] | StringWhereOps
   : V extends number  ? number | number[] | NumericWhereOps
-  : V extends boolean ? boolean
+  : V extends boolean ? boolean | { eq?: boolean; author?: AuthorCondition }
   : V extends Array<infer U>
       ? U extends string ? string | string[] | StringWhereOps
         : U extends number ? number | number[] | NumericWhereOps
@@ -447,6 +558,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
   & {
       base?: string | string[];
       id?: string | string[];
+      /** Alone: the instance's `.author`, i.e. its earliest link's author.
+       *  Beside property/relation conditions in the same object: that, AND
+       *  each of those conditions is satisfied by a link this author wrote.
+       *  For "this author wrote the `agent` link" alone, nest it:
+       *  `{ agent: { eq: did, author } }`. It does not reach into
+       *  `OR`/`AND`/`NOT` sub-clauses. See "Filtering by Author" in the
+       *  model-classes guide. */
       author?: WhereCondition;
       timestamp?: WhereCondition;
       OR?: StrictTypedWhere<T>[];
@@ -458,6 +576,13 @@ type StrictTypedWhere<T extends Ad4mModel> =
  *  shape when T has no declared fields (e.g. fromSHACL-derived classes). */
 export type TypedWhere<T extends Ad4mModel> =
   HasNoTypedFields<T> extends true ? Where : StrictTypedWhere<T>;
+
+/** Top-level typed `where` of a query on T: {@link TypedWhere} plus
+ *  `producedByFlow`. Kept out of `TypedWhere` itself because that shape is
+ *  reused under `OR`/`AND`/`NOT` and in include sub-queries, where the
+ *  executor rejects `producedByFlow` (see {@link Where.producedByFlow}). */
+export type TypedQueryWhere<T extends Ad4mModel> =
+  TypedWhere<T> & { producedByFlow?: ProducedByFlowFilter };
 
 // ---- Typed order -------------------------------------------------------------
 
@@ -479,6 +604,10 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.linkStatus}. Inherited from the parent query when unset. */
+  linkStatus?: LinkStatus;
+  /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 
@@ -535,12 +664,16 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   properties?: PropertyKeysOf<T>[];
   include?: TypedIncludeMap<T>;
   includeAll?: boolean;
-  where?: TypedWhere<T>;
+  where?: TypedQueryWhere<T>;
   order?: TypedOrder<T>;
   offset?: number;
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.linkStatus}. */
+  linkStatus?: LinkStatus;
+  /** See {@link Query.includeUnverified}. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 

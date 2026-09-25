@@ -6,7 +6,7 @@ use super::projection::{
     build_projection_order_clause, build_projection_where_patterns, resolve_projections,
 };
 use super::shape::parse_shape_from_json;
-use super::sparql_builder::build_instance_sparql;
+use super::sparql_builder::{build_instance_sparql, LinkGuard};
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
@@ -68,6 +68,61 @@ fn make_link_by(
     link
 }
 
+/// `query` with the #1113 opt-in set, unless it sets the flag itself.
+///
+/// `make_link` proofs are `key`/`sig` and its timestamps are `"1"`, `"2"`…, so
+/// no fixture link verifies and the default `proof_valid_filter` withholds every
+/// row. The tests that use these fixtures are about hydration, filtering and
+/// paging, not signatures, so they read through [`fixture_query`] /
+/// [`fixture_query_from_json`] with `include_unverified` (which `include` and
+/// projection sub-queries inherit). The default itself is tested against real
+/// signatures in `proof_valid_tests.rs`, and through the SDK in
+/// `tests/js/tests/model/model-unverified-links.test.ts`.
+fn with_unverified(query: &ModelQueryInput) -> ModelQueryInput {
+    let mut query = query.clone();
+    if query.include_unverified.is_none() {
+        query.include_unverified = Some(true);
+    }
+    query
+}
+
+async fn fixture_query(
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: &dyn super::types::ShapeResolver,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver, None).await
+}
+
+async fn fixture_query_from_json(
+    store: &SparqlStore,
+    class_name: &str,
+    query: &ModelQueryInput,
+    shape_json: &str,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
+}
+
+/// [`fixture_query_from_json`] read as `viewer`: the multi-tenancy tests
+/// (#1024) turn on who may see a Local link, not on signatures.
+async fn fixture_query_from_json_for_viewer(
+    store: &SparqlStore,
+    class_name: &str,
+    query: &ModelQueryInput,
+    shape_json: &str,
+    viewer: Option<&str>,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    super::test_helpers::execute_model_query_from_json_for_viewer(
+        store,
+        class_name,
+        &with_unverified(query),
+        shape_json,
+        viewer,
+    )
+    .await
+}
+
 const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
     "className": "Cache",
     "properties": {
@@ -124,7 +179,7 @@ async fn local_property_hydrates_only_from_local_links() {
         ))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -161,7 +216,7 @@ async fn local_property_hydrates_only_from_local_links() {
         ))
         .unwrap();
 
-    let result2 = execute_model_query_from_json(
+    let result2 = fixture_query_from_json(
         &store2,
         "Cache",
         &ModelQueryInput::default(),
@@ -257,7 +312,7 @@ async fn local_links_are_private_per_user_on_one_executor() {
     };
 
     // ── Alice's view ────────────────────────────────────────────────────────
-    let as_alice = super::test_helpers::execute_model_query_from_json_for_viewer(
+    let as_alice = fixture_query_from_json_for_viewer(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -283,7 +338,7 @@ async fn local_links_are_private_per_user_on_one_executor() {
     );
 
     // ── Bob's view: the mirror image ────────────────────────────────────────
-    let as_bob = super::test_helpers::execute_model_query_from_json_for_viewer(
+    let as_bob = fixture_query_from_json_for_viewer(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -308,7 +363,7 @@ async fn local_links_are_private_per_user_on_one_executor() {
     // The flow engine's `currentState` cache and the auto-processor read in
     // this scope. If filtering leaked into it, those would silently stop
     // seeing their own derivations.
-    let as_executor = super::test_helpers::execute_model_query_from_json_for_viewer(
+    let as_executor = fixture_query_from_json_for_viewer(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -411,7 +466,7 @@ async fn engine_derived_local_links_are_visible_to_co_owners_and_nothing_else_is
             },
         ),
     ] {
-        let as_alice = super::test_helpers::execute_model_query_from_json_for_viewer(
+        let as_alice = fixture_query_from_json_for_viewer(
             &store,
             "EngineCached",
             &input,
@@ -521,7 +576,7 @@ async fn total_count_matches_what_the_viewer_can_hydrate() {
     let run = |input: ModelQueryInput, viewer: Option<&'static str>| {
         let store = &store;
         async move {
-            super::test_helpers::execute_model_query_from_json_for_viewer(
+            fixture_query_from_json_for_viewer(
                 store,
                 "Cache",
                 &input,
@@ -634,7 +689,7 @@ async fn test_full_model_query_with_where_filter() {
 
     // Query without WHERE - should find 1 instance
     let query_no_where = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json)
+    let result = fixture_query_from_json(&store, "Recipe", &query_no_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -657,7 +712,7 @@ async fn test_full_model_query_with_where_filter() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result2 = execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json)
+    let result2 = fixture_query_from_json(&store, "Recipe", &query_with_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -722,7 +777,7 @@ async fn test_where_clause_raw_uri_property() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -791,7 +846,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -939,7 +994,7 @@ async fn test_shared_predicate_relations_all_populated_via_store() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
         .await
         .unwrap();
 
@@ -1067,7 +1122,7 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Parent", &query, shape_json)
         .await
         .unwrap();
 
@@ -1102,7 +1157,10 @@ async fn test_build_projection_where_patterns_empty_when_no_clause() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
+    assert_eq!(
+        build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY),
+        ""
+    );
 }
 
 #[tokio::test]
@@ -1122,7 +1180,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
         "expected id IRI filter, got: {patterns}"
@@ -1160,7 +1218,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         "Signal",
         parse_shape_from_json(target_shape_json, "Signal").unwrap(),
     );
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("?t <signal://type>"),
         "expected triple pattern for signal://type, got: {patterns}"
@@ -1288,6 +1346,8 @@ async fn test_resolve_projections_count() {
             &_resolver,
             0,
             None,
+            Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1343,6 +1403,8 @@ async fn test_resolve_projections_list() {
             &_resolver,
             0,
             None,
+            Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1397,6 +1459,8 @@ async fn test_resolve_projections_scalar() {
             &_resolver,
             0,
             None,
+            Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1442,6 +1506,8 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             &shape,
             &_resolver,
             0,
+            None,
+            Some(true),
             None,
         )
         .await
@@ -1519,6 +1585,8 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             &_resolver,
             0,
             None,
+            Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1591,6 +1659,8 @@ async fn test_resolve_projections_where_filter_by_author() {
             &shape,
             &_resolver,
             0,
+            None,
+            Some(true),
             None,
         )
         .await
@@ -1872,7 +1942,8 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true);
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2175,7 +2246,7 @@ async fn test_deep_query_defaults_to_true() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert!(!result.instances.is_empty(), "should find instance");
@@ -2229,7 +2300,7 @@ async fn test_deep_query_false_skips_property_getters() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert!(!result.instances.is_empty());
@@ -2298,7 +2369,7 @@ async fn test_getters_run_after_pagination() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
@@ -2443,7 +2514,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2522,7 +2593,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2649,7 +2720,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2721,7 +2792,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2791,7 +2862,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2884,7 +2955,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2972,7 +3043,7 @@ async fn test_full_model_query_signed_expression_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -3049,7 +3120,7 @@ async fn test_full_model_query_signed_expression_numeric_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -3102,7 +3173,7 @@ async fn test_full_model_query_signed_expression_boolean_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Thing", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
@@ -3170,7 +3241,7 @@ async fn test_full_model_query_where_string_array_in() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "active and pending should match");
@@ -3231,7 +3302,7 @@ async fn test_full_model_query_where_ops_not() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
@@ -3319,7 +3390,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3353,7 +3424,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3387,7 +3458,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3418,7 +3489,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3434,7 +3505,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3454,7 +3525,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -3535,7 +3606,7 @@ async fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
         .await
         .unwrap();
 
@@ -3607,7 +3678,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3629,7 +3700,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3651,7 +3722,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3708,7 +3779,7 @@ async fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3730,7 +3801,7 @@ async fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3782,7 +3853,7 @@ async fn test_full_model_query_ops_not_string_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3832,7 +3903,7 @@ async fn test_full_model_query_ops_not_array_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Thing",
         &ModelQueryInput {
@@ -3889,7 +3960,7 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3943,7 +4014,7 @@ async fn test_full_model_query_ops_contains_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4005,7 +4076,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4105,7 +4176,7 @@ async fn test_plain_literal_where_paginate_count() {
         "status".to_string(),
         WhereCondition::String("active".to_string()),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -4127,7 +4198,7 @@ async fn test_plain_literal_where_paginate_count() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
     assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
 
-    let result2 = execute_model_query_from_json(
+    let result2 = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -4207,7 +4278,7 @@ async fn test_plain_literal_contains_filter() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Msg",
         &ModelQueryInput {
@@ -4282,7 +4353,7 @@ async fn test_perf_large_dataset_paginated_query() {
     );
 
     let start = std::time::Instant::now();
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -4389,7 +4460,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
 
     // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
     let start = std::time::Instant::now();
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -4576,7 +4647,7 @@ async fn test_full_model_query_order_by_property_string() {
     }"#;
 
     // ORDER BY name ASC with limit (triggers SPARQL pagination)
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4595,7 +4666,7 @@ async fn test_full_model_query_order_by_property_string() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 
     // ORDER BY name DESC with limit
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4653,7 +4724,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
         "relations": {}
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person2",
         &ModelQueryInput {
@@ -4703,7 +4774,7 @@ async fn test_full_model_query_order_by_property_number() {
     }"#;
 
     // ORDER BY score ASC, limit 3 → should get 1, 5, 42
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -4725,7 +4796,7 @@ async fn test_full_model_query_order_by_property_number() {
     assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
 
     // ORDER BY score DESC, limit 2 → should get 999, 100
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -4866,6 +4937,8 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         &resolver,
         0,
         None,
+        Some(true),
+        None,
     )
     .await
     .unwrap();
@@ -4899,6 +4972,8 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         &shape,
         &resolver,
         0,
+        None,
+        Some(true),
         None,
     )
     .await
@@ -4982,7 +5057,7 @@ async fn test_sort_by_projection_count_desc() {
         },
     );
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -5050,7 +5125,7 @@ async fn test_sort_by_projection_count_asc() {
         },
     );
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -5124,7 +5199,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     );
 
     // Ask for page 1 (top-2 by likes DESC): should be 10 and 8
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -5232,7 +5307,7 @@ async fn test_sort_by_relation_property_asc() {
     resolver.register("Post", post_shape.clone());
     resolver.register("Location", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -5241,7 +5316,6 @@ async fn test_sort_by_relation_property_asc() {
             ..Default::default()
         },
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -5308,7 +5382,7 @@ async fn test_sort_by_relation_property_desc() {
     resolver.register("Post2", post_shape.clone());
     resolver.register("Location2", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -5317,7 +5391,6 @@ async fn test_sort_by_relation_property_desc() {
             ..Default::default()
         },
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -5402,7 +5475,7 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
     resolver.register("Post3", post_shape.clone());
     resolver.register("Location3", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -5411,7 +5484,6 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
             ..Default::default()
         },
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -5508,7 +5580,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
     resolver.register("Post3", post_shape.clone());
     resolver.register("Location3", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -5517,7 +5589,6 @@ async fn test_sort_by_relation_property_with_missing_relation() {
             ..Default::default()
         },
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -5700,7 +5771,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5727,7 +5798,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5757,7 +5828,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5815,8 +5886,6 @@ async fn test_persistent_store_typed_literal_comparison() {
 
 #[tokio::test]
 async fn test_model_query_from_js_wire_format() {
-    use super::query::execute_model_query;
-
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
 
@@ -5863,7 +5932,7 @@ async fn test_model_query_from_js_wire_format() {
     eprintln!("[wire] parsed query: {:?}", query_input);
 
     let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5878,7 +5947,7 @@ async fn test_model_query_from_js_wire_format() {
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
     eprintln!("[wire] parsed not query: {:?}", query_input);
 
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5891,7 +5960,7 @@ async fn test_model_query_from_js_wire_format() {
     // between from JS wire format
     let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver, None)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5954,7 +6023,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
 
     // Identical body text must NOT collapse the two instances into one.
     let result =
-        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
             .await
             .unwrap();
     assert_eq!(
@@ -5992,7 +6061,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result2 = execute_model_query_from_json(&store, "Message", &query_where, shape_json)
+    let result2 = fixture_query_from_json(&store, "Message", &query_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -6024,7 +6093,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         .unwrap();
 
     let result3 =
-        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
             .await
             .unwrap();
     let body_by_id: HashMap<String, String> = result3
@@ -6443,7 +6512,7 @@ async fn test_or_where_filters_in_sparql_with_order_and_limit() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .unwrap();
 
@@ -6508,7 +6577,7 @@ async fn test_not_where_filters_in_sparql() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .unwrap();
 
@@ -6568,7 +6637,7 @@ async fn test_and_with_two_conditions_on_one_property() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .expect("the clause must compile to valid SPARQL");
 
@@ -6633,7 +6702,7 @@ async fn test_not_on_a_property_also_constrained_outside() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .expect("the clause must compile to valid SPARQL");
 
@@ -6763,24 +6832,22 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
     };
 
     // "has no comments at all"
-    let none_any = super::query::execute_model_query(
+    let none_any = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(None, Some(BTreeMap::new())),
         &resolver,
-        None,
     )
     .await
     .unwrap();
     assert_eq!(ids(&none_any), vec!["we://post/3".to_string()]);
 
     // "has at least one comment"
-    let some_any = super::query::execute_model_query(
+    let some_any = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(Some(BTreeMap::new()), None),
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -6791,7 +6858,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
 
     // "has a comment whose body is spam" — the nested clause names a property
     // of Comment, so it only resolves because the target class is known.
-    let some_spam = super::query::execute_model_query(
+    let some_spam = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(
@@ -6802,7 +6869,6 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
             None,
         ),
         &resolver,
-        None,
     )
     .await
     .unwrap();
@@ -6899,7 +6965,7 @@ async fn test_getter_relation_with_target_class_hydrates_via_include() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "TextBlock", &query, shape_json)
+    let result = fixture_query_from_json(&store, "TextBlock", &query, shape_json)
         .await
         .unwrap();
 
@@ -7040,7 +7106,7 @@ async fn test_relation_quantifier_requires_the_target_class() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver, None)
+    let result = fixture_query(&store, &post_shape, &query, &resolver)
         .await
         .unwrap();
 
@@ -7176,15 +7242,9 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(
-        &store,
-        collection_shape.as_ref(),
-        &query,
-        &resolver,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 2, "both children hydrate");
@@ -7307,15 +7367,9 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(
-        &store,
-        collection_shape.as_ref(),
-        &query,
-        &resolver,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "one link, one child");
@@ -7435,15 +7489,9 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(
-        &store,
-        collection_shape.as_ref(),
-        &query,
-        &resolver,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     // The point of the test: two readings, one link, one member. Hydrating the
@@ -7532,15 +7580,9 @@ async fn test_limit_on_a_polymorphic_include_is_rejected() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(
-        &store,
-        collection_shape.as_ref(),
-        &query,
-        &resolver,
-        None,
-    )
-    .await
-    .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let err = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("a limit that cannot be honoured must not be dropped in silence");
     let msg = err.to_string();
     assert!(msg.contains("children"), "names the relation: {msg}");
     assert!(msg.contains("limit"), "names what was refused: {msg}");
@@ -7644,10 +7686,9 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver, None)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let entries = result.instances[0]["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 1);
@@ -7763,10 +7804,9 @@ async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver, None)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let entries = result.instances[0]["entries"].as_array().unwrap();
     assert_eq!(
@@ -7832,10 +7872,9 @@ async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() 
             ..Default::default()
         };
 
-        let err =
-            super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
-                .await
-                .expect_err("an empty relation must not make an unanswerable query answerable");
+        let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
+            .await
+            .expect_err("an empty relation must not make an unanswerable query answerable");
         let msg = err.to_string();
         assert!(msg.contains(relation), "names the relation: {msg}");
         assert!(msg.contains("offset"), "names what was refused: {msg}");
@@ -7873,7 +7912,7 @@ async fn test_untyped_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
@@ -7993,10 +8032,9 @@ async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class(
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver, None)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, block_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let containers = result.instances[0]["containers"].as_array().unwrap();
     assert_eq!(containers.len(), 2, "both containers hydrate");
@@ -8055,7 +8093,7 @@ async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver, None)
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
@@ -8107,10 +8145,9 @@ async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() 
     }"#;
 
     // Class-wide read: the batch mixes an unparseable id with a real IRI.
-    let result =
-        execute_model_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
-            .await
-            .expect("a non-IRI store id must not make the query fail to parse");
+    let result = fixture_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
+        .await
+        .expect("a non-IRI store id must not make the query fail to parse");
     assert_eq!(
         result.instances.len(),
         2,
@@ -8133,7 +8170,7 @@ async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() 
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Recipe", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Recipe", &query, shape_json)
         .await
         .expect("where-by-id on a non-IRI id must not fail to parse");
     assert_eq!(result.instances.len(), 1, "exactly the legacy row");
@@ -8216,7 +8253,7 @@ async fn test_ordered_collection_hydrates_in_crdt_order() {
         }
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Collection",
         &ModelQueryInput::default(),
@@ -8272,7 +8309,7 @@ async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
         }
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Collection",
         &ModelQueryInput::default(),
@@ -8388,7 +8425,7 @@ async fn traverse_ids(store: &SparqlStore, scope: Scope, order: bool) -> Vec<Str
         },
         ..Default::default()
     };
-    let result = execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     let mut ids: Vec<String> = result
@@ -8570,7 +8607,7 @@ async fn transitive_projection_counts_descendants_not_children() {
                 ..Default::default()
             };
             let result =
-                execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_WITH_REPLIES)
+                fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_WITH_REPLIES)
                     .await
                     .expect("query should execute");
             result
@@ -8656,7 +8693,7 @@ async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+    fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("walk should execute")
         .instances
@@ -8758,14 +8795,13 @@ async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
         ..Default::default()
     };
 
-    let ids: Vec<String> =
-        execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
-            .await
-            .expect("walk should execute")
-            .instances
-            .iter()
-            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
-            .collect();
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
 
     assert_eq!(
         ids.len(),
@@ -8801,10 +8837,9 @@ async fn global_limit_caps_the_union_after_the_per_anchor_slice() {
                 limit: Some(limit),
                 ..Default::default()
             };
-            let result =
-                execute_model_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
-                    .await
-                    .expect("query should execute");
+            let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+                .await
+                .expect("query should execute");
             result
                 .instances
                 .iter()
@@ -8852,7 +8887,7 @@ async fn global_limit_applies_when_the_filter_cannot_be_pushed() {
         limit: Some(1),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     let ids: Vec<&str> = result
@@ -8886,14 +8921,13 @@ async fn the_window_applies_to_the_walks_union_not_to_each_level() {
         limit: Some(4),
         ..Default::default()
     };
-    let ids: Vec<String> =
-        execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
-            .await
-            .expect("walk should execute")
-            .instances
-            .iter()
-            .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
-            .collect();
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
     // Breadth-first union: a0 a1 a2 b00 b01 b10 b11 b20 b21 — skip 1, take 4.
     assert_eq!(
         ids,
@@ -8920,10 +8954,9 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
         }),
         ..Default::default()
     };
-    let err =
-        execute_model_query_from_json(&store, "Comment", &with_transitive, COMMENT_SHAPE_JSON)
-            .await
-            .expect_err("transitive + levels must be refused");
+    let err = fixture_query_from_json(&store, "Comment", &with_transitive, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("transitive + levels must be refused");
     assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
 
     let with_limit = ModelQueryInput {
@@ -8937,7 +8970,7 @@ async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
         }),
         ..Default::default()
     };
-    let err = execute_model_query_from_json(&store, "Comment", &with_limit, COMMENT_SHAPE_JSON)
+    let err = fixture_query_from_json(&store, "Comment", &with_limit, COMMENT_SHAPE_JSON)
         .await
         .expect_err("limitPerAnchor + levels must be refused");
     assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
@@ -8973,7 +9006,7 @@ async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("walk should execute");
     let ids: Vec<&str> = result
@@ -9012,7 +9045,7 @@ async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("walk should execute");
     let ids: Vec<&str> = result
@@ -9088,7 +9121,7 @@ async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
         .await
         .expect("query should execute");
     let ids: Vec<&str> = result
@@ -9114,7 +9147,7 @@ async fn a_global_limit_counts_instances_not_timestamp_rows() {
         limit: Some(2),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
         .await
         .expect("query should execute");
     let ids: Vec<&str> = result
@@ -9157,7 +9190,7 @@ async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
         }),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     assert!(
@@ -9186,7 +9219,7 @@ async fn the_older_scopes_with_an_unwritable_id_match_nothing() {
         }),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &raw, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &raw, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     assert!(result.instances.is_empty(), "Raw scope must match nothing");
@@ -9199,7 +9232,7 @@ async fn the_older_scopes_with_an_unwritable_id_match_nothing() {
         }),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &model, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &model, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     assert!(
@@ -9228,7 +9261,7 @@ async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
         ]),
         ..Default::default()
     };
-    let err = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let err = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect_err("two order keys cannot drive a per-anchor slice");
     assert!(err.to_string().contains("one key"), "got: {err}");
@@ -9244,7 +9277,7 @@ async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &ok, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &ok, COMMENT_SHAPE_JSON)
         .await
         .expect("one key is fine");
     assert_eq!(result.instances.len(), 2);
@@ -9270,7 +9303,7 @@ async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    execute_model_query_from_json(&store, "Comment", &unpushable_filter, COMMENT_SHAPE_JSON)
+    fixture_query_from_json(&store, "Comment", &unpushable_filter, COMMENT_SHAPE_JSON)
         .await
         .expect("a post-hydration filter is not a refusal");
 }
@@ -9295,7 +9328,7 @@ async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("walk should execute");
     let ids: Vec<&str> = result
@@ -9332,7 +9365,7 @@ async fn a_count_only_walk_totals_the_walk_too() {
         limit: Some(0),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("count-only walk should execute");
     assert!(
@@ -9390,7 +9423,7 @@ async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
         order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("walk should execute");
     let ids: Vec<&str> = result
@@ -9480,7 +9513,7 @@ async fn a_transitive_read_totals_what_it_returns() {
         )),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
         .await
         .expect("query should execute");
     assert_eq!(
@@ -9534,15 +9567,10 @@ async fn comment_ids(
     query: ModelQueryInput,
     viewer: Option<&str>,
 ) -> Vec<String> {
-    let result = super::test_helpers::execute_model_query_from_json_for_viewer(
-        store,
-        "Comment",
-        &query,
-        COMMENT_SHAPE_JSON,
-        viewer,
-    )
-    .await
-    .expect("query should execute");
+    let result =
+        fixture_query_from_json_for_viewer(store, "Comment", &query, COMMENT_SHAPE_JSON, viewer)
+            .await
+            .expect("query should execute");
     let mut ids: Vec<String> = result
         .instances
         .iter()
@@ -9553,7 +9581,7 @@ async fn comment_ids(
 }
 
 async fn comment_count(store: &SparqlStore, parent: Scope, viewer: Option<&str>) -> usize {
-    super::test_helpers::execute_model_query_from_json_for_viewer(
+    fixture_query_from_json_for_viewer(
         store,
         "Comment",
         &ModelQueryInput {
@@ -9864,10 +9892,15 @@ async fn reverse_include_follows_only_links_the_viewer_may_see() {
     let containers = |viewer: Option<&'static str>| {
         let (store, resolver, shape, query) = (&store, &resolver, &block_shape, &query);
         async move {
-            let result =
-                super::query::execute_model_query(store, shape.as_ref(), query, resolver, viewer)
-                    .await
-                    .unwrap();
+            let result = super::query::execute_model_query(
+                store,
+                shape.as_ref(),
+                &with_unverified(query),
+                resolver,
+                viewer,
+            )
+            .await
+            .unwrap();
             let mut ids: Vec<String> = result.instances[0]["containers"]
                 .as_array()
                 .unwrap()
@@ -9949,11 +9982,10 @@ async fn a_transitive_projection_follows_only_links_the_viewer_may_see() {
         let store = &store;
         let query = &query;
         async move {
-            let result = super::test_helpers::execute_model_query_from_json_for_viewer(
-                store, "Comment", query, shape_json, viewer,
-            )
-            .await
-            .expect("query should execute");
+            let result =
+                fixture_query_from_json_for_viewer(store, "Comment", query, shape_json, viewer)
+                    .await
+                    .expect("query should execute");
             assert_eq!(result.instances.len(), 1, "root is returned");
             let root = result.instances[0].clone();
             let mut subtree: Vec<String> = root["$subtree"]
@@ -10084,7 +10116,7 @@ async fn a_revocation_tombstone_is_reachable_through_links() {
     let member = "did:key:zMember";
     seed_role(&store, role, member, true);
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&[REVOKED]),
@@ -10123,7 +10155,7 @@ async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
     let role = "role://instance/1";
     seed_role(&store, role, "did:key:zMember", true);
 
-    let plain = execute_model_query_from_json(
+    let plain = fixture_query_from_json(
         &store,
         "Reviewer",
         &ModelQueryInput::default(),
@@ -10131,7 +10163,7 @@ async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
     )
     .await
     .unwrap();
-    let with_links = execute_model_query_from_json(
+    let with_links = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&[REVOKED]),
@@ -10182,7 +10214,7 @@ async fn a_member_is_dated_and_attributed_by_its_own_link() {
         .add_link(&link_by(mallory, role, "role://member", bob, ROLE_T2))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&["members"]),
@@ -10234,7 +10266,7 @@ async fn links_on_the_paginated_plan_with_a_property_selection() {
         limit: Some(10),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
+    let result = fixture_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2);
@@ -10280,7 +10312,7 @@ async fn links_on_a_local_property_withhold_a_shared_link() {
         ))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Cache",
         &links_query(&["state"]),
@@ -10298,7 +10330,7 @@ async fn links_on_a_local_property_withhold_a_shared_link() {
 async fn links_rejects_a_key_it_cannot_resolve() {
     let store = SparqlStore::new(None).unwrap();
     seed_role(&store, "role://instance/1", "did:key:zA", true);
-    let err = execute_model_query_from_json(
+    let err = fixture_query_from_json(
         &store,
         "Reviewer",
         &links_query(&["role_grant_revoked"]),
@@ -10342,7 +10374,7 @@ async fn links_rejects_a_reverse_relation_name() {
     }"#;
 
     // Control: the forward relation on the same shape is read.
-    let ok = execute_model_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+    let ok = fixture_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
         .await
         .unwrap();
     assert_eq!(
@@ -10353,7 +10385,7 @@ async fn links_rejects_a_reverse_relation_name() {
         1
     );
 
-    let err = execute_model_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+    let err = fixture_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
         .await
         .expect_err("a reverse relation must not resolve to an empty list");
     let msg = format!("{err}");
@@ -10409,15 +10441,9 @@ async fn links_inside_an_include_sub_query() {
         )])),
         ..Default::default()
     };
-    let result = super::query::execute_model_query(
-        &store,
-        collection_shape.as_ref(),
-        &query,
-        &resolver,
-        None,
-    )
-    .await
-    .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
     let child = &result.instances[0]["children"][0];
     assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
     let rows = child["__links"]["we://note"]
@@ -10489,7 +10515,7 @@ async fn links_rows_are_viewer_scoped() {
     let targets = |viewer: Option<&'static str>, key: &'static str| {
         let (store, input) = (&store, &input);
         async move {
-            let res = super::test_helpers::execute_model_query_from_json_for_viewer(
+            let res = fixture_query_from_json_for_viewer(
                 store,
                 "EngineCached",
                 input,

@@ -6,6 +6,17 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
+  - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
+  - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.
+  - `linkStatus: "local"` now returns only instances that are flagged in a Local link too, and a typed relation under `"local"` lists only targets flagged in a Local link; `"shared"` likewise needs Shared flag links.
+  - A hand-written relation `getter` still runs as written.
+- **Breaking: model queries withhold links whose signature does not verify** [#1123](https://github.com/coasys/ad4m/pull/1123)
+  - By default, `model_query` (and so `findAll`, `findOne`, `get()`, `Model.query(...)`) no longer hydrates from a link whose stored verdict is not `proofValid = "true"`. Such a link does not become a property value, a relation target (including a typed relation's generated getter and its `where`), the instance's `author` or `updatedAt`, a `__links` row, a sort key behind `order` with `limit`/`offset`, or a non-transitive `$` projection count or list. Rows that current consumers get today can disappear.
+  - Opt in with `includeUnverified: true` / `.includeUnverified()`. It is meant for display only, for example to mark a value as unverified; do not base decisions on what it returns.
+  - What selects an instance skips them too since [#1150](https://github.com/coasys/ad4m/pull/1150) (entry above). Hand-written relation getters run as written.
+  - Links carried over by the rusqlite → SPARQL migration read as unverified: `convert_link_literal_uris` rewrites `literal://` to `literal:` after the link was signed, so every migrated link with a `literal://` source, predicate or target is stored with `proofValid = "false"` and is now hidden from model queries. Pre-SPARQL migrations are no longer supported (#1046), so this is not fixed; `includeUnverified` still reads those links.
+  - Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141) whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) still read back in the canonical encoding, because the store did not keep the signed bytes. The node that signed them keeps returning them, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold these links by default; `includeUnverified` still reads them. Literals written by the SDK (`Literal.from(v).toUrl()`) and any link written after #1141 are not affected. Pinned by `proof_valid_a_pre_1141_non_canonical_literal_is_withheld_after_a_read_back`.
 - **Breaking: a subject class property named `id`, `baseExpression`, `createdAt`, `updatedAt`, `author` or `timestamp` is now rejected at registration** [#991](https://github.com/coasys/ad4m/pull/991)
   - These are reserved synthetic hydration keys; a property sharing one of these names could silently overwrite hydration metadata or be overwritten by it (issue #974) instead of causing an error. `ensureSDNASubjectClass` runs at app startup, so a class already in the wild with a colliding property name will stop registering on upgrade rather than continue mis-reading. Rename the property to fix it.
 - **Runtime bump — Deno 2.3.1 → 2.9.5, Holochain 0.7.0-dev.16 → 0.7.0 (stable)** [#907](https://github.com/coasys/ad4m/pull/907)
@@ -18,6 +29,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- **Links read back with the exact target they were signed over** [#1141](https://github.com/coasys/ad4m/pull/1141)
+  - The store keeps `literal:*` targets as typed values and used to re-render them in the SDK's encoding on every read, so a target written any other way (a raw space, raw JSON, `-_.~` escaped) came back as different bytes and a read-back copy no longer verified. `perspective.get()`, `__links` rows and the links a Perspective publishes to its Neighbourhood now return the signed target. Targets written with `Literal.from(v).toUrl()` read back as before.
+  - `expression.create(_, "literal")` URLs now use the same percent-encoding as `Literal.toUrl()` (`-_.~` are no longer escaped).
+  - Links stored before this release did not keep the original bytes, so a non-canonical one still reads back in the canonical form.
 - Multi-user agent publishing after language controller refactor [#711](https://github.com/coasys/ad4m/pull/711)
 - Broadcast signal for managed user [#722](https://github.com/coasys/ad4m/pull/722)
 - Waker-bridge: use QuerySubscriptionProxy for SurrealDB subscriptions [#720](https://github.com/coasys/ad4m/pull/720)
@@ -41,6 +56,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 - Duplicate agent fix [#641](https://github.com/coasys/ad4m/pull/641)
 
 ### Added
+- **`linkStatus` model query option: read an instance from links of one status only** [#1124](https://github.com/coasys/ad4m/pull/1124)
+  - `findAll(perspective, { linkStatus: "shared" })` / `.linkStatus("shared")` hydrates every property, relation, `author`, `updatedAt` and `__links` row from Shared links only, so no Local link is used for the values in a result shown to another user (#1024). `"local"` is the converse. Unset reads both, as before. Typed relations filled by the SDK's generated conformance getter are filtered too; a hand-written `getter` runs as written. Included relations and `$` projection targets inherit it unless an include's sub-query sets its own.
+  - Combines with `includeUnverified` on the same link: a link is read only when it has the requested status and its signature verified, or the query sets `includeUnverified`.
+  - A link with no stored status annotation is not read under either value (fail closed).
+  - Which instances are returned follows the same rule since [#1150](https://github.com/coasys/ad4m/pull/1150): `where`, the class's flags, `count`/`totalCount`, `$` projections and the order behind `limit`/`offset` read links of the requested status only.
 - Add hosting GraphQL contract (HostingUserInfo, PaymentRequestResult) [#743](https://github.com/coasys/ad4m/pull/743)
 - OpenClaw plugin managed mode [#739](https://github.com/coasys/ad4m/pull/739)
 - Wrap OpenClaw skill in plugin [#737](https://github.com/coasys/ad4m/pull/737)

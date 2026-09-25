@@ -85,6 +85,17 @@ export interface FlowFireOutcome {
  *  | `[]` | `false` | `false` | you had already voted; nothing was written |
  *  | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
  */
+/**
+ *  One output of a run, named when proposing a transition into a terminal
+ *  state: an instance, and the class it is an instance of. Every co-signer
+ *  loads it through that class and hashes its content, so the proposal
+ *  commits to the instance as it is now, not just to its id.
+ */
+export interface FlowOutputRef {
+  className: string;
+  id: string;
+}
+
 export interface FlowProposeResult {
   /** The live proposal this call minted or joined — always the one for the
    *  edge, whether this call wrote it or found it open. Hand it to another
@@ -106,6 +117,60 @@ export interface FlowProposeResult {
   /** `true` when two edges out of `derivedState` both carry quorum: the flow
    *  is irreversibly stalled and must not be shown as "awaiting votes". */
   contested: boolean;
+}
+
+/**
+ * One instance a verified flow receipt speaks for — an entry of
+ * `PerspectiveProxy.flowValidOutputs(flow, state?)`.
+ *
+ * Every entry has already passed the whole verification chain executor-side:
+ * the receipt's signatures and quorum re-checked, its outputs bound to the
+ * quorum-signed commitment (#1104), and the instance's *live* content still
+ * equal to what the quorum committed to. An output edited since the run
+ * completed is not listed, although the receipt itself stays verifiable.
+ */
+export interface FlowValidOutput {
+  /** The instance, as the `(className, id)` pair the quorum committed to. */
+  output: FlowOutputRef;
+  /** The instance's content as committed at completion (its `modelQuery`
+   *  hydration, JSON-encoded). */
+  content: string;
+  /** The terminal state the granting run settled into, re-derived by the
+   *  verifier. */
+  terminalState: string;
+  /** Content-derived URI of the receipt that proves this output. */
+  receiptUri: string;
+}
+
+/**
+ * What `PerspectiveProxy.verifyFlowReceipt` learned — a THREE-way answer,
+ * not a boolean, and collapsing it to one is the classic mistake:
+ *
+ * - `"verified"`   — the carried material re-derives the claim;
+ * - `"rejected"`   — the material was checked and does not hold up;
+ * - `"undecidable"`— this replica cannot decide (it lacks the flow
+ *   definition, or holds a different one). Refuse to act on it exactly as
+ *   on `"rejected"`, but do NOT treat it as evidence against the receipt
+ *   or its minter — sync the definition and ask again.
+ */
+export interface FlowReceiptVerdict {
+  outcome: "verified" | "rejected" | "undecidable";
+  /** Human-readable reason, phrased for the outcome it accompanies. */
+  detail: string;
+  /** Only on `"verified"`: the terminal state the reader's own fold reached. */
+  terminalState?: string;
+  /** Only on `"verified"`: the outputs the receipt speaks for. */
+  outputs?: FlowOutputRef[];
+  /** Only on `"verified"`: the distinct eligible DIDs that made the quorum. */
+  voters?: string[];
+}
+
+/** What `PerspectiveProxy.mintFlowReceipt` wrote: the receipt's
+ *  content-derived node URI and its body (opaque to clients — verify it with
+ *  `verifyFlowReceipt`, never by inspection). */
+export interface FlowMintedReceipt {
+  receiptUri: string;
+  receipt: object;
 }
 
 /**
@@ -438,12 +503,21 @@ export class FlowInstance {
    * How to read the result — fired vs. queued vs. no-op vs. stalled — is
    * documented on {@link FlowProposeResult} itself.
    *
+   * `outputs` names the instances the run produces, as `{ className, id }`
+   * pairs, for a transition into a terminal state. The proposal signs a hash
+   * over their content, every co-signer recomputes it on its own replica,
+   * and a receipt for the run speaks for exactly these instances as they
+   * stood at completion.
+   *
    * Throws when `toState` is not reachable from the derived state, when the
    * target state carries a `requires` guard that is not currently satisfied
-   * on this replica, or when the instance is already contested.
+   * on this replica, when the instance is already contested, when `outputs`
+   * is given for a non-terminal state or names something that is not an
+   * instance of its class, or
+   * when an open proposal on the same edge names different outputs.
    */
-  async proposeTransition(toState: string, rationale?: string): Promise<FlowProposeResult> {
-    return this.perspective.proposeFlowTransition(this.uri, toState, rationale);
+  async proposeTransition(toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
+    return this.perspective.proposeFlowTransition(this.uri, toState, rationale, outputs);
   }
 
   async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {

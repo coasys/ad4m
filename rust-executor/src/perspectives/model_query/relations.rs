@@ -19,11 +19,13 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
+use super::sparql_builder::LinkGuard;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
 use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
 ///
@@ -31,10 +33,18 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// batched SPARQL query: `?source <pred> ?target` with `VALUES ?target { ... }`
 /// containing all instance IDs.  The results are attached to each instance
 /// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
+///
+/// With a `link_status` (#1116), only links of that status are read, and a
+/// link whose signature did not verify is not read unless the query opted in
+/// with `include_unverified` (#1113). For `viewer_did`, another agent's
+/// `Local` link is not read (#1024). All three are checked on one reifier
+/// ([`LinkGuard::exists`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
     viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
@@ -59,16 +69,18 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
-        // The edge triple alone says nothing about who wrote it, so a
-        // reverse relation would otherwise point back at instances linked
-        // only by another user's Local link.
-        let visibility = crate::perspectives::link_visibility::viewer_triple_filter(
-            viewer_did,
-            &format!("?source <{safe_pred}> ?target"),
-        );
+        // One reifier carries every check, the viewer's included: another
+        // user's Local edge and a forged Shared one on the same triple must
+        // not pass between them (#1024, #1120).
+        let filter = LinkGuard {
+            status: link_status,
+            include_unverified,
+            viewer: viewer_did,
+        }
+        .exists("?source", &format!("<{safe_pred}>"), "?target");
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .\n{} }}",
-            target_constraint, visibility
+            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
+            target_constraint
         );
         let result_json = store.query(&sparql)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -116,6 +128,12 @@ pub fn resolve_reverse_relations(
 /// metadata in the shape, delegates to either [`resolve_forward_include`]
 /// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
 /// are passed through to the recursive call.
+///
+/// `link_status` and `include_unverified` are the parent query's. A sub-query
+/// that does not set its own inherits each of them, so a Shared-only read stays
+/// Shared-only on the included instances, and a caller that asked to see
+/// unverified rows sees them there too. A sub-query's own setting wins,
+/// including an explicit `includeUnverified: false`.
 pub(super) async fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -123,6 +141,8 @@ pub(super) async fn resolve_includes_recursive(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
     viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
@@ -136,11 +156,17 @@ pub(super) async fn resolve_includes_recursive(
             None => continue,
         };
 
-        let sub_query = match include_val {
+        let mut sub_query = match include_val {
             IncludeValue::Bool(true) => ModelQueryInput::default(),
             IncludeValue::SubQuery(sq) => *sq.clone(),
             _ => continue,
         };
+        if sub_query.link_status.is_none() {
+            sub_query.link_status = link_status.cloned();
+        }
+        if sub_query.include_unverified.is_none() {
+            sub_query.include_unverified = include_unverified;
+        }
 
         // Checked here, where the include is recognised, rather than down in
         // hydration: both resolvers return early when the relation holds no
@@ -574,14 +600,19 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
-    // Only edges the viewer may see. Otherwise a source that points here
-    // only through another user's Local link is included, hydrated from its
-    // own Shared links (#1024).
-    let edge = format!("?source <{safe_pred}> ?target");
-    let visible =
-        crate::perspectives::link_visibility::viewer_edge_filter(viewer_did, &edge, "rev");
-    let sparql =
-        format!("SELECT ?source ?target WHERE {{ {edge} . {target_constraint}\n{visible}}}");
+    // Only edges the viewer may see, on the same reifier as the status and
+    // proof checks. Otherwise a source that points here only through another
+    // user's Local link is included, hydrated from its own Shared links
+    // (#1024).
+    let filter = LinkGuard {
+        status: sub_query.link_status.as_ref(),
+        include_unverified: sub_query.include_unverified,
+        viewer: viewer_did,
+    }
+    .exists("?source", &format!("<{safe_pred}>"), "?target");
+    let sparql = format!(
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{filter} }}"
+    );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 

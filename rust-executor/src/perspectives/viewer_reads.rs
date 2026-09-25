@@ -147,9 +147,20 @@ impl PerspectiveInstance {
         query_json: &str,
         viewer_did: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
-        let query_input: crate::perspectives::model_query::ModelQueryInput =
+        let mut query_input: crate::perspectives::model_query::ModelQueryInput =
             serde_json::from_str(query_json)
                 .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // `where.producedByFlow` is resolved here, not in the pipeline: it
+        // needs the perspective (receipts, flow catalogue) and signature
+        // verification, neither of which SPARQL or the post-hydration filter
+        // has. Extracted BEFORE the query runs and turned into an id
+        // constraint the store applies ahead of `limit`/`offset` — so a page
+        // of N is N *valid* outputs, never N rows later thinned. Malformed or
+        // mis-placed filters error rather than silently admit everything.
+        let produced_by_flow =
+            crate::perspectives::model_query::take_produced_by_flow(&mut query_input)
+                .map_err(deno_core::anyhow::Error::msg)?;
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
@@ -164,6 +175,47 @@ impl PerspectiveInstance {
             .await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
+
+        if let Some(filter) = produced_by_flow {
+            // Which outputs a valid receipt vouches for is the flow engine's
+            // derivation, read in executor scope. It only narrows the ids;
+            // the query below still reads each instance as `viewer_did`.
+            let valid = crate::perspectives::flow_instance::produced::flow_valid_outputs(
+                self,
+                &filter.flow,
+                filter.state.as_deref(),
+            )
+            .await?;
+            // Only outputs committed as the queried class pass; see
+            // `output_matches_class` for why conformance alone is not enough.
+            let allowed: std::collections::BTreeSet<String> = valid
+                .into_iter()
+                .filter(|v| {
+                    crate::perspectives::flow_instance::produced::output_matches_class(
+                        &v.output,
+                        class_name,
+                        &shape.target_class,
+                    )
+                })
+                .map(|v| v.output.id)
+                .collect();
+            if !crate::perspectives::model_query::constrain_ids(&mut query_input, allowed)
+                .map_err(deno_core::anyhow::Error::msg)?
+            {
+                // No valid output survives; answer directly rather than
+                // handing the store an empty VALUES block.
+                return serde_json::to_string(
+                    &crate::perspectives::model_query::ModelQueryResult {
+                        instances: vec![],
+                        total_count: 0,
+                    },
+                )
+                .map_err(|e| {
+                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+                });
+            }
+        }
+
         let result = crate::perspectives::model_query::execute_model_query(
             &self.sparql_store,
             shape.as_ref(),

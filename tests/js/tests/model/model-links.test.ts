@@ -17,6 +17,10 @@
  *   5. A live subscription re-fires when a link it asks for lands, even on a
  *      predicate the model does not declare (a subscribed revocation check
  *      must not keep reporting `[]` after the tombstone is written).
+ *   6. Per-item provenance for a collection (#1115): each member's row carries
+ *      its author, timestamp and the stored signature verdict, so a member
+ *      written under someone else's name with a signature that does not verify
+ *      reads `valid: false` next to a genuine one.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-links.test.ts
@@ -252,6 +256,66 @@ describe("Ad4mModel — links option (per-link rows)", function () {
     expect(inner.__links![TOMBSTONE].map((r) => r.data.target)).to.deep.equal([
       "literal://string:hidden",
     ]);
+  });
+
+  // ── 6. per-item provenance: author, timestamp and verdict (#1115) ───────
+
+  it("gives each collection member its own author, timestamp and signature verdict", async () => {
+    const post = await TestPost.create(perspective, { title: "provenance" });
+    const mine = await TestComment.create(perspective, { body: "signed by me" });
+    const theirs = await TestComment.create(perspective, { body: "claimed by someone else" });
+    await post.addComments(mine.id);
+    await sleep(20);
+
+    // A member link under another agent's name whose signature is not theirs:
+    // stored as given, verdict computed from the signature at insert time.
+    const forgedAuthor = "did:key:z6MkForgedAuthorForgedAuthorForgedAuthorForged";
+    const forgedAt = new Date().toISOString();
+    await perspective.addLinkExpression({
+      author: forgedAuthor,
+      timestamp: forgedAt,
+      data: { source: post.id, predicate: HAS_COMMENT, target: theirs.id },
+      proof: { key: `${forgedAuthor}#key`, signature: "00".repeat(64) },
+    } as any);
+
+    // The forged member link does not verify, so it is withheld unless the
+    // query opts in (#1113); this test is about the row's verdict.
+    const [found] = await TestPost.findAll(perspective, {
+      where: { id: post.id },
+      links: ["comments"],
+      includeUnverified: true,
+    });
+
+    // The plain array stays as it is.
+    expect([...found.comments].sort()).to.deep.equal([mine.id, theirs.id].sort());
+
+    const rows = found.__links!.comments;
+    expect(rows.map((r) => r.data.target)).to.deep.equal([mine.id, theirs.id]);
+    const [own, forged] = rows;
+
+    expect(own.author).to.equal(me);
+    expect(own.proof.valid).to.equal(true);
+    expect(own.proof.invalid).to.equal(false);
+
+    expect(forged.author).to.equal(forgedAuthor);
+    expect(new Date(forged.timestamp).getTime()).to.equal(new Date(forgedAt).getTime());
+    expect(new Date(forged.timestamp).getTime()).to.be.above(
+      new Date(own.timestamp).getTime(),
+    );
+    expect(forged.proof.valid).to.equal(false);
+    expect(forged.proof.invalid).to.equal(true);
+    // A failed signature is told apart from an unsigned link by its non-empty
+    // signature, since `invalid` alone covers both.
+    expect(forged.proof.signature).to.equal("00".repeat(64));
+
+    // Same verdict perspective.get() reports for the stored link.
+    const stored = await perspective.get(
+      new LinkQuery({ source: post.id, predicate: HAS_COMMENT }),
+    );
+    for (const s of stored) {
+      const row = rows.find((r) => r.data.target === s.data.target)!;
+      expect(!!row.proof.valid, `verdict for ${s.data.target}`).to.equal(!!s.proof.valid);
+    }
   });
 
   it("is available on the raw perspective.modelQuery RPC", async () => {

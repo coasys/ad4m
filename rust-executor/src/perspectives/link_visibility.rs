@@ -56,6 +56,12 @@
 //! 2. [`viewer_author_filter`] — the SPARQL fragment injected into the
 //!    generated model-query SQL, so the model-query engine filters inside the
 //!    store instead of hydrating rows it must then throw away.
+//! 3. [`viewer_reifier_filter`] — the same rule inside the model-query link
+//!    guard (`model_query::sparql_builder::LinkGuard`), which every link that
+//!    *selects* an instance passes: `where`, the class's flags, the count,
+//!    order keys, scopes and walks. It sits on the same reifier as the
+//!    `linkStatus` and signature checks, so two different links cannot pass
+//!    them between them.
 //!
 //! Neither is a new mechanism nor a per-user materialised cache: both are
 //! query-time predicates over data that is already stored per link.
@@ -244,6 +250,36 @@ pub fn viewer_author_filter(
         "_viewer_status",
         &format!("?{predicate_var}"),
     )
+}
+
+/// The visibility check on an already-joined `reifier` (given **with** the
+/// leading `?`), for the model-query link guard, which puts every check a link
+/// must pass on one reifier (`model_query::sparql_builder::LinkGuard`).
+///
+/// Binds the link's author and status as `{reifier}_va` / `{reifier}_vs`, so
+/// the names are unique as long as the reifier is. `predicate_term` is the
+/// link's predicate (`<iri>` or a bound variable), which lets the
+/// [`ENGINE_DERIVED_PREDICATES`] through.
+///
+/// Returns an empty string in executor scope.
+pub fn viewer_reifier_filter(
+    viewer_did: Option<&str>,
+    reifier: &str,
+    predicate_term: &str,
+) -> String {
+    let bare = reifier.trim_start_matches('?');
+    let author = format!("{bare}_va");
+    let filter = author_filter(
+        viewer_did,
+        bare,
+        &author,
+        &format!("{bare}_vs"),
+        predicate_term,
+    );
+    if filter.is_empty() {
+        return String::new();
+    }
+    format!(" ?{bare} <ad4m://ontology/author> ?{author} .\n{filter}")
 }
 
 /// [`viewer_author_filter`] with a caller-chosen status variable, and the

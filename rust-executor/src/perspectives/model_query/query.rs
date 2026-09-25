@@ -10,19 +10,21 @@ use super::eval_transform::eval_transform;
 use super::filtering::{matches_where, sort_instances};
 use super::getters::evaluate_getters;
 use super::hydration::{filter_properties, group_results_by_source, hydrate_instances};
+use super::link_author::refuse_unanswerable_link_author;
 use super::links::{attach_links, resolve_link_keys};
 use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    local_status_filter, per_anchor_limit, ANCHOR_VAR,
+    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
+    ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
-use crate::perspectives::link_visibility::{viewer_author_filter, viewer_edge_filter};
+use crate::perspectives::link_visibility::viewer_author_filter;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -44,109 +46,69 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
     }
 }
 
-/// Resolve a transitive traversal for `viewer_did`: every `(anchor, node)`
-/// pair the anchor reaches through links the viewer may see.
+/// Everything each of `starts` reaches over `<predicate>` in one or more steps,
+/// following only links `guard` admits, as `(start, reached)` pairs without
+/// duplicates.
 ///
-/// A `+` path cannot filter its hops, so the builder cannot express this. It
-/// is walked here instead ([`visible_pairs`]), and the builder then keeps only
-/// these pairs ([`VisibleReach`](super::sparql_builder::VisibleReach)).
-/// Without it, a node reachable only through another user's `Local` link would
-/// be returned.
-///
-/// `None` when there is nothing to resolve: executor scope, or a scope that is
-/// not a transitive traversal.
-async fn visible_reach(
+/// A property path (`<p>+`) is a reachability test over triples and has no
+/// link per hop whose status, verdict or author it could read, so a transitive
+/// walk that must honour `linkStatus` / `includeUnverified`, or a viewer who
+/// may not follow another user's Local link (#1024), is done here (#1120):
+/// one guarded single-step query per depth for the whole frontier, until no
+/// new node turns up. `Out` follows `start -> node`, `In` follows
+/// `node -> start`. As with `+`, a start on a cycle reaches itself.
+pub(super) fn guarded_reach(
     store: &SparqlStore,
-    query: &ModelQueryInput,
-    viewer_did: Option<&str>,
-) -> Result<Option<Vec<(String, String)>>, Error> {
-    let (
-        Some(did),
-        Some(Scope::Traverse {
-            ids,
-            predicate,
-            transitive: true,
-            direction,
-            ..
-        }),
-    ) = (viewer_did, &query.parent)
-    else {
-        return Ok(None);
-    };
-    visible_pairs(store, ids, predicate, *direction, did)
-        .await
-        .map(Some)
-}
-
-/// Walk `predicate` from `anchors` in `direction`, one hop per query over the
-/// whole frontier, following only links `viewer_did` may see. Returns every
-/// `(anchor, node)` pair reached.
-///
-/// Used wherever a `+` path would otherwise match raw triples for a viewer: a
-/// transitive `Traverse` scope and a transitive projection. The walk follows
-/// the predicate through nodes of any class, as the `+` path does, and stops
-/// when a hop reaches nothing new. An anchor that is not a valid IRI is
-/// skipped and an unwritable predicate reaches nothing, as in the builder.
-pub(super) async fn visible_pairs(
-    store: &SparqlStore,
-    anchors: &[String],
+    starts: &[String],
     predicate: &str,
     direction: ScopeDirection,
-    viewer_did: &str,
+    guard: LinkGuard,
 ) -> Result<Vec<(String, String)>, Error> {
-    let Ok(predicate) = validate_iri(predicate) else {
-        return Ok(vec![]);
+    let pred = format!("<{predicate}>");
+    // `?s` is always the frontier end of the step, `?o` the node it reaches.
+    let (subject, object) = match direction {
+        ScopeDirection::Out => ("?s", "?o"),
+        ScopeDirection::In => ("?o", "?s"),
     };
-    let edge = match direction {
-        ScopeDirection::Out => format!("?from <{predicate}> ?to"),
-        ScopeDirection::In => format!("?to <{predicate}> ?from"),
-    };
-    let visible = viewer_edge_filter(Some(viewer_did), &edge, "reach");
-
-    let anchors: Vec<&String> = anchors
-        .iter()
-        .filter(|id| validate_iri(id).is_ok())
-        .collect();
-    let mut reached: HashMap<&str, HashSet<String>> = anchors
-        .iter()
-        .map(|a| (a.as_str(), HashSet::new()))
-        .collect();
-    let mut frontier: Vec<(&str, String)> = anchors
-        .iter()
-        .map(|a| (a.as_str(), a.to_string()))
-        .collect();
-    let mut pairs = Vec::new();
-
+    let step = format!(
+        "{subject} {pred} {object} .{}",
+        guard.join("?_wr", subject, &pred, object)
+    );
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    // Every node queued so far, so each is expanded once.
+    let mut discovered: HashSet<String> = starts.iter().cloned().collect();
+    let mut frontier: Vec<String> = starts.to_vec();
     while !frontier.is_empty() {
-        let from: Vec<String> = frontier
-            .iter()
-            .map(|(_, node)| node.clone())
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .collect();
         let sparql = format!(
-            "SELECT DISTINCT ?from ?to WHERE {{\n    {edge} .\n    {}\n{visible}}}",
-            values_or_str_filter("from", &from)
+            "SELECT ?s ?o WHERE {{ {step} {} }}",
+            values_or_str_filter("s", &frontier)
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
-        let mut next_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let mut next: Vec<String> = Vec::new();
         for row in &rows {
-            if let (Some(from), Some(to)) = (row["from"].as_str(), row["to"].as_str()) {
-                next_of.entry(from).or_default().push(to);
-            }
-        }
-
-        let mut next = Vec::new();
-        for (anchor, node) in &frontier {
-            for to in next_of.get(node.as_str()).into_iter().flatten() {
-                let seen = reached.get_mut(anchor).expect("every anchor is seeded");
-                if seen.insert(to.to_string()) {
-                    pairs.push((anchor.to_string(), to.to_string()));
-                    next.push((*anchor, to.to_string()));
-                }
+            let (Some(s), Some(o)) = (row["s"].as_str(), row["o"].as_str()) else {
+                continue;
+            };
+            edges.entry(s.to_string()).or_default().push(o.to_string());
+            if discovered.insert(o.to_string()) {
+                next.push(o.to_string());
             }
         }
         frontier = next;
+    }
+
+    let mut pairs = Vec::new();
+    for start in starts {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = vec![start.as_str()];
+        while let Some(node) = stack.pop() {
+            for next in edges.get(node).into_iter().flatten() {
+                if seen.insert(next.as_str()) {
+                    pairs.push((start.clone(), next.clone()));
+                    stack.push(next.as_str());
+                }
+            }
+        }
     }
     Ok(pairs)
 }
@@ -241,7 +203,6 @@ async fn walk_levels(
             Some(pagination),
             Some(resolver),
             viewer_did,
-            None,
         );
         let InstanceQueryPlan::TwoPhase {
             pagination_subquery,
@@ -383,10 +344,49 @@ pub(super) async fn execute_model_query_inner(
         }
     }
 
-    // A transitive traversal read by a viewer, walked over the links that
-    // viewer may see. Every query below that is built from this scope needs it.
-    let reach = visible_reach(store, query_input, viewer_did).await?;
-    let reach = reach.as_deref();
+    // A transitive scope under a guard that restricts links is walked here and
+    // handed to the builder as pairs (see `ModelQueryInput::walked`), so the
+    // rows, the page and the count all read the same guarded walk.
+    let walked_input;
+    let query_input = match &query_input.parent {
+        Some(Scope::Traverse {
+            ids,
+            predicate,
+            transitive: true,
+            direction,
+            ..
+        }) if query_input.walked.is_none() && !LinkGuard::of(query_input, viewer_did).is_open() => {
+            match validate_iri(predicate) {
+                Ok(safe_pred) => {
+                    let anchors: Vec<String> = ids
+                        .iter()
+                        .filter(|id| validate_iri(id).is_ok())
+                        .cloned()
+                        .collect();
+                    let pairs = guarded_reach(
+                        store,
+                        &anchors,
+                        safe_pred,
+                        *direction,
+                        LinkGuard::of(query_input, viewer_did),
+                    )?;
+                    walked_input = ModelQueryInput {
+                        walked: Some(pairs),
+                        ..query_input.clone()
+                    };
+                    &walked_input
+                }
+                // The builder answers an invalid predicate with nothing.
+                Err(_) => query_input,
+            }
+        }
+        _ => query_input,
+    };
+
+    // A per-link `author` condition is answered in the store or not at all.
+    // The post-hydration fallback only knows the earliest link's author, so a
+    // clause that would reach it is refused here, before any plan is chosen.
+    refuse_unanswerable_link_author(query_input, shape, resolver)?;
 
     // Resolved up front so a bad key is an error on every query shape, not
     // only on the ones that go on to return rows.
@@ -415,9 +415,7 @@ pub(super) async fn execute_model_query_inner(
         && count_only_can_skip_the_walk
         && all_where_pushable(query_input, shape, Some(resolver))
     {
-        if let Some(sparql) =
-            build_count_sparql(shape, query_input, Some(resolver), viewer_did, reach)
-        {
+        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver), viewer_did) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -649,7 +647,6 @@ pub(super) async fn execute_model_query_inner(
         sparql_pagination.as_ref(),
         Some(resolver),
         viewer_did,
-        reach,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
@@ -714,11 +711,11 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
-                    // Phase 1 pages over conformance triples, which carry no
-                    // author, so it can hand us sources whose links the viewer
-                    // may not see. Filtering here means those sources hydrate
-                    // to nothing and drop out, rather than surfacing another
-                    // user's private link rows.
+                    let link_status = link_status_filter(query_input.link_status.as_ref());
+                    let proof_valid = proof_valid_filter(query_input.include_unverified);
+                    // Phase 1 pages over conformance, which the guard already
+                    // scopes to the viewer; the rows themselves are filtered
+                    // here the same way the single plan filters them.
                     let viewer =
                         viewer_author_filter(viewer_did, "_reifier", "author", "predicate");
                     let property_sparql = format!(
@@ -729,7 +726,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}{viewer}}}"#
+{link_status}{proof_valid}{local_status}{viewer}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -772,7 +769,14 @@ pub(super) async fn execute_model_query_inner(
         .map(|p| (p.name.clone(), p.predicate.clone(), p.is_scalar_relation))
         .collect();
     if !reverse_rels.is_empty() && !instances.is_empty() {
-        resolve_reverse_relations(store, &mut instances, &reverse_rels, viewer_did)?;
+        resolve_reverse_relations(
+            store,
+            &mut instances,
+            &reverse_rels,
+            query_input.link_status.as_ref(),
+            query_input.include_unverified,
+            viewer_did,
+        )?;
     }
 
     // Apply post-hydration where-clause filters
@@ -803,7 +807,7 @@ pub(super) async fn execute_model_query_inner(
         instances.len()
     } else if sparql_pagination.is_some() {
         if let Some(count_sparql) =
-            build_count_sparql(shape, query_input, Some(resolver), viewer_did, reach)
+            build_count_sparql(shape, query_input, Some(resolver), viewer_did)
         {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -873,6 +877,8 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            query_input.link_status.as_ref(),
+            query_input.include_unverified,
         )?;
     }
 
@@ -886,6 +892,8 @@ pub(super) async fn execute_model_query_inner(
                 shape,
                 resolver,
                 depth,
+                query_input.link_status.as_ref(),
+                query_input.include_unverified,
                 viewer_did,
             )
             .await?;
@@ -911,7 +919,16 @@ pub(super) async fn execute_model_query_inner(
     };
 
     // After `filter_properties`, so a `properties` selection cannot strip it.
-    attach_links(store, shape, &link_keys, &mut final_instances, viewer_did).await?;
+    attach_links(
+        store,
+        shape,
+        &link_keys,
+        query_input.link_status.as_ref(),
+        query_input.include_unverified,
+        &mut final_instances,
+        viewer_did,
+    )
+    .await?;
 
     // Attach projection results
     if let Some(ref projections) = query_input.projections {
@@ -922,6 +939,8 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            query_input.link_status.as_ref(),
+            query_input.include_unverified,
             viewer_did,
         )
         .await?;

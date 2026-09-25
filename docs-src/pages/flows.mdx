@@ -1,0 +1,536 @@
+import { Callout } from "nextra/components";
+
+# Flows: State Machines a Group Agrees On
+
+A flow is a shared state machine. A group moves it forward with signed proposals and votes. The flow runs over an expression that lives in a shared Perspective, and every replica can recompute its state from links it can verify.
+
+That is the whole difference from a status field. A status field is whatever the last writer said. A flow's state is what the group's own rules produced: every transition is backed by an on-graph proposal, gated by a consensus rule that says how many distinct agents must sign before it counts.
+
+With flows you can build, among other things:
+
+- **a task handover** — Ready → InProgress → InReview → Done, where Done needs a deliverable, a review note, and a reviewer's signature;
+- **a review process** — a state that requires evidence in the graph before anyone can even propose entering it;
+- **a role grant** — a flow whose completion, proven by a receipt, is what makes someone a reviewer in *another* flow.
+
+Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspective, shared like any other link. Two agents in a [Neighbourhood](/neighbourhoods) run the same flow because they hold the same definition, not because they run the same app.
+
+## The parts
+
+```text
+  SHACLFlow  (the definition — Social DNA, shared as links)
+  ├── FlowState        name, value, requires (guard), consensusRule
+  └── FlowTransition   actionName, fromState → toState
+        │
+        │  FlowInstance.start(perspective, name, subjectUri)
+        ▼
+  FlowInstance  (one run, riding on a subject expression)
+        │
+        │  instance.proposeTransition(toState, rationale?, outputs?)
+        ▼
+  FlowTransitionProposal  (one proposed move; votes are signed links on it)
+        │
+        │  enough distinct eligible votes = the edge settles
+        ▼
+  derived state  (recomputed from the signed links, never stored)
+        │
+        │  terminal state reached → perspective.mintFlowReceipt(instanceUri)
+        ▼
+  FlowReceipt  (portable proof: this quorum settled this run into this state,
+        │       and committed to these outputs)
+        ▼
+  consumers: perspective.flowValidOutputs, verifyFlowReceipt,
+             model queries with where: { producedByFlow },
+             role gates with fromRole.producedByFlow
+```
+
+## The one rule
+
+**A flow's state is never stored. It is derived, every time, from the signed links present right now.**
+
+To answer *"what state is this task in?"*, the engine:
+
+1. starts at the flow's lowest-valued state,
+2. looks at the declared edges that leave it,
+3. takes the edge that collected enough distinct, eligible signatures earliest,
+4. repeats from the state that edge leads to,
+5. stops at the first state where no edge has reached quorum. That state is the answer.
+
+Three consequences, all intended:
+
+- **Two replicas agree without talking.** Same links in, same state out. Every choice in the walk is made by an explicit sort key, never by the order a database returned rows.
+- **A third party can check the work.** The derivation is a pure function over plain data. Hand someone the links and they can re-run it and reach your verdict.
+- **Retracting a vote moves the flow back.** Withdraw the signature that settled an edge and the flow stands where it stood before you signed. That is the semantics, not a bug. See [Reject is not cancel](#reject-is-not-cancel).
+
+<Callout type="info" emoji="ℹ️">
+  The engine does write a `currentState` value onto each flow instance, but it
+  is a **cache for readers, never authority**. It is a `Local` link — it never
+  syncs — and nothing in the derivation reads it. Read it for display. Never
+  decide anything on it.
+</Callout>
+
+## States and transitions
+
+A flow is defined in TypeScript with `SHACLFlow`, then registered on a perspective with `addFlow`. The example below is the task flow the handover test drives end to end.
+
+```typescript
+import { SHACLFlow } from "@coasys/ad4m";
+
+const flow = new SHACLFlow("TaskFlow", "handover://");
+flow.inputTypes = ["HandoverTask"];      // subject classes this flow runs over
+flow.consensusRule = { n: 1 };           // default rule for every transition
+flow.interpretationHint =
+  "Advance a Task: Ready → InProgress → InReview → Done.";
+
+flow.addState({
+  name: "Ready",
+  value: 0,                              // lowest value = the initial state
+  interpretationHint: "Named, not yet started.",
+});
+flow.addState({
+  name: "InProgress",
+  value: 1,
+  interpretationHint: "Someone is working on it.",
+  requires: [{ className: "HandoverWorkLog", linkedTo: "base", count: { min: 1 } }],
+});
+flow.addState({
+  name: "InReview",
+  value: 2,
+  interpretationHint: "A deliverable exists and is waiting on review.",
+  requires: [{ className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } }],
+});
+flow.addState({
+  name: "Done",
+  value: 3,
+  interpretationHint: "Accepted.",
+  requires: [
+    { className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } },
+    { className: "HandoverReviewNote", linkedTo: "base", count: { min: 1 } },
+  ],
+  consensusRule: { n: 2 },               // per-state override of the default
+});
+
+flow.addTransition({ actionName: "Start", fromState: "Ready", toState: "InProgress", actions: [] });
+flow.addTransition({ actionName: "SubmitForReview", fromState: "InProgress", toState: "InReview", actions: [] });
+flow.addTransition({ actionName: "Accept", fromState: "InReview", toState: "Done", actions: [] });
+
+await perspective.addFlow("TaskFlow", flow);
+```
+
+*From `tests/js/tests/model/flow-task-handover.test.ts`, `makeTaskFlow`, driven by "Part 1 — Ready → InProgress → InReview → Done via proposeTransition; reject moves it back".*
+
+Facts about this shape:
+
+- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.**
+- The flow's canonical identity is its `flowUri`: `${namespace}${name}Flow`, here `handover://TaskFlowFlow`. Instances store that URI, because bare names collide when two communities share Social DNA.
+- Each state's `interpretationHint` is one English sentence. It is rendered into the prompt an interpreting LLM sees for that state, so an agent reasoning about a transition reads what the group meant, not a guess from the name.
+- A per-state `consensusRule` overrides the flow-level default. Cheap early edges can take one signature while the final one takes two, or a reviewer.
+- `FlowTransition.actions` exists on the type and nothing executes it yet.
+
+Starting a run and rendering it:
+
+```typescript
+import { FlowInstance } from "@coasys/ad4m";
+
+const task = await Task.create(perspective, { title: "Ship the handover" });
+const started = await FlowInstance.start(perspective, "TaskFlow", task.id);
+
+started.currentStateName;                              // "Ready"
+started.availableTransitions.map((t) => t.actionName); // ["Start"] — the button list
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+`availableTransitions` lists the edges that leave the current state. Render one button per entry. An empty list means the state is terminal.
+
+To find runs later, use `FlowInstance.findAll(perspective, filter?)`. The filter is a flow name or `{ flowName?, subject? }`. `findAll` never registers classes: on a perspective that has never minted an instance it returns `[]` instead of installing the shape, because a read must not sync a write to every peer.
+
+## Guards: `requires`
+
+`requires` is where "Done" stops meaning *somebody clicked Done* and starts meaning *the graph contains what Done requires*. Each entry is a model query: a subject class, optional property conditions, a cardinality, and an anchor (`linkedTo: "base"` ties the match to the flow's subject). All entries in the array must match.
+
+A proposal into a guarded state is refused while the guard is unmet:
+
+```typescript
+// InProgress requires a HandoverWorkLog linked to the task. None exists yet:
+try {
+  await started.proposeTransition("InProgress");
+} catch (e) {
+  // error message names the unmet guard
+}
+
+// Write the evidence, then the same press succeeds:
+await WorkLog.create(perspective, { note: "Picked up." },
+  { parent: { id: task.id, predicate: "ad4m://has_child" } });
+const result = await instance.proposeTransition("InProgress", "I've started — see the log");
+result.outcomes;      // [{ fromState: "Ready", toState: "InProgress", ... }] — n:1 fires
+result.derivedState;  // "InProgress"
+```
+
+*From `flow-task-handover.test.ts`, Part 1 and `advanceToInReview`.*
+
+When a proposal is minted, the executor evaluates the guard on the proposing replica and **seals the evidence**: it writes the matched instances as the proposal's evidence and an order-independent SHA-256 over their canonicalised content next to them. Every voter re-computes that seal against their own graph before they sign. If the cited content changed since the mint, the voter's replica declines to co-sign and writes nothing. It does not delete the proposal — the local graph may simply be behind, and a replica may only ever refuse its own action.
+
+The derivation itself re-runs no guards. Every vote it counts was cast by someone who checked the seal first, and settled history is never re-tested against the live graph. Otherwise editing a task that a finished transition had cited would silently unwind the flow that consumed it.
+
+<Callout type="info" emoji="ℹ️">
+  The engine also runs a deterministic evaluator after each LLM extraction
+  pass. It checks every live instance against the `requires` guards of the
+  reachable next states and mints a proposal for each fully satisfied pair.
+  That keeps a flow moving when an LLM produced the evidence but did not
+  press the button. A state with **no** guard is never proposed this way —
+  nothing in the graph implies a human started work — so guard-free states
+  advance only through `proposeTransition`. An LLM's own proposal never fires
+  a transition on its own.
+</Callout>
+
+## Proposing and voting
+
+The button a UI puts on each `availableTransitions` entry calls `proposeTransition`. The executor evaluates the guard on this replica, seals the evidence, and either mints a proposal or co-signs the one another agent already opened for the same edge.
+
+```typescript
+import { FlowInstance, type FlowProposeResult } from "@coasys/ad4m";
+
+const result: FlowProposeResult = await instance.proposeTransition(
+  "Done",
+  "Deliverable present and reviewed.",
+);
+
+result.proposalUri;   // hand this to another agent, or to rejectProposal
+result.minted;        // true = this call wrote the proposal
+result.recordedVote;  // true = this DID's vote landed (mint or join)
+result.outcomes;      // FlowFireOutcome[] — empty while short of quorum
+result.derivedState;  // where the derivation stands after the call
+result.contested;     // true = stalled; do not render "awaiting votes"
+```
+
+Read `FlowProposeResult` with this table. A bare outcome list cannot tell these cases apart:
+
+| `outcomes` | `recordedVote` | `minted` | meaning |
+| --- | --- | --- | --- |
+| non-empty | — | — | the transition fired |
+| `[]` | `true` | `true` | you opened the proposal; waiting for other voters |
+| `[]` | `true` | `false` | you joined someone else's proposal |
+| `[]` | `false` | `false` | you had already voted; nothing was written |
+| `[]` | — | — | plus `contested: true`: stalled, not waiting |
+
+**An empty outcome list is a normal answer.** A vote short of quorum is a landed vote, not a failure.
+
+Two agents who want the same transition both press the same button. The second call finds the open proposal for that edge and co-signs it instead of minting a twin:
+
+```typescript
+// Done has consensusRule { n: 2 }. Alice presses first:
+const alicePress = await aliceInstance.proposeTransition("Done", "Deliverable present and reviewed.");
+alicePress.outcomes;      // [] — one of two votes
+alicePress.minted;        // true
+alicePress.derivedState;  // "InReview" — unchanged
+
+// Bob presses the SAME button on his view — not acceptProposal:
+const bobPress = await bobInstance.proposeTransition("Done");
+bobPress.outcomes[0].toState;  // "Done" — two distinct DIDs is quorum
+bobPress.outcomes[0].voters;   // [aliceDid, bobDid]
+bobPress.minted;               // false — he joined Alice's proposal
+bobPress.proposalUri === alicePress.proposalUri; // true
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+A vote on a listed proposal is also available directly: `instance.acceptProposal(proposalUri)` adds this DID's signature and re-derives. On the wire these calls are `perspective.proposeFlowTransition`, `perspective.acceptFlowProposal` and `perspective.rejectFlowProposal`, and over MCP the `flow_proposal_accept` / `flow_proposal_reject` tools.
+
+### Quorum belongs to the edge
+
+When two replicas mint proposals for the same transition concurrently — each not yet having seen the other's — one edge carries twin proposals. If quorum were counted per proposal, a flow with `n: 2` and two twins holding one vote each would sit at genesis forever, both one short. So the engine asks *"did this **edge** collect `n` distinct voters?"*, across every proposal for it. Twins converge, and each appears in the outcome's `contributingProposalUris`.
+
+### Reject is not cancel
+
+`rejectProposal` withdraws what **you** signed. It deletes only links this DID signed — your vote, or your whole proposal if you opened it — and returns how many links went. It never touches another agent's links. If you signed nothing on the proposal it errors instead of doing nothing silently.
+
+Because state is recomputed from the links present now, withdrawing a vote that had settled an edge moves the flow back:
+
+```typescript
+// Done had just settled at n:2. Bob withdraws his vote:
+const retracted = await bobInstance.rejectProposal(bobPress.proposalUri); // ≥ 1 link removed
+
+// The next derivation stands in InReview again — Alice's single vote
+// is one short of n:2:
+const after = await aliceInstance.proposeTransition("Done");
+after.derivedState;  // "InReview"
+after.outcomes;      // [] — Alice already voted
+```
+
+*From `flow-task-handover.test.ts`, Part 1.*
+
+There is no "already fired" guard, and there must not be one. The `resolved_as → "fired"` mark the engine writes is a `Local` display index, never an input to the derivation.
+
+### Contention
+
+If two edges out of the current state both reach quorum, the engine does **not** pick a winner. It reports contention and the walk stops there. Choosing by timestamp would adjudicate a race with numbers the racing agents wrote themselves. A contested flow is **stalled, not waiting**: more votes cannot move it. While an instance is contested, `proposeTransition` into it is refused, and anything that pays out on a completed flow must refuse a contested derivation.
+
+## Roles: `fromRole` and `didProperty`
+
+A `ConsensusRule` can require that voters hold a role. A role is not a special object. It is ordinary data, and `fromRole` is an ordinary model query over it:
+
+```typescript
+flow.addState({
+  name: "Done",
+  value: 3,
+  requires: [ /* … as above … */ ],
+  consensusRule: {
+    n: 1,
+    fromRole: {
+      className: "HandoverReviewerRole",
+      where: { domain: "frontend" },
+      didProperty: "agent",   // the property on each match that holds the member's DID
+    },
+  },
+});
+```
+
+A non-member can still press the button. Their vote is recorded, but the derivation does not count it:
+
+```typescript
+// Bob holds a ReviewerRole instance with agent = bobDid. Alice does not.
+const alicePress = await aliceInstance.proposeTransition("Done");
+alicePress.outcomes;      // [] — her click does not settle an n:1 edge
+alicePress.recordedVote;  // true — the vote landed; it just does not count
+
+const bobPress = await bobInstance.proposeTransition("Done");
+bobPress.outcomes[0].voters;  // includes bobDid, not aliceDid
+bobPress.derivedState;        // "Done"
+```
+
+*From `flow-task-handover.test.ts`, "Part 2 — Done gated by fromRole: only the reviewer DID counts".*
+
+Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before the grant does not count retroactively. Revocation is a signed tombstone link on the role instance, never a deletion. It stops future votes and does not rewrite settled history.
+
+One convention follows for Social DNA authors: **role instances are add-only, and membership ends only through tombstones.** The role query runs against the current graph — only the instance's existence is windowed in time — so a query keyed on a mutable property (`where: { active: true }`) reopens the deletion problem: flipping the property would remove the instance from historical verdicts and un-settle edges its votes once settled. State that changes belongs in new instances, not in edited ones.
+
+<Callout type="warning" emoji="⚠️">
+  Plain `fromRole` matches the role **instance**. Anyone who can write a
+  matching instance passes the gate. Part 3 of the handover test asserts this
+  as "the hole": a `ReviewerRoleGrant` flow over the role instance was still
+  in `Proposed`, and `fromRole` matched the instance anyway. To bind
+  membership to a grant *process* completing, add
+  [`producedByFlow` to the role query](#producedbyflow-on-a-role-a-role-granted-by-another-flow).
+</Callout>
+
+## Outputs: what a final step names
+
+A run's outputs are the instances the group agrees the run produced — the deliverable a review accepted, the role a grant ceremony granted. The proposer of the final transition names them as `(className, id)` pairs:
+
+```typescript
+// The grant flow's final press names the role instance as the run's output:
+await grantInstance.proposeTransition("Granted", undefined, [
+  { className: "HandoverReviewerRole", id: role.id },
+]);
+```
+
+*From `flow-task-handover.test.ts`, "Part 3 — grant flow over a ReviewerRole …".*
+
+Rules, each enforced by the engine:
+
+- **The run's subject is never an output by default.** Name it, or the receipt speaks for nothing.
+- Outputs can only be named on a proposal into a **terminal** state. Naming them elsewhere is refused: the run does not end there.
+- Every named output must be an instance of its named class on the proposing replica, checked by the same rule every voter re-runs.
+- **Every co-signer must name the same outputs.** A press that names different outputs than the open proposal is refused, not joined — joining would sign outputs the presser did not name.
+
+**Why the content is hashed.** The proposal signs `outputs_hash`, a digest over each output's `(class, id, canonical content)`, next to the evidence seal. Every voter loads each named output through its class on their own graph, recomputes the hash, and refuses to co-sign on a mismatch. The receipt minted later must hash its carried outputs to that same quorum-signed commitment. Without the content in the hash, an id would be a movable target: any property of the instance could change after the vote while the id stayed the same, and the receipt would then speak for content the quorum never saw. "Content" here is exactly what a model query returns for the instance through its class: every scalar property, relations and collections as the ids they point at, and the synthetic `createdAt` / `updatedAt` / `author` fields.
+
+## Receipts: `mintFlowReceipt` and `verifyFlowReceipt`
+
+A settled run leaves no portable proof by itself. A **flow receipt** is that proof, and minting one is an explicit call:
+
+```typescript
+// Any member can mint once the run has settled. Nothing mints automatically.
+const minted = await perspective.mintFlowReceipt(instanceUri);
+minted.receiptUri;  // "ad4m://flow/receipt/…"
+minted.receipt;     // the receipt object — hand it to any replica
+
+// Any holder of the receipt can verify it against their own flow catalogue:
+const verdict = await perspective.verifyFlowReceipt(minted.receipt);
+verdict.outcome;        // "verified" | "rejected" | "undecidable"
+verdict.terminalState;  // "Done"
+verdict.outputs;        // [{ className, id }] — what the quorum committed to
+verdict.voters;         // the distinct DIDs that settled the final edge
+```
+
+*From `tests/js/tests/flow/flow-produced-by.test.ts`, "complete → mint → enumerate → verify → filter, through the SDK", and `flow-task-handover.test.ts`, Part 3.*
+
+**What a verified receipt proves.** Under the flow definition the *verifier* holds: n distinct eligible DIDs each signed a vote naming a proposal URI that is the content address of this evidence seal and this outputs commitment, the carried read-set re-folds to the claimed terminal state, and the receipt's outputs hash to the commitment that quorum signed. Nothing in the receipt is a minter's assertion of state. The mint itself re-derives the state and refuses to build a receipt for any other.
+
+**What a receipt does not prove** — see [Guarantees](#guarantees-and-non-guarantees) for the full list. The two that matter most in practice: it does not prove any voter actually re-checked the seal before signing (an honest client does, but the check itself is not signed), and it does not prove the outputs still have the committed content *now*. A receipt attests to content at completion. A later edit does not invalidate a minted receipt — its preimages are frozen inside it.
+
+**Verification never re-runs guards and never queries the live graph.** The receipt carries the signed material, and the verdict comes from re-folding that material under the verifier's own catalogue. A receipt minted under an older flow definition stops verifying when the definition changes — the verdict names that reason (`DnaChanged`) rather than calling the receipt bad.
+
+The three-way verdict is deliberate. `undecidable` means "this replica cannot decide", not "the receipt is bad". Do not collapse it into `rejected` in a UI, and never treat it as `verified`.
+
+Tampering is caught: the produced-by test copies a real receipt, swaps one output id to a node the quorum never committed to, and gets `rejected`.
+
+## `producedByFlow`: querying what a flow produced
+
+Every consumer of receipts asks the same question: *is this instance a valid output of flow F, settled into state S?* The engine answers it once, fail-closed, on three surfaces.
+
+**Enumerate** — `perspective.flowValidOutputs(flowUri, state?)`:
+
+```typescript
+const outputs = await perspective.flowValidOutputs("handover://ProducedDeliveryFlow", "Done");
+outputs[0].output;        // { className: "ProducedDeliverable", id: … }
+outputs[0].terminalState; // "Done"
+outputs[0].receiptUri;    // the receipt that proves it
+```
+
+**Filter** — the model-query `where: { producedByFlow }`:
+
+```typescript
+// Only instances a verifying receipt commits to pass the filter:
+const produced = await Deliverable.findAll(perspective, {
+  where: { producedByFlow: { flow: FLOW_URI, state: "Done" } },
+});
+
+// The run's subject is not an output, so it does not pass:
+const tasksProduced = await Task.findAll(perspective, {
+  where: { producedByFlow: { flow: FLOW_URI } },
+});
+// tasksProduced === []
+```
+
+*Both from `flow-produced-by.test.ts`, "complete → mint → enumerate → verify → filter, through the SDK".*
+
+An instance counts iff some receipt in the perspective **verifies** under this replica's catalogue, was minted for that flow, settled into the named state (any terminal state when omitted), and names the instance by **className and id together** in its committed outputs. The className is the one in *your* query — a node committed as a Task is not a produced Role, even with the same id.
+
+These two live surfaces apply one more check the receipt alone cannot: the instance's **live content must still equal the committed content**. An output edited after completion drops from `flowValidOutputs` and from the filter, while `verifyFlowReceipt` keeps saying `verified` — the receipt is about completion time, the query is about now.
+
+Fail-closed rules on every surface: a `rejected` receipt is excluded, an `undecidable` receipt is excluded the same way (a payout query must not trust a receipt nobody could check), an unknown flow is an **error** rather than an empty list, and a malformed filter is an **error** rather than a filter that admits everything.
+
+## `producedByFlow` on a role: a role granted by another flow
+
+Plain `fromRole` matches the instance. Adding `producedByFlow` to the role query adds the condition that the instance must be a **valid output of a completed run of another flow**. For a full walkthrough see [Writing a flow: a role granted by a flow](/developer-guides/writing-a-flow).
+
+```typescript
+consensusRule: {
+  n: 1,
+  fromRole: {
+    className: "HandoverReviewerRole",
+    where: { domain: "frontend" },
+    didProperty: "agent",
+    producedByFlow: {
+      flow: "handover://ReviewerRoleGrantFlow",  // `${namespace}${name}Flow`
+      state: "Granted",
+    },
+  },
+}
+```
+
+It is the same name and the same check as the [`producedByFlow` model-query filter](#producedbyflow-querying-what-a-flow-produced), with one difference: on a role, **both fields are required**. Without `state`, a run that settled into the flow's "rejected" state would grant what its "approved" state was meant to. A `producedByFlow` without `state` does not decode, and an undecodable rule refuses the edge rather than falling back to a default.
+
+<Callout type="warning" emoji="⚠️">
+  Spell the key exactly. The role query ignores keys it does not know, so a
+  misspelt key — or `grantedByFlow`, the name this gate had before it was
+  renamed — is silently dropped, and the gate falls back to plain `fromRole`.
+  That is fail-open, and it is tracked in
+  [#1144](https://github.com/coasys/ad4m/issues/1144). Until it is fixed, the
+  test that catches it is a negative one: a vote from a holder with no minted
+  receipt must **not** settle the edge (Part 3 below).
+</Callout>
+
+For each candidate instance, the gate asks whether a receipt under the granting flow's index verifies against this replica's own flow definitions, was minted for that flow, settled into `state` — the state the replica's own re-fold derives, not the one the receipt asserts — and names the instance by `(className, id)` among its outputs. The className is the one in *your* `fromRole` query, read from your own flow definition, never from anything the receipt or the carried evidence says. A node committed as a `Task` is not a produced `HandoverReviewerRole`, even with the same id.
+
+The grant is dated from the receipt's `settled_at` — the moment the n-th distinct eligible voter signed the grant's final edge. When several receipts name the instance, the earliest wins. No participant picks that time, and there is **no fallback** to the assignment link or the instance's own timestamp: if there were, writing one link would grant the role and the gate would be decorative.
+
+The full loop, from a UI, in three calls:
+
+```typescript
+// 1. The Grant presses name the role instance as the run's output.
+//    Every co-signer names the same outputs.
+await grant.proposeTransition("Granted", undefined, [
+  { className: "HandoverReviewerRole", id: role.id },
+]);
+// (a second member presses the same button to reach the grant's n:2)
+
+// 2. Once the run has settled, any member mints its receipt:
+await perspective.mintFlowReceipt(grantRunUri);
+
+// 3. Optional — inspect what the gate will read:
+await perspective.flowValidOutputs("handover://ReviewerRoleGrantFlow", "Granted");
+```
+
+*From `flow-task-handover.test.ts`, Part 3.*
+
+The gate is **fail-closed**, and Part 3 pins each direction:
+
+- A settled grant run **without a minted receipt does not grant**. Bob's vote on the gated task did not count until someone called `mintFlowReceipt`. "The run completed" is not evidence. A receipt is.
+- Once the receipt exists, votes cast before the mint count on the next derivation — the vote was always valid, the gate just could not verify the grant yet. Nothing new needs to be written.
+- The receipt is bound to its instance by `(className, id)`. Alice's own role instance — same class, same `domain` — did not pass the gate, because no receipt names *her* instance. A receipt is never "flow F completed"; it is "flow F produced *this*".
+**Where the check runs, and what travels.** Each replica decides eligibility against its **own** graph, while it collects the evidence for a fold. The read-set then carries only the result: for each matched role instance, the grant date (`produced_at`, the granting run's `settled_at`). The granting receipt itself does not travel, and verifying a receipt never recurses into the granting flow's receipts.
+
+So a receipt minted for a *gated* flow proves that n people signed, and when. It does not, on its own, prove to a reader outside the neighbourhood that those people were allowed to sign: the minting replica decided that against its graph, and the verifier re-folds with the carried grant dates and trusts them, the same way it trusts that the carried grant links were all the links there were. Referencing the granting receipt by hash, optionally carrying it, and transitive verification are future work ([#1140](https://github.com/coasys/ad4m/issues/1140)).
+
+The gate has **three** outcomes, not two:
+
+1. **Granted.** A verified receipt names this instance.
+2. **Not granted.** No verified receipt names it. The instance contributes nothing, exactly as if the role query had not matched it.
+3. **Cannot decide.** The replica does not hold the granting flow, or the flow's receipt index is over budget. This comes back as an **error**, and the flow whose rule asked cannot derive a state until it is resolved. The error means "unknown", not "no".
+
+Do not write `if (granted) allow else deny` around a call that can throw. If you catch the error and deny, you bring back the silent denial that the engine refuses to give: a flood of junk index links would then deny every holder, with no signal. Show the error, or retry after sync. "Fail-closed" above means that an unproven grant never counts. It does not mean that an undecidable gate reads as "not a member".
+
+Un-granting is the normal role revocation: a signed tombstone on the role instance. It stops future votes. It does not invalidate the receipt, and undoing the granting flow does not un-grant either: retracting a settling vote moves the live flow back, while the minted receipt keeps verifying. Who may write that tombstone follows the role query's `where.author` — absent: anyone; `"$did"`: only the holder; a specific DID: only that DID, and if it is unreachable, the grant is permanent. There is no way to make a `producedByFlow` grant expire.
+
+One shape is refused outright: `producedByFlow` together with a `count` that zero instances satisfy, such as `{ max: 0 }`. That would read "eligible while no verified receipt exists", so every reason a receipt fails to verify would become a reason to grant.
+
+## Errors and limits
+
+The refusals a developer will meet, what each one means, and what to do:
+
+| You did | You get | It means | Do |
+| --- | --- | --- | --- |
+| `proposeTransition("Done")` from a state with no declared edge to Done | error naming the states, e.g. `` `Done` is not reachable from `Ready` `` | the flow's transitions do not include this edge from the **derived** state (not the cache) | render only `availableTransitions`; re-read `derivedState` from the error |
+| `proposeTransition` into a state whose `requires` is unmet | error naming the unmet guard | the guard query found no match on this replica at mint time | write the evidence first, or wait for it to sync |
+| `proposeTransition` while the instance is contested | refusal | two edges out of the current state both hold quorum; the group must resolve it socially (retract votes) | do not retry; surface the contention |
+| `proposeTransition` with `outputs` into a non-terminal state | refusal | a run does not end there, so there is nothing the outputs could be outputs *of* | name outputs only on the final transition |
+| `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
+| `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
+| `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
+| `flowValidOutputs` / the `producedByFlow` filter / a `fromRole` with `producedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
+| a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | remove the junk links from the flow's receipt index; the error names the flow and the count |
+| a `fromRole` with `producedByFlow` and a `count` satisfied by zero (e.g. `{ max: 0 }`) | error: refusing to gate | a receipt that fails to verify would make the voter eligible, not ineligible | drop the `count`, or gate on a positive count |
+| a `fromRole` with `producedByFlow` but no `state` | the rule does not decode; the edge is refused | a grant without a named state would also be granted by a run that settled into "rejected" | name the state the granting run must settle into |
+| a malformed `producedByFlow` filter (wrong shape, or nested inside OR/AND/NOT) | error | a filter that cannot be read must not admit everything | fix the filter shape: `{ flow, state? }` at the top level of `where` |
+
+Limits that are absences, not errors — do not go looking for these:
+
+- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or the `currentStateName` cache.
+- **No read that re-derives without voting.** `currentStateName` is the engine's cache. The calls that re-derive are the ones that act (`proposeTransition`, `acceptProposal`); their `derivedState` and their refusal messages name the derived state.
+- **No automatic receipt minting.** A settled run gets a receipt only when someone calls `mintFlowReceipt`.
+- **No direct fire.** An edge fires only by reaching quorum. `FlowTransition.actions` is declared and not executed.
+
+## Guarantees, and non-guarantees
+
+Each claim below is enforced by a named code branch in `rust-executor/src/perspectives/flow_instance/`, and tested where a test is named.
+
+**The engine guarantees:**
+
+- **Determinism.** Two replicas holding the same links derive the same state. Every choice in the fold is made by an explicit sort key (`fold.rs`; the fold is a pure function with no I/O).
+- **Only self-signed facts count.** Every field of a proposal is read only from links the proposer signed, with the executor's signature verdict valid (`atom.rs`, `signed_by`, `unique_field`). A synced link claiming to be part of a proposal but signed by someone else is invisible. A proposer who published two values for one field invalidates their own proposal. There is no last-write-wins on this path.
+- **A vote binds the proposal's content.** The proposal URI is the content address of its signed fields — instance, edge, evidence seal, outputs commitment — recomputed on every read (`atom.rs`, `proposal_uri`). A vote signs that URI, so neither a peer nor the proposer can re-point a voted proposal's fields afterwards.
+- **Quorum cannot be manufactured by timestamps.** Quorum is a count of distinct eligible DIDs (`fold.rs`, `settle_edge`). Back-dating a vote can shift *when* an edge settled, never *whether* it settled.
+- **Eligibility is judged as of each vote's own timestamp** (`roles.rs`; tested by `flow-task-handover.test.ts` Part 2). Revocation stops future votes and never un-settles history.
+- **A co-sign re-checks the evidence and the outputs on the voter's own graph** before signing, and refuses on any mismatch (`accept.rs`, `check_outputs_commitment`; Rust e2e `a_co_signer_refuses_an_output_edited_since_the_proposal`).
+- **A receipt's outputs are what the quorum committed to.** Mint refuses outputs that do not hash to the final edge's signed commitment, and verification re-hashes the carried preimages against it (`receipt.rs`, `final_edge_commitment`; `verify.rs` step 7; tested by the tampered-receipt case in `flow-produced-by.test.ts`, and Rust e2e `a_forged_receipt_in_the_graph_neither_lists_nor_passes_the_filter`).
+- **Every receipt consumer fails closed** (`produced.rs`): only a `Verified` verdict counts, `Undecidable` is excluded, an unknown flow and an over-budget receipt index are errors, never empty answers (Rust e2e `an_unknown_flow_is_an_error_not_an_empty_answer`, `a_receipt_flood_is_an_error_not_an_empty_answer`).
+- **A `producedByFlow` role gate has no fallback** to the assignment link, binds by `(className, id)` with the class from the reader's own query, and dates the grant from the quorum's `settled_at` (`grant.rs`, `roles/evidence.rs` `RoleGrantEvidence::resolve`; tested by `flow-task-handover.test.ts` Part 3, both halves, and Rust e2e `a_produced_by_flow_gate_grants_the_holder_through_the_real_store`).
+
+**The engine does NOT guarantee:**
+
+- **That any voter actually ran the checks before signing.** The protocol requires each voter to recompute the seal and the outputs commitment and refuse on mismatch, and an honest client does. But the recomputation is not itself signed or carried, so a voter running modified code is indistinguishable from an honest one (`verify.rs`, the "not proven" table). The trust root of a receipt is the voter quorum, not the software.
+- **That outputs still have the committed content now.** A receipt attests to content at completion. The live-content check exists only on `flowValidOutputs` and the `producedByFlow` filter, not on `verifyFlowReceipt` and not on the grant gate — a grant keeps being honoured after the role instance accrues links.
+- **That the voters on a gated flow were eligible, to a reader outside the neighbourhood.** A `producedByFlow` gate is decided by each replica against its own graph, and the read-set carries only the resulting grant date, not the granting receipt. A receipt for a gated flow is verified with those carried dates taken on trust (`grant.rs`, § *What a receipt of a gated flow proves*; carrying the granting receipt is [#1140](https://github.com/coasys/ad4m/issues/1140)).
+- **Who authored the evidence or the instance.** Instance authorship is never checked and never carried. Guard evidence is hashed, not author-verified.
+- **A trustworthy settlement time for the first edge.** Later edges settle no earlier than the walk's arrival at their from-state, but nothing bounds the *first* edge's timestamp backward: a genesis vote back-dated to 1970 settles at 1970 (`fold.rs`, § Ordering and time). Quorum is unaffected. Do not build anything that pays out on the settlement *time* of a flow's first edge.
+- **Delivery or liveness.** The engine derives over the links a replica holds. It does not guarantee that links sync, or when.
+
+<Callout type="info" emoji="📄">
+  The executable twin of this page is
+  [`tests/js/tests/model/flow-task-handover.test.ts`](https://github.com/coasys/ad4m/blob/dev/tests/js/tests/model/flow-task-handover.test.ts)
+  — read it top to bottom for the same story as running code. The full design
+  rationale is in
+  [`docs/flow-interpretation-hints-design.md`](https://github.com/coasys/ad4m/blob/dev/docs/flow-interpretation-hints-design.md).
+</Callout>

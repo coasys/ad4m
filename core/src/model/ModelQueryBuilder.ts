@@ -6,11 +6,11 @@
  */
 
 import type { Ad4mModel } from "./Ad4mModel";
-import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
-  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
+  TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -81,7 +81,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+  where(conditions: TypedQueryWhere<T>): ModelQueryBuilder<T> {
     this.queryParams.where = conditions as Where;
     return this;
   }
@@ -262,6 +262,44 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
     this.queryParams.deepQuery = enabled;
+    return this;
+  }
+
+  /**
+   * Reads instances as they exist in links of one status only.
+   *
+   * `'shared'` leaves out every Local link, both from the values returned and
+   * from what decides which instances are returned. Use it when the data is
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
+   *
+   * @param status - `'shared'` or `'local'`
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const cards = await Card.query(perspective).linkStatus('shared').get();
+   * ```
+   */
+  linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
+    this.queryParams.linkStatus = status;
+    return this;
+  }
+
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * Off by default: the executor withholds unverified links. Turn it on only
+   * to *display* an unverified claim, never for data you act on. See
+   * {@link Query.includeUnverified}.
+   *
+   * @param enabled - Whether to include unverified links (default: true)
+   * @returns The query builder for chaining
+   */
+  includeUnverified(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.includeUnverified = enabled;
     return this;
   }
 

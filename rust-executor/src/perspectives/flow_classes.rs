@@ -44,9 +44,8 @@ pub(crate) const FLOW_TRANSITION_PROPOSAL_SDNA: &str =
 
 /// Idempotently register both hard-wired flow-runtime subject classes into the
 /// perspective. Mirrors [`super::interpretation::overlay::classes::ensure_interpretation_overlay_classes`].
-/// No `required_path` guard yet — the shapes are stable at this point; add one
-/// when a future property forces a re-register.
-///
+/// `FlowTransitionProposal` carries a `required_path` guard since the outputs
+/// commitment was added to it (#1104); `FlowInstance` has none yet.
 pub(crate) async fn ensure_flow_model_classes(
     perspective: &mut PerspectiveInstance,
     context: &AgentContext,
@@ -60,12 +59,16 @@ pub(crate) async fn ensure_flow_model_classes(
         context,
     )
     .await?;
+    // `nonce` is the newest path (#1108; `outputs_hash` was #1104's). A
+    // perspective that registered the shape before it would silently drop
+    // the nonce every proposal now writes — and without a nonce no proposal
+    // is an atom — so its presence forces a re-register.
     ensure_subject_class(
         perspective,
         FLOW_TRANSITION_PROPOSAL_CLASS,
         FLOW_TRANSITION_PROPOSAL_TARGET_CLASS,
         FLOW_TRANSITION_PROPOSAL_SDNA,
-        None,
+        Some(crate::perspectives::flow_instance::atom::PROPOSAL_NONCE_PREDICATE),
         context,
     )
     .await
@@ -204,16 +207,36 @@ pub(crate) async fn start_flow_instance(
     .await
 }
 
-/// Mint one `FlowTransitionProposal` at `ad4m://flow/proposal/{proposal_id}`.
+/// Mint one `FlowTransitionProposal` at its **content-addressed** URI:
+/// `ad4m://flow/proposal/{hash}`, where the hash covers the instance, the
+/// edge, the seal, the outputs commitment, the proposer and `nonce`
+/// ([`crate::perspectives::flow_instance::atom::proposal_uri`] — the one
+/// definition; a co-signer's vote signs the URI, so it must cover the
+/// fields, #1108).
 ///
-/// `proposal_id` and `batch_id` are caller-supplied, as in
-/// [`mint_flow_instance`], so the caller controls id generation and atomic
+/// `nonce` and `batch_id` are caller-supplied, as in
+/// [`mint_flow_instance`], so the caller controls uniqueness and atomic
 /// commit. Propose-time comes from `Ad4mModel`'s built-in `createdAt`.
 ///
-/// `evidence` is a collection: it is passed as a JSON array and
-/// `create_subject` expands it into one `addLink` per element.
+/// `evidence` and `outputs` are collections, written as one link per element
+/// **directly**, not through `create_subject`: the class may be registered
+/// under a client's shape rather than the hardwired one — the TS SDK's
+/// `FlowInstance.start` registers `FlowTransitionProposal` itself, with both
+/// as `@HasMany` relations (an `ad4m://adder`, no `ad4m://setter`) — and
+/// `create_subject` writes values only through setters. The engine's own
+/// commitment must not depend on which shape a client registered. Each
+/// target is resolved exactly as the hardwired setter would (#1127).
 /// `rationale` is written only when `Some` and non-empty. `runUri` is not
 /// written; engine-emitted proposals do not track back to a run today.
+///
+/// `outputs` is `Some` exactly for a proposal into a terminal state: the
+/// instances the proposer names as the run's outputs, with their content.
+/// The writer stores each one's
+/// [`OutputRef::encode`](crate::perspectives::flow_instance::atom::OutputRef::encode)
+/// as an `outputs` link and signs `outputsHash` =
+/// [`outputs_hash`](crate::perspectives::flow_instance::atom::outputs_hash)
+/// over the content, so the named refs and the hash come from one list on an
+/// honest write. `Some(&[])` commits to "no outputs"; `None` writes neither.
 ///
 /// Property names must match the SDNA `name` fields exactly. A mismatched
 /// key is silently dropped by `create_subject`; the alignment test below
@@ -221,20 +244,34 @@ pub(crate) async fn start_flow_instance(
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_flow_transition_proposal(
     perspective: &mut PerspectiveInstance,
-    proposal_id: &str,
+    nonce: &str,
     proposer_did: &str,
     flow_instance_uri: &str,
     from_state: &str,
     to_state: &str,
     evidence_ids: &[String],
     evidence_hash: &str,
+    outputs: Option<&[crate::perspectives::flow_evaluator::EvidenceItem]>,
     rationale: Option<&str>,
     batch_id: Option<String>,
     context: &AgentContext,
 ) -> anyhow::Result<String> {
+    use crate::perspectives::flow_instance::atom::{normalised_outputs, outputs_hash, OutputRef};
+
     ensure_flow_model_classes(perspective, context).await?;
 
-    let uri = flow_transition_proposal_uri(proposal_id);
+    // The commitment is part of the URI preimage, so it is computed before
+    // the URI. `Some(&[])` commits to "no outputs"; `None` commits to none.
+    let committed = outputs.map(outputs_hash);
+    let uri = crate::perspectives::flow_instance::atom::proposal_uri(
+        flow_instance_uri,
+        from_state,
+        to_state,
+        evidence_hash,
+        committed.as_deref(),
+        proposer_did,
+        nonce,
+    );
 
     let mut values = serde_json::json!({
         "flowInstance": flow_instance_uri,
@@ -242,6 +279,7 @@ pub(crate) async fn write_flow_transition_proposal(
         "toState": to_state,
         "proposer": proposer_did,
         "evidenceHashes": evidence_hash,
+        "nonce": nonce,
     });
     if let Some(text) = rationale {
         if !text.is_empty() {
@@ -249,8 +287,33 @@ pub(crate) async fn write_flow_transition_proposal(
         }
     }
 
+    // The collections, as `(property, predicate, elements)`, written below.
+    let mut collections: Vec<(&str, &str, Vec<String>)> = Vec::new();
     if !evidence_ids.is_empty() {
-        values["evidence"] = serde_json::json!(evidence_ids);
+        collections.push((
+            "evidence",
+            PROPOSAL_EVIDENCE_PREDICATE,
+            evidence_ids.to_vec(),
+        ));
+    }
+
+    if let Some(items) = outputs {
+        values["outputsHash"] = committed
+            .clone()
+            .expect("committed is Some exactly when outputs is")
+            .into();
+        let refs: Vec<OutputRef> = items.iter().map(OutputRef::of).collect();
+        let encoded: Vec<String> = normalised_outputs(&refs)
+            .iter()
+            .map(OutputRef::encode)
+            .collect();
+        if !encoded.is_empty() {
+            collections.push((
+                "outputs",
+                crate::perspectives::flow_instance::atom::OUTPUT_PREDICATE,
+                encoded,
+            ));
+        }
     }
 
     perspective
@@ -261,7 +324,7 @@ pub(crate) async fn write_flow_transition_proposal(
             },
             uri.clone(),
             Some(values),
-            batch_id,
+            batch_id.clone(),
             context,
         )
         .await
@@ -269,8 +332,42 @@ pub(crate) async fn write_flow_transition_proposal(
             anyhow::anyhow!("write_flow_transition_proposal: create_subject failed: {e:#}")
         })?;
 
+    let mut links = Vec::new();
+    for (property, predicate, elements) in collections {
+        for element in elements {
+            let target = perspective
+                .resolve_property_value(
+                    FLOW_TRANSITION_PROPOSAL_CLASS,
+                    property,
+                    &serde_json::Value::String(element),
+                    context,
+                )
+                .await
+                .map_err(|e| {
+                    anyhow::anyhow!("write_flow_transition_proposal: `{property}` value: {e:#}")
+                })?;
+            links.push(Link {
+                source: uri.clone(),
+                predicate: Some(predicate.to_string()),
+                target,
+            });
+        }
+    }
+    if !links.is_empty() {
+        perspective
+            .add_links(links, LinkStatus::Shared, batch_id, context)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!("write_flow_transition_proposal: collection links: {e:#}")
+            })?;
+    }
+
     Ok(uri)
 }
+
+/// The predicate a proposal's `evidence` collection is written under — the
+/// hardwired SDNA's `evidence` path (locked by the SDNA tests below).
+pub(crate) const PROPOSAL_EVIDENCE_PREDICATE: &str = "ad4m://flow/evidence";
 
 /// Write a `FlowInstance`'s `currentState` link — the engine's **cache** of
 /// what [`crate::perspectives::flow_instance::fold_read_set`] derived.
@@ -446,6 +543,7 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
+            "nonce",
         ] {
             assert!(
                 names.contains(&expected),
@@ -563,6 +661,8 @@ mod tests {
         // but for the writer's payload: every JSON key the writer sends
         // to `create_subject` MUST be a declared SDNA property name.
         // A silent mismatch would return Ok while never writing.
+        // `evidence` and `outputs` are written as direct links (#1127), but
+        // their values still resolve through these property names.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
         let props: Vec<&str> = v["properties"]
             .as_array()
@@ -577,6 +677,12 @@ mod tests {
             "proposer",
             "evidence",
             "evidenceHashes",
+            "outputs",
+            "outputsHash",
+            // The URI salt (#1108). Dropping this write silently makes every
+            // freshly-minted proposal a non-atom (`MissingField(nonce)`), so
+            // the alignment guard matters as much as for the scalars above.
+            "nonce",
             // Optional LLM-attribution field. Same alignment guard as
             // the required scalars — a rename in the SDNA that did not
             // land here would silently drop the rationale from the
@@ -592,38 +698,77 @@ mod tests {
     }
 
     #[test]
-    fn evidence_property_is_a_collection_with_add_link_setter() {
-        // The writer passes `evidence` as a JSON array, and
-        // `create_subject` only expands an array into per-element
-        // `addLink`s when every setter action is `addLink` — on a
-        // `setSingleTarget` setter the array would be stored as one
-        // `literal:json:` blob instead. Locking the shape here so a
+    fn evidence_and_outputs_properties_are_collections_with_add_link_setters() {
+        // The engine writes these as one link per element itself (#1127),
+        // but any other writer — a client calling `create_subject` with an
+        // array — relies on `create_subject` expanding it into per-element
+        // `addLink`s, which it does only when every setter action is
+        // `addLink`; on a `setSingleTarget` setter the array would be stored
+        // as one `literal:json:` blob instead. Locking the shape here so a
         // well-meaning SDNA edit that switches to `setSingleTarget`
         // (which would type-check) breaks this test instead of silently
-        // changing the on-graph representation of evidence at runtime.
+        // changing the on-graph representation at runtime. For `outputs`
+        // that would also break the atom reader, which reads one
+        // `ad4m://flow/output` link per named output.
         let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
-        let evidence = v["properties"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|p| p["name"].as_str() == Some("evidence"))
-            .expect("evidence property must exist");
+        for name in ["evidence", "outputs"] {
+            let property = v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} property must exist"));
+            assert_eq!(
+                property["collection"].as_bool(),
+                Some(true),
+                "{name} must be declared `collection: true`",
+            );
+            let setter_actions: Vec<&str> = property["setter"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must declare a setter array"))
+                .iter()
+                .filter_map(|s| s["action"].as_str())
+                .collect();
+            assert_eq!(
+                setter_actions,
+                vec!["addLink"],
+                "{name} collection setter must be `addLink` — `setSingleTarget` would clobber",
+            );
+        }
+    }
+
+    #[test]
+    fn outputs_properties_write_the_predicates_the_atom_reads() {
+        // The writer goes through the SDNA; the atom reads raw predicates.
+        // If the two drift, a proposal into a terminal state is written with
+        // outputs no voter can see, and every co-sign refuses it as
+        // `Uncommitted`.
+        use crate::perspectives::flow_instance::atom::{
+            OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
+        };
+        let v = parse(FLOW_TRANSITION_PROPOSAL_SDNA);
+        let path_of = |name: &str| {
+            v["properties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .and_then(|p| p["path"].as_str())
+                .map(str::to_string)
+        };
+        assert_eq!(path_of("outputs").as_deref(), Some(OUTPUT_PREDICATE));
+        // The writer names the evidence predicate itself (#1127).
         assert_eq!(
-            evidence["collection"].as_bool(),
-            Some(true),
-            "evidence must be declared `collection: true`",
+            path_of("evidence").as_deref(),
+            Some(super::PROPOSAL_EVIDENCE_PREDICATE)
         );
-        let setter_actions: Vec<&str> = evidence["setter"]
-            .as_array()
-            .expect("evidence must declare a setter array")
-            .iter()
-            .filter_map(|s| s["action"].as_str())
-            .collect();
         assert_eq!(
-            setter_actions,
-            vec!["addLink"],
-            "evidence collection setter must be `addLink` — `setSingleTarget` would clobber",
+            path_of("outputsHash").as_deref(),
+            Some(OUTPUTS_HASH_PREDICATE)
         );
+        // Same drift guard for the nonce (#1108): the writer stores it via
+        // the SDNA, the atom re-reads it raw to recompute the URI.
+        assert_eq!(path_of("nonce").as_deref(), Some(PROPOSAL_NONCE_PREDICATE));
     }
 
     #[test]
