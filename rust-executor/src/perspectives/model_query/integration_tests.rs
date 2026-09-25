@@ -9427,13 +9427,17 @@ async fn links_rejects_a_reverse_relation_name() {
 /// The flow engine's role reads, answered by the real query pipeline over
 /// [`ROLE_SHAPE_JSON`] instead of a stub that decides membership by looking
 /// for the DID in the query text. Here nothing but `model_query` decides.
+///
+/// [`seed_role`] links do not verify, so it reads through
+/// [`fixture_query_from_json`] (#1113 opt-in): the tests are about the DID
+/// gate, not signatures.
 struct RoleStore(SparqlStore);
 
 #[async_trait::async_trait]
 impl crate::perspectives::flow_evaluator::RequiresQueryable for RoleStore {
     async fn model_query(&self, class_name: &str, query_json: &str) -> anyhow::Result<String> {
         let input: ModelQueryInput = serde_json::from_str(query_json)?;
-        let result = execute_model_query_from_json(&self.0, class_name, &input, ROLE_SHAPE_JSON)
+        let result = fixture_query_from_json(&self.0, class_name, &input, ROLE_SHAPE_JSON)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         Ok(serde_json::to_string(&result)?)
