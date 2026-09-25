@@ -6,6 +6,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **`model_query` `where`: a String or StringArray condition on a collection property now filters rows in every position** [#1130](https://github.com/coasys/ad4m/pull/1130)
+  - Before, the post-hydration filter skipped these conditions and assumed SPARQL had applied them. That holds at the top level of a `where`, but not inside a combinator the compiler could not push down: there the condition passed for every row. A role gate whose `didProperty` names a collection admitted non-members this way.
+  - The filter now uses contains-semantics: `String` matches when some value in the collection equals it, `StringArray` when some value is in the list. Absent or `null` matches nothing.
+  - **Fewer rows for affected queries.** A query with such a condition inside a combinator that also holds an unpushable condition used to return rows that did not match it. It now returns only rows that do. Nothing in the result says a clause was not pushed, so if a query returns fewer rows after upgrading, look for this shape.
+  - A condition on a getter-backed collection now rejects every row, because getters run after this filter. Before, it admitted every row. Neither is correct; rejecting is the safe one. Tracked in [#1131](https://github.com/coasys/ad4m/issues/1131).
 - **Breaking: a subject class property named `id`, `baseExpression`, `createdAt`, `updatedAt`, `author` or `timestamp` is now rejected at registration** [#991](https://github.com/coasys/ad4m/pull/991)
   - These are reserved synthetic hydration keys; a property sharing one of these names could silently overwrite hydration metadata or be overwritten by it (issue #974) instead of causing an error. `ensureSDNASubjectClass` runs at app startup, so a class already in the wild with a colliding property name will stop registering on upgrade rather than continue mis-reading. Rename the property to fix it.
 - **Runtime bump — Deno 2.3.1 → 2.9.5, Holochain 0.7.0-dev.16 → 0.7.0 (stable)** [#907](https://github.com/coasys/ad4m/pull/907)

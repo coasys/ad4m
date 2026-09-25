@@ -192,11 +192,18 @@ pub(super) fn eligible_now<'g>(
 /// Query-aware stub: a call whose JSON mentions one of `member_dids`
 /// returns `rows_per_match` instances (`r0`, `r1`, …, each dated [`T0`] unless
 /// `undated_instances`); `unconditional_instances` (for DID-independent queries)
-/// wins over matching when set; `error` fails every call. `histories`
-/// is what the store says about each DID's instances, answered the way
-/// `model_query` answers `links`: under `__links`, one array per
-/// requested key — the tombstone predicate gets `revocation_links`, any
-/// other key `grant_links`.
+/// wins over matching when set; `error` fails every call.
+///
+/// `histories` holds each **instance's** links, keyed by instance id, the
+/// way the real store holds them. A history can hold links about several
+/// DIDs. Picking out the candidate's links is `RoleGrantLinks::from_instance`'s
+/// job, not the stub's. An instance with no entry has no links.
+///
+/// It answers `links` the way `model_query` does: under `__links`, one
+/// array per requested key. [`STUB_GRANT_KEY`] gets `grant_links`, the
+/// tombstone predicate gets `revocation_links`, and any other key gets
+/// `[]`. A key nobody wrote has no links in the real store, so a
+/// misspelled or unexpected key reads as "none" here too.
 #[derive(Default)]
 pub(super) struct RoleStub {
     pub(super) member_dids: Vec<String>,
@@ -207,6 +214,11 @@ pub(super) struct RoleStub {
     pub(super) calls: Mutex<Vec<String>>,
     pub(super) histories: HashMap<String, RoleGrantLinks>,
 }
+
+/// The `didProperty` every stubbed role query uses, and so the one `links`
+/// key the stub answers with grant links. [`grant_link`] writes it as the
+/// predicate.
+pub(super) const STUB_GRANT_KEY: &str = "agent";
 
 #[async_trait]
 impl RequiresQueryable for RoleStub {
@@ -227,36 +239,36 @@ impl RequiresQueryable for RoleStub {
             }
         });
         let query: Value = serde_json::from_str(query_json)?;
-        let history = self
-            .histories
-            .iter()
-            .find(|(did, _)| query_json.contains(did.as_str()))
-            .map(|(_, h)| h.clone())
-            .unwrap_or_default();
-        let links: Option<Map<String, Value>> = query["links"].as_array().map(|keys| {
+        let keys: Option<Vec<&str>> = query["links"]
+            .as_array()
+            .map(|keys| keys.iter().filter_map(Value::as_str).collect());
+        let links_of = |id: &str, keys: &[&str]| -> Map<String, Value> {
+            let history = self.histories.get(id).cloned().unwrap_or_default();
             keys.iter()
-                .filter_map(Value::as_str)
-                .map(|key| {
+                .map(|&key| {
                     let rows = if key
                         == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
                     {
-                        &history.revocation_links
+                        json!(history.revocation_links)
+                    } else if key == STUB_GRANT_KEY {
+                        json!(history.grant_links)
                     } else {
-                        &history.grant_links
+                        json!([])
                     };
-                    (key.to_string(), json!(rows))
+                    (key.to_string(), rows)
                 })
                 .collect()
-        });
+        };
         let instances: Vec<Value> = (0..n)
             .map(|i| {
+                let id = format!("r{i}");
                 let mut inst = if self.undated_instances {
-                    json!({ "id": format!("r{i}") })
+                    json!({ "id": id })
                 } else {
-                    json!({ "id": format!("r{i}"), "timestamp": T0, "author": ADMIN() })
+                    json!({ "id": id, "timestamp": T0, "author": ADMIN() })
                 };
-                if let Some(links) = &links {
-                    inst["__links"] = Value::Object(links.clone());
+                if let Some(keys) = &keys {
+                    inst["__links"] = Value::Object(links_of(&id, keys));
                 }
                 inst
             })
