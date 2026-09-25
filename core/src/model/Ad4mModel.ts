@@ -1072,7 +1072,7 @@ export class Ad4mModel {
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
-    if (query.linkStatus !== undefined) queryInput.linkStatus = query.linkStatus;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
     if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes

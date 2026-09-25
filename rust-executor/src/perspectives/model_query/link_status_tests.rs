@@ -389,7 +389,7 @@ async fn link_status_shared_does_not_select_on_a_local_value() {
 /// exists and a verified link exists", not "one link is both". Here the mark
 /// has a valid Local link and a forged Shared link on the same triple, so
 /// together they would pass a Shared, verified-only read, and a Local value
-/// would reach the Shared-only caller. `reverse_triple_filter` checks both on
+/// would reach the Shared-only caller. `verified_link_exists` checks both on
 /// one reifier.
 #[tokio::test]
 async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_one() {
@@ -533,5 +533,34 @@ async fn link_status_and_include_unverified_both_apply_to_a_local_unverified_lin
                 assert!(rows.is_empty(), "{case}: `__links` must be empty: {rows:?}");
             }
         }
+    }
+}
+
+/// `linkStatus` parses fail-closed: only `"shared"` and `"local"` are accepted,
+/// at the top level and inside an `include` sub-query. A misspelt value must
+/// not fall back to reading both statuses. `null` is the same as unset.
+#[test]
+fn link_status_rejects_an_unknown_value() {
+    for bad in [r#""bogus""#, r#""Shared""#, r#""""#] {
+        assert!(
+            serde_json::from_str::<ModelQueryInput>(&format!(r#"{{"linkStatus":{bad}}}"#)).is_err(),
+            "top level: {bad}"
+        );
+        assert!(
+            serde_json::from_str::<ModelQueryInput>(&format!(
+                r#"{{"include":{{"comments":{{"linkStatus":{bad}}}}}}}"#
+            ))
+            .is_err(),
+            "include sub-query: {bad}"
+        );
+    }
+    for (raw, want) in [
+        (r#""shared""#, Some(LinkStatus::Shared)),
+        (r#""local""#, Some(LinkStatus::Local)),
+        ("null", None),
+    ] {
+        let q: ModelQueryInput =
+            serde_json::from_str(&format!(r#"{{"linkStatus":{raw}}}"#)).unwrap();
+        assert_eq!(q.link_status, want, "{raw}");
     }
 }

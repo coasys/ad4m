@@ -344,13 +344,20 @@ export type Query = {
    *
    * `'shared'` hydrates from Shared links only: every property, relation,
    * `author` and `updatedAt` comes from links that are gossiped to the
-   * neighbourhood, and nothing from this executor's Local links. That is the
+   * neighbourhood, and none from this executor's Local links. That is the
    * read to use when showing data to another user (#1024). `'local'` is the
-   * converse. Unset (the default) reads both, and a property declared
-   * `local: true` still reads only its Local links.
+   * converse. Unset or `null` (the default) reads both, and a property
+   * declared `local: true` still reads only its Local links.
    *
-   * Included relations inherit the setting unless their sub-query sets its own.
-   * The `__links` rows (see {@link Query.links}) are restricted the same way.
+   * Relations include typed `@HasMany` / `@HasOne` relations, which are filled
+   * by the conformance getter the SDK generates: the executor adds the status
+   * check to that getter's relation link. A hand-written `getter` is run as
+   * written, so it reads links of any status unless it checks
+   * `<ad4m://ontology/status>` itself.
+   *
+   * Included relations and the instances a `$` projection hydrates inherit
+   * the setting, unless an include's sub-query sets its own. The `__links`
+   * rows (see {@link Query.links}) are restricted the same way.
    *
    * Combines with {@link Query.includeUnverified}: a link must have the
    * requested status **and** pass the signature check, both on the same link.
