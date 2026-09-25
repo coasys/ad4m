@@ -145,15 +145,12 @@ pub fn approve_enrolment(
 
     // 3. Early authority check — the signer needs kel_ops + delegate scope.
     //    fold() enforces this too, but catching it here gives a clear error.
-    let signer_has_authority = state
-        .key_history
-        .iter()
-        .any(|kv| {
-            kv.entry.id == signer_key_id
-                && kv.revoked_at.is_none()
-                && kv.entry.scope.kel_ops
-                && kv.entry.scope.delegate
-        });
+    let signer_has_authority = state.key_history.iter().any(|kv| {
+        kv.entry.id == signer_key_id
+            && kv.revoked_at.is_none()
+            && kv.entry.scope.kel_ops
+            && kv.entry.scope.delegate
+    });
     if !signer_has_authority {
         return Err(EnrolError::SignerLacksAuthority);
     }
@@ -229,12 +226,12 @@ pub fn roster(state: &KeyState) -> Vec<RosterEntry> {
 mod tests {
     use super::*;
     use crate::agent::kel::adapter::MemoryAdapter;
+    use crate::agent::kel::adapter::{KelAdapter, MonotonicityCache};
     use crate::agent::kel::recovery::did_key_of;
     use crate::agent::kel::{
         fold, incept_human, recovery, KeyEventBody, RecoveryAuthority, RevocationReason,
     };
     use crate::agent::resolver::{AgentLanguageResolver, ReverseIndex};
-    use crate::agent::kel::adapter::{KelAdapter, MonotonicityCache};
     use did_key::{generate, Ed25519KeyPair};
     use std::sync::Arc;
 
@@ -283,8 +280,8 @@ mod tests {
 
     fn setup_identity() -> (
         Vec<KeyEvent>,
-        String,   // scid
-        String,   // key_id0
+        String, // scid
+        String, // key_id0
         did_key::PatchedKeyPair,
     ) {
         let (kp0, did0) = keypair();
@@ -565,14 +562,7 @@ mod tests {
         };
 
         // Attempt to give kel_ops to a hosted executor — must fail.
-        let result = approve_enrolment(
-            &offer,
-            Scope::full(),
-            &state,
-            &key_id0,
-            &kp0,
-            &consumed,
-        );
+        let result = approve_enrolment(&offer, Scope::full(), &state, &key_id0, &kp0, &consumed);
         assert!(matches!(result, Err(EnrolError::InvalidScope(_))));
     }
 
@@ -715,8 +705,7 @@ mod tests {
         assert!(state2.key_valid_at(&key_id0, state2.head_seq()));
 
         // Verify the signature.
-        let kp_verify =
-            PatchedKeyPair::try_from(state.keys_at(0)[0].signing_key.as_str()).unwrap();
+        let kp_verify = PatchedKeyPair::try_from(state.keys_at(0)[0].signing_key.as_str()).unwrap();
         let sig_bytes = hex::decode(&sig).unwrap();
         assert!(kp_verify.verify(msg, &sig_bytes).is_ok());
     }
