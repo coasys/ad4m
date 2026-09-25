@@ -52,9 +52,11 @@
 //!      whose signature verifies, and whose author [`granter_authorised`](evidence::granter_authorised)
 //!      accepts, the same function that decides who may revoke. The grant
 //!      counts from the earliest grant link.
-//!   2. **`author: "$did"`.** The grant is the instance itself, written by the
-//!      grantee. It counts from the earliest link on the instance whose
-//!      signature verifies and whose author is the candidate.
+//!   2. **`author: "$did"`** (and `didProperty: "author"`, which says the
+//!      same). The grant is the instance itself, written by the grantee. It
+//!      counts from the earliest link on the instance, on a predicate the
+//!      class declares, whose signature verifies and whose author is the
+//!      candidate.
 //!   3. A rule with both counts from the later of the two: both must hold.
 //!   4. A rule with neither, or an instance where a kind the rule needs has
 //!      no qualifying link, grants nothing: the instance contributes no
