@@ -32,12 +32,17 @@
 //!   ▼ FlowInstance::read_set  ← ONLY store access in a state read
 //!      ├─ proposals (TransitionAtoms from above)
 //!      └─ resolve_role_grants per gated target state  (roles.rs)
-//!         Reads each candidate's role instances and their history — grant time,
-//!         signed + authorised revocation tombstones — into RoleGrant windows.
-//!         Decides nothing about any particular vote.
+//!         Reads each candidate's role instances and collects the links behind
+//!         them — grant links and signed tombstones, authority NOT applied.
+//!         Decides nothing: not about a vote, not about a window.
 //!   │
 //!   ▼ fold_read_set
-//!      Calls eligible_votes per atom (roles.rs, pure): each vote is gated
+//!      ├─ RoleGrantEvidence::resolve per candidate (roles.rs, pure): links →
+//!      │  RoleGrant windows, applying the authority rule from the definition
+//!      │  passed in. Unresolvable evidence aborts the whole derivation —
+//!      │  dropping the candidate would de-quorate an edge and let the walk
+//!      │  take a survivor contention would have held.
+//!      └─ eligible_votes per atom (roles.rs, pure): each vote is gated
 //!      AS OF ITS OWN TIMESTAMP against the windows (#1027) → VouchedAtom
 //!      with pre-filtered votes. No store. No role queries.
 //!   │
@@ -72,8 +77,10 @@
 //! # The read-set is the proof
 //!
 //! [`FlowInstance::read_set`] does all the I/O and produces a [`ReadSet`]:
-//! the raw signed links of every proposal, plus the role verdicts that
-//! decided who was eligible. [`fold_read_set`] is pure over that value, so
+//! the raw signed links of every proposal, plus the raw signed links behind
+//! every voter's role membership. No verdict travels — the windows and the
+//! authority filter are recomputed from those links by whoever reads them.
+//! [`fold_read_set`] is pure over that value, so
 //! when a completed flow mints a Synergy token later, the token's backing is
 //! `serde_json` of the read-set the fold already received — and an
 //! off-perspective verifier can re-run the identical fold over it and reach
@@ -83,25 +90,31 @@
 pub mod accept;
 pub mod atom;
 pub mod fold;
+pub mod grant;
 #[cfg(test)]
 mod ordering_tests;
 pub mod pass;
+pub mod produced;
+pub mod propose;
+pub mod read_set;
+pub mod receipt;
 pub mod roles;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod time;
 pub mod trigger;
+pub mod verify;
 
 pub(crate) use pass::local_cached_state;
+pub use read_set::{fold_read_set, ProposalLinks, ReadSet};
 
 use crate::perspectives::flow_context::FlowInstanceRecord;
 use crate::perspectives::flow_spawn::initial_state_of;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::shacl_parser::SHACLFlow;
-use crate::types::DecoratedLinkExpression;
-use atom::{marked_fired, TransitionAtom};
-use fold::{fold, rule_for, Contention, DerivedState, VouchedAtom};
-use roles::{eligible_votes, resolve_role_grants, RoleGrant};
-use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use fold::{rule_for, Contention, DerivedState, ResolvedRule};
+use roles::resolve_role_grants;
+use std::collections::{BTreeSet, HashMap};
 
 /// A running flow: its identity instance plus the definition it runs. Built once
 /// per read; borrows the definition from the caller's catalogue.
@@ -127,103 +140,6 @@ pub struct FlowInstance<'a> {
     /// (`flow_context::render::FLOW_BASE_TOKEN`).
     pub subject: String,
     pub flow: &'a SHACLFlow,
-}
-
-/// One proposal exactly as the store returned it: every link on it, from
-/// every author, each carrying its own signature verdict.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProposalLinks {
-    pub uri: String,
-    pub links: Vec<DecoratedLinkExpression>,
-}
-
-/// Everything the engine read to decide one flow's state, as a plain value.
-///
-/// Serialisable on purpose: this is what a minted token carries as its
-/// backing, and [`fold_read_set`] over it reproduces the verdict without a
-/// perspective.
-///
-/// The two halves are not worth the same, and the difference matters to
-/// anything that settles value on this:
-///
-/// - `proposals` are **proof**. Every link carries its own author and
-///   signature verdict, so a verifier re-runs the identity checks itself
-///   instead of believing us.
-/// - `role_grants` are an **audit record**, not proof — see the field.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ReadSet {
-    pub instance_uri: String,
-    /// The state the walk starts from — the flow definition's first state.
-    pub genesis: String,
-    pub proposals: Vec<ProposalLinks>,
-    /// Each voter's role instances and their history — when each was granted
-    /// and which signed, authorised tombstones ended it — as this replica
-    /// read them (#1027). The *verdict* is not here: [`fold_read_set`] gates
-    /// every vote as of its own timestamp against these windows, so a
-    /// verifier re-runs that decision itself. What it still takes on trust
-    /// is the history: the role instances and tombstones are cited by ID, author and
-    /// timestamp, not carried as signed links. Nothing cited is ever
-    /// deleted, so every citation stays resolvable against the graph;
-    /// carrying the signed links themselves is platform work this engine
-    /// does not do yet.
-    pub role_grants: Vec<RoleGrant>,
-}
-
-impl ReadSet {
-    /// The proposals that are atoms. A proposal that fails the identity
-    /// checks is logged and dropped — never deleted, because a missing
-    /// proposer link may still be in flight.
-    pub fn atoms(&self) -> Vec<TransitionAtom> {
-        self.proposals
-            .iter()
-            .filter_map(|p| {
-                TransitionAtom::from_links(&self.instance_uri, &p.uri, &p.links)
-                    .map_err(|reason| {
-                        log::debug!(
-                            "flow instance {}: proposal {} is not an atom — {reason}",
-                            self.instance_uri,
-                            p.uri
-                        )
-                    })
-                    .ok()
-            })
-            .collect()
-    }
-
-    /// Proposal URIs already carrying **this replica's** `Local`
-    /// `resolved_as → "fired"` mark. Bookkeeping for [`pass`], never an
-    /// input to the fold; a peer's `Shared` mark is not counted.
-    pub fn marked_proposals(&self) -> HashSet<String> {
-        self.proposals
-            .iter()
-            .filter(|p| marked_fired(&p.links))
-            .map(|p| p.uri.clone())
-            .collect()
-    }
-}
-
-/// The state of a flow, re-derived from a read-set. **Pure** — no store
-/// access, no role queries. Calls [`eligible_votes`] per atom to pre-filter
-/// each atom's votes by the [`RoleGrant`]s that `read_set` already resolved,
-/// then hands the fold [`VouchedAtom`]s whose `eligible_votes` contain only
-/// the votes the rule admits. The fold itself does no role work; every
-/// eligibility decision is visible in the read-set before this function runs.
-///
-/// This is the function an off-perspective verifier re-runs over a minted
-/// token's proof to reach the same verdict independently.
-pub fn fold_read_set(flow: &SHACLFlow, read_set: &ReadSet) -> DerivedState {
-    let vouched: Vec<VouchedAtom> = read_set
-        .atoms()
-        .into_iter()
-        .map(|atom| {
-            let rule = rule_for(flow, &atom.to_state);
-            VouchedAtom {
-                eligible_votes: eligible_votes(&atom, &rule, &read_set.role_grants),
-                atom,
-            }
-        })
-        .collect();
-    fold(&read_set.genesis, flow, &vouched)
 }
 
 impl<'a> FlowInstance<'a> {
@@ -257,11 +173,11 @@ impl<'a> FlowInstance<'a> {
     }
 
     /// All I/O for a state read. Returns the proposal links of every
-    /// [`TransitionAtom`] on this instance, plus one [`RoleGrant`] — the
-    /// candidate's role instances with their grant and revocation history — per
-    /// `(target_state, candidate_DID)` pair where the rule's `fromRole` gates
-    /// that state. That is three classes of store query and no others; the
-    /// fold that follows is pure over this value.
+    /// [`TransitionAtom`] on this instance, plus one [`RoleGrantEvidence`] —
+    /// the candidate's role instances with the grant and tombstone links
+    /// behind them — per `(target_state, candidate_DID)` pair where the
+    /// rule's `fromRole` gates that state. That is three classes of store
+    /// query and no others; the fold that follows is pure over this value.
     ///
     /// Fails closed: `Err` propagates on any store error **and** on any role
     /// query that cannot discriminate between DIDs. The caller must abandon the
@@ -283,6 +199,7 @@ impl<'a> FlowInstance<'a> {
 
         let mut read_set = ReadSet {
             instance_uri: self.uri.clone(),
+            subject: self.subject.clone(),
             genesis,
             proposals,
             role_grants: Vec::new(),
@@ -295,7 +212,13 @@ impl<'a> FlowInstance<'a> {
         let atoms = read_set.atoms();
         let targets: BTreeSet<&str> = atoms.iter().map(|a| a.to_state.as_str()).collect();
         for to_state in targets {
-            let rule = rule_for(self.flow, to_state);
+            // No role resolution for a refused target: the edge cannot settle
+            // whoever voted, so resolving grants for it would be I/O whose
+            // result nothing reads. Not a fail-open — the refusal is
+            // `settle_edge`'s, and `fold_read_set` empties the eligible set.
+            let ResolvedRule::Rule(rule) = rule_for(self.flow, to_state) else {
+                continue;
+            };
             let Some(role) = rule.from_role.as_ref() else {
                 continue;
             };
@@ -319,7 +242,7 @@ impl<'a> FlowInstance<'a> {
         &self,
         perspective: &PerspectiveInstance,
     ) -> anyhow::Result<DerivedState> {
-        Ok(fold_read_set(self.flow, &self.read_set(perspective).await?))
+        fold_read_set(self.flow, &self.read_set(perspective).await?)
     }
 }
 

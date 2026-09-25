@@ -15,6 +15,7 @@ import type {
   TypedQuery, TypedWhere, TypedOrder, TypedIncludeMap, TypedIncludeProjection,
   IncludeExtras, Query,
 } from "./types";
+import type { ModelQueryBuilder } from "./ModelQueryBuilder";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -184,6 +185,31 @@ expectAssignable<TypedWhere<Post>>({ title: { gt: 5 } });
 // @ts-expect-error
 expectAssignable<TypedWhere<Post>>({ views: { contains: "x" } });
 
+// producedByFlow — accepted at the top level of a typed query and by
+// ModelQueryBuilder.where(), which is where the executor reads it
+expectAssignable<TypedQuery<Post>>({ where: { producedByFlow: { flow: "coasys://F" } } });
+expectAssignable<TypedQuery<Post>>({
+  where: { title: "x", producedByFlow: { flow: "coasys://F", state: "done" } },
+});
+expectAssignable<Parameters<ModelQueryBuilder<Post>["where"]>[0]>({
+  producedByFlow: { flow: "coasys://F" },
+});
+
+// ...and rejected everywhere the executor errors on it: nested under a
+// combinator, or in an include sub-query's `where`
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { OR: [{ producedByFlow: { flow: "coasys://F" } }] } });
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { NOT: { producedByFlow: { flow: "coasys://F" } } } });
+expectAssignable<TypedQuery<Post>>({
+  // @ts-expect-error
+  include: { comments: { where: { producedByFlow: { flow: "coasys://F" } } } },
+});
+
+// Malformed filter — must error
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { producedByFlow: { state: "done" } } });
+
 // ---------------------------------------------------------------------------
 // TypedOrder
 // ---------------------------------------------------------------------------
@@ -244,6 +270,22 @@ expectAssignable<TypedIncludeMap<Post>>({
   };
   void _bad1;
 }
+
+// A transitive projection: the whole conversation under each row rather than
+// its direct replies. `IncludeProjection` has always accepted this; the typed
+// form rejected it at compile time, so the option was unreachable from a typed
+// query — the documented spelling for "42 replies" on a collapsed branch.
+expectAssignable<TypedIncludeMap<Post>>({
+  $descendantCount: { from: "comments", count: true, transitive: true },
+});
+
+// And on the list-shaped variants, which the executor also walks transitively.
+expectAssignable<TypedIncludeMap<Post>>({
+  $firstDescendant: { from: "comments", transitive: true, limit: 1 },
+});
+expectAssignable<TypedIncludeMap<Post>>({
+  $descendants: { from: "comments", transitive: true, limit: 10, where: { likes: { gt: 1 } } },
+});
 
 // Projection's nested where uses the *target's* property keys
 expectAssignable<TypedIncludeMap<Post>>({

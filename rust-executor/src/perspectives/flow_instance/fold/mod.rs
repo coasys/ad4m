@@ -16,15 +16,14 @@
 //!   is by an explicit sort key.
 //! - **Re-verifiable off-perspective.** [`fold`] takes plain data and does no
 //!   I/O, so a verifier outside the neighbourhood can re-run it over a
-//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. How
-//!   much that verdict is worth differs by half: the proposals and votes are
-//!   signed links the verifier re-checks itself, while the `fromRole`
-//!   history — grant times and revocation tombstones, against which each
-//!   vote is gated as of its own timestamp — is what this replica read: the
-//!   read-set carries each role instance's [`RoleGrantWindow`](super::roles::RoleGrantWindow)
-//!   values but cites the underlying links by id, author and timestamp
-//!   rather than carrying them as signed links — see
-//!   [`ReadSet`](super::ReadSet).
+//!   serialised [`ReadSet`](super::ReadSet) and reach the same verdict. Both
+//!   halves are worth the same now: the proposals and votes are signed links
+//!   the verifier re-checks itself, and so is the `fromRole` history — the
+//!   read-set carries the grant links and revocation tombstones themselves,
+//!   and [`RoleGrantEvidence::resolve`](super::roles::RoleGrantEvidence::resolve)
+//!   recomputes each [`RoleGrantWindow`](super::roles::RoleGrantWindow) from
+//!   them, so no grant time or revocation is anyone's assertion. What stays
+//!   asserted is named on [`ReadSet`](super::ReadSet).
 //! - **A function of the links present now.** Delete a settled vote and the
 //!   fold recomputes without it, so the flow stands where it stood before
 //!   that vote. The graph is the truth and the state follows it.
@@ -33,7 +32,11 @@
 //! edge arrive whenever two replicas mint concurrently — each dedupes only
 //! against the proposals it has seen — and asking "is *this proposal*
 //! settled?" would strand such a flow at genesis forever, while asking "did
-//! the *edge* collect `n` distinct voters?" resolves it.
+//! the *edge* collect `n` distinct voters?" resolves it. On a **terminal**
+//! edge the unit is one notch finer — the edge's *outputs commitment* — so
+//! that the votes an edge settles on always agreed to one set of outputs;
+//! see [`settle_edge`] for why anything coarser lets one early uncommitted
+//! proposal make the run unreceiptable forever (#1108/#1118).
 //!
 //! What that is *not*, as of #987: the deliberate two-bot path. The mint pass
 //! dedupes on `(instance, to_state, evidence_hash)` with no proposer
@@ -118,10 +121,18 @@
 //! contention refused this no longer guards the choice of edge, but it would
 //! narrow the stall above by making a back-dated second proposal detectable.
 
+pub mod reachability;
+pub mod rule;
+#[cfg(test)]
+mod test_support;
+
+pub use rule::{quorum, rule_for, ResolvedRule};
+
 use super::atom::{TransitionAtom, Vote};
 use super::time::parse_link_timestamp;
 use crate::perspectives::shacl_parser::{ConsensusRule, SHACLFlow};
 use chrono::{DateTime, Utc};
+use reachability::feasibly_reachable;
 
 /// An atom whose votes have already been filtered by its rule's `fromRole`,
 /// each as of its own timestamp ([`super::roles::eligible_votes`]). Role
@@ -191,28 +202,6 @@ enum Settlement {
     One(Box<SettledEdge>),
     /// More than one has settled. The walk stops without choosing.
     Contested(Contention),
-}
-
-/// The rule governing entry INTO `to_state`: the target state's own
-/// `consensusRule`, else the flow-level one, else `{ n: 1 }`.
-pub fn rule_for(flow: &SHACLFlow, to_state: &str) -> ConsensusRule {
-    flow.states
-        .iter()
-        .find(|s| s.name == to_state)
-        .and_then(|s| s.consensus_rule.as_ref())
-        .or(flow.consensus_rule.as_ref())
-        .cloned()
-        .unwrap_or(ConsensusRule {
-            n: 1,
-            from_role: None,
-        })
-}
-
-/// Whether enough distinct eligible voters signed. `{n: 0}` is a
-/// misconfigured rule and never satisfies quorum: "nobody set a threshold"
-/// must not read as "everybody passes".
-pub fn quorum(rule: &ConsensusRule, distinct_voters: usize) -> bool {
-    rule.n > 0 && distinct_voters as u32 >= rule.n
 }
 
 /// The state of a flow: walk from `genesis`, taking the one settled declared
@@ -321,89 +310,30 @@ fn settle(
     }
 }
 
-/// Whether `to` can still be entered once the flow is in `from`, following
-/// declared transitions only.
-///
-/// This asks about the flow's shape, not about votes: an edge that is quorate
-/// now but loses a race is only *denied* if the state it leads to drops out of
-/// the graph reachable from the winner. A state is reachable from itself, so
-/// two transitions sharing a target never contend.
-///
-/// Used for the unit test that checks pure graph shape. [`settle`] uses
-/// [`feasibly_reachable`] instead, which also requires atom evidence on every
-/// intermediate hop.
-fn reachable(flow: &SHACLFlow, from: &str, to: &str) -> bool {
-    let mut seen = vec![from.to_string()];
-    let mut frontier = vec![from.to_string()];
-    while let Some(state) = frontier.pop() {
-        if state == to {
-            return true;
-        }
-        for t in flow.transitions.iter().filter(|t| t.from_state == state) {
-            if !seen.iter().any(|s| s == &t.to_state) {
-                seen.push(t.to_state.clone());
-                frontier.push(t.to_state.clone());
-            }
-        }
-    }
-    false
-}
-
-/// Whether `to` is reachable from `from` through hops that each carry at
-/// least one **admitted vote** — a [`VouchedAtom`] in `atoms` whose
-/// `eligible_votes` is non-empty.
-///
-/// The threshold is deliberate, and role-aware. Declaring an edge is
-/// unilateral (any flow author); *proposing* on it is also unilateral (any
-/// participant, including one whose votes the role rule excludes — #1030
-/// decides whose votes count, and a mere-existence check would route around
-/// it). An admitted vote is the first non-unilateral evidence that the
-/// cycle is live, and it is the same admission `settle_edge` pools twenty
-/// lines down — the two readings of the atom slice must not disagree on
-/// whose voice counts. Quorum is NOT required: that would change what
-/// "feasible" means for a half-voted edge, a bigger semantic call than
-/// contention suppression needs.
-///
-/// Failing closed here means an unconfirmed-cycle path does not silently
-/// suppress contention detection in [`settle`].
-///
-/// A state is reachable from itself regardless of atoms (the two-transitions-
-/// to-the-same-target case never contends).
-fn feasibly_reachable(flow: &SHACLFlow, from: &str, to: &str, atoms: &[VouchedAtom]) -> bool {
-    if from == to {
-        return true;
-    }
-    let mut seen = vec![from.to_string()];
-    let mut frontier = vec![from.to_string()];
-    while let Some(state) = frontier.pop() {
-        for t in flow.transitions.iter().filter(|t| t.from_state == state) {
-            // Only traverse this hop if some atom on it carries an admitted
-            // vote. A phantom hop (no atoms), a vote-less proposal, or an
-            // atom voted only by excluded DIDs cannot be relied on to carry
-            // the loser to its target.
-            let hop_has_admitted_vote = atoms.iter().any(|a| {
-                a.atom.from_state == state
-                    && a.atom.to_state == t.to_state
-                    && !a.eligible_votes.is_empty()
-            });
-            if !hop_has_admitted_vote {
-                continue;
-            }
-            if t.to_state == to {
-                return true;
-            }
-            if !seen.iter().any(|s| s == &t.to_state) {
-                seen.push(t.to_state.clone());
-                frontier.push(t.to_state.clone());
-            }
-        }
-    }
-    false
-}
-
-/// One edge: pool the eligible votes of every not-yet-consumed atom on
+/// One edge: pool the eligible votes of the not-yet-consumed atoms on
 /// `from → to`, and if the rule's `{n}` distinct voters is met, report the
 /// edge as settled at the moment the n-th of them signed.
+///
+/// **On a terminal edge, votes pool per outputs commitment** — the fold half
+/// of #1118 option 2 (#1108 re-review, @lal-bot-coasys). A vote into a
+/// terminal state is agreement to *those outputs*: `accept` refuses to
+/// co-sign an atom whose commitment it cannot recompute, and a receipt can
+/// only speak for one commitment ([`super::receipt::final_edge_commitment`]).
+/// Pooling across commitments therefore counted votes that agreed to
+/// nothing in common: one eligible early proposal with no `outputs_hash`
+/// (or a rival one) landed in the settled edge's `atom_uris`, the
+/// commitment read back `Uncommitted`/`Conflicting`, and the run settled
+/// terminally with a receipt nobody could ever mint — permanently, since
+/// there is no proposing past a settled edge. So: atoms are grouped by
+/// their commitment, an atom with none contributes nothing, quorum must be
+/// reached **within one group**, and among quorate groups the
+/// earliest-settled wins (hash order breaks a tie, deterministically). The
+/// settled edge's atoms all share one commitment by construction.
+///
+/// A non-terminal edge keeps pooling across every atom: no run ends there,
+/// `accept` ignores outputs off the final edge, and splitting its quorum by
+/// an irrelevant field would re-open the twin-proposal wedge pooling exists
+/// to close.
 ///
 /// An edge that was already quorate when the walk arrived settles at the
 /// moment of arrival (`max(nth, after)`), so a proposal that lost an earlier
@@ -419,7 +349,67 @@ fn settle_edge(
     atoms: &[VouchedAtom],
     consumed: &[SettledEdge],
 ) -> Option<SettledEdge> {
-    let rule = rule_for(flow, to);
+    // A rule that could not be read admits no edge: return before any vote is
+    // counted, so there is no path on which an unreadable gate settles (#1078).
+    let ResolvedRule::Rule(rule) = rule_for(flow, to) else {
+        log::warn!(
+            "flow `{}`: refusing edge `{from}` → `{to}` — the `consensusRule` governing `{to}` \
+             did not parse, so the threshold it declared is unknown",
+            flow.flow_uri()
+        );
+        return None;
+    };
+    let candidates: Vec<&VouchedAtom> = atoms
+        .iter()
+        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
+        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
+        .collect();
+
+    if !super::receipt::is_terminal_state(flow, to) {
+        return settle_pool(from, to, after, &rule, &candidates);
+    }
+
+    // Terminal edge: group by commitment. BTreeMap so a tie between two
+    // quorate groups breaks by hash order on every replica alike.
+    let mut groups: std::collections::BTreeMap<&str, Vec<&VouchedAtom>> =
+        std::collections::BTreeMap::new();
+    for v in candidates {
+        match v.atom.outputs_hash.as_deref() {
+            Some(hash) => groups.entry(hash).or_default().push(v),
+            None => log::debug!(
+                "flow: atom {} on terminal edge `{from}` → `{to}` carries no outputs \
+                 commitment; its votes bind no outputs and are not pooled",
+                v.atom.uri
+            ),
+        }
+    }
+    groups
+        .into_values()
+        .filter_map(|group| settle_pool(from, to, after, &rule, &group))
+        .min_by(|a, b| {
+            (
+                parse_link_timestamp(&a.settled_at),
+                &a.settled_at,
+                &a.atom_uris,
+            )
+                .cmp(&(
+                    parse_link_timestamp(&b.settled_at),
+                    &b.settled_at,
+                    &b.atom_uris,
+                ))
+        })
+}
+
+/// The pooling half of [`settle_edge`], over one already-chosen set of
+/// atoms: sort every eligible vote by parsed instant, count distinct DIDs,
+/// and settle at the n-th — floored by `after`.
+fn settle_pool(
+    from: &str,
+    to: &str,
+    after: &str,
+    rule: &ConsensusRule,
+    atoms: &[&VouchedAtom],
+) -> Option<SettledEdge> {
     // Pool with each vote's parsed instant and sort by it — string order is
     // client-library order inside a sub-second collision (#1000). Atom
     // construction already dropped unparseable timestamps, so the
@@ -428,8 +418,6 @@ fn settle_edge(
     // all cannot be the n-th.
     let mut pooled: Vec<(DateTime<Utc>, &Vote, &str)> = atoms
         .iter()
-        .filter(|v| v.atom.from_state == from && v.atom.to_state == to)
-        .filter(|v| !consumed.iter().any(|e| e.atom_uris.contains(&v.atom.uri)))
         .flat_map(|v| {
             v.eligible_votes
                 .iter()
@@ -462,7 +450,7 @@ fn settle_edge(
         if !atom_uris.iter().any(|u| u == uri) {
             atom_uris.push(uri.to_string());
         }
-        if quorum(&rule, voters.len()) {
+        if quorum(rule, voters.len()) {
             nth = Some((instant, vote.at.clone()));
             break;
         }
@@ -489,68 +477,53 @@ fn settle_edge(
 
 #[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
-
-    const ALICE: &str = "did:key:alice";
-    const BOB: &str = "did:key:bob";
-    const T1: &str = "2026-01-01T00:00:00.000Z";
-    const T2: &str = "2026-01-02T00:00:00.000Z";
-    const T3: &str = "2026-01-03T00:00:00.000Z";
-
-    /// `review ⇄ changes_requested`, plus `review → approved` whose `{n}` is
-    /// configurable, so every quorum case fits one fixture.
-    fn review_flow(approved_n: Option<u32>) -> SHACLFlow {
-        let mut approved = serde_json::json!({ "name": "approved", "value": 1.0 });
-        if let Some(n) = approved_n {
-            approved["consensusRule"] = serde_json::json!({ "n": n });
+    /// Lal's terminal-edge scenario at the fold layer (#1108 re-review):
+    /// under `{n: 2}` into terminal `approved`, Mallory's early atom with no
+    /// commitment (or a rival one) must not pool with Alice's and Bob's
+    /// votes on the committed atom. Quorum is reached inside the committed
+    /// group: the settled edge names only Alice's atom, and settles at
+    /// Bob's vote — not at the Mallory+Alice pair the old pooling counted.
+    ///
+    /// Killing test for the mutation that pools terminal edges across
+    /// commitments again.
+    #[test]
+    fn a_terminal_edge_pools_votes_per_outputs_commitment() {
+        const MALLORY: &str = "did:key:mallory";
+        let flow = review_flow(Some(2));
+        for rival_commitment in [None, Some("hash-y")] {
+            let atoms = [
+                vouched_committing(
+                    "p-mallory",
+                    "review",
+                    "approved",
+                    rival_commitment,
+                    &[(MALLORY, T1)],
+                ),
+                vouched_committing(
+                    "p-alice",
+                    "review",
+                    "approved",
+                    Some("hash-x"),
+                    &[(ALICE, T2), (BOB, T3)],
+                ),
+            ];
+            let derived = fold("review", &flow, &atoms);
+            assert_eq!(derived.state, "approved", "rival: {rival_commitment:?}");
+            assert_eq!(
+                derived.settled[0].atom_uris,
+                vec!["p-alice"],
+                "only the quorate group's atoms settle, so every counted atom \
+                 shares one commitment (rival: {rival_commitment:?})"
+            );
+            assert_eq!(
+                derived.settled[0].settled_at, T3,
+                "quorum is the 2nd voter INSIDE the group — Bob at T3, not \
+                 Mallory+Alice at T2 (rival: {rival_commitment:?})"
+            );
+            assert_eq!(derived.settled[0].voters, vec![ALICE, BOB]);
         }
-        serde_json::from_value(serde_json::json!({
-            "name": "Review",
-            "namespace": "review://",
-            "states": [
-                { "name": "review", "value": 0.0 },
-                { "name": "changes_requested", "value": 0.5 },
-                approved,
-            ],
-            "transitions": [
-                { "action_name": "Request", "from_state": "review", "to_state": "changes_requested", "actions": [] },
-                { "action_name": "Resubmit", "from_state": "changes_requested", "to_state": "review", "actions": [] },
-                { "action_name": "Approve", "from_state": "review", "to_state": "approved", "actions": [] },
-            ],
-        }))
-        .expect("fixture flow parses")
-    }
-
-    /// One atom on `from → to` carrying exactly the listed `(did, at)` votes
-    /// as eligible. Fields the fold never reads carry placeholders.
-    fn vouched(uri: &str, from: &str, to: &str, votes: &[(&str, &str)]) -> VouchedAtom {
-        let votes: Vec<Vote> = votes
-            .iter()
-            .map(|(did, at)| Vote {
-                did: did.to_string(),
-                at: at.to_string(),
-            })
-            .collect();
-        VouchedAtom {
-            atom: TransitionAtom {
-                uri: uri.to_string(),
-                from_state: from.to_string(),
-                to_state: to.to_string(),
-                proposer: votes.first().map(|v| v.did.clone()).unwrap_or_default(),
-                proposed_at: votes.first().map(|v| v.at.clone()).unwrap_or_default(),
-                evidence_hash: "seal".to_string(),
-                votes: votes.clone(),
-            },
-            eligible_votes: votes,
-        }
-    }
-
-    fn walked(derived: &DerivedState) -> Vec<(&str, &str)> {
-        derived
-            .settled
-            .iter()
-            .map(|e| (e.from_state.as_str(), e.to_state.as_str()))
-            .collect()
     }
 
     #[test]
@@ -716,304 +689,5 @@ mod tests {
             assert_eq!(derived.state, "review", "{name}");
             assert!(derived.settled.is_empty(), "{name}");
         }
-    }
-
-    /// The rule that governs an edge is the one on the state it ENTERS: the
-    /// target's own override first, then the flow-level default.
-    #[test]
-    fn the_target_states_rule_overrides_the_flows() {
-        let mut flow = review_flow(Some(2));
-        flow.consensus_rule = Some(ConsensusRule {
-            n: 1,
-            from_role: None,
-        });
-        assert_eq!(
-            rule_for(&flow, "approved").n,
-            2,
-            "the state's own rule wins"
-        );
-        assert_eq!(
-            rule_for(&flow, "changes_requested").n,
-            1,
-            "a state without one inherits the flow's"
-        );
-    }
-
-    /// `triage → approved | rejected`, both terminal: the shape where a
-    /// clock-decided winner cannot be undone.
-    fn terminal_branch_flow() -> SHACLFlow {
-        serde_json::from_value(serde_json::json!({
-            "name": "Triage",
-            "namespace": "triage://",
-            "states": [
-                { "name": "triage", "value": 0.0 },
-                { "name": "approved", "value": 1.0 },
-                { "name": "rejected", "value": 0.0 },
-            ],
-            "transitions": [
-                { "action_name": "Approve", "from_state": "triage", "to_state": "approved", "actions": [] },
-                { "action_name": "Reject", "from_state": "triage", "to_state": "rejected", "actions": [] },
-            ],
-        }))
-        .expect("fixture flow parses")
-    }
-
-    /// Two quorate edges into states that cannot reach each other: taking the
-    /// earliest would let a self-asserted timestamp decide an outcome nothing
-    /// can undo, so the walk stops instead.
-    #[test]
-    fn an_irreversible_branch_stops_the_walk_without_choosing() {
-        let flow = terminal_branch_flow();
-        let atoms = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-        ];
-
-        let derived = fold("triage", &flow, &atoms);
-
-        assert_eq!(derived.state, "triage", "the walk must not leave the state");
-        assert!(derived.settled.is_empty(), "and must take no edge");
-        let contention = derived.contested.expect("contested branch is reported");
-        assert_eq!(contention.from_state, "triage");
-        // Ranked earliest-first, so a reader sees what would have been taken.
-        let targets: Vec<&str> = contention
-            .candidates
-            .iter()
-            .map(|e| e.to_state.as_str())
-            .collect();
-        assert_eq!(targets, vec!["approved", "rejected"]);
-        assert_eq!(
-            contention.candidates[0].voters,
-            vec![ALICE.to_string()],
-            "each candidate still carries the quorum that made it"
-        );
-    }
-
-    /// The same two proposals in a flow where the loser stays reachable are
-    /// not contention: the walk takes the earliest now and the other later, so
-    /// the timestamp ordered the edges without denying either.
-    #[test]
-    fn a_race_the_walk_can_come_back_from_is_not_contention() {
-        let flow = review_flow(Some(1));
-        let atoms = vec![
-            vouched("p1", "review", "changes_requested", &[(ALICE, T1)]),
-            vouched("p3", "review", "approved", &[(ALICE, T2)]),
-            vouched("p2", "changes_requested", "review", &[(ALICE, T3)]),
-        ];
-
-        let derived = fold("review", &flow, &atoms);
-
-        assert!(
-            derived.contested.is_none(),
-            "approved is reachable via the cycle"
-        );
-        assert_eq!(derived.state, "approved");
-    }
-
-    /// Refusal is scoped to a genuine race: one quorate edge alongside an edge
-    /// with votes but not enough of them is not contention.
-    #[test]
-    fn a_branch_with_only_one_quorate_edge_is_not_contested() {
-        let mut flow = terminal_branch_flow();
-        // `approved` needs two voters; only Alice signed it.
-        flow.states
-            .iter_mut()
-            .find(|s| s.name == "approved")
-            .expect("fixture has approved")
-            .consensus_rule = Some(ConsensusRule {
-            n: 2,
-            from_role: None,
-        });
-        let atoms = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-        ];
-
-        let derived = fold("triage", &flow, &atoms);
-
-        assert_eq!(derived.state, "rejected");
-        assert!(derived.contested.is_none(), "one candidate is not a race");
-    }
-
-    /// An uncontested walk reports no contention, so `contested.is_some()` is a
-    /// safe test for "do not pay out on this".
-    #[test]
-    fn an_ordinary_stall_is_not_contention() {
-        let derived = fold("review", &review_flow(None), &[]);
-        assert_eq!(derived.state, "review");
-        assert!(derived.contested.is_none());
-    }
-
-    #[test]
-    fn reachability_follows_declared_transitions_only() {
-        let review = review_flow(None);
-        assert!(
-            reachable(&review, "changes_requested", "approved"),
-            "via the cycle"
-        );
-        assert!(
-            reachable(&review, "approved", "approved"),
-            "a state reaches itself"
-        );
-        assert!(
-            !reachable(&review, "approved", "review"),
-            "approved is terminal"
-        );
-        let triage = terminal_branch_flow();
-        assert!(
-            !reachable(&triage, "approved", "rejected"),
-            "terminal siblings"
-        );
-    }
-
-    /// A flow with a back-edge `approved → triage` that is declared in the
-    /// schema but has zero atoms — a phantom escape route that makes
-    /// `reachable()` report `rejected` as recoverable from `approved`.
-    /// With `feasibly_reachable()` (no atoms on the back-edge) the branch is
-    /// correctly treated as foreclosed and contention is reported.
-    fn phantom_back_edge_flow() -> SHACLFlow {
-        serde_json::from_value(serde_json::json!({
-            "name": "Triage",
-            "namespace": "triage://",
-            "states": [
-                { "name": "triage",   "value": 0.0 },
-                { "name": "approved", "value": 1.0 },
-                { "name": "rejected", "value": 0.0 },
-            ],
-            "transitions": [
-                { "action_name": "Approve", "from_state": "triage",   "to_state": "approved", "actions": [] },
-                { "action_name": "Reject",  "from_state": "triage",   "to_state": "rejected", "actions": [] },
-                // Back-edge: a flow author declares this, making `rejected`
-                // graph-reachable from `approved`; but if nobody votes on it
-                // the cycle is phantom.
-                { "action_name": "Reset",   "from_state": "approved", "to_state": "triage",   "actions": [] },
-            ],
-        }))
-        .expect("fixture flow parses")
-    }
-
-    /// **Regression for #999.** A back-edge with zero atoms is graph-reachable
-    /// but not feasibly traversable. The engine must still report contention
-    /// rather than silently take the earliest edge.
-    ///
-    /// This test fails on the unfixed code (which uses the pure-graph
-    /// `reachable()`) and must pass after the fix.
-    #[test]
-    fn phantom_back_edge_with_no_atoms_does_not_suppress_contention() {
-        let flow = phantom_back_edge_flow();
-        let atoms = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-            // No atom for `approved → triage`; the back-edge is declared but phantom.
-        ];
-
-        let derived = fold("triage", &flow, &atoms);
-
-        assert_eq!(derived.state, "triage", "walk must not leave triage");
-        assert!(derived.settled.is_empty(), "no edge may be taken");
-        let contention = derived
-            .contested
-            .expect("phantom back-edge must not suppress contention");
-        assert_eq!(contention.from_state, "triage");
-        let targets: Vec<&str> = contention
-            .candidates
-            .iter()
-            .map(|e| e.to_state.as_str())
-            .collect();
-        assert_eq!(
-            targets,
-            vec!["approved", "rejected"],
-            "both candidates are visible in the reported contention"
-        );
-    }
-
-    /// When the back-edge in `phantom_back_edge_flow` actually has atoms, the
-    /// cycle is confirmed live: `rejected` is feasibly reachable from
-    /// `approved`, so taking the earliest edge is correct and no contention is
-    /// reported.
-    #[test]
-    fn confirmed_back_edge_with_atoms_is_not_contention() {
-        let flow = phantom_back_edge_flow();
-        let atoms = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-            vouched("a://reset", "approved", "triage", &[(ALICE, T3)]),
-        ];
-
-        let derived = fold("triage", &flow, &atoms);
-
-        assert!(
-            derived.contested.is_none(),
-            "back-edge has atoms: the cycle is live, so no contention"
-        );
-        // The fold walks: triage→approved (T1), then approved→triage (T3 via back-edge),
-        // then triage→rejected (T3, since approved's atom is now consumed). No contention
-        // at any step; the cycle is confirmed live by the back-edge atom.
-        assert_eq!(
-            derived.state, "rejected",
-            "cycle completes: approved consumed, rejected fires on revisit"
-        );
-    }
-
-    /// The separating case between "someone proposed" and "the cycle is
-    /// live": an atom EXISTS on the back-edge but carries zero admitted
-    /// votes (a vote-less proposal, or one voted only by DIDs the role rule
-    /// excludes — `eligible_votes` is the role-gated list). Proposing is
-    /// unilateral, so it must not turn a reported Contention back into a
-    /// silent adjudication. This test passes under the eligible-vote
-    /// threshold and fails under a mere atom-existence check.
-    #[test]
-    fn vote_less_back_edge_atom_does_not_suppress_contention() {
-        let flow = phantom_back_edge_flow();
-        let atoms = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-            // Atom exists on the back-edge, but nobody's vote was admitted.
-            vouched("a://reset", "approved", "triage", &[]),
-        ];
-
-        let derived = fold("triage", &flow, &atoms);
-
-        assert_eq!(derived.state, "triage", "walk must not leave triage");
-        let contention = derived
-            .contested
-            .expect("a vote-less proposal on the back-edge must not suppress contention");
-        assert_eq!(contention.from_state, "triage");
-    }
-
-    /// `feasibly_reachable` returns true when every hop on the path has atoms,
-    /// false when a hop is phantom, and always true when `from == to`.
-    #[test]
-    fn feasibly_reachable_requires_atom_evidence_on_every_hop() {
-        let flow = phantom_back_edge_flow();
-
-        // Atoms only for triage → {approved,rejected}; back-edge is phantom.
-        let without_back = vec![
-            vouched("a://approve", "triage", "approved", &[(ALICE, T1)]),
-            vouched("a://reject", "triage", "rejected", &[(BOB, T2)]),
-        ];
-        // rejected is NOT feasibly reachable from approved (back-edge phantom).
-        assert!(
-            !feasibly_reachable(&flow, "approved", "rejected", &without_back),
-            "phantom hop blocks the path"
-        );
-        // A state is always reachable from itself.
-        assert!(
-            feasibly_reachable(&flow, "approved", "approved", &without_back),
-            "same-state is trivially reachable"
-        );
-
-        // Add an atom for the back-edge; now the path is confirmed.
-        let mut with_back = without_back.clone();
-        with_back.push(vouched("a://reset", "approved", "triage", &[(ALICE, T3)]));
-        assert!(
-            feasibly_reachable(&flow, "approved", "rejected", &with_back),
-            "confirmed back-edge makes rejected reachable"
-        );
-        // Still not reachable from a dead end.
-        assert!(
-            !feasibly_reachable(&flow, "rejected", "approved", &with_back),
-            "rejected has no outgoing transitions"
-        );
     }
 }

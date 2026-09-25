@@ -12,16 +12,14 @@ import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
-
-/** One fired flow transition, as returned by `perspective.acceptFlowProposal`
- *  (and, engine-side, by every consensus pass). */
-export interface FlowFireOutcome {
-    instanceUri: string;
-    fromState: string;
-    toState: string;
-    voters: string[];
-    contributingProposalUris: string[];
-}
+// FlowInstance.ts owns the flow-proposal result types so they sit next to the
+// `proposeTransition()` API they describe. `import type` keeps this out of the
+// runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
+// would otherwise be a cycle).
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
@@ -405,6 +403,18 @@ export class PerspectiveClient {
         )
     }
 
+    async proposeFlowTransition(
+        uuid: string,
+        instanceUri: string,
+        toState: string,
+        rationale?: string,
+        outputs?: FlowOutputRef[],
+    ): Promise<FlowProposeResult> {
+        return this.#apiClient.call<FlowProposeResult>(
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
+        )
+    }
+
     async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
         return this.#apiClient.call<FlowFireOutcome[]>(
             'perspective.acceptFlowProposal', { uuid, proposalUri },
@@ -421,6 +431,30 @@ export class PerspectiveClient {
             'perspective.rejectFlowProposal', { uuid, proposalUri },
         )
         return result.retractedLinks
+    }
+
+    /** Re-decide a flow receipt under this perspective's own flow catalogue. */
+    async verifyFlowReceipt(uuid: string, receipt: object): Promise<FlowReceiptVerdict> {
+        return this.#apiClient.call<FlowReceiptVerdict>(
+            'perspective.verifyFlowReceipt', { uuid, receipt },
+        )
+    }
+
+    /** The instances that are, as they stand, valid outputs of `flow`
+     *  (optionally: of runs settled into terminal state `state`). */
+    async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return this.#apiClient.call<FlowValidOutput[]>(
+            'perspective.flowValidOutputs', { uuid, flow, state },
+        )
+    }
+
+    /** Mint and store the receipt for a completed flow run. Fails while the
+     *  run has not settled into a terminal state, and when an output's
+     *  content no longer matches what the quorum committed to. */
+    async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
+        return this.#apiClient.call<FlowMintedReceipt>(
+            'perspective.mintFlowReceipt', { uuid, instanceUri },
+        )
     }
 
     /**

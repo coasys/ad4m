@@ -791,6 +791,11 @@ impl AIService {
                 &api.api_key,
                 api.base_url,
             )),
+            ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
+                &api.api_key,
+                api.base_url,
+                api.max_num_ctx,
+            )),
         };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
         Ok(client)
@@ -2675,6 +2680,7 @@ mod tests {
             api_key: api_key.to_string(),
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
+            max_num_ctx: None,
         }
     }
 
