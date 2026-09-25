@@ -333,6 +333,10 @@ This powers integrations like the [OpenClaw AD4M Plugin](https://github.com/open
 # Run JS integration tests
 pnpm test
 
+# Run the integration suites against a built executor (cd tests/js)
+pnpm run test-main                        # local languages, no Holochain (CI: integration-tests-js)
+pnpm run test-main-multi-node-holochain   # multi-node suites over Holochain
+
 # Run Rust tests (--test-threads=1 required: shared state)
 cd rust-executor && cargo test --release -- --test-threads=1
 

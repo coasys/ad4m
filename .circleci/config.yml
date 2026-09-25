@@ -308,13 +308,16 @@ jobs:
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
 
-  integration-tests-local:
+  # The regular JS integration suite: local bootstrap languages only, no
+  # Holochain conductor. Two-executor suites share languages and
+  # neighbourhoods through the shared stores (tests/js/utils/sharedStores.ts).
+  integration-tests-js:
     machine: true
     resource_class: coasys/marvin-light
     steps:
       - setup_local_integration_test_environment
       - run:
-          name: Run local integration tests (no Holochain)
+          name: Run JS integration tests (local languages, no Holochain)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
@@ -337,17 +340,19 @@ jobs:
           path: /tmp/test-artifacts
           destination: test-logs
 
-  integration-tests-holochain:
+  # Multi-node suites that need Holochain: links syncing between executors
+  # through p-diff-sync (tests/js/tests/integration.test.ts).
+  integration-tests-multi-node-holochain:
     machine: true
     resource_class: coasys/marvin-light
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run Holochain integration tests (Alice + Bob)
+          name: Run multi-node Holochain integration tests (Alice + Bob)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
-            cd ./tests/js && pnpm run test-main-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
@@ -517,10 +522,10 @@ workflows:
       - rust-tests:
           requires:
             - build
-      - integration-tests-local:
+      - integration-tests-js:
           requires:
             - build
-      - integration-tests-holochain:
+      - integration-tests-multi-node-holochain:
           requires:
             - build
       - integration-tests-multi-user-simple:

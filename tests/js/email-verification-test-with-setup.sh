@@ -47,6 +47,8 @@ echo "  - Preparing test directory..."
 LANG_FLAGS=""
 if [[ "$*" == *"--local"* ]]; then
     LANG_FLAGS="--local"
+    # publishTestLangs.ts and the test start their executors without Holochain
+    export LOCAL_MODE=true
     echo "  - Using LOCAL bootstrap languages (no Holochain)"
 fi
 

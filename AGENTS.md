@@ -64,7 +64,20 @@ After the Holochain 0.7.0 update with PR #5550:
 
 ## Running Integration Tests
 
-The integration tests are in `tests/js` and run with `pnpm run test-main`.
+The integration tests are in `tests/js`. Two suites:
+
+| Script (in `tests/js`) | CI job | Languages |
+|---|---|---|
+| `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` | `bootstrap-languages/local/*`, executors run with `--run-holochain false` |
+| `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Holochain agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
+
+`integration-tests-js` is the regular suite and the required check. Put a
+two-executor test there when it only needs one executor to see languages or
+neighbourhoods the other published: `startExecutor` points the local
+language-language and neighbourhood store of every executor at shared
+directories under `tests/js/tst-tmp` (`tests/js/utils/sharedStores.ts`). A test
+that needs links to sync between executors goes in the multi-node Holochain
+suite.
 
 ### Port Conflicts
 
