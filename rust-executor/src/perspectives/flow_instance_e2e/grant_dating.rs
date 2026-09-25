@@ -137,8 +137,11 @@ async fn a_non_granters_back_dated_grant_link_does_not_move_the_edge() {
 /// The same back-dating with a forged signature: a link that claims to be
 /// admin's and is not.
 ///
-/// Red on the base: grant links were not signature-checked, so the forgery
-/// dated the grant an hour before the vote.
+/// Red on this branch's first base (00f35b740): grant links were not
+/// signature-checked, so the forgery dated the grant an hour before the vote.
+/// Green on the current base, because `model_query` now withholds unverified
+/// `__links` rows (#1123); this pins that the dating rule's own signature
+/// check holds it too.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_forged_back_dated_grant_link_does_not_move_the_edge() {
     let admin = TestSigner::generate();
