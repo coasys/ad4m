@@ -46,10 +46,13 @@ pub use outputs::{
 pub use uri::proposal_uri;
 
 use super::time::parse_link_timestamp;
-use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
+use crate::perspectives::flow_classes::{
+    FLOW_TRANSITION_PROPOSAL_CLASS, PROPOSAL_EVIDENCE_PREDICATE,
+};
 use crate::perspectives::model_query::utils::parse_literal_value;
+use crate::perspectives::model_query::LINKS_KEY;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
+use crate::types::{DecoratedLinkExpression, LinkStatus};
 use outputs::named_outputs;
 use serde::{Deserialize, Serialize};
 
@@ -470,44 +473,59 @@ fn earliest_proposer_timestamp(
         .map(|(_, ts)| ts)
 }
 
-/// Enumerate one instance's proposals and read each one's links.
+/// Every predicate a proposal's links are read on: each property of the
+/// `FlowTransitionProposal` class, plus the two links the class does not
+/// declare, the votes ([`ACCEPTED_BY_PREDICATE`]) and this replica's fired mark
+/// ([`RESOLVED_AS_PREDICATE`]).
 ///
-/// **The dividing principle.** The halves split exactly where hydration starts
-/// destroying what the caller needs. Half 1 only has to know that a proposal
-/// *exists* and belongs to this instance — a fact the model layer preserves
-/// exactly, so discovery belongs there. Half 2 has to know *who wrote each
-/// individual field, and whether that link's signature verified* — per-link
-/// facts hydration collapses away, so field-reading has to stay on raw links.
+/// The fields an atom reads are all here, and so is every other predicate the
+/// engine writes on a proposal, because [`TransitionAtom::proposed_at`] is the
+/// earliest of the proposer's own links on *any* predicate. A link on a
+/// predicate outside this list is not read. Only the proposer's own links can
+/// date a proposal, so the one thing such a link could have moved is a
+/// timestamp the proposer already sets. `proposal_link_predicates_cover_the_class`
+/// ties the list to the class's SDNA.
+pub const PROPOSAL_LINK_PREDICATES: [&str; 13] = [
+    FLOW_INSTANCE_PREDICATE,
+    FROM_STATE_PREDICATE,
+    TO_STATE_PREDICATE,
+    PROPOSER_PREDICATE,
+    PROPOSAL_EVIDENCE_PREDICATE,
+    EVIDENCE_HASHES_PREDICATE,
+    OUTPUT_PREDICATE,
+    OUTPUTS_HASH_PREDICATE,
+    PROPOSAL_NONCE_PREDICATE,
+    "ad4m://flow/run_uri",
+    "ad4m://flow/rationale",
+    ACCEPTED_BY_PREDICATE,
+    RESOLVED_AS_PREDICATE,
+];
+
+/// Enumerate one instance's proposals and read each one's links, in one
+/// `model_query`.
 ///
-/// **Half 1 — class query (changed in #990, `cda1d95ea`):** a `model_query` over the
-/// hard-wired `FlowTransitionProposal` subject class, filtered by
-/// `flowInstance == instance_uri`, yields the URIs of every proposal that
-/// belongs to this instance. Using the class query rather than a raw
-/// `get_links` scopes the result to properly-typed proposals and reuses the
-/// machinery already validated by `flow_evaluator`'s `run_query`.
+/// The query selects the `FlowTransitionProposal` instances whose
+/// `flowInstance` is `instance_uri` and asks for their links on
+/// [`PROPOSAL_LINK_PREDICATES`] (`links`, #1117). It reads only each
+/// instance's `id` and its `__links` rows, never a hydrated value.
 ///
-/// This narrows the *pointer* set, not the atom set. Class conformance emits a
-/// triple per required property, so a half-written proposal carrying only
-/// `flowInstance` is no longer discovered — but [`TransitionAtom::from_links`]
-/// already rejected that shape with `MissingField`, so the fold never saw it
-/// either way. The `where` is exists-style (`?source <ad4m://flow/instance>
-/// …`) and this function reads only `instances[].id`, never the hydrated
-/// `flowInstance` value, so a third-party re-point cannot drop a real proposal
-/// from discovery — that is the same attack half 2 refuses to hydrate.
+/// **Why the rows and not the instance.** Hydration folds a proposal into one
+/// object: a scalar is last-write-wins across authors, and `author` is the
+/// author of the earliest link. Read that way, a later third-party `to_state`
+/// would be the value while the proposal is still attributed to its proposer
+/// (#1046 §1). The atom rules need each link's own author and signature
+/// verdict, which is what a `__links` row is: a
+/// [`DecoratedLinkExpression`], every author's links kept apart, each with the
+/// verdict the store computed from its signature and its `status`.
 ///
-/// **Half 2 — raw `get_links` per proposal (must stay raw):** model_query
-/// hydration collapses each instance to a single `author` field (the earliest
-/// author across all links, `model_query/hydration.rs:171-183,350`) and
-/// carries no per-link signature verdict — its hydrated record is
-/// `(predicate, target, author, timestamp)`, and `proof.valid` is never in it.
-/// Both identity checks below run through [`signed_by`], which needs both
-/// dropped fields at once: `l.author == did` **and** `proof.valid ==
-/// Some(true)`. Worse than lossy, hydrating would *invert* [`unique_field`]:
-/// scalar properties last-write-win on timestamp with no author filter, so a
-/// later third-party `to_state` becomes the hydrated value while `author`
-/// stays the earliest DID — the forgery would be served back as the
-/// proposer's own word. This half cannot go away until instances carry
-/// per-property `(author, proof.valid)`.
+/// **What the query withholds.** A link whose signature does not verify is
+/// neither in a row nor able to select a proposal (the `model_query` default,
+/// #1113, #1120). [`signed_by`] ignores such a link anyway, so no atom changes,
+/// but a read-set no longer carries forged material for every receipt reader
+/// to re-verify.
+///
+/// A requested key missing from `__links`, or a row that is not a link, is an
+/// `Err`, never "no links": an empty `acceptedBy` would silently drop votes.
 pub async fn load_proposal_links(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
@@ -517,9 +535,11 @@ pub async fn load_proposal_links(
             "load_proposal_links: instance_uri must not be empty"
         ));
     }
-
-    // Half 1: discovery through the class query.
-    let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
+    let query_json = serde_json::json!({
+        "where": { "flowInstance": instance_uri },
+        "links": PROPOSAL_LINK_PREDICATES,
+    })
+    .to_string();
     let raw = perspective
         .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
         .await
@@ -527,34 +547,49 @@ pub async fn load_proposal_links(
     let result: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
         anyhow::anyhow!("load_proposal_links: model_query returned invalid JSON: {e:#}")
     })?;
-    let mut uris: Vec<String> = result
+    proposal_links_of(&result)
+}
+
+/// Each instance's `id` and its links on [`PROPOSAL_LINK_PREDICATES`], from
+/// one `model_query` result, sorted by URI.
+fn proposal_links_of(
+    result: &serde_json::Value,
+) -> anyhow::Result<Vec<(String, Vec<DecoratedLinkExpression>)>> {
+    let instances = result
         .get("instances")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| {
             anyhow::anyhow!("load_proposal_links: model_query returned no `instances` array")
-        })?
-        .iter()
-        .filter_map(|inst| {
-            inst.get("id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .collect();
-    uris.sort();
-    uris.dedup();
-
-    // Half 2: raw links per proposal, never hydrated (see the doc above).
-    let mut out = Vec::with_capacity(uris.len());
-    for uri in uris {
-        let links = perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.clone()),
-                ..Default::default()
-            })
-            .await
-            .map_err(|e| anyhow::anyhow!("load_proposal_links: get_links({uri}) failed: {e:#}"))?;
-        out.push((uri, links));
+        })?;
+    let mut out: Vec<(String, Vec<DecoratedLinkExpression>)> = Vec::new();
+    for instance in instances {
+        let Some(uri) = instance.get("id").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let mut links = Vec::new();
+        for predicate in PROPOSAL_LINK_PREDICATES {
+            let rows = instance
+                .get(LINKS_KEY)
+                .and_then(|l| l.get(predicate))
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "load_proposal_links: {uri} has no `{LINKS_KEY}.{predicate}` rows; \
+                         reading that as \"no links\" could drop votes"
+                    )
+                })?;
+            for row in rows {
+                links.push(serde_json::from_value(row.clone()).map_err(|e| {
+                    anyhow::anyhow!(
+                        "load_proposal_links: a `{predicate}` row of {uri} is not a link ({e}): {row}"
+                    )
+                })?);
+            }
+        }
+        out.push((uri.to_string(), links));
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
     Ok(out)
 }
 
@@ -562,6 +597,80 @@ pub async fn load_proposal_links(
 mod tests {
     use super::super::test_support::*;
     use super::*;
+    /// Every property path of the class, and the two links it does not
+    /// declare, is read. A path missing here would be a proposer link the
+    /// read drops, and `proposed_at` is the earliest of those.
+    #[test]
+    fn proposal_link_predicates_cover_the_class() {
+        let sdna: serde_json::Value =
+            serde_json::from_str(crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_SDNA)
+                .expect("the class SDNA parses");
+        let mut expected: Vec<&str> = sdna["properties"]
+            .as_array()
+            .expect("properties")
+            .iter()
+            .map(|p| p["path"].as_str().expect("path"))
+            .chain([ACCEPTED_BY_PREDICATE, RESOLVED_AS_PREDICATE])
+            .collect();
+        expected.sort();
+        let mut read = PROPOSAL_LINK_PREDICATES.to_vec();
+        read.sort();
+        assert_eq!(read, expected);
+    }
+
+    fn query_result(links: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "instances": [{ "id": "proposal://p1", "__links": links }] })
+    }
+
+    fn all_keys_empty() -> serde_json::Map<String, serde_json::Value> {
+        PROPOSAL_LINK_PREDICATES
+            .iter()
+            .map(|p| (p.to_string(), serde_json::json!([])))
+            .collect()
+    }
+
+    /// A requested key missing from `__links` is an error, not "no links":
+    /// no `acceptedBy` rows read as none would drop every vote. A row that is
+    /// not a link is an error too. The rows of every key are one list.
+    #[test]
+    fn proposal_rows_missing_or_malformed_are_errors_not_no_links() {
+        let mut missing = all_keys_empty();
+        missing.remove(ACCEPTED_BY_PREDICATE);
+        let err = proposal_links_of(&query_result(missing.into()))
+            .expect_err("a missing key is an error");
+        assert!(
+            err.to_string().contains(ACCEPTED_BY_PREDICATE),
+            "names the key: {err}"
+        );
+
+        let mut malformed = all_keys_empty();
+        malformed.insert(
+            TO_STATE_PREDICATE.to_string(),
+            serde_json::json!([{ "author": ALICE }]),
+        );
+        let err = proposal_links_of(&query_result(malformed.into()))
+            .expect_err("a row that is not a link is an error");
+        assert!(err.to_string().contains("not a link"), "{err}");
+
+        let honest = honest_proposal(ALICE, "review", "approved", "h1", T1);
+        let mut rows = all_keys_empty();
+        for l in &honest {
+            rows[l.data.predicate.as_deref().unwrap()]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::to_value(l).unwrap());
+        }
+        let read = proposal_links_of(&query_result(rows.into())).expect("rows parse");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].0, "proposal://p1");
+        assert_eq!(read[0].1.len(), honest.len());
+        assert_eq!(
+            atom_of(&read[0].1),
+            atom_of(&honest),
+            "the rows read back as the same atom"
+        );
+    }
+
     #[test]
     fn an_engine_minted_proposal_is_an_atom_and_its_proposer_is_its_first_voter() {
         let atom = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1))
