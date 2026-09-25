@@ -1,5 +1,5 @@
 //! Concurrency contract of `run_dispatch_loop` (#1133), checked against a mock
-//! `ZomeDispatch` so no conductor is needed.
+//! `RequestDispatch` so no conductor is needed.
 //!
 //! Invariants proved here:
 //! 1. a cheap zome call is answered while a slow one is still running
@@ -60,7 +60,7 @@ impl MockDispatch {
 }
 
 #[async_trait]
-impl ZomeDispatch for MockDispatch {
+impl RequestDispatch for MockDispatch {
     async fn handle(&self, request: HolochainServiceRequest) {
         match request {
             HolochainServiceRequest::CallZomeFunction {

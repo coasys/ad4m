@@ -2,7 +2,7 @@
 //!
 //! `HolochainService::init` runs one `run_dispatch_loop` per conductor on the service's own
 //! tokio runtime. The loop takes `Envelope`s off the channel every
-//! `HolochainServiceInterface` method writes to and runs them against a `ZomeDispatch`:
+//! `HolochainServiceInterface` method writes to and runs them against a `RequestDispatch`:
 //! `ConductorDispatch` in production (the per-variant `match` that used to live inline in
 //! `init`), a mock in `tests.rs`.
 //!
@@ -36,7 +36,7 @@ pub(crate) const ZOME_CALL_CONCURRENCY: usize = 32;
 /// exists for the ones it will not run); a dropped oneshot surfaces to the caller as a
 /// channel error with no reason attached.
 #[async_trait]
-pub(crate) trait ZomeDispatch: Send + Sync + 'static {
+pub(crate) trait RequestDispatch: Send + Sync + 'static {
     async fn handle(&self, request: HolochainServiceRequest);
 }
 
@@ -60,7 +60,7 @@ pub(crate) trait ZomeDispatch: Send + Sync + 'static {
 /// Once a request has what it waited for (the drain, the write lock, or a permit), `admit`
 /// logs its time in queue (`debug`; `warn` above 1 s) and, if its `deadline` has passed,
 /// answers it with an error so it never reaches the dispatcher.
-pub(crate) async fn run_dispatch_loop<D: ZomeDispatch>(
+pub(crate) async fn run_dispatch_loop<D: RequestDispatch>(
     mut receiver: UnboundedReceiver<Envelope>,
     dispatcher: Arc<D>,
 ) {
@@ -163,7 +163,7 @@ fn log_queue_wait(name: &str, waited: Duration, in_flight: usize) {
     }
 }
 
-/// The production `ZomeDispatch`: each request variant, its timeout, and the call into
+/// The production `RequestDispatch`: each request variant, its timeout, and the call into
 /// `HolochainService` or the conductor.
 pub(crate) struct ConductorDispatch {
     pub service: HolochainService,
@@ -173,7 +173,7 @@ pub(crate) struct ConductorDispatch {
 }
 
 #[async_trait]
-impl ZomeDispatch for ConductorDispatch {
+impl RequestDispatch for ConductorDispatch {
     async fn handle(&self, message: HolochainServiceRequest) {
         let service = &self.service;
         let new_app_ids_sender = &self.new_app_ids;
