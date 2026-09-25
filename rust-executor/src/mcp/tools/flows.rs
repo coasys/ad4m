@@ -704,4 +704,187 @@ mod tests {
             "Local cache 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Whose cache a tool reads
+    // -----------------------------------------------------------------------
+
+    /// Unregisters the fixture perspective when the test ends.
+    struct PerspectiveGuard(String);
+    impl Drop for PerspectiveGuard {
+        fn drop(&mut self) {
+            crate::perspectives::unregister_perspective(&self.0);
+        }
+    }
+
+    /// The Delivery flow with one instance whose only `currentState` link is
+    /// `plant`, written by `write`, and a handler whose caller is the main
+    /// agent, who has never read the instance. The fold has no proposals to
+    /// count, so the derived state is `identified`.
+    async fn instance_with_a_foreign_cache(
+        plant: impl FnOnce(
+            &mut PerspectiveInstance,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>,
+    ) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+        use crate::mcp::server::McpContext;
+        use tokio::sync::RwLock;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for link in
+            parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+        // The instance as sync delivers it: no cache from anyone.
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            FOREIGN_BASE,
+            "identified",
+            "foreign-cache-inst-1",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+        let own = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(inst_uri.clone()),
+                predicate: Some(
+                    crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        perspective
+            .remove_links(own.into_iter().map(Into::into).collect(), None)
+            .await
+            .expect("drop the minter's cache");
+        plant(&mut perspective, inst_uri).await;
+
+        let uuid = perspective.persisted.lock().await.uuid.clone();
+        crate::perspectives::register_perspective(uuid.clone(), perspective);
+        let handler = Ad4mMcpHandler::new(McpContext {
+            admin_credential: Some("test-admin".to_string()),
+            auth_token: std::sync::Arc::new(RwLock::new(Some("test-admin".to_string()))),
+            dynamic_class_tools: false,
+        });
+        (handler, uuid.clone(), PerspectiveGuard(uuid))
+    }
+
+    const FOREIGN_BASE: &str = "ad4m://task/foreign-cache";
+
+    /// Mallory, a second managed user, writes a Local `currentState` of her
+    /// choosing: what `FlowInstanceRecord.create({ currentState })` or a
+    /// plain add lets any co-owner write.
+    fn mallory_plants(
+        perspective: &mut PerspectiveInstance,
+        inst_uri: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let email = "mallory-mcp@1058.test";
+            crate::agent::AgentService::ensure_user_key_exists(email).expect("key");
+            let mallory = crate::agent::AgentContext::for_user_email(email.to_string());
+            perspective
+                .add_link(
+                    crate::types::Link {
+                        source: inst_uri,
+                        predicate: Some(
+                            crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE
+                                .to_string(),
+                        ),
+                        target: "literal:string:scoped".to_string(),
+                    },
+                    LinkStatus::Local,
+                    None,
+                    &mallory,
+                )
+                .await
+                .expect("a co-owner may write a Local link of their own");
+        })
+    }
+
+    fn params(uuid: &str) -> Parameters<FlowExprParams> {
+        Parameters(FlowExprParams {
+            perspective_id: uuid.to_string(),
+            flow_name: "Delivery".to_string(),
+            expression_address: FOREIGN_BASE.to_string(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_state_ignores_a_co_owners_cache() {
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(mallory_plants).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
+        assert_eq!(
+            out["state"], "identified",
+            "the caller's derived state, not the co-owner's cache: {out}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_actions_ignores_a_co_owners_cache() {
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(mallory_plants).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_actions(params(&uuid)).await).expect("JSON");
+        assert_eq!(out["current_state"], "identified", "{out}");
+        let actions = out["available_actions"].as_array().expect("actions");
+        assert_eq!(
+            actions.len(),
+            1,
+            "the transitions leaving the derived state: {out}"
+        );
+        assert_eq!(actions[0]["action"], "Scope");
+    }
+
+    /// A Local link that names the caller as its author counts as the
+    /// caller's cache only when the caller's signature on it verifies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_state_ignores_a_cache_the_caller_did_not_sign() {
+        fn unsigned_in_callers_name(
+            perspective: &mut PerspectiveInstance,
+            inst_uri: String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                let main_did =
+                    crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
+                        .expect("main DID");
+                perspective
+                    .add_link_expression(
+                        crate::types::LinkExpression {
+                            author: main_did,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            data: crate::types::Link {
+                                source: inst_uri,
+                                predicate: Some(
+                                    crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE
+                                        .to_string(),
+                                ),
+                                target: "literal:string:scoped".to_string(),
+                            },
+                            proof: crate::types::ExpressionProof {
+                                key: "not-the-callers-key".to_string(),
+                                signature: "not-the-callers-signature".to_string(),
+                            },
+                            status: None,
+                        },
+                        LinkStatus::Local,
+                        None,
+                    )
+                    .await
+                    .expect("add_link_expression");
+            })
+        }
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(unsigned_in_callers_name).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
+        assert_eq!(out["state"], "identified", "{out}");
+    }
 }

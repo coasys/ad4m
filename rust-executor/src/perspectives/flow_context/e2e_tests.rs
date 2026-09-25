@@ -293,3 +293,42 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         "Local cache at 'scoped' must be returned (fold would give 'identified' — no proposals)"
     );
 }
+
+/// A co-owner's Local `currentState` is theirs, not the flow's state. Mallory
+/// starts an instance with a `currentState` of her choosing (what
+/// `FlowInstanceRecord.create({ currentState })` lets any co-owner write).
+/// The flow context that goes into another user's interpretation prompt is
+/// the derived state, not her value.
+#[tokio::test(flavor = "multi_thread")]
+async fn gather_active_flow_contexts_ignores_a_co_owners_cache() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    for link in parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse") {
+        perspective
+            .add_link(link, LinkStatus::Local, None, &ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
+    let mallory_email = "mallory-loader@1058.test";
+    crate::agent::AgentService::ensure_user_key_exists(mallory_email).expect("key");
+    let mallory = crate::agent::AgentContext::for_user_email(mallory_email.to_string());
+
+    let base_uri = "ad4m://task/planted-cache";
+    mint_flow_instance(
+        &mut perspective,
+        "delivery://DeliveryFlow",
+        base_uri,
+        "scoped",
+        "planted-cache-inst-1",
+        None,
+        &mallory,
+    )
+    .await
+    .expect("mint_flow_instance as the co-owner");
+
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    assert_eq!(contexts.len(), 1, "{contexts:?}");
+    assert_eq!(
+        contexts[0].current_state, "identified",
+        "the fold (no proposals: genesis), not the co-owner's cache"
+    );
+}

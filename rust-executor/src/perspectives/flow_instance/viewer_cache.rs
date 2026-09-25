@@ -404,6 +404,51 @@ mod tests {
         );
     }
 
+    /// Restores free hosting when a test that switched it off ends.
+    struct FreeHostingOff;
+    impl FreeHostingOff {
+        fn new() -> Self {
+            crate::db::Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(false))
+                .expect("switch free hosting off");
+            FreeHostingOff
+        }
+    }
+    impl Drop for FreeHostingOff {
+        fn drop(&mut self) {
+            let _ = crate::db::Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(true));
+        }
+    }
+
+    /// The cache refresh a read does is bookkeeping, not a user write: a
+    /// user without credits on a host with free hosting off can still read,
+    /// and the refresh is not billed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_refresh_needs_no_credits_and_is_not_billed() {
+        let (mut perspective, _main_ctx, _main_did, uri) = seeded().await;
+        let (other_ctx, other_did) = other_user();
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.add_user(OTHER_EMAIL, &other_did, "pw")?;
+            db.set_user_credits(OTHER_EMAIL, 0.0)
+        })
+        .expect("a user row with no credits");
+        let _free_hosting_off = FreeHostingOff::new();
+        crate::billing::test_seam::reset();
+
+        let written = sync_for_context(&mut perspective, "{}", &other_ctx)
+            .await
+            .expect("a read refresh does not need credits");
+        assert_eq!(written, 1);
+        assert_eq!(
+            state_seen_by(&perspective, &uri, &other_did).await,
+            "identified"
+        );
+        let billed: Vec<_> = crate::billing::test_seam::calls()
+            .into_iter()
+            .filter(|c| c.email == OTHER_EMAIL)
+            .collect();
+        assert!(billed.is_empty(), "the refresh is not billed: {billed:?}");
+    }
+
     #[test]
     fn the_narrowed_query_keeps_only_the_selecting_leaves() {
         assert_eq!(narrowed_query("{}"), "{}");
