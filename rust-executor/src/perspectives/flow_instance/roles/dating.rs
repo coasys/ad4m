@@ -182,17 +182,20 @@ fn did_fields(where_clause: &Map<String, Value>, did: &str, out: &mut Vec<String
     }
 }
 
-/// Whether the rule's `author`, at any level, names `$did`. A level whose
-/// DID property is itself called `author` has no author condition.
+/// Whether the rule's `author`, at any level, names `$did`. `didProperty:
+/// "author"` says the same thing (the translator writes it as
+/// `author: <did>`); a `where.author` beside it is a field, not an author
+/// condition.
 fn authored_by_grantee(query: &ModelQuery, inherited_did_property: Option<&str>) -> bool {
     let did_property = query.did_property.as_deref().or(inherited_did_property);
-    let own = did_property != Some("author")
-        && query
-            .r#where
-            .as_ref()
-            .and_then(|w| w.get("author"))
-            .and_then(|c| serde_json::to_string(c).ok())
-            .is_some_and(|c| c.contains("$did"));
+    let own = query.did_property.as_deref() == Some("author")
+        || (did_property != Some("author")
+            && query
+                .r#where
+                .as_ref()
+                .and_then(|w| w.get("author"))
+                .and_then(|c| serde_json::to_string(c).ok())
+                .is_some_and(|c| c.contains("$did")));
     own || query
         .or
         .iter()

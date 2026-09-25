@@ -31,8 +31,9 @@ pub struct ProposalLinks {
 ///
 /// - `proposals` — every verified link of every proposal, from every author,
 ///   each with its own signature verdict.
-/// - `role_grants` — the grant links and revocation tombstones behind each
-///   voter's membership, carried *before* any authority filter.
+/// - `role_grants` — the links that date each voter's grant and the
+///   revocation tombstones that end it; tombstones are carried *before* any
+///   authority filter.
 ///
 /// No derived value travels. Grant windows, revocation times and the
 /// authority rule are all recomputed by the reader
@@ -42,11 +43,14 @@ pub struct ProposalLinks {
 /// asserted field *beside* the links was considered and rejected: a second,
 /// weaker trust path is one a verifier can silently fall back to.
 ///
-/// Exactly two residues stay asserted, and each is named where it lives:
+/// Exactly three residues stay asserted, and each is named where it lives:
 /// that a matched instance really satisfied the role query
 /// (`model_query` hydration witnesses no link — the model-query-signatures
-/// gap), and **completeness** — a minter can withhold a tombstone it
-/// dislikes, which absence of a link can never disprove.
+/// gap); that a carried grant link sits on one of the rule's DID fields (the
+/// reader re-checks its instance, target, author and signature, but a field
+/// name maps to a predicate only through the class shape, which a pure
+/// reader does not hold); and **completeness** — a minter can withhold a
+/// tombstone it dislikes, which absence of a link can never disprove.
 ///
 /// # Reading one that arrived from elsewhere
 ///

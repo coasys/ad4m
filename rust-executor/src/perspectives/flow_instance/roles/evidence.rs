@@ -30,7 +30,9 @@ pub struct RoleInstanceHistory {
     /// and on carried material they would be the minter's claims, so the type
     /// refuses to carry them (see
     /// [`RoleGrantLinks`](crate::perspectives::flow_evaluator::RoleGrantLinks)).
-    /// The reader re-applies every filter. Empty when the rule has no DID
+    /// The reader re-applies every filter except the predicate, which only
+    /// the class shape maps to a field (a residue named on
+    /// [`ReadSet`](super::super::ReadSet)). Empty when the rule has no DID
     /// field.
     pub grant_links: Vec<LinkExpression>,
     /// Under `author: "$did"`, the grantee's own links on the instance
@@ -741,7 +743,17 @@ mod tests {
             .as_deref(),
             Some(T2)
         );
-        assert_eq!(alice_granted_at(self_granted, Vec::new(), vec![by_admin]), None);
+        assert_eq!(alice_granted_at(self_granted, Vec::new(), vec![by_admin.clone()]), None);
+
+        // `didProperty: "author"` is the same rule: the instance's author is
+        // the candidate.
+        let author_property = json!({ "className": "ns://Reviewer", "didProperty": "author" });
+        assert_eq!(
+            alice_granted_at(author_property.clone(), Vec::new(), vec![by_admin.clone(), by_alice.clone()])
+                .as_deref(),
+            Some(T2)
+        );
+        assert_eq!(alice_granted_at(author_property, Vec::new(), vec![by_admin]), None);
 
         // With a DID field as well, both must hold and the later one wins:
         // Alice's own earliest link is at T1, her `agent` link at T3.

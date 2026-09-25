@@ -890,7 +890,7 @@ impl RequiresQueryable for PerspectiveInstance {
                     .await?
                     .into_iter()
                     .map(as_carried)
-                    .filter(|l| target_names_did(&l.data.target, did, &did_literal)),
+                    .filter(|l| dating.is_grant_link(l, instance_id)),
             );
         }
         earliest_first(&mut grant_links, MAX_GRANT_LINKS);
