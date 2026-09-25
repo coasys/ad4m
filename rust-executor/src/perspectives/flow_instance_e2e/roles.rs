@@ -426,3 +426,84 @@ async fn a_role_gate_with_an_unknown_key_refuses_the_edge() {
         assert_eq!(f.derived().await.state, expected, "{why}");
     }
 }
+
+/// #1120 at the role level. An admin-gated role asks "did the admin write an
+/// `owner -> voter` link", and a link that claims the admin as its author over
+/// a signature that does not verify must not answer yes. Any peer can gossip
+/// one. The genuine control is the same fixture with the admin's real grant:
+/// the voter's vote then settles the edge, so the refusal is the forgery's.
+///
+/// The role query carries the author nested under the DID property
+/// (`{ owner: { eq: voter, author: admin } }`), and `model_query` joins that
+/// author on a link whose signature verifies (#1150). Killing mutation: drop
+/// the guard on the author's reifier in `link_author_join`. The forged grant
+/// then selects the role instance and the vote settles the edge.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_forged_admin_authored_grant_does_not_make_a_vote_count() {
+    for (genuine, expected, why) in [
+        (
+            true,
+            "scoped",
+            "control: the admin's genuine grant makes the vote count",
+        ),
+        (
+            false,
+            "identified",
+            "a grant forged in the admin's name must not make the vote count",
+        ),
+    ] {
+        let mut f = seed_satisfied_fixture(None).await;
+        let admin = acting_did(&f);
+        let admin_gate = format!(
+            r#"{{"n":1,"fromRole":{{"className":"ns://Task","didProperty":"owner","where":{{"author":"{admin}"}}}}}}"#
+        );
+        set_consensus_rule(&mut f, "delivery://Delivery.scoped", &admin_gate).await;
+        let voter = TestSigner::generate();
+        if genuine {
+            f.link(TASK, "ns://owner", &literal(&voter.did), LinkStatus::Shared)
+                .await;
+        } else {
+            sync_forged(&mut f, &admin, TASK, "ns://owner", &literal(&voter.did)).await;
+        }
+        tick().await;
+        let seal = seal_for(&f, "scoped").await;
+        sync_proposal_from(&mut f, &voter, "voter-1", "identified", "scoped", &seal).await;
+        assert_eq!(f.derived().await.state, expected, "{why}");
+    }
+}
+
+/// Carried role evidence is plain signed links: no `proof.valid`, and no
+/// `status`, which is not signed and says only where the minter's copy sat.
+/// `RoleGrantEvidence` serialises that way, and the reader re-derives
+/// everything it decides from the signatures.
+///
+/// Pinned because the role read's source changes shape under it: a
+/// `model_query` `__links` row carries its link's status (#1103), so a
+/// collection that deserialises rows into `LinkExpression` must clear it the
+/// way the raw read's `as_carried` does.
+#[tokio::test(flavor = "multi_thread")]
+async fn carried_role_evidence_has_no_status() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", OWNER_RULE).await;
+    grant_owner_role(&mut f).await;
+    tick().await;
+    f.mint_one().await;
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+
+    let read_set = f.read_set().await;
+    let carried: Vec<&LinkExpression> = read_set
+        .role_grants
+        .iter()
+        .flat_map(|g| &g.instances)
+        .flat_map(|i| i.grant_links.iter().chain(&i.revocation_links))
+        .collect();
+    assert!(
+        carried.len() >= 2,
+        "fixture: the grant and the tombstone are carried: {read_set:?}"
+    );
+    assert!(
+        carried.iter().all(|l| l.status.is_none()),
+        "carried role evidence has no status: {carried:?}"
+    );
+}

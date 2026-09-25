@@ -20,7 +20,7 @@
 //! predicate IRI. The result gains one key, [`LINKS_KEY`], mapping each
 //! requested entry — spelled as requested — to every link on that predicate,
 //! shaped as a [`DecoratedLinkExpression`](crate::types::DecoratedLinkExpression)
-//! (author, timestamp, data, proof with the stored signature verdict) so a
+//! (author, timestamp, data, proof with the stored signature verdict, status) so a
 //! consumer can deserialize it directly, gate on the verdict, or verify the
 //! signature itself.
 //!
@@ -45,19 +45,41 @@
 //! the window.
 
 use deno_core::anyhow::{anyhow, Error};
+use serde::de::DeserializeOwned;
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
 use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
-use crate::perspectives::sparql_store::SparqlStore;
+use crate::perspectives::sparql_store::{status_from_str, SparqlStore};
 use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
 /// name in `shacl_parser`, so a class cannot declare a property it would
 /// overwrite.
 pub(crate) const LINKS_KEY: &str = "__links";
+
+/// The rows of one requested `links` key on one result instance, each read as
+/// a `T`. A key missing from [`LINKS_KEY`], or a row that is not a `T`, is an
+/// `Err`, never an empty list: read as "no links", a missing `acceptedBy` or
+/// grant key would silently drop every vote or grant.
+pub(crate) fn links_rows<T: DeserializeOwned>(
+    instance: &Value,
+    key: &str,
+) -> Result<Vec<T>, Error> {
+    instance
+        .get(LINKS_KEY)
+        .and_then(|links| links.get(key))
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow!("no `{LINKS_KEY}.{key}` rows"))?
+        .iter()
+        .map(|row| {
+            serde_json::from_value(row.clone())
+                .map_err(|e| anyhow!("a `{key}` row is not a link ({e}): {row}"))
+        })
+        .collect()
+}
 
 /// Resolve each requested entry to the predicate it reads, as
 /// `(requested spelling, predicate)`.
@@ -160,6 +182,11 @@ pub(super) fn resolve_link_keys(
 /// "invalid": true}`: `LinkExpression::compute_proof_valid` returns `false`
 /// for it.
 ///
+/// Each row carries the link's `status` (`"SHARED"` / `"LOCAL"`), so a
+/// consumer that must tell its own `Local` bookkeeping from a peer's `Shared`
+/// link (the flow engine's fired mark) reads it here instead of from a second
+/// raw read.
+///
 /// `data.target` is the target the link was signed over (the store's
 /// `wireTarget` annotation when a literal was written in another encoding
 /// than the store's canonical one), and the verdict was computed over those
@@ -207,7 +234,7 @@ pub(super) async fn attach_links(
             viewer_did, "_reifier", "author",
         );
         let sparql = format!(
-            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
+            r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid ?rowStatus WHERE {{
     {source_constraint}
     VALUES ?predicate {{ {predicate_values} }}
     ?source ?predicate ?target .
@@ -218,6 +245,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
+    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?rowStatus . }}
 {link_status}{proof_valid}{local_status}{viewer}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
@@ -231,7 +259,7 @@ pub(super) async fn attach_links(
             // a failed signature, a missing verdict and a missing proof alike;
             // an empty `signature` is what tells an unsigned link apart.
             let valid = s(row, "proofValid") == "true";
-            let link = json!({
+            let mut link = json!({
                 "author": s(row, "author"),
                 "timestamp": s(row, "timestamp"),
                 "data": {
@@ -251,6 +279,11 @@ pub(super) async fn attach_links(
                     "invalid": !valid,
                 },
             });
+            // Spelled as `perspective.get` spells it (`"SHARED"` / `"LOCAL"`),
+            // and absent when the store recorded none, like `status` there.
+            if let Some(status) = status_from_str(&s(row, "rowStatus")) {
+                link["status"] = serde_json::to_value(status)?;
+            }
             found
                 .entry(source)
                 .or_default()
