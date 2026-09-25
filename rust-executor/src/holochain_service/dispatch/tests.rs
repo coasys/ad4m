@@ -25,7 +25,9 @@
 
 use super::*;
 use deno_core::error::AnyError;
-use holochain::prelude::{AppBundleSource, ExternIO, InstallAppPayload, ZomeCallResponse};
+use holochain::prelude::{
+    AppBundleSource, ExternIO, InstallAppPayload, Signature, ZomeCallResponse,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
 use std::task::Poll;
@@ -38,7 +40,7 @@ use crate::holochain_service::interface::HolochainServiceInterface;
 
 struct MockDispatch {
     /// Everything the mock ran, in the order it ran: `start:<label>`, `done:<label>`,
-    /// `install`, `shutdown`.
+    /// `sign:<data>`, `install`, `shutdown`.
     events: StdMutex<Vec<String>>,
     /// Label of every zome call as it starts, so a test can wait for one to be in flight.
     started: mpsc::UnboundedSender<String>,
@@ -89,6 +91,10 @@ impl ZomeDispatch for MockDispatch {
                 let _ = response.send(HolochainServiceResponse::InstallApp(Err(anyhow!(
                     "mock install: no AppInfo to return"
                 ))));
+            }
+            HolochainServiceRequest::Sign(data, response) => {
+                self.record(format!("sign:{data}"));
+                let _ = response.send(HolochainServiceResponse::Sign(Ok(Signature([0; 64]))));
             }
             HolochainServiceRequest::Shutdown(response) => {
                 self.record("shutdown".into());
@@ -236,6 +242,36 @@ async fn fast_call_is_not_blocked_by_slow_call() {
         h.mock.events(),
         vec!["start:slow", "start:fast", "done:fast", "done:slow"]
     );
+}
+
+/// A keystore request must not wait for a zome call permit, nor behind zome calls queued
+/// for one: with every permit held and another call queued, `Sign` is still answered at once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sign_is_not_blocked_by_a_full_zome_call_pool() {
+    let h = Harness::start();
+    let busy = fill_permits(&h, 500).await;
+    let queued = enqueue(h.zome_call("queued", 0, None)).await;
+
+    let signature = tokio::time::timeout(Duration::from_millis(250), h.iface.sign("hi".into()))
+        .await
+        .expect("Sign must be answered while every permit is held")
+        .unwrap();
+    assert_eq!(signature, Signature([0; 64]));
+
+    // The verdict: "sign" ran before any busy call finished and before "queued" started.
+    let events = h.mock.events();
+    let sign_at = events.iter().position(|e| e == "sign:hi").unwrap();
+    assert!(
+        !events[..sign_at]
+            .iter()
+            .any(|e| e.starts_with("done:") || e == "start:queued"),
+        "Sign must not wait behind the zome call pool: {events:?}"
+    );
+
+    for call in busy {
+        call.await.unwrap().unwrap();
+    }
+    assert_eq!(label_of(queued.await.unwrap().unwrap()), "queued");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
