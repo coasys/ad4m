@@ -620,6 +620,48 @@ impl SparqlStore {
         self.insert_link_triples(link)
     }
 
+    /// Test-only: drop the `proofValid` annotation from a stored link's
+    /// reifier, leaving the link and its other metadata in place.
+    /// `insert_link_triples` always writes one, so no production path yields a
+    /// link without it; this lets the model_query tests pin how one reads.
+    #[cfg(test)]
+    pub(crate) fn remove_proof_valid_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_reifier_annotation(link, ONT_PROOF_VALID)
+    }
+
+    /// Drop the `ad4m://ontology/wireTarget` quad from a link's reifier, so
+    /// the store looks like one written before #1141, which kept no signed
+    /// bytes for a non-canonical `literal:*` target.
+    #[cfg(test)]
+    pub(crate) fn remove_wire_target_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_reifier_annotation(link, ONT_WIRE_TARGET)
+    }
+
+    #[cfg(test)]
+    fn remove_reifier_annotation(
+        &self,
+        link: &LinkExpression,
+        predicate: &str,
+    ) -> Result<(), Error> {
+        let reifier_iri = make_reifier_iri(link);
+        let quads: Vec<_> = self
+            .store
+            .quads_for_pattern(
+                Some(reifier_iri.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(predicate)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        if quads.is_empty() {
+            return Err(anyhow!("link has no {predicate} annotation"));
+        }
+        for quad in &quads {
+            self.store.remove(quad)?;
+        }
+        Ok(())
+    }
+
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
