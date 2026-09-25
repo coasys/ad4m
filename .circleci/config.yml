@@ -119,6 +119,8 @@ commands:
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build \
                    ad4m-ldk/js/lib core/lib link-server/dist
             tar -xf "$src"
+            echo "restored $(tar -tf "$src" | wc -l) entries from $src"
+            ls -l bootstrap-languages/*/build/bundle.js link-server/dist/index.js .hc-toolchain/bin/
 
   setup_integration_test_environment:
     description: "Setup common integration test environment"
@@ -233,9 +235,15 @@ jobs:
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
+            # Write to a temp name and rename: a rerun of build for the same
+            # SHA must not hand a half-written file to an integration job
+            # that is restoring from the earlier run (mv is atomic on one fs).
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            mkdir -p "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            cp target/release/ad4m target/release/ad4m-executor "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            mkdir -p "$dst"
+            for bin in ad4m ad4m-executor; do
+              cp "target/release/$bin" "$dst/$bin.tmp" && mv "$dst/$bin.tmp" "$dst/$bin"
+            done
       - run:
           # clippy and rust-tests compile on other runners. These generated files are
           # embedded by that compile (include_bytes!/include!/include_dir!) and are
@@ -243,11 +251,13 @@ jobs:
           name: Stash generated Rust compile inputs for clippy and rust-tests
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            tar -cf "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar" \
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
+            tar -cf "$dst.tmp" \
               rust-executor/CUSTOM_DENO_SNAPSHOT.bin \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
               rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
               dapp/dist
+            mv "$dst.tmp" "$dst"
       - run:
           # Everything gitignored that the integration jobs read and used to
           # rebuild themselves (restored by restore_integration_inputs):
@@ -264,7 +274,8 @@ jobs:
           name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            tar -cf "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar" \
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
+            tar -cf "$dst.tmp" \
               bootstrap-languages/*/build \
               bootstrap-languages/*/hc-dna/workdir/*.dna \
               bootstrap-languages/*/hc-dna/workdir/*.happ \
@@ -275,6 +286,7 @@ jobs:
               .hc-toolchain/bin/kitsune2-bootstrap-srv \
               .hc-toolchain/.installed_rev \
               .hc-toolchain/.installed_kitsune_version
+            mv "$dst.tmp" "$dst"
             ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
 
   clippy:
