@@ -335,6 +335,62 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Resolve the Holochain agent key for one language (issue #1099).
+    ///
+    /// Each language gets its own agent key so that two languages bundling
+    /// the same DNA + network seed produce distinct cells (cell id =
+    /// DNA hash + agent pubkey) instead of colliding on one shared cell
+    /// with last-writer-wins signal routing. Resolution order:
+    ///
+    /// 1. The mapping stored in Ad4mDb from a previous resolution.
+    /// 2. Adoption: an app already installed under the language's own
+    ///    app id predates per-language keys — keep its key so existing
+    ///    installs keep their cell, source chain, and DHT identity.
+    /// 3. A fresh keypair otherwise.
+    ///
+    /// The resolved key is persisted, so every path is stable across
+    /// restarts.
+    pub async fn agent_key_for_language(
+        &self,
+        language_address: &str,
+        app_id: &str,
+    ) -> Result<HoloHash<Agent>, AnyError> {
+        // Serialize per language across lookup → adoption → keygen →
+        // persist: a concurrent caller waits here and then finds the
+        // winner's key in the stored mapping instead of generating its own.
+        let lock = LANGUAGE_KEY_LOCKS
+            .lock()
+            .expect("LANGUAGE_KEY_LOCKS poisoned")
+            .entry(language_address.to_string())
+            .or_default()
+            .clone();
+        let _guard = lock.lock().await;
+
+        let setting_key = format!("language_agent_key:{}", language_address);
+        // A failed read must propagate: treating it as "no stored key"
+        // would generate and persist a new key over a valid mapping,
+        // silently forking the language's cell identity.
+        if let Some(stored) =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_setting(&setting_key))?
+        {
+            match holochain::prelude::AgentPubKey::try_from(stored.as_str()) {
+                Ok(key) => return Ok(key),
+                Err(_) => log::warn!(
+                    "Stored agent key for language {} is in invalid format, re-resolving",
+                    language_address
+                ),
+            }
+        }
+        let key = match self.get_app_info(app_id.to_string()).await? {
+            Some(app_info) => app_info.agent_pub_key,
+            None => self.new_sign_keypair_random().await?,
+        };
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_setting(&setting_key, &key.to_string())
+        })?;
+        Ok(key)
+    }
+
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(
@@ -411,6 +467,14 @@ impl HolochainServiceInterface {
 lazy_static! {
     static ref HOLOCHAIN_SERVICE: Arc<RwLock<Option<HolochainServiceInterface>>> =
         Arc::new(RwLock::new(None));
+
+    /// Serializes `agent_key_for_language` per language: without this, two
+    /// concurrent first resolutions of the same language can both observe
+    /// "no stored key, no installed app" and each generate + persist a
+    /// different key — last write wins in the DB while apps may already be
+    /// installed under the losing key (cell id = DNA hash + agent key).
+    static ref LANGUAGE_KEY_LOCKS: std::sync::Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>> =
+        std::sync::Mutex::new(std::collections::HashMap::new());
 }
 
 /// Set while `HolochainService::init` is running. What `holochain_service_once_started`
