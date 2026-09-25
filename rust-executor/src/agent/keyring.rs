@@ -131,8 +131,8 @@ fn wrap_to_recipient(
 
     // Derive a symmetric key from the shared secret via SHA-256.
     let sym_key = Sha256::digest(shared_secret.as_bytes());
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(&sym_key).map_err(|e| KeyringError::CryptoError(e.to_string()))?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
+        .map_err(|e| KeyringError::CryptoError(e.to_string()))?;
 
     // Use a zero nonce — each ephemeral key produces a unique shared secret,
     // so reuse across keys never happens.
@@ -153,8 +153,8 @@ fn unwrap_with_secret(
     let shared_secret = recipient_secret.diffie_hellman(&ephemeral_pk);
 
     let sym_key = Sha256::digest(shared_secret.as_bytes());
-    let cipher =
-        ChaCha20Poly1305::new_from_slice(&sym_key).map_err(|e| KeyringError::CryptoError(e.to_string()))?;
+    let cipher = ChaCha20Poly1305::new_from_slice(&sym_key)
+        .map_err(|e| KeyringError::CryptoError(e.to_string()))?;
 
     let nonce = Nonce::default();
     let plaintext = cipher
@@ -257,7 +257,10 @@ impl VersionedKeyring {
         recipient: &EncryptionRecipient,
         unwrap_secret: &StaticSecret,
     ) -> Result<(), KeyringError> {
-        let current = self.versions.last_mut().ok_or(KeyringError::VersionNotFound(0))?;
+        let current = self
+            .versions
+            .last_mut()
+            .ok_or(KeyringError::VersionNotFound(0))?;
 
         // Unwrap the DEK using the existing member's secret.
         let dek = unwrap_from_version(current, unwrap_secret)?;
@@ -289,7 +292,10 @@ impl VersionedKeyring {
         }
 
         // Unwrap the current DEK.
-        let current = self.versions.last().ok_or(KeyringError::VersionNotFound(0))?;
+        let current = self
+            .versions
+            .last()
+            .ok_or(KeyringError::VersionNotFound(0))?;
         let _old_dek = unwrap_from_version(current, unwrap_secret)?;
 
         // Mint a fresh DEK for the new version — forward secrecy.
@@ -299,11 +305,7 @@ impl VersionedKeyring {
     }
 
     /// Unwrap the DEK from a specific version using a recipient's secret.
-    pub fn unwrap_version(
-        &self,
-        version: u32,
-        secret: &StaticSecret,
-    ) -> Result<Dek, KeyringError> {
+    pub fn unwrap_version(&self, version: u32, secret: &StaticSecret) -> Result<Dek, KeyringError> {
         let v = self
             .version(version)
             .ok_or(KeyringError::VersionNotFound(version))?;
@@ -401,9 +403,7 @@ mod tests {
         let (s2, pk2) = test_keypair();
 
         let mut keyring = VersionedKeyring::new();
-        keyring
-            .mint(&[test_recipient("user-1", &pk1)], 0)
-            .unwrap();
+        keyring.mint(&[test_recipient("user-1", &pk1)], 0).unwrap();
 
         assert_eq!(keyring.version_count(), 1);
 
