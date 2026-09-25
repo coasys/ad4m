@@ -16,12 +16,11 @@ references:
 # Self-hosted machine runners on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04), two pools:
 # - coasys/marvin: every job that compiles Rust (build, clippy, rust-tests) and llm-e2e
 #   (local Ollama). Few runners, each with a warm ~28GB target/ cache.
-# - coasys/marvin-light: every job that compiles no Rust: it restores the stashed binaries
-#   (integration tests, CLI) or runs Node only (js-unit-tests, plugin). More runners, small
-#   working dirs.
+# - coasys/marvin-light: every job that compiles no Rust. These jobs restore the stashed
+#   binaries (integration tests, CLI), run Node only (js-unit-tests, plugin) or only parse
+#   Rust (fmt). More runners, with small working dirs.
 # Only `build` gates the integration tests. clippy and rust-tests start after it and run
-# next to the integration tests.
-#   A burst of pushes then waits on the one Rust build per pipeline, not behind other tests.
+# next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
 
 commands:
   fix_workdir:
@@ -209,12 +208,21 @@ jobs:
       - setup_env
       - restore_rust_compile_inputs
       - run:
-          name: cargo fmt --check
-          command: cargo fmt --check
-      - run:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
+
+  fmt:
+    # rustfmt only parses the sources, so it needs no build and no warm target/.
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: cargo fmt --check
+          command: cargo fmt --check
 
   rust-tests:
     machine: true
@@ -440,6 +448,7 @@ workflows:
       - build
       - plugin-ad4m-tests
       - js-unit-tests
+      - fmt
       - clippy:
           requires:
             - build
