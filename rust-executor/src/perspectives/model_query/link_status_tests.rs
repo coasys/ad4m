@@ -266,7 +266,7 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
+            super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
                 .await
                 .unwrap()
                 .instances[0]
@@ -405,7 +405,7 @@ async fn link_status_shared_does_not_select_on_a_local_value() {
 /// exists and a verified link exists", not "one link is both". Here the mark
 /// has a valid Local link and a forged Shared link on the same triple, so
 /// together they would pass a Shared, verified-only read, and a Local value
-/// would reach the Shared-only caller. `verified_link_exists` checks both on
+/// would reach the Shared-only caller. [`LinkGuard`](super::sparql_builder::LinkGuard) checks both on
 /// one reifier.
 #[tokio::test]
 async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_one() {

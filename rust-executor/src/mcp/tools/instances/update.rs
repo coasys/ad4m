@@ -69,7 +69,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
@@ -112,7 +119,7 @@ impl Ad4mMcpHandler {
     )]
     pub async fn instance_remove(&self, params: Parameters<InstanceRemoveParams>) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -125,7 +132,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
@@ -135,22 +149,23 @@ impl Ad4mMcpHandler {
         // The cascade is not batched, so on failure the links already
         // removed stay removed: say so, with the count, instead of
         // reporting a deletion that did not fully happen.
-        let removed = match remove_all_links_of(&mut perspective, &base_uri).await {
-            Ok(removed) => removed,
-            Err(failure) => {
-                return pretty(&json!({
-                    "error": format!(
-                        "Error removing {} instance at '{}': {}. {} link(s) had already been \
-                         removed, so the instance may be partially deleted — inspect what is \
-                         left with query_links (source or target = '{}') and retry.",
-                        class_name, base_uri, failure.error, failure.removed, base_uri
-                    ),
-                    "class_name": class_name,
-                    "base_uri": base_uri,
-                    "links_removed": failure.removed,
-                }))
-            }
-        };
+        let removed =
+            match remove_all_links_of(&mut perspective, &base_uri, viewer.as_deref()).await {
+                Ok(removed) => removed,
+                Err(failure) => {
+                    return pretty(&json!({
+                        "error": format!(
+                            "Error removing {} instance at '{}': {}. {} link(s) had already been \
+                             removed, so the instance may be partially deleted — inspect what is \
+                             left with query_links (source or target = '{}') and retry.",
+                            class_name, base_uri, failure.error, failure.removed, base_uri
+                        ),
+                        "class_name": class_name,
+                        "base_uri": base_uri,
+                        "links_removed": failure.removed,
+                    }))
+                }
+            };
         pretty(&json!({
             "success": true,
             "class_name": class_name,

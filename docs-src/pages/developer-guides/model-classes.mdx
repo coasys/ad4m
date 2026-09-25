@@ -244,7 +244,7 @@ class Recipe extends Ad4mModel {
 | `readOnly` | `boolean` | `false` | Prevents updates after creation |
 | `resolveLanguage` | `string` | `"literal"` | Language used to resolve the stored value. Use `"literal"` for simple values, or a Language address for richer content |
 | `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal:string:uninitialized"`) |
-| `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
+| `local` | `boolean` | `false` | Store locally only — not synced to the network. On a multi-user host the value is also private to the user who wrote it (see [Multi-User Mode](/multi-user#data-isolation)). Useful for user preferences or draft state |
 | `getter` | `string` | — | SPARQL SELECT expression for computed values. `<Base>` is replaced with the instance's URI at query time. Mutually exclusive with regular storage |
 | `transform` | `NodeExpression` | — | Declarative post-retrieval transform expressed as a SHACL-AF Node Expression. Evaluated in the Rust model query engine, not in JavaScript. See [Transforms](#the-transform-option) |
 
@@ -897,7 +897,7 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
 - **Additive:** the rows are read by a separate query over the returned page. Asking for them never changes `createdAt`, `updatedAt` or any property value. `links` works with `where`, `order`, pagination, `properties` and inside an `include` sub-query (`include: { comments: { links: ["app://flag"] } }`).
 - **Subscriptions:** `subscribe()` re-runs when a link on any requested entry is added or removed, including an IRI the class does not declare and entries inside an `include` sub-query. A subscribed revocation check therefore updates when the tombstone is written.
-- **Local properties:** for a property declared `local: true`, only the agent's own local links are returned, the same rule hydration applies.
+- **Local links:** for a property declared `local: true`, only links with status `local` are returned. On a multi-user host, another user's local links are never returned, on any entry (see [Multi-User Mode](/multi-user#data-isolation)). This is the same rule hydration applies.
 - **Not one snapshot:** the rows come from a second read. A member added or removed between the two reads can appear in the relation but not in `__links`, or the other way round. If you date members by their own link, treat a member with no row as an error. Don't fall back to `createdAt`, which is earlier and so would widen any "since" window.
 
 The option is also accepted by the raw RPC: `perspective.modelQuery("Post", JSON.stringify({ links: ["comments"] }))`.

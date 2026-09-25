@@ -381,6 +381,11 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
     );
 
     // An edge that settles after catch-up is an event for B.
+    //
+    // Seeding B made new keys for this process's main agent, so A's acting
+    // user is new to A's instance too, and its first pass there is a catch-up
+    // of its own (the catch-up is per user).
+    assert!(consensus_pass(&mut a).await.is_empty());
     let h3 = settle(&mut a, "h3", "review", "approved").await;
     replicate_proposals(&a, &mut b, &[&h3]).await;
     let later = consensus_pass(&mut b).await;
@@ -395,6 +400,48 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
     );
     assert_eq!(b.cached_state().await, "approved");
     assert!(consensus_pass(&mut b).await.is_empty(), "and only once");
+}
+
+/// A co-owner cannot switch the catch-up off. Mallory, a second user of
+/// replica B, writes a Local `currentState` on an instance B has never
+/// derived. It is her own link, which she may write, but it says nothing
+/// about what B's main agent has derived: B's first pass is still a silent
+/// catch-up and reports none of A's history as new.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    let mut b = seed_review_flow().await;
+    drop_local_cache(&mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+
+    let mallory = second_agent("mallory-catch-up@e2e.test");
+    b.perspective
+        .add_link(
+            Link {
+                source: b.instance_uri.clone(),
+                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                target: literal("review"),
+            },
+            LinkStatus::Local,
+            None,
+            &mallory,
+        )
+        .await
+        .expect("a co-owner may write a Local link of their own");
+
+    let first = consensus_pass(&mut b).await;
+    assert!(
+        first.is_empty(),
+        "the main agent never derived this instance: its first pass is a silent catch-up, got {first:?}"
+    );
+    let marked = b.read_set().await.marked_proposals();
+    assert!(
+        marked.contains(&h1) && marked.contains(&h2),
+        "and the history is marked: {marked:?}"
+    );
 }
 
 /// A newcomer with nothing to catch up on: the first pass writes the cache

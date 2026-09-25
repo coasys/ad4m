@@ -78,7 +78,11 @@ impl Ad4mMcpHandler {
             query["parent"] = json!({ "id": link_target(parent.trim()), "predicate": HAS_CHILD });
         }
 
-        match run_model_query(&perspective, &class_name, &query).await {
+        let viewer = match self.viewer_did().await {
+            Ok(v) => v,
+            Err(e) => return error_json(e),
+        };
+        match run_model_query(&perspective, &class_name, &query, viewer.as_deref()).await {
             Ok((instances, total)) => pretty(&json!({
                 "class_name": class_name,
                 "count": instances.len(),
@@ -107,7 +111,11 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        let viewer = match self.viewer_did().await {
+            Ok(v) => v,
+            Err(e) => return error_json(e),
+        };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(instance)) => pretty(&instance),
             Ok(None) => not_found(&class_name, &base_uri),
             Err(e) => error_json(format!("Error reading {class_name} instance: {e}")),

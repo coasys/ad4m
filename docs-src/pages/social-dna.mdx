@@ -427,7 +427,10 @@ const instance = await FlowInstance.start(
 const instances = await FlowInstance.findAll(perspective, "Delivery");
 
 // Where is it now? `currentState` resolves to the FlowState on the shape,
-// so the interpretationHint the LLM sees is right there.
+// so the interpretationHint the LLM sees is right there. The value is the
+// engine's cache (`ad4m://flow/current_state`), a local link of your own:
+// every read of FlowInstance rows derives the state for the reading user
+// and refreshes that user's cache first.
 console.log(instance.currentStateName);            // "Identified"
 console.log(instance.currentState.interpretationHint);
 

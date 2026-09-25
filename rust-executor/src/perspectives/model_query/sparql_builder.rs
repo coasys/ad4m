@@ -14,10 +14,12 @@
 //! [`build_query_patterns`] for the shared conformance + where logic.
 //!
 //! Every link either kind of pattern matches passes the query's [`LinkGuard`]
-//! (`linkStatus`, `includeUnverified`), the same links hydration reads. So a
-//! link that is withheld from an instance's values cannot select it, count it,
-//! order it or exclude it either (#1120).
+//! (`linkStatus`, `includeUnverified`, and the viewer a `Local` link must
+//! belong to), the same links hydration reads. So a link that is withheld from
+//! an instance's values cannot select it, count it, order it or exclude it
+//! either (#1120, #1024).
 
+use crate::perspectives::link_visibility::{viewer_author_filter, viewer_reifier_filter};
 use serde_json::Value;
 
 use crate::perspectives::sparql_store::status_str;
@@ -177,9 +179,10 @@ pub(super) fn build_instance_sparql(
     query: &ModelQueryInput,
     sparql_pagination: Option<&SparqlPagination>,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
 ) -> InstanceQueryPlan {
-    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
-    let guard = LinkGuard::of(query);
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver, viewer_did);
+    let guard = LinkGuard::of(query, viewer_did);
 
     let needed = instance_link_predicates(shape);
 
@@ -320,6 +323,11 @@ pub(super) fn build_instance_sparql(
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(query.link_status.as_ref());
         let proof_valid = proof_valid_filter(query.include_unverified);
+        // `local_status` is about the *shape* (is this link's status right for
+        // a property the class declared local?), `viewer` about the
+        // *requesting agent* (may it see this Local link at all?). A row must
+        // pass both, and the two query options above.
+        let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
         InstanceQueryPlan::Single(format!(
             r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -329,7 +337,7 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{local_status}{viewer}}}"#
         ))
     }
 }
@@ -423,8 +431,9 @@ pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
 /// two-phase plan's pagination subquery ([`build_timestamp_probe`] on its own
 /// reifier), scopes, `$` projections and the reverse relations. A transitive
 /// scope or projection is walked one guarded step at a time
-/// (`query::guarded_reach`). A typed relation's generated getter gets it in
-/// `getters::verify_relation_getter`; a hand-written getter runs as written.
+/// (`query::guarded_reach`). A typed relation's generated getter and its
+/// `where` get it, and the viewer, in `getters.rs`; a hand-written getter runs
+/// as written.
 ///
 /// Empty when the query opts in with `includeUnverified`.
 pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
@@ -436,48 +445,61 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
 }
 
 /// Which links a read may use: the query's `linkStatus` (#1116) and
-/// `includeUnverified` (#1113), as one value.
+/// `includeUnverified` (#1113), and the agent the read is for (#1024), as one
+/// value.
 ///
 /// Every read that matches a link goes through this, whether it hydrates an
 /// instance or decides which instances match (#1120). The checks always sit on
-/// **one** reifier variable: a link passes when *it* has the status and *it*
-/// verified. Two clauses over two reifier variables would mean "a Shared link
-/// exists and a verified link exists", which a verified Local link and a forged
-/// Shared one on the same triple satisfy between them.
+/// **one** reifier variable: a link passes when *it* has the status, *it*
+/// verified and *it* is visible to the viewer. Two clauses over two reifier
+/// variables would mean "a Shared link exists and a verified link exists",
+/// which a verified Local link and a forged Shared one on the same triple
+/// satisfy between them. The same goes for visibility: another user's verified
+/// Local link and a forged Shared link on one triple must not jointly pass.
 ///
-/// The default (`LinkGuard::default()`) is no status restriction and verified
-/// links only. A missing annotation fails closed: both checks are required
-/// triples, so a link with no status or no verdict does not pass.
+/// The default (`LinkGuard::default()`) is no status restriction, verified
+/// links only, executor scope. A missing annotation fails closed: the status,
+/// the verdict and, for a viewer, the author and status are required triples,
+/// so a link without them does not pass
+/// ([`viewer_reifier_filter`](crate::perspectives::link_visibility::viewer_reifier_filter)).
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct LinkGuard<'a> {
     pub(super) status: Option<&'a LinkStatus>,
     pub(super) include_unverified: Option<bool>,
+    /// `Some(did)`: only links `did` may see, so another agent's `Local` link
+    /// is not read. `None` is executor scope.
+    pub(super) viewer: Option<&'a str>,
 }
 
 impl<'a> LinkGuard<'a> {
-    /// The guard a query asks for.
-    pub(super) fn of(query: &'a ModelQueryInput) -> Self {
+    /// The guard a query asks for, read on behalf of `viewer`.
+    pub(super) fn of(query: &'a ModelQueryInput, viewer: Option<&'a str>) -> Self {
         LinkGuard {
             status: query.link_status.as_ref(),
             include_unverified: query.include_unverified,
+            viewer,
         }
     }
 
-    /// No restriction at all: any status, unverified links included. The
-    /// emitted SPARQL is then what it was before the guard existed.
+    /// No restriction at all: any status, unverified links included,
+    /// executor scope. The emitted SPARQL is then what it was before the guard
+    /// existed.
     #[cfg(test)]
     pub(super) const ANY: LinkGuard<'static> = LinkGuard {
         status: None,
         include_unverified: Some(true),
+        viewer: None,
     };
 
     /// Whether this guard lets every link through, so nothing is emitted.
     pub(super) fn is_open(&self) -> bool {
-        self.status.is_none() && self.include_unverified.unwrap_or(false)
+        self.status.is_none() && self.include_unverified.unwrap_or(false) && self.viewer.is_none()
     }
 
-    /// The checks as triple patterns on `reifier`, a variable the caller has
-    /// already joined to the link through `rdf:reifies`. Empty when open.
+    /// The checks as patterns on `reifier`, a variable the caller has already
+    /// joined to the link through `rdf:reifies`. The viewer check binds
+    /// variables named after `reifier`, so a reifier must be unique in the
+    /// query. Empty when open.
     pub(super) fn on_reifier(&self, reifier: &str) -> String {
         let mut out = String::new();
         if let Some(s) = self.status {
@@ -491,6 +513,7 @@ impl<'a> LinkGuard<'a> {
                 " {reifier} <ad4m://ontology/proofValid> \"true\" ."
             ));
         }
+        out.push_str(&viewer_reifier_filter(self.viewer, reifier));
         out
     }
 
@@ -524,7 +547,7 @@ impl<'a> LinkGuard<'a> {
 
     /// For a read that matches the bare triple `subject predicate object`
     /// rather than joining one reifier per row: kept when at least one link
-    /// asserting the triple passes both checks on the same reifier.
+    /// asserting the triple passes every check on the same reifier.
     /// `FILTER EXISTS` rather than a join, so two passing links over one triple
     /// do not return the subject twice: the reads that hydrate a relation use
     /// it. `predicate` is a term: `<iri>` or a variable. Empty when open.
@@ -538,25 +561,6 @@ impl<'a> LinkGuard<'a> {
             self.on_reifier("?_pv")
         )
     }
-}
-
-/// [`LinkGuard::exists`] for an IRI predicate, with the two options passed
-/// separately: the reverse relations in `relations.rs`, and a typed relation's
-/// generated getter and a relation's `where` (`getters.rs`).
-///
-/// Empty when no status is requested and `include_unverified` is `Some(true)`.
-pub(super) fn verified_link_exists(
-    subject: &str,
-    predicate: &str,
-    object: &str,
-    status: Option<&LinkStatus>,
-    include_unverified: Option<bool>,
-) -> String {
-    LinkGuard {
-        status,
-        include_unverified,
-    }
-    .exists(subject, &format!("<{predicate}>"), object)
 }
 
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
@@ -574,13 +578,24 @@ pub(super) fn verified_link_exists(
 /// Returns an empty string when the shape declares no local properties, leaving the
 /// query byte-identical to before.
 pub(super) fn local_status_filter(shape: &ModelShape) -> String {
+    local_status_filter_on(shape, "_reifier", "predicate", "_status")
+}
+
+/// [`local_status_filter`] over caller-chosen variable names (given without
+/// the leading `?`), for a query that binds its own reifier and predicate.
+fn local_status_filter_on(
+    shape: &ModelShape,
+    reifier_var: &str,
+    predicate_var: &str,
+    status_var: &str,
+) -> String {
     let preds = local_predicates(shape);
     if preds.is_empty() {
         return String::new();
     }
 
     format!(
-        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
+        "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!(?{predicate_var} IN ({})) || ?{status_var} = \"Local\")\n",
         preds.join(", ")
     )
 }
@@ -604,19 +619,68 @@ pub(super) fn build_count_sparql(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
 ) -> Option<String> {
-    let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let (conformance, where_extra) = build_query_patterns(shape, query, resolver, viewer_did);
 
     if conformance.trim().is_empty() && where_extra.trim().is_empty() {
         return None;
     }
 
+    let visibility = count_visibility_guard(shape, LinkGuard::of(query, viewer_did));
+
     Some(format!(
         r#"SELECT (COUNT(DISTINCT ?source) AS ?cnt) WHERE {{
 {conformance}
 {where_extra}
-}}"#
+{visibility}}}"#
     ))
+}
+
+/// Keep `total_count` equal to the number of instances hydration returns to
+/// the viewer.
+///
+/// Hydration emits a matched source only if it has at least one row that
+/// passes four checks: its predicate is one the shape hydrates, it satisfies
+/// [`local_status_filter`], it passes the query's `linkStatus` and proof
+/// checks, and the viewer may see it. A source with no such row is dropped
+/// from the results. This guard applies the same checks, on one reifier
+/// ([`LinkGuard::join`]), so a source that hydration drops is also not
+/// counted.
+///
+/// The predicate restriction is necessary. Any visible link on the source,
+/// for example a Shared link on a predicate the shape does not declare, would
+/// otherwise satisfy the guard while hydration drops the source.
+///
+/// Conformance alone does not do this when what selects the instance is not
+/// one of its own rows: a class with no flag and no required property,
+/// selected by a parent scope's link on the parent. Then every row of the
+/// instance can be another user's Local link, and only this guard keeps the
+/// instance out of the count
+/// (`total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate`).
+///
+/// What this does not hide is that an instance exists. Conformance reads the
+/// class's own links (its flag, its required properties), and those are rows
+/// hydration reads too. So when those links are visible to the viewer and
+/// every other property link belongs to another agent, the instance is
+/// counted and returned, with no values for the properties the viewer cannot
+/// read. Count and rows agree on it.
+///
+/// Empty in executor scope, leaving the generated query byte-identical.
+fn count_visibility_guard(shape: &ModelShape, guard: LinkGuard) -> String {
+    if guard.viewer.is_none() {
+        return String::new();
+    }
+    let predicates = instance_link_predicates(shape);
+    let values = if predicates.is_empty() {
+        String::new()
+    } else {
+        let terms: Vec<String> = predicates.iter().map(|p| format!("<{p}>")).collect();
+        format!("    VALUES ?_cnt_pred {{ {} }}\n", terms.join(" "))
+    };
+    let join = guard.join("?_cnt_reifier", "?source", "?_cnt_pred", "?_cnt_obj");
+    let local_status = local_status_filter_on(shape, "_cnt_reifier", "_cnt_pred", "_cnt_status");
+    format!("{values}    ?source ?_cnt_pred ?_cnt_obj .{join}\n{local_status}")
 }
 
 /// Check whether **all** where-clause conditions can be pushed into SPARQL.
@@ -643,7 +707,11 @@ pub(super) fn all_where_pushable(
 ) -> bool {
     match query.where_clause {
         None => true,
-        Some(ref wc) => compile_where_clause(wc, shape, resolver, LinkGuard::of(query)).complete,
+        // Completeness does not depend on the guard, which only adds checks
+        // to the patterns, so the viewer is irrelevant here.
+        Some(ref wc) => {
+            compile_where_clause(wc, shape, resolver, LinkGuard::of(query, None)).complete
+        }
     }
 }
 
@@ -657,13 +725,21 @@ pub(super) fn all_where_pushable(
 ///
 /// **Where patterns** translate the query's `where` clause into SPARQL
 /// `FILTER`/`VALUES` expressions for server-side evaluation.
+///
+/// Every link either reads passes [`LinkGuard`], including `viewer_did`'s
+/// visibility: a node reachable only through another user's `Local` link is
+/// not in scope, and a `where` condition is not met by another user's `Local`
+/// value (#1024). A transitive traversal cannot check the hops of a `+` path,
+/// so for a viewer it needs the pairs the executor walked
+/// (`ModelQueryInput::walked`); without them it matches nothing.
 pub(super) fn build_query_patterns(
     shape: &ModelShape,
     query: &ModelQueryInput,
     resolver: Option<&dyn ShapeResolver>,
+    viewer_did: Option<&str>,
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
-    let guard = LinkGuard::of(query);
+    let guard = LinkGuard::of(query, viewer_did);
 
     /// A scope the builder cannot express, as patterns that match nothing.
     ///
@@ -807,6 +883,15 @@ pub(super) fn build_query_patterns(
                         pairs,
                         &format!("    {subject} <{safe_pred}>+ {object} ."),
                     )),
+                    // The `+` path would match every pair reachable through
+                    // anyone's links, including another user's Local ones.
+                    (None, true) if viewer_did.is_some() => {
+                        log::warn!(
+                            "Traverse scope matches nothing: a transitive read in agent \
+                             scope was not walked over the links the viewer may see"
+                        );
+                        return matches_nothing();
+                    }
                     _ => {
                         let guarded = if *transitive {
                             String::new()
@@ -1865,7 +1950,7 @@ mod tests {
     }
 
     fn pagination_subquery(shape: &ModelShape, pg: &SparqlPagination) -> String {
-        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None) {
+        match build_instance_sparql(shape, &ModelQueryInput::default(), Some(pg), None, None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -1991,7 +2076,7 @@ mod tests {
     #[test]
     fn flag_initial_that_is_not_an_iri_takes_the_str_fallback() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -2006,7 +2091,7 @@ mod tests {
         );
         // And an initial that IS a real IRI keeps the seekable form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None);
+        let plan = build_instance_sparql(&s, &ModelQueryInput::default(), None, None, None);
         let sparql = match plan {
             InstanceQueryPlan::Single(q) => q,
             InstanceQueryPlan::TwoPhase { .. } => panic!("expected Single plan"),
@@ -3181,7 +3266,7 @@ mod traverse_scope_tests {
             ScopeDirection::Out,
             None,
         ));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
 
         assert!(
             conformance.contains("?_anchor <test://comment> ?source ."),
@@ -3200,7 +3285,7 @@ mod traverse_scope_tests {
     #[test]
     fn traverse_scope_transitive_emits_a_one_or_more_path() {
         let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
 
         assert!(
             conformance.contains("?_anchor <test://comment>+ ?source ."),
@@ -3208,10 +3293,31 @@ mod traverse_scope_tests {
         );
     }
 
+    /// A transitive scope read for a viewer that was not walked matches
+    /// nothing. The `+` path would reach through every agent's links,
+    /// another user's Local ones included, and `execute_model_query` always
+    /// walks for a viewer, so only a direct caller of the builder gets here.
+    /// Executor scope keeps the path.
+    #[test]
+    fn traverse_scope_transitive_unwalked_for_a_viewer_matches_nothing() {
+        let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
+        assert!(q.walked.is_none());
+        let (conformance, where_extra) =
+            build_query_patterns(&traverse_shape(), &q, None, Some("did:key:z6MkBob"));
+        assert_eq!(conformance, "    FILTER(false)");
+        assert_eq!(where_extra, "");
+
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
+        assert!(
+            conformance.contains("?_anchor <test://comment>+ ?source ."),
+            "executor scope: {conformance}"
+        );
+    }
+
     #[test]
     fn traverse_scope_inward_swaps_the_terms() {
         let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::In, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
 
         assert!(
             conformance.contains("?source <test://comment> ?_anchor ."),
@@ -3225,7 +3331,7 @@ mod traverse_scope_tests {
     #[test]
     fn traverse_scope_with_no_valid_anchors_matches_nothing() {
         let q = traverse_query(traverse(vec![], false, ScopeDirection::Out, None));
-        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
 
         assert!(
             conformance.contains("VALUES ?_anchor {  }"),
@@ -3245,7 +3351,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
@@ -3272,7 +3378,7 @@ mod traverse_scope_tests {
             SortKey::Projection("test://has-like".to_string()),
             OrderDirection::DESC,
         );
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..

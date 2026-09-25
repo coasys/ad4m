@@ -7,6 +7,11 @@
 use super::Ad4mMcpHandler;
 use crate::agent::AgentService;
 use crate::mcp::shacl;
+// Mention terms come from profile names / `name_override` — untrusted input,
+// potentially attacker-controlled in a shared neighbourhood — so every one is
+// escaped before it goes into the mention-matching FILTER. One escaping rule
+// for the crate, in `model_query::utils`.
+use crate::perspectives::model_query::utils::escape_sparql_string as escape_sparql_literal;
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,20 +55,6 @@ pub struct MentionWakerConfigParams {
 // ============================================================================
 // Helpers
 // ============================================================================
-
-/// Escape a string for safe interpolation inside a double-quoted SPARQL
-/// string literal. Mention terms come from profile names / `name_override`
-/// — untrusted input, potentially attacker-controlled in a shared
-/// neighbourhood — so without this, a `"` or `\` breaks out of the literal
-/// and can inject arbitrary SPARQL into the mention-matching FILTER. Also
-/// escapes CR/LF/TAB, which SPARQL STRING_LITERAL2 forbids raw.
-fn escape_sparql_literal(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
-}
 
 /// Validate that a value intended to be an IRI is safe for interpolation
 /// inside a SPARQL string literal (`STR(?x) = "..."`).  A well-formed IRI

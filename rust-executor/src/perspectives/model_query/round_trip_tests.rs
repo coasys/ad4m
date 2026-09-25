@@ -718,6 +718,7 @@ async fn e2e_shacl_shape_with_where_ops() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();
@@ -746,6 +747,7 @@ async fn e2e_shacl_shape_with_where_ops() {
             ..Default::default()
         },
         &resolver,
+        None,
     )
     .await
     .unwrap();

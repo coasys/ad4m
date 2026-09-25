@@ -2252,3 +2252,470 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         "a failed add_to_collection must not leave the item linked: {got}"
     );
 }
+
+/// Another managed user's Local link, written straight into the perspective's
+/// shared store as co-owning users do on a multi-user executor. The MCP
+/// handler in these tests acts as the main agent, so it must not see it.
+fn other_users_local_link(
+    source: &str,
+    predicate: &str,
+    target: &str,
+) -> crate::types::LinkExpression {
+    crate::types::LinkExpression {
+        author: "did:key:z6MkOtherManagedUser".to_string(),
+        timestamp: "2026-01-01T00:00:00.000Z".to_string(),
+        data: crate::types::Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        },
+        proof: crate::types::ExpressionProof {
+            key: "key".to_string(),
+            signature: "sig".to_string(),
+        },
+        status: Some(crate::types::LinkStatus::Local),
+    }
+}
+
+/// `get_children` must not list another user's Local child link (#1024).
+#[tokio::test(flavor = "multi_thread")]
+async fn get_children_hides_other_users_local_child_links() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let mine = parse(
+        &handler
+            .add_child(Parameters(AddChildParams {
+                perspective_id: uuid.clone(),
+                parent: "ad4m://room".into(),
+                child: "ad4m://obj/mine".into(),
+            }))
+            .await,
+    );
+    assert_eq!(mine["success"], true, "{mine}");
+    crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .sparql_store
+        .add_link(&other_users_local_link(
+            "ad4m://room",
+            HAS_CHILD,
+            "ad4m://obj/private",
+        ))
+        .unwrap();
+
+    let listed = parse(
+        &handler
+            .get_children(Parameters(GetChildrenParams {
+                perspective_id: uuid.clone(),
+                parent: "ad4m://room".into(),
+                limit: None,
+            }))
+            .await,
+    );
+    let ids: Vec<&str> = listed["children"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["ad4m://obj/mine"], "{listed}");
+    assert_eq!(listed["total_count"], 1, "{listed}");
+}
+
+/// `instance_remove` must not delete another user's Local links on the
+/// instance (#1024). The cascade removes only the links the caller can see.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_remove_leaves_other_users_local_links() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = created["base_uri"].as_str().unwrap().to_string();
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    perspective
+        .sparql_store
+        .add_link(&other_users_local_link(
+            &channel,
+            "ad4m://private_note",
+            "literal://string:mine-only",
+        ))
+        .unwrap();
+
+    let removed = parse(
+        &handler
+            .instance_remove(Parameters(InstanceRemoveParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+
+    // Executor scope: what is really left in the store.
+    let left = perspective
+        .get_links(&LinkQuery {
+            source: Some(channel.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        left.iter().map(|l| l.author.as_str()).collect::<Vec<_>>(),
+        vec!["did:key:z6MkOtherManagedUser"],
+        "only the other user's Local link may survive: {left:?}"
+    );
+}
+
+/// Collection membership lookups must not see another user's Local
+/// membership link (#1024). `instance_add_to_collection` used it to answer
+/// "already a member", which told the caller the link exists.
+/// `instance_remove_from_collection` removed it.
+#[tokio::test(flavor = "multi_thread")]
+async fn collection_membership_ignores_other_users_local_links() {
+    let (handler, uuid, _guard) = setup(false).await;
+
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = created["base_uri"].as_str().unwrap().to_string();
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    perspective
+        .sparql_store
+        .add_link(&other_users_local_link(
+            &channel,
+            HAS_CHILD,
+            "ad4m://obj/private",
+        ))
+        .unwrap();
+    let authors_on_item = || {
+        let perspective = perspective.clone();
+        let channel = channel.clone();
+        async move {
+            let mut authors: Vec<String> = perspective
+                .get_links(&LinkQuery {
+                    source: Some(channel),
+                    predicate: Some(HAS_CHILD.to_string()),
+                    target: Some("ad4m://obj/private".to_string()),
+                    ..Default::default()
+                })
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|l| l.author)
+                .collect();
+            authors.sort();
+            authors
+        }
+    };
+
+    let added = parse(
+        &handler
+            .instance_add_to_collection(Parameters(InstanceAddToCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "messages".into(),
+                item_uri: "ad4m://obj/private".into(),
+            }))
+            .await,
+    );
+    assert_eq!(added["success"], true, "{added}");
+    assert_eq!(
+        added["links_added"], 1,
+        "another user's Local membership must not make the item a member: {added}"
+    );
+    assert_eq!(authors_on_item().await.len(), 2);
+
+    let removed = parse(
+        &handler
+            .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".into(),
+                base_uri: channel.clone(),
+                collection: "messages".into(),
+                item_uri: "ad4m://obj/private".into(),
+            }))
+            .await,
+    );
+    assert_eq!(removed["success"], true, "{removed}");
+    assert_eq!(removed["links_removed"], 1, "{removed}");
+    assert_eq!(
+        authors_on_item().await,
+        vec!["did:key:z6MkOtherManagedUser".to_string()],
+        "only the other user's Local membership link may survive"
+    );
+}
+
+/// Run a `{class}_{operation}` dynamic tool and return its text.
+async fn dynamic_tool(handler: &Ad4mMcpHandler, tool: &str, args: Value) -> String {
+    let result = handler
+        .handle_dynamic_tool(tool, args.as_object().cloned())
+        .await
+        .unwrap_or_else(|e| panic!("{tool} failed: {e:?}"));
+    result
+        .content
+        .iter()
+        .filter_map(|c| c.as_text().map(|t| t.text.clone()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// A Channel created by the main agent, plus another user's Local link on it.
+async fn channel_with_other_users_local_link(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    predicate: &str,
+    target: &str,
+) -> String {
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.to_string(),
+                class_name: "Channel".into(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = created["base_uri"].as_str().unwrap().to_string();
+    crate::perspectives::get_perspective(uuid)
+        .unwrap()
+        .sparql_store
+        .add_link(&other_users_local_link(&channel, predicate, target))
+        .unwrap();
+    channel
+}
+
+/// Targets of the other user's links from `source` on `predicate`, read in
+/// executor scope: what is really in the store.
+async fn other_users_targets(uuid: &str, source: &str, predicate: &str) -> Vec<String> {
+    crate::perspectives::get_perspective(uuid)
+        .unwrap()
+        .get_links(&LinkQuery {
+            source: Some(source.to_string()),
+            predicate: Some(predicate.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|l| l.author == "did:key:z6MkOtherManagedUser")
+        .map(|l| l.data.target)
+        .collect()
+}
+
+/// `{class}_update` replaces the values of a property. It must replace only
+/// the values this agent can see, not another user's Local value (#1024).
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_update_leaves_other_users_local_value() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = channel_with_other_users_local_link(
+        &handler,
+        &uuid,
+        "flux://channel_name",
+        "literal://string:private",
+    )
+    .await;
+
+    let out = dynamic_tool(
+        &handler,
+        "channel_update",
+        json!({"perspective_id": uuid, "expression_address": channel, "name": "renamed"}),
+    )
+    .await;
+
+    assert_eq!(
+        other_users_targets(&uuid, &channel, "flux://channel_name").await,
+        vec!["literal://string:private".to_string()],
+        "{out}"
+    );
+}
+
+/// `{class}_set_{property}`: same rule as `{class}_update`.
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_set_property_leaves_other_users_local_value() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = channel_with_other_users_local_link(
+        &handler,
+        &uuid,
+        "flux://channel_name",
+        "literal://string:private",
+    )
+    .await;
+
+    let out = dynamic_tool(
+        &handler,
+        "channel_set_name",
+        json!({"perspective_id": uuid, "expression_address": channel, "value": "renamed"}),
+    )
+    .await;
+
+    assert_eq!(
+        other_users_targets(&uuid, &channel, "flux://channel_name").await,
+        vec!["literal://string:private".to_string()],
+        "{out}"
+    );
+}
+
+/// `{class}_delete` removes every link on the instance that this agent can
+/// see. Another user's Local link on it is private to them and stays.
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_delete_leaves_other_users_local_links() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = channel_with_other_users_local_link(
+        &handler,
+        &uuid,
+        "ad4m://private_note",
+        "literal://string:mine-only",
+    )
+    .await;
+
+    let out = dynamic_tool(
+        &handler,
+        "channel_delete",
+        json!({"perspective_id": uuid, "expression_address": channel}),
+    )
+    .await;
+
+    let left = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .get_links(&LinkQuery {
+            source: Some(channel.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        left.iter().map(|l| l.author.as_str()).collect::<Vec<_>>(),
+        vec!["did:key:z6MkOtherManagedUser"],
+        "only the other user's Local link may survive: {out}"
+    );
+}
+
+/// A Channel on which the other user and the main agent each hold their own
+/// Local membership link for the same item: one bare triple, two reifiers.
+async fn channel_where_both_hold_local_member(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    item: &str,
+) -> String {
+    let channel = channel_with_other_users_local_link(handler, uuid, HAS_CHILD, item).await;
+    crate::perspectives::get_perspective(uuid)
+        .unwrap()
+        .add_link(
+            crate::types::Link {
+                source: channel.clone(),
+                predicate: Some(HAS_CHILD.to_string()),
+                target: item.to_string(),
+            },
+            crate::types::LinkStatus::Local,
+            None,
+            &crate::agent::AgentContext::main_agent(),
+        )
+        .await
+        .expect("main agent's own Local copy");
+    channel
+}
+
+/// Both halves of a same-item removal: the main agent's copy is gone from
+/// the store and from its own reads, the other user's copy is still there
+/// and still visible to them.
+async fn assert_only_other_users_copy_left(uuid: &str, channel: &str, item: &str, out: &str) {
+    let perspective = crate::perspectives::get_perspective(uuid).unwrap();
+    let query = LinkQuery {
+        source: Some(channel.to_string()),
+        predicate: Some(HAS_CHILD.to_string()),
+        target: Some(item.to_string()),
+        ..Default::default()
+    };
+    let authors: Vec<String> = perspective
+        .get_links(&query)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.author)
+        .collect();
+    assert_eq!(
+        authors,
+        vec!["did:key:z6MkOtherManagedUser".to_string()],
+        "only the other user's copy is left in the store: {out}"
+    );
+    let seen_by = |viewer: String| {
+        let perspective = perspective.clone();
+        let query = query.clone();
+        async move {
+            perspective
+                .get_links_for_viewer(&query, Some(&viewer))
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(
+        seen_by(crate::agent::did()).await,
+        0,
+        "the main agent no longer sees the item: {out}"
+    );
+    assert_eq!(
+        seen_by("did:key:z6MkOtherManagedUser".to_string()).await,
+        1,
+        "the other user still sees their copy: {out}"
+    );
+}
+
+/// `{class}_remove_{collection}` removes this agent's membership link, not
+/// another user's Local one for the same item. Both hold the same item, so
+/// the test proves both halves: mine removed, theirs kept.
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_remove_from_collection_leaves_other_users_local_member() {
+    let (handler, uuid, _guard) = setup(true).await;
+    let channel = channel_where_both_hold_local_member(&handler, &uuid, "ad4m://obj/private").await;
+
+    let out = dynamic_tool(
+        &handler,
+        "channel_remove_messages",
+        json!({"perspective_id": uuid, "expression_address": channel, "value": "ad4m://obj/private"}),
+    )
+    .await;
+
+    assert_eq!(parse(&out)["links_removed"], 1, "{out}");
+    assert_only_other_users_copy_left(&uuid, &channel, "ad4m://obj/private", &out).await;
+}
+
+/// `instance_remove_from_collection`: the same rule through the generic tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_remove_from_collection_leaves_other_users_local_member() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = channel_where_both_hold_local_member(&handler, &uuid, "ad4m://obj/private").await;
+
+    let out = handler
+        .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+            perspective_id: uuid.clone(),
+            class_name: "Channel".to_string(),
+            base_uri: channel.clone(),
+            collection: "messages".to_string(),
+            item_uri: "ad4m://obj/private".to_string(),
+        }))
+        .await;
+
+    assert_eq!(parse(&out)["success"], true, "{out}");
+    assert_only_other_users_copy_left(&uuid, &channel, "ad4m://obj/private", &out).await;
+}

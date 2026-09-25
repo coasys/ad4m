@@ -184,7 +184,10 @@ export class FlowInstanceRecord extends Ad4mModel {
   /**
    * The state name this replica's executor last derived for the flow — a
    * per-replica cache written as a `local` link, never the authority (the
-   * fold over the signed proposals is). Optional on the shape: a row that
+   * fold over the signed proposals is). On a multi-user host a `local` link
+   * is private to its author, so the cache is per user too: reading
+   * `FlowInstance` rows derives the state for the reading user and writes or
+   * replaces that user's own cache first. Optional on the shape: a row that
    * synced in from a peer carries no value until the local consensus pass
    * has run, so an empty string means "not yet derived here".
    */

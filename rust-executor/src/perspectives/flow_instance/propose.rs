@@ -69,7 +69,7 @@ use super::atom::{
     check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
     TransitionAtom,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{catch_up_before_voting, run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -377,8 +377,9 @@ async fn mint(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<(String, bool, bool, Vec<FireOutcome>)> {
+    let mut outcomes = catch_up_before_voting(perspective, &transition.instance_uri, context).await;
     let uri = write_proposal(perspective, transition, acting_did, rationale, context).await?;
-    let outcomes = sweep(perspective, &transition.instance_uri, context).await;
+    outcomes.extend(sweep(perspective, &transition.instance_uri, context).await);
     Ok((uri, true, true, outcomes))
 }
 
