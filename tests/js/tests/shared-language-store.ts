@@ -109,12 +109,19 @@ export default function sharedLanguageStoreTests(testContext: TestContext) {
                 const published = await client.languages.publish(uniqueBundle("kv"),
                     new LanguageMetaInput("kv-store language", ""));
 
-                const own = await client.expression.get(`lang://${published.address}`);
-                expect(own, "KV-mode language-language lost its own publish").to.not.be.null;
-                expect(JSON.parse(own.data).name).to.equal("kv-store language");
+                // languages.meta, not expression.get("lang://..."): the `lang`
+                // alias is only registered when all system languages load.
+                const own = await client.languages.meta(published.address);
+                expect(own.name).to.equal("kv-store language");
 
                 expect(sharedLanguageExists(published.address)).to.be.false;
-                expect(await testContext.alice.expression.get(`lang://${published.address}`)).to.be.null;
+                let aliceError: any = null;
+                try {
+                    await testContext.alice.languages.meta(published.address);
+                } catch (e) {
+                    aliceError = e;
+                }
+                expect(aliceError, "Alice found a language published in another executor's KV").to.not.be.null;
             });
         });
     };
