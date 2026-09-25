@@ -179,7 +179,7 @@ pub(crate) async fn produced_at_by_instance<Q: RequiresQueryable + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perspectives::flow_evaluator::{EvidenceItem, RoleGrantLinks};
+    use crate::perspectives::flow_evaluator::EvidenceItem;
     use crate::perspectives::flow_instance::atom::{
         outputs_hash, proposal_uri, OutputRef, EVIDENCE_HASHES_PREDICATE, FLOW_INSTANCE_PREDICATE,
         FROM_STATE_PREDICATE, OUTPUTS_HASH_PREDICATE, OUTPUT_PREDICATE, PROPOSAL_NONCE_PREDICATE,
@@ -412,6 +412,10 @@ mod tests {
     /// nothing for anyone else), hands out Alice's signed assignment link on
     /// each, holds `catalogue`, and returns `receipts` as the granting flow's
     /// index. Records which flows' receipts were asked for.
+    ///
+    /// The history comes back the way `model_query` answers `links` (#1103):
+    /// under `__links`, one array per requested key — the tombstone
+    /// predicate gets no rows, any other key Alice's assignment link.
     struct GateStore {
         instances: Vec<&'static str>,
         catalogue: HashMap<String, SHACLFlow>,
@@ -422,32 +426,36 @@ mod tests {
     #[async_trait]
     impl RequiresQueryable for GateStore {
         async fn model_query(&self, _class: &str, query_json: &str) -> anyhow::Result<String> {
+            let query: Value = serde_json::from_str(query_json)?;
+            let keys: Vec<String> = query["links"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
             let instances: Vec<Value> = if query_json.contains(did_of(ALICE)) {
                 self.instances
                     .iter()
-                    .map(|id| json!({ "id": id, "timestamp": ASSIGNMENT_LINK_AT }))
+                    .map(|id| {
+                        let links: serde_json::Map<String, Value> = keys
+                            .iter()
+                            .map(|key| {
+                                let rows = if key == ROLE_GRANT_REVOKED_PREDICATE {
+                                    Vec::new()
+                                } else {
+                                    vec![assignment(id)]
+                                };
+                                (key.clone(), json!(rows))
+                            })
+                            .collect();
+                        json!({ "id": id, "timestamp": ASSIGNMENT_LINK_AT, "__links": links })
+                    })
                     .collect()
             } else {
                 Vec::new()
             };
             Ok(json!({ "totalCount": instances.len(), "instances": instances }).to_string())
-        }
-
-        async fn role_grant_links(
-            &self,
-            _role_class: &str,
-            instance_id: &str,
-            _did_property: Option<&str>,
-            did: &str,
-        ) -> anyhow::Result<RoleGrantLinks> {
-            Ok(RoleGrantLinks {
-                grant_links: if did == did_of(ALICE) {
-                    vec![assignment(instance_id)]
-                } else {
-                    Vec::new()
-                },
-                revocation_links: Vec::new(),
-            })
         }
 
         async fn flow_receipts(&self, flow_uri: &str) -> anyhow::Result<Vec<FlowReceipt>> {
