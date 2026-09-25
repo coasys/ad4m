@@ -68,8 +68,8 @@
  *     `fromRole` is an ordinary ModelQuery. Roles are not special objects.
  *     A key the engine does not know anywhere in the rule refuses the edge
  *     (Part 4); it is not dropped. A grant starts at a link whose signature
- *     verifies, from an author the rule accepts; a forged link stamped
- *     earlier does not move it (Part 5).
+ *     verifies, from an author the rule accepts; an earlier link from anyone
+ *     else does not move it (Part 5).
  *
  *  7. GRANTING A ROLE IS ITSELF A FLOW  (the fractal stretch)
  *     A `ReviewerRoleGrant` flow runs over a `HandoverReviewerRole` instance
@@ -119,7 +119,7 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, LinkQuery, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
 import { FlowInstance } from "@coasys/ad4m";
 import type { ConsensusRule, FlowProposeResult } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
@@ -714,57 +714,54 @@ describe("flow task handover — WE-facing API with roles", function () {
 
   // ── Part 5: when a grant starts ──────────────────────────────────────────
 
-  it("Part 5 — a forged grant link stamped before a vote does not make that vote count", async () => {
-    const { aliceP, bobP } = await sharedPerspective("handover-backdated-grant");
+  it("Part 5 — a grant starts at the granter's link, not at an earlier one the grantee wrote", async () => {
+    const { aliceP, bobP } = await sharedPerspective("handover-grant-start");
+    // Only Alice grants the role: the rule's author sits under every field,
+    // so both the `agent` and the `domain` link must be hers.
     await aliceP.addFlow(
       "TaskFlow",
       makeTaskFlow({
         n: 1,
         fromRole: {
           className: "HandoverReviewerRole",
-          where: { domain: "frontend" },
+          where: { domain: "frontend", author: aliceDid },
           didProperty: "agent",
         },
       }),
     );
 
-    const task = (await (Task as any).create(aliceP, { title: "Back-dated grant" })) as Task;
+    const task = (await (Task as any).create(aliceP, { title: "Early self-assignment" })) as Task;
     await FlowInstance.start(aliceP, "TaskFlow", task.id);
     await advanceToInReview(aliceP, bobP, task.id);
     await createUnder<ReviewNote>(ReviewNote, aliceP, task.id, { body: "Looks good" });
 
-    // Bob votes before anyone grants him the role: his vote does not count.
-    const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Done");
-    expect(bobPress.outcomes, "Bob holds no role yet").to.have.lengthOf(0);
-    expect(bobPress.recordedVote).to.be.true;
-
-    // Alice grants him the role after his vote. The vote was cast outside it.
-    const role = await createUnder<ReviewerRole>(ReviewerRole, aliceP, task.id, {
+    // Bob writes the role instance naming himself, then votes. His own links
+    // are not a grant under this rule, so the vote does not count.
+    const role = await createUnder<ReviewerRole>(ReviewerRole, bobP, task.id, {
       agent: bobDid,
       domain: "frontend",
     });
-    const [assignment] = await aliceP.get(
-      new LinkQuery({ source: role.id, predicate: "handover://role_agent" }),
-    );
-    expect(assignment, "the role instance carries its agent link").to.exist;
+    const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Done");
+    expect(bobPress.outcomes, "Bob granted himself nothing").to.have.lengthOf(0);
+    expect(bobPress.recordedVote).to.be.true;
 
-    // A second agent link naming Bob, claiming Alice as its author, stamped
-    // an hour ago, with a signature that does not verify.
-    await aliceP.addLinkExpression({
-      author: aliceDid,
-      timestamp: new Date(Date.now() - 3_600_000).toISOString(),
-      data: { source: role.id, predicate: "handover://role_agent", target: assignment.data.target },
-      proof: { key: `${aliceDid}#key`, signature: "not-a-real-signature" },
-    } as any);
+    // Alice grants him the role after his vote, by writing the same two
+    // links herself. The vote was cast outside the role.
+    for (const predicate of ["handover://role_agent", "handover://role_domain"]) {
+      const [bobs] = await aliceP.get(new LinkQuery({ source: role.id, predicate }));
+      expect(bobs, `Bob's ${predicate} link`).to.exist;
+      await aliceP.add(new Link({ source: role.id, predicate, target: bobs.data.target }));
+    }
 
     // Alice's own click re-derives the run. She holds no role, so it counts
-    // for nothing, and Bob's vote predates his genuine grant.
-    // Fail-on-old-code: grant links were not signature-checked, the forgery
-    // dated Bob's grant an hour back, and his vote settled Done here.
+    // for nothing, and Bob's vote predates his grant.
+    // Fail-on-old-code: the grant started at the earliest `agent` link naming
+    // Bob from ANY author, which was his own, written before his vote, so the
+    // vote counted and the run settled Done here.
     const alicePress = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
     expect(
       alicePress.outcomes,
-      "a forged, back-dated grant link must not make Bob's earlier vote count",
+      "Bob's own earlier link must not date the grant Alice made after his vote",
     ).to.have.lengthOf(0);
     expect(alicePress.derivedState).to.equal("InReview");
     // Part 2 is the positive half: a vote cast after a genuine grant counts.

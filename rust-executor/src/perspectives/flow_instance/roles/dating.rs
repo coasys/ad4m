@@ -1,23 +1,12 @@
-//! When a role grant starts: the one rule, applied where the evidence is
-//! collected and again where it is read (#1063).
+//! When a role grant starts (#1063): the rule stated in the
+//! [`roles`](super) module doc (§ *Where the timestamps come from*), as code.
 //!
-//! A grant is dated only by a link that verifies, from someone the rule
-//! accepts. There are two kinds of such link, and the rule says which it
-//! needs:
-//!
-//! - **Grant links.** A *DID field* is a `where` field whose translated
-//!   condition is the candidate's DID: `didProperty` is one, `member: "$did"`
-//!   another. A grant link is a link on one of those fields that names the
-//!   DID and whose author [`granter_authorised`] accepts, the function that
-//!   also decides who may revoke.
-//! - **The grantee's own links.** Under `author: "$did"` the grant is the
-//!   instance itself, written by the grantee, so it counts from the earliest
-//!   link on the instance the grantee wrote.
-//!
-//! Each kind the rule needs yields its earliest such link, and the grant
-//! starts at the later of the two. A kind the rule needs with no qualifying
-//! link means no grant, and so does a rule that needs neither kind. No
-//! instance timestamp or other fallback dates a grant.
+//! [`GrantDating`] is built from the translated role query and the candidate,
+//! and applied twice: where the evidence is collected
+//! ([`RoleGrantLinks::from_instance`](crate::perspectives::flow_evaluator::RoleGrantLinks::from_instance),
+//! before the cap) and where it is read
+//! ([`RoleGrantEvidence::resolve`](super::RoleGrantEvidence::resolve)). Change
+//! the rule there, not here.
 
 use super::evidence::granter_authorised;
 use crate::perspectives::flow_evaluator::{did_literal_url, target_names_did};
