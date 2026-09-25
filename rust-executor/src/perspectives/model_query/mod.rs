@@ -126,7 +126,7 @@ pub(crate) mod utils;
 pub(crate) use filtering::matches_condition;
 pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
-pub(crate) use links::{links_trigger_predicates, LINKS_KEY};
+pub(crate) use links::{links_rows, links_trigger_predicates, LINKS_KEY};
 pub use query::execute_model_query;
 pub use relations::resolve_reverse_relations;
 pub(crate) use shape::{load_shape_from_store, MissingShape};
