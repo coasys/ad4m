@@ -113,7 +113,7 @@ fn typed_number_literal(n: f64) -> Option<String> {
 pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
-    let verified = |predicate: &str| guard.on_reifier("?_r", predicate);
+    let verified = |_predicate: &str| guard.on_reifier("?_r");
 
     if let Some(prop) = shape.properties.iter().find(|p| {
         // `emittable_iri` on the initial: the value is inlined as `<…>`
@@ -330,7 +330,7 @@ pub(super) fn build_instance_sparql(
         // a property the class declared local?), `viewer` about the
         // *requesting agent* (may it see this Local link at all?). A row must
         // pass both, and the two query options above.
-        let viewer = viewer_author_filter(viewer_did, "_reifier", "author", "predicate");
+        let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
         InstanceQueryPlan::Single(format!(
             r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -500,12 +500,10 @@ impl<'a> LinkGuard<'a> {
     }
 
     /// The checks as patterns on `reifier`, a variable the caller has already
-    /// joined to the link through `rdf:reifies`. `predicate` is the link's
-    /// predicate as a term (`<iri>` or a bound variable): an engine-derived
-    /// predicate is visible to every viewer. The viewer check binds variables
-    /// named after `reifier`, so a reifier must be unique in the query.
-    /// Empty when open.
-    pub(super) fn on_reifier(&self, reifier: &str, predicate: &str) -> String {
+    /// joined to the link through `rdf:reifies`. The viewer check binds
+    /// variables named after `reifier`, so a reifier must be unique in the
+    /// query. Empty when open.
+    pub(super) fn on_reifier(&self, reifier: &str) -> String {
         let mut out = String::new();
         if let Some(s) = self.status {
             out.push_str(&format!(
@@ -518,7 +516,7 @@ impl<'a> LinkGuard<'a> {
                 " {reifier} <ad4m://ontology/proofValid> \"true\" ."
             ));
         }
-        out.push_str(&viewer_reifier_filter(self.viewer, reifier, predicate));
+        out.push_str(&viewer_reifier_filter(self.viewer, reifier));
         out
     }
 
@@ -546,7 +544,7 @@ impl<'a> LinkGuard<'a> {
         format!(
             " {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
              <<( {subject} {predicate} {object} )>> .{}",
-            self.on_reifier(reifier, predicate)
+            self.on_reifier(reifier)
         )
     }
 
@@ -563,7 +561,7 @@ impl<'a> LinkGuard<'a> {
         format!(
             " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
              <<( {subject} {predicate} {object} )>> .{} }}",
-            self.on_reifier("?_pv", predicate)
+            self.on_reifier("?_pv")
         )
     }
 }

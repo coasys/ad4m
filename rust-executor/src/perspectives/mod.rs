@@ -738,16 +738,9 @@ pub async fn import_perspective(
     // `instance.links` is already `LinkExpression`. Decorating just to persist
     // would convert back at the store boundary. Missing status defaults to
     // Local, matching the previous decorate path (not Shared).
-    //
-    // The engine's derivations (`ENGINE_DERIVED_PREDICATES`) are not
-    // imported: they describe the exporting executor's view, only the engine
-    // may write them here, and its next pass derives them again.
     let additions: Vec<crate::types::LinkExpression> = instance
         .links
         .into_iter()
-        .filter(|link| {
-            !crate::perspectives::link_visibility::is_engine_derived(link.data.predicate.as_deref())
-        })
         .map(|mut link| {
             if link.status.is_none() {
                 link.status = Some(LinkStatus::Local);

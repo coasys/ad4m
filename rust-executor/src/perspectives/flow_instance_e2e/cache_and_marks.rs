@@ -126,12 +126,10 @@ async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
         }
         .normalize(),
     );
-    crate::perspectives::interpretation_test_support::store_as_peer_link(
-        &f.perspective,
-        LinkExpression::from(peer_cache),
-        LinkStatus::Shared,
-    )
-    .await;
+    f.perspective
+        .add_link_expression(LinkExpression::from(peer_cache), LinkStatus::Shared, None)
+        .await
+        .expect("sync a peer's currentState");
     // The peer's link really is on the graph, and really does say something
     // else — so the assertion below is about withholding, not about a link
     // that never arrived.

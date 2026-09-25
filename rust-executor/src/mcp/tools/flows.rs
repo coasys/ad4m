@@ -280,6 +280,7 @@ impl Ad4mMcpHandler {
         if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
             perspective,
             &record.instance_uri,
+            None,
         )
         .await?
         {

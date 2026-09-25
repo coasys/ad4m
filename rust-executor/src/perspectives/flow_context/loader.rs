@@ -260,10 +260,12 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
-    // Cache-first (#987): trust the `Local`-verified `currentState` link when
-    // present — peers cannot write it since #987's Local switch, so it is
-    // exactly what this replica last derived.  Instances whose cache is absent
-    // (never derived yet) fall through to `derive_states`.
+    // Cache-first (#987): trust the `Local` `currentState` link when present —
+    // peers cannot write it since #987's Local switch, so it is what this
+    // replica last derived. On a multi-user host every user holds their own
+    // cache (#1024); executor scope takes it only when all of them agree.
+    // Instances whose cache is absent or disputed fall through to
+    // `derive_states`.
     //
     // The cache stores only the state name — the fold's contention verdict
     // was NOT computed on this path, so cache-sourced flows carry
@@ -279,6 +281,7 @@ pub async fn gather_active_flow_contexts(
         match crate::perspectives::flow_instance::local_cached_state(
             perspective,
             &record.instance_uri,
+            None,
         )
         .await
         {
