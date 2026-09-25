@@ -2839,6 +2839,7 @@ mod tests {
                     signature: String::new(),
                     valid: None,
                     invalid: None,
+                    ..Default::default()
                 },
                 status: None,
             }

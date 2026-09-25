@@ -195,6 +195,7 @@ pub fn create_signed_expression<T: Serialize>(
         proof: ExpressionProof {
             key: signing_key_id_for_context(context)?,
             signature,
+            ..Default::default()
         },
     })
 }

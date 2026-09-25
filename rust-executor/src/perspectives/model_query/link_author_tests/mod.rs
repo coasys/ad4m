@@ -74,6 +74,7 @@ fn link(author: &str, source: &str, predicate: &str, target: &str, ts: &str) -> 
         proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
+            ..Default::default()
         },
         status: Some(LinkStatus::Shared),
     }

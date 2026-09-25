@@ -982,6 +982,7 @@ impl SparqlStore {
                         signature: proof_sig,
                         valid: Some(proof_valid),
                         invalid: Some(!proof_valid),
+                        ..Default::default()
                     },
                     status,
                 };
@@ -1123,6 +1124,7 @@ impl SparqlStore {
                 signature: proof_sig,
                 valid: Some(proof_valid),
                 invalid: Some(!proof_valid),
+                ..Default::default()
             },
             status,
         })

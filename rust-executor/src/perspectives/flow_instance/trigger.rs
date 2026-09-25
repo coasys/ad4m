@@ -392,6 +392,7 @@ mod tests {
                 signature: String::new(),
                 valid: Some(true),
                 invalid: Some(false),
+                ..Default::default()
             },
             status: Some(LinkStatus::Shared),
         }
