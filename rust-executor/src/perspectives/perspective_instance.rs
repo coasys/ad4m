@@ -8003,6 +8003,348 @@ mod tests {
         assert_eq!(links_on(&perspective, "test://members").await.len(), 2);
     }
 
+    // Both users hold the identical triple as a Local link (#1058 review).
+    //
+    // `sparql_store::remove_link` drops the link's own reifier (one per
+    // author and timestamp) and the bare `(s, p, t)` triple only once no
+    // reifier references it. The write paths above pick the links they remove
+    // by pattern in the acting agent's scope, so the case the tests above do
+    // not cover is two users holding the *same* triple: removing mine must
+    // take neither the other user's copy nor the bare triple under it. Each
+    // test runs the write once as the main agent, on one predicate, and once
+    // as the other user, on a second predicate, in the same store.
+
+    const OTHER_EMAIL: &str = "other-user@1058.test";
+    const SAME_TARGET: &str = "test://same-value";
+
+    /// A second managed user with a real key, so its writes are signed by it
+    /// and its DID is what the viewer scope compares the author against.
+    fn other_user() -> (AgentContext, String) {
+        AgentService::ensure_user_key_exists(OTHER_EMAIL).expect("other user key");
+        let ctx = AgentContext::for_user_email(OTHER_EMAIL.to_string());
+        let did = crate::agent::did_for_context(&ctx).expect("other user DID");
+        (ctx, did)
+    }
+
+    /// Who runs the write in one round of a same-triple test.
+    #[derive(Clone, Copy)]
+    enum Actor {
+        Main,
+        Other,
+    }
+
+    /// One side of a same-triple round: the actor removes its copy, the
+    /// keeper's copy must survive.
+    struct SameTriple {
+        actor_ctx: AgentContext,
+        actor_did: String,
+        keeper_did: String,
+    }
+
+    /// The main agent and the other user each add `predicate -> SAME_TARGET`
+    /// as their own Local link, through the real signed write path.
+    async fn both_hold_same_local(
+        p: &mut PerspectiveInstance,
+        predicate: &str,
+        actor: Actor,
+    ) -> SameTriple {
+        let (other_ctx, other_did) = other_user();
+        let main_did = crate::agent::did();
+        let link = || Link {
+            source: WRITE_SOURCE.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: SAME_TARGET.to_string(),
+        };
+        p.add_link(link(), LinkStatus::Local, None, &AgentContext::main_agent())
+            .await
+            .expect("main agent's Local copy");
+        p.add_link(link(), LinkStatus::Local, None, &other_ctx)
+            .await
+            .expect("other user's Local copy");
+        assert_eq!(
+            links_on(p, predicate).await.len(),
+            2,
+            "both copies are stored, one reifier each"
+        );
+        match actor {
+            Actor::Main => SameTriple {
+                actor_ctx: AgentContext::main_agent(),
+                actor_did: main_did,
+                keeper_did: other_did,
+            },
+            Actor::Other => SameTriple {
+                actor_ctx: other_ctx,
+                actor_did: other_did,
+                keeper_did: main_did,
+            },
+        }
+    }
+
+    /// Targets on `predicate` as `viewer` reads them: the read behind the
+    /// client's `queryLinks`.
+    async fn targets_seen_by(
+        p: &PerspectiveInstance,
+        predicate: &str,
+        viewer: &str,
+    ) -> Vec<String> {
+        let mut targets: Vec<String> = p
+            .get_links_for_viewer(
+                &LinkQuery {
+                    source: Some(WRITE_SOURCE.to_string()),
+                    predicate: Some(predicate.to_string()),
+                    ..Default::default()
+                },
+                Some(viewer),
+            )
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        targets.sort();
+        targets
+    }
+
+    /// Is the bare `(WRITE_SOURCE, predicate, target)` triple still in the
+    /// store, independent of any reifier?
+    fn bare_triple_exists(p: &PerspectiveInstance, predicate: &str, target: &str) -> bool {
+        let rows = p
+            .sparql_store
+            .query(&format!(
+                "SELECT ?p WHERE {{ <{WRITE_SOURCE}> ?p <{target}> . FILTER(?p = <{predicate}>) }}"
+            ))
+            .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&rows).unwrap();
+        !rows.is_empty()
+    }
+
+    /// Like [`this_command`], writing Local, so the value the actor puts in
+    /// place of its copy is private too and the keeper's reads stay
+    /// unambiguous.
+    fn this_local_command(action: Action, predicate: &str, target: &str) -> Command {
+        Command {
+            local: Some(true),
+            ..this_command(action, predicate, target)
+        }
+    }
+
+    async fn run_as(
+        p: &mut PerspectiveInstance,
+        ctx: &AgentContext,
+        command: Command,
+        parameters: Vec<Parameter>,
+    ) {
+        p.execute_commands(
+            vec![command],
+            WRITE_SOURCE.to_string(),
+            parameters,
+            None,
+            ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// After the actor's write: the actor no longer sees `SAME_TARGET` on
+    /// `predicate`, the keeper still does, exactly the keeper's copy is left
+    /// in the store, and the bare triple is still there for the keeper's
+    /// reifier to point at.
+    async fn assert_only_keepers_copy_left(
+        p: &PerspectiveInstance,
+        predicate: &str,
+        round: &SameTriple,
+    ) {
+        let same = SAME_TARGET.to_string();
+        assert!(
+            !targets_seen_by(p, predicate, &round.actor_did)
+                .await
+                .contains(&same),
+            "the actor's own copy of {predicate} is gone"
+        );
+        assert!(
+            targets_seen_by(p, predicate, &round.keeper_did)
+                .await
+                .contains(&same),
+            "the other user still sees their copy of {predicate}"
+        );
+        let authors: Vec<String> = links_on(p, predicate)
+            .await
+            .into_iter()
+            .filter(|l| l.data.target == SAME_TARGET)
+            .map(|l| l.author)
+            .collect();
+        assert_eq!(
+            authors,
+            vec![round.keeper_did.clone()],
+            "exactly the keeper's copy of {predicate} is left in the store"
+        );
+        assert!(
+            bare_triple_exists(p, predicate, SAME_TARGET),
+            "the bare triple stays while the keeper's reifier still references it"
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_link_exact_target_removes_only_the_actors_copy_of_a_shared_triple() {
+        let mut p = setup().await;
+        for (predicate, actor) in [
+            ("test://same-a", Actor::Main),
+            ("test://same-b", Actor::Other),
+        ] {
+            let round = both_hold_same_local(&mut p, predicate, actor).await;
+            run_as(
+                &mut p,
+                &round.actor_ctx,
+                this_command(Action::RemoveLink, predicate, SAME_TARGET),
+                vec![],
+            )
+            .await;
+            assert_only_keepers_copy_left(&p, predicate, &round).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_link_wildcard_removes_only_the_actors_copy_of_a_shared_triple() {
+        let mut p = setup().await;
+        for (predicate, actor) in [
+            ("test://same-a", Actor::Main),
+            ("test://same-b", Actor::Other),
+        ] {
+            let round = both_hold_same_local(&mut p, predicate, actor).await;
+            run_as(
+                &mut p,
+                &round.actor_ctx,
+                this_command(Action::RemoveLink, predicate, "*"),
+                vec![],
+            )
+            .await;
+            assert_only_keepers_copy_left(&p, predicate, &round).await;
+            assert_eq!(
+                targets_seen_by(&p, predicate, &round.actor_did).await,
+                Vec::<String>::new(),
+                "the wildcard removed everything the actor could see"
+            );
+        }
+    }
+
+    /// `SetSingleTarget` replaces the actor's value; the keeper's identical
+    /// Local value stays and is what their model query still hydrates.
+    #[tokio::test]
+    async fn set_single_target_replaces_only_the_actors_copy_of_a_shared_triple() {
+        let mut p = setup().await;
+        let shacl = r#"{
+            "node_shape_uri": "test://NoteShape",
+            "target_class": "test://Note",
+            "properties": [
+                {
+                    "path": "test://same-a",
+                    "name": "a",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "test://same-a", "target": "value"}]
+                },
+                {
+                    "path": "test://same-b",
+                    "name": "b",
+                    "max_count": 1,
+                    "writable": true,
+                    "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "test://same-b", "target": "value"}]
+                }
+            ],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        p.add_sdna(
+            "Note".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(shacl.to_string()),
+            &AgentContext::main_agent(),
+        )
+        .await
+        .expect("add_sdna");
+        let property_as_seen_by = |p: &PerspectiveInstance, name: &'static str, viewer: String| {
+            let p = p.clone();
+            async move {
+                let query = format!(r#"{{"where":{{"id":"{WRITE_SOURCE}"}},"limit":1}}"#);
+                let result = p
+                    .model_query_for_viewer("Note", &query, Some(&viewer))
+                    .await
+                    .expect("model_query_for_viewer");
+                let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+                result["instances"][0][name].as_str().map(str::to_string)
+            }
+        };
+
+        for (predicate, name, actor) in [
+            ("test://same-a", "a", Actor::Main),
+            ("test://same-b", "b", Actor::Other),
+        ] {
+            let round = both_hold_same_local(&mut p, predicate, actor).await;
+            run_as(
+                &mut p,
+                &round.actor_ctx,
+                this_local_command(Action::SetSingleTarget, predicate, "test://replaced"),
+                vec![],
+            )
+            .await;
+            assert_only_keepers_copy_left(&p, predicate, &round).await;
+            assert_eq!(
+                targets_seen_by(&p, predicate, &round.actor_did).await,
+                vec!["test://replaced".to_string()],
+                "the actor sees only the new value"
+            );
+            assert_eq!(
+                property_as_seen_by(&p, name, round.keeper_did.clone())
+                    .await
+                    .as_deref(),
+                Some(SAME_TARGET),
+                "the keeper's model query still hydrates their copy"
+            );
+            assert_eq!(
+                property_as_seen_by(&p, name, round.actor_did.clone())
+                    .await
+                    .as_deref(),
+                Some("test://replaced"),
+                "the actor's model query hydrates the new value"
+            );
+        }
+    }
+
+    /// `CollectionSetter` to a membership without the shared member removes
+    /// only the actor's copy of it.
+    #[tokio::test]
+    async fn collection_setter_removes_only_the_actors_copy_of_a_shared_member() {
+        let mut p = setup().await;
+        for (predicate, actor) in [
+            ("test://same-a", Actor::Main),
+            ("test://same-b", Actor::Other),
+        ] {
+            let round = both_hold_same_local(&mut p, predicate, actor).await;
+            run_as(
+                &mut p,
+                &round.actor_ctx,
+                this_local_command(Action::CollectionSetter, predicate, "value"),
+                vec![Parameter {
+                    name: "value".to_string(),
+                    value: serde_json::json!("test://kept-member"),
+                }],
+            )
+            .await;
+            assert_only_keepers_copy_left(&p, predicate, &round).await;
+            assert_eq!(
+                targets_seen_by(&p, predicate, &round.actor_did).await,
+                vec!["test://kept-member".to_string()],
+                "the actor's membership is exactly the new list"
+            );
+            assert_eq!(
+                targets_seen_by(&p, predicate, &round.keeper_did).await,
+                vec![SAME_TARGET.to_string()],
+                "the keeper's membership is untouched"
+            );
+        }
+    }
+
     /// The collection-expansion gate in `create_subject` / `update_subject`:
     /// a JSON array on a property whose setter actions are all `addLink`
     /// becomes one link per element, while an array on a `setSingleTarget`

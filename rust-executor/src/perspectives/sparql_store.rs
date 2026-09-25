@@ -1714,6 +1714,57 @@ mod tests {
         assert_eq!(all[0].author, signer.did);
     }
 
+    /// Two users' Local links on one `(s, p, t)` share the bare triple and
+    /// have a reifier each. Removing one link drops only its reifier; the bare
+    /// triple goes with the last reifier (#1058).
+    #[test]
+    fn test_remove_link_keeps_other_authors_link_and_bare_triple() {
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let svc = new_service();
+        let mut alices = make_link(&alice, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        let mut bobs = make_link(&bob, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        alices.status = Some(LinkStatus::Local);
+        bobs.status = Some(LinkStatus::Local);
+        svc.add_link(&alices).unwrap();
+        svc.add_link(&bobs).unwrap();
+        assert_ne!(
+            make_reifier_iri(&alices),
+            make_reifier_iri(&bobs),
+            "each author has their own reifier"
+        );
+
+        let bare_triple_present = || {
+            svc.store
+                .quads_for_pattern(
+                    Some(NamedNodeRef::new_unchecked("ad4m://src").into()),
+                    Some(NamedNodeRef::new_unchecked("ad4m://pred")),
+                    Some(NamedNodeRef::new_unchecked("ad4m://tgt").into()),
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .next()
+                .is_some()
+        };
+        assert!(bare_triple_present());
+
+        svc.remove_link(&alices).unwrap();
+        let left = svc.get_all_links().unwrap();
+        assert_eq!(left.len(), 1, "Bob's link survives Alice's removal");
+        assert_eq!(left[0].author, bob.did);
+        assert_eq!(left[0].status, Some(LinkStatus::Local));
+        assert!(
+            bare_triple_present(),
+            "the bare triple stays while Bob's reifier references it"
+        );
+
+        svc.remove_link(&bobs).unwrap();
+        assert!(svc.get_all_links().unwrap().is_empty());
+        assert!(
+            !bare_triple_present(),
+            "the bare triple goes with the last reifier"
+        );
+    }
+
     #[test]
     fn test_no_named_graphs_used() {
         let signer = TestSigner::generate();

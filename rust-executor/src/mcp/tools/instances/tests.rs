@@ -2610,13 +2610,84 @@ async fn dynamic_delete_leaves_other_users_local_links() {
     );
 }
 
+/// A Channel on which the other user and the main agent each hold their own
+/// Local membership link for the same item: one bare triple, two reifiers.
+async fn channel_where_both_hold_local_member(
+    handler: &Ad4mMcpHandler,
+    uuid: &str,
+    item: &str,
+) -> String {
+    let channel = channel_with_other_users_local_link(handler, uuid, HAS_CHILD, item).await;
+    crate::perspectives::get_perspective(uuid)
+        .unwrap()
+        .add_link(
+            crate::types::Link {
+                source: channel.clone(),
+                predicate: Some(HAS_CHILD.to_string()),
+                target: item.to_string(),
+            },
+            crate::types::LinkStatus::Local,
+            None,
+            &crate::agent::AgentContext::main_agent(),
+        )
+        .await
+        .expect("main agent's own Local copy");
+    channel
+}
+
+/// Both halves of a same-item removal: the main agent's copy is gone from
+/// the store and from its own reads, the other user's copy is still there
+/// and still visible to them.
+async fn assert_only_other_users_copy_left(uuid: &str, channel: &str, item: &str, out: &str) {
+    let perspective = crate::perspectives::get_perspective(uuid).unwrap();
+    let query = LinkQuery {
+        source: Some(channel.to_string()),
+        predicate: Some(HAS_CHILD.to_string()),
+        target: Some(item.to_string()),
+        ..Default::default()
+    };
+    let authors: Vec<String> = perspective
+        .get_links(&query)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.author)
+        .collect();
+    assert_eq!(
+        authors,
+        vec!["did:key:z6MkOtherManagedUser".to_string()],
+        "only the other user's copy is left in the store: {out}"
+    );
+    let seen_by = |viewer: String| {
+        let perspective = perspective.clone();
+        let query = query.clone();
+        async move {
+            perspective
+                .get_links_for_viewer(&query, Some(&viewer))
+                .await
+                .unwrap()
+                .len()
+        }
+    };
+    assert_eq!(
+        seen_by(crate::agent::did()).await,
+        0,
+        "the main agent no longer sees the item: {out}"
+    );
+    assert_eq!(
+        seen_by("did:key:z6MkOtherManagedUser".to_string()).await,
+        1,
+        "the other user still sees their copy: {out}"
+    );
+}
+
 /// `{class}_remove_{collection}` removes this agent's membership link, not
-/// another user's Local one for the same item.
+/// another user's Local one for the same item. Both hold the same item, so
+/// the test proves both halves: mine removed, theirs kept.
 #[tokio::test(flavor = "multi_thread")]
 async fn dynamic_remove_from_collection_leaves_other_users_local_member() {
     let (handler, uuid, _guard) = setup(true).await;
-    let channel =
-        channel_with_other_users_local_link(&handler, &uuid, HAS_CHILD, "ad4m://obj/private").await;
+    let channel = channel_where_both_hold_local_member(&handler, &uuid, "ad4m://obj/private").await;
 
     let out = dynamic_tool(
         &handler,
@@ -2625,9 +2696,26 @@ async fn dynamic_remove_from_collection_leaves_other_users_local_member() {
     )
     .await;
 
-    assert_eq!(
-        other_users_targets(&uuid, &channel, HAS_CHILD).await,
-        vec!["ad4m://obj/private".to_string()],
-        "{out}"
-    );
+    assert_eq!(parse(&out)["links_removed"], 1, "{out}");
+    assert_only_other_users_copy_left(&uuid, &channel, "ad4m://obj/private", &out).await;
+}
+
+/// `instance_remove_from_collection`: the same rule through the generic tool.
+#[tokio::test(flavor = "multi_thread")]
+async fn instance_remove_from_collection_leaves_other_users_local_member() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let channel = channel_where_both_hold_local_member(&handler, &uuid, "ad4m://obj/private").await;
+
+    let out = handler
+        .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+            perspective_id: uuid.clone(),
+            class_name: "Channel".to_string(),
+            base_uri: channel.clone(),
+            collection: "messages".to_string(),
+            item_uri: "ad4m://obj/private".to_string(),
+        }))
+        .await;
+
+    assert_eq!(parse(&out)["success"], true, "{out}");
+    assert_only_other_users_copy_left(&uuid, &channel, "ad4m://obj/private", &out).await;
 }
