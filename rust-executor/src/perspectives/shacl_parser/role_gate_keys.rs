@@ -9,14 +9,18 @@
 //! [`Malformed`](super::ConsensusRuleSlot::Malformed), and the edge is
 //! refused (#1078). [`decode_consensus_rule`](super::decode_consensus_rule)
 //! gives an unknown key the same answer, by running
-//! [`role_gate_key_errors`] on the literal's JSON before decoding it.
+//! [`role_gate_key_errors`] on the literal's JSON before decoding it. A key
+//! written twice is refused too, at any level
+//! ([`parse_refusing_duplicate_keys`]): the last one would win silently.
 //!
 //! Checked: every object a role gate can carry, which is the rule, the
 //! `fromRole` query and each of its `or` arms, `count`, `producedByFlow`, an
 //! object `linkedTo`, and each object-valued `where` condition. Not checked:
 //! the keys of `where` itself, which are property names, and the value of
-//! `equals`, which is passed to `model_query` as it is (its `WhereOps` refuses
-//! unknown operator keys itself).
+//! `equals`, which is passed to `model_query` as it is. `WhereOps` does not
+//! refuse an unknown key there: the object falls through to a `SubClause`,
+//! which matches no value, so the condition fails closed
+//! (`filtering::tests::an_unknown_operator_key_falls_through_to_a_subclause_that_matches_nothing`).
 //!
 //! Only the rule is strict. `requires` guards and `context` use the same
 //! `ModelQuery` type and keep serde's lenient decode, so a flow definition
@@ -24,7 +28,9 @@
 //! separate question.
 
 use crate::perspectives::flow_evaluator::LINKED_TO_KEYS;
+use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
+use std::fmt;
 
 const RULE_KEYS: &[&str] = &["n", "fromRole"];
 const QUERY_KEYS: &[&str] = &[
@@ -44,6 +50,72 @@ const CONDITION_KEYS: &[&str] = &["equals", "in", "exists", "matches"];
 /// Keys that were renamed, with where they went. Only a hint in the error;
 /// the old key is refused like any other unknown key.
 const RENAMED: &[(&str, &str)] = &[("grantedByFlow", "renamed to `producedByFlow` in #1076")];
+
+/// Parse `s` as JSON, refusing a key written twice in any object. A
+/// `serde_json::Value` keeps the last of duplicate keys, and so does the
+/// `where` map and the `linkedTo` value of a decoded rule: a gate followed by
+/// `"fromRole":null`, or a property condition written twice, would read as
+/// the last one without an error.
+pub(super) fn parse_refusing_duplicate_keys(s: &str) -> Result<Value, String> {
+    serde_json::from_str::<Strict>(s)
+        .map(|v| v.0)
+        .map_err(|e| e.to_string())
+}
+
+/// A `Value` whose objects are built by [`StrictVisitor`].
+struct Strict(Value);
+
+impl<'de> Deserialize<'de> for Strict {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        d.deserialize_any(StrictVisitor).map(Strict)
+    }
+}
+
+struct StrictVisitor;
+
+impl<'de> Visitor<'de> for StrictVisitor {
+    type Value = Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str("JSON")
+    }
+    fn visit_bool<E: de::Error>(self, v: bool) -> Result<Value, E> {
+        Ok(Value::Bool(v))
+    }
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+    fn visit_f64<E: de::Error>(self, v: f64) -> Result<Value, E> {
+        Ok(v.into())
+    }
+    fn visit_str<E: de::Error>(self, v: &str) -> Result<Value, E> {
+        Ok(Value::String(v.to_string()))
+    }
+    fn visit_unit<E: de::Error>(self) -> Result<Value, E> {
+        Ok(Value::Null)
+    }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Value, A::Error> {
+        let mut items = Vec::new();
+        while let Some(Strict(item)) = seq.next_element()? {
+            items.push(item);
+        }
+        Ok(Value::Array(items))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
+        let mut object = Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if object.contains_key(&key) {
+                return Err(de::Error::custom(format!("duplicate key `{key}`")));
+            }
+            let Strict(value) = map.next_value()?;
+            object.insert(key, value);
+        }
+        Ok(Value::Object(object))
+    }
+}
 
 /// Every key in a `consensusRule` literal that the reader would drop, as one
 /// message each naming the key's path (`fromRole.grantedByFlow`). Empty when
