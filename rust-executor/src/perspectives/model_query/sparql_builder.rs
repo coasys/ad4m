@@ -460,10 +460,10 @@ pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static s
 /// Local link and a forged Shared link on one triple must not jointly pass.
 ///
 /// The default (`LinkGuard::default()`) is no status restriction, verified
-/// links only, executor scope. A missing status or verdict fails the status
-/// and proof checks: both are required triples. The viewer check follows
-/// [`link_visibility`](crate::perspectives::link_visibility): a link with no
-/// status is not Local, so it is not private to anyone.
+/// links only, executor scope. A missing annotation fails closed: the status,
+/// the verdict and, for a viewer, the author and status are required triples,
+/// so a link without them does not pass
+/// ([`viewer_reifier_filter`](crate::perspectives::link_visibility::viewer_reifier_filter)).
 #[derive(Debug, Clone, Copy, Default)]
 pub(super) struct LinkGuard<'a> {
     pub(super) status: Option<&'a LinkStatus>,

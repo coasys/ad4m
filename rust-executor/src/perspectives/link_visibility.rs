@@ -261,25 +261,39 @@ pub fn viewer_author_filter(
 /// link's predicate (`<iri>` or a bound variable), which lets the
 /// [`ENGINE_DERIVED_PREDICATES`] through.
 ///
+/// Unlike [`viewer_author_filter`], the status is a required pattern here, not
+/// an `OPTIONAL`: a link with no status does not pass. The store writes a
+/// status on every link and refuses one without it
+/// (`SparqlStore::add_link`), so only data written before that can lack one,
+/// and for the links that *select* instances withholding it is the fail-closed
+/// side. It is also what keeps the guard cheap: an `OPTIONAL` inside the
+/// selection join made a viewer's page of 50 over 3000 instances take seconds
+/// (`test_perf_guarded_selection_paginated_query`).
+///
 /// Returns an empty string in executor scope.
 pub fn viewer_reifier_filter(
     viewer_did: Option<&str>,
     reifier: &str,
     predicate_term: &str,
 ) -> String {
-    let bare = reifier.trim_start_matches('?');
-    let author = format!("{bare}_va");
-    let filter = author_filter(
-        viewer_did,
-        bare,
-        &author,
-        &format!("{bare}_vs"),
-        predicate_term,
-    );
-    if filter.is_empty() {
+    let Some(did) = viewer_did else {
         return String::new();
-    }
-    format!(" ?{bare} <ad4m://ontology/author> ?{author} .\n{filter}")
+    };
+    let bare = reifier.trim_start_matches('?');
+    format!(
+        " ?{bare} <ad4m://ontology/author> ?{bare}_va . ?{bare} <ad4m://ontology/status> ?{bare}_vs . FILTER(?{bare}_vs != \"{STATUS_LOCAL_LITERAL}\" || ?{bare}_va = \"{}\" || {predicate_term} IN ({}))",
+        escape_sparql_string(did),
+        engine_derived_terms()
+    )
+}
+
+/// [`ENGINE_DERIVED_PREDICATES`] as a SPARQL term list for `IN ( … )`.
+fn engine_derived_terms() -> String {
+    ENGINE_DERIVED_PREDICATES
+        .iter()
+        .map(|p| format!("<{p}>"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// [`viewer_author_filter`] with a caller-chosen status variable, and the

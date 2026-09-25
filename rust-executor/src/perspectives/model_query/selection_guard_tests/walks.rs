@@ -153,9 +153,9 @@ async fn test_perf_guarded_selection_paginated_query() {
     let mut timings = Vec::new();
     for q in [
         by_time.clone(),
-        opted_in(by_time),
+        opted_in(by_time.clone()),
         by_name.clone(),
-        opted_in(by_name),
+        opted_in(by_name.clone()),
     ] {
         let start = std::time::Instant::now();
         let got = run(&store, q.clone()).await;
@@ -164,11 +164,35 @@ async fn test_perf_guarded_selection_paginated_query() {
         assert_eq!(got.total_count, 1000, "{q}");
         timings.push(elapsed);
     }
+    // The same two queries read as an agent: the guard then also checks that
+    // each link is not another agent's Local link (#1024).
+    let viewer = TestSigner::generate();
+    for q in [by_time, by_name] {
+        let query: super::super::types::ModelQueryInput =
+            serde_json::from_value(q.clone()).unwrap();
+        let start = std::time::Instant::now();
+        let got = super::super::test_helpers::execute_model_query_from_json_for_viewer(
+            &store,
+            "Grant",
+            &query,
+            super::SG_SHAPE_JSON,
+            Some(&viewer.did),
+        )
+        .await
+        .unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(got.instances.len(), 50, "{q} as a viewer");
+        assert_eq!(got.total_count, 1000, "{q} as a viewer");
+        timings.push(elapsed);
+    }
     eprintln!(
         "guarded selection over 3000 signed instances (1000 matching), page of 50: \
-         by timestamp default {:?} / includeUnverified {:?}, by name default {:?} / includeUnverified {:?}",
-        timings[0], timings[1], timings[2], timings[3]
+         by timestamp default {:?} / includeUnverified {:?} / as a viewer {:?}, \
+         by name default {:?} / includeUnverified {:?} / as a viewer {:?}",
+        timings[0], timings[1], timings[4], timings[2], timings[3], timings[5]
     );
     assert!(timings[0].as_secs() < 5, "{:?}", timings[0]);
     assert!(timings[2].as_secs() < 5, "{:?}", timings[2]);
+    assert!(timings[4].as_secs() < 5, "{:?}", timings[4]);
+    assert!(timings[5].as_secs() < 5, "{:?}", timings[5]);
 }
