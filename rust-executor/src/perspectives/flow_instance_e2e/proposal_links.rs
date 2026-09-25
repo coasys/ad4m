@@ -110,10 +110,10 @@ async fn the_proposal_read_keeps_every_verified_link_the_atom_rules_read() {
         "the read keeps every verified link, field for field"
     );
     assert!(
-        verified_read
-            .iter()
-            .any(|l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE)
-                && l.status == Some(LinkStatus::Local)),
+        verified_read.iter().any(
+            |l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE)
+                && l.status == Some(LinkStatus::Local)
+        ),
         "the pass's own mark is read with its Local status: {verified_read:?}"
     );
 
@@ -151,9 +151,7 @@ async fn a_read_set_does_not_carry_a_link_whose_signature_does_not_verify() {
 
     let raw = links_of(&f, &proposal).await;
     assert_eq!(
-        raw.iter()
-            .filter(|l| l.proof.valid != Some(true))
-            .count(),
+        raw.iter().filter(|l| l.proof.valid != Some(true)).count(),
         3,
         "precondition: the three forgeries are on the graph: {raw:?}"
     );
