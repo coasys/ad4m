@@ -502,8 +502,8 @@ The refusals a developer will meet, what each one means, and what to do:
 
 Limits that are absences, not errors — do not go looking for these:
 
-- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or `currentStateName`.
-- **`currentStateName` is a cache, refreshed by the read.** A `FlowInstance` read (`findAll`, `findOne`) derives the state for the reading user from the signed proposals on this replica and updates that user's own cache before answering; it does not re-verify peers' links the way `proposeTransition` and `acceptProposal` do. Those calls also return `derivedState`, and their refusal messages name the derived state.
+- **No flow subscriptions.** There is no `onStateChange` or `onProposalAdded`. Poll `FlowInstance.findAll`, `proposals()`, or `currentStateName`. A model subscription on `FlowInstance` does not refresh the cache: it shows the cache as the subscribing user last wrote it, and does not change when another user's transition settles.
+- **`currentStateName` is a cache, refreshed by the read.** A `FlowInstance` read (`findAll`, `findOne`) derives the state for the reading user from the signed proposals on this replica and updates that user's own cache before answering (not for a token that may only read the perspective, which sees the cache as it is); it does not re-verify peers' links the way `proposeTransition` and `acceptProposal` do. Those calls also return `derivedState`, and their refusal messages name the derived state.
 - **No automatic receipt minting.** A settled run gets a receipt only when someone calls `mintFlowReceipt`.
 - **No direct fire.** An edge fires only by reaching quorum. `FlowTransition.actions` is declared and not executed.
 
