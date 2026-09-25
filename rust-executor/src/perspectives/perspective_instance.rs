@@ -2165,6 +2165,16 @@ impl PerspectiveInstance {
 
             if let Some(owners) = owners_list {
                 for owner in owners {
+                    // As in `pubsub_publish_diff` (#1024): an owner who may
+                    // not see both versions gets neither.
+                    if !link_visibility::decorated_visible_to(&decorated_old_link, Some(owner))
+                        || !link_visibility::decorated_visible_to(
+                            &decorated_new_link_expression,
+                            Some(owner),
+                        )
+                    {
+                        continue;
+                    }
                     pubsub
                         .publish(
                             &PERSPECTIVE_LINK_UPDATED_TOPIC,
