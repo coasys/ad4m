@@ -23,6 +23,7 @@
 //! with an extra key there still loads. Which way a guard should fail is a
 //! separate question.
 
+use crate::perspectives::flow_evaluator::LINKED_TO_KEYS;
 use serde_json::{Map, Value};
 
 const RULE_KEYS: &[&str] = &["n", "fromRole"];
@@ -37,7 +38,6 @@ const QUERY_KEYS: &[&str] = &[
 ];
 const COUNT_KEYS: &[&str] = &["min", "max"];
 const PRODUCED_BY_FLOW_KEYS: &[&str] = &["flow", "state"];
-const LINKED_TO_KEYS: &[&str] = &["via", "to"];
 /// The object forms of `PropertyCondition`, one key each.
 const CONDITION_KEYS: &[&str] = &["equals", "in", "exists", "matches"];
 
@@ -135,9 +135,13 @@ mod tests {
         parse_flow_from_links, ConsensusRule, ConsensusRuleSlot, FlowState, ModelQuery,
         ModelQueryCount, ProducedByFlow, PropertyCondition,
     };
-    use super::role_gate_key_errors;
+    use super::{
+        role_gate_key_errors, CONDITION_KEYS, COUNT_KEYS, PRODUCED_BY_FLOW_KEYS, QUERY_KEYS,
+        RULE_KEYS,
+    };
     use crate::types::Link;
-    use serde_json::json;
+    use serde_json::{json, Value};
+    use std::collections::BTreeSet;
 
     fn link(source: &str, predicate: &str, target: &str) -> Link {
         Link {
@@ -203,6 +207,44 @@ mod tests {
             assert!(
                 matches!(state.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
                 "{name}: an unknown key must make the rule Malformed, got {:?}",
+                state.consensus_rule_slot()
+            );
+        }
+    }
+
+    /// A key written twice. `serde_json::Value` keeps the last of duplicate
+    /// keys, so a check that decodes through a `Value` reads a different rule
+    /// from the one the author wrote: a gate replaced by `null`, a
+    /// `producedByFlow` dropped, `n` lowered. The first three decode to
+    /// `Malformed` on the base (its derived `Deserialize` refuses a duplicate
+    /// field); the last two sit in a map and a `Value`, where serde keeps the
+    /// last without complaint, and are refused here too (fail closed).
+    #[test]
+    #[rustfmt::skip]
+    fn a_role_gate_with_a_duplicate_key_is_malformed() {
+        let cases: [(&str, &str); 5] = [
+            ("the rule: `fromRole` then `fromRole: null` removes the gate",
+             r#"{"n":1,"fromRole":{"className":"ns://Role","didProperty":"agent"},"fromRole":null}"#),
+            ("the query: `producedByFlow` then `producedByFlow: null` leaves a plain `fromRole`",
+             r#"{"n":1,"fromRole":{"className":"ns://Role","didProperty":"agent","producedByFlow":{"flow":"ns://GrantFlow","state":"Granted"},"producedByFlow":null}}"#),
+            ("the rule: `n` 2 then 1 lowers the quorum",
+             r#"{"n":2,"fromRole":{"className":"ns://Role","didProperty":"agent"},"n":1}"#),
+            ("a `where` property written twice",
+             r#"{"n":1,"fromRole":{"className":"ns://Role","didProperty":"agent","where":{"rank":"lead","rank":"guest"}}}"#),
+            ("an object `linkedTo` with `via` twice",
+             r#"{"n":1,"fromRole":{"className":"ns://Role","didProperty":"agent","linkedTo":{"via":"ns://has","to":"base","via":"ns://other"}}}"#),
+        ];
+        for (name, rule) in cases {
+            let value: serde_json::Value = serde_json::from_str(rule).expect("valid JSON");
+            assert_eq!(
+                role_gate_key_errors(&value),
+                Vec::<String>::new(),
+                "{name}: premise: through a `Value` the duplicate is gone and no key is unknown"
+            );
+            let state = state_with(rule);
+            assert!(
+                matches!(state.consensus_rule_slot(), ConsensusRuleSlot::Malformed),
+                "{name}: a duplicate key must make the rule Malformed, got {:?}",
                 state.consensus_rule_slot()
             );
         }
@@ -322,5 +364,35 @@ mod tests {
         }
         let wire = serde_json::to_value(&rule).expect("serialises");
         assert_eq!(role_gate_key_errors(&wire), Vec::<String>::new());
+
+        // Equality, not only inclusion: a key the types no longer serialise
+        // (a stale name left behind by a rename) must leave its list too.
+        let keys = |v: &Value| -> BTreeSet<String> {
+            v.as_object().expect("object").keys().cloned().collect()
+        };
+        let list = |l: &[&str]| -> BTreeSet<String> { l.iter().map(|k| k.to_string()).collect() };
+        let from_role = &wire["fromRole"];
+        let conditions: BTreeSet<String> = from_role["where"]
+            .as_object()
+            .expect("where")
+            .values()
+            .filter_map(Value::as_object)
+            .flat_map(|o| o.keys().cloned())
+            .collect();
+        for (level, wire_keys, known) in [
+            ("rule", keys(&wire), RULE_KEYS),
+            ("query", keys(from_role), QUERY_KEYS),
+            ("or arm", keys(&from_role["or"][0]), QUERY_KEYS),
+            ("count", keys(&from_role["count"]), COUNT_KEYS),
+            ("producedByFlow", keys(&from_role["producedByFlow"]), PRODUCED_BY_FLOW_KEYS),
+            ("where condition", conditions, CONDITION_KEYS),
+        ] {
+            // The `or` arm leaves its own `or` unset.
+            let known = match level {
+                "or arm" => list(known).into_iter().filter(|k| k != "or").collect(),
+                _ => list(known),
+            };
+            assert_eq!(wire_keys, known, "{level}: wire keys and the known list differ");
+        }
     }
 }

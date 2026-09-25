@@ -241,6 +241,11 @@ pub(crate) fn cardinality_satisfied(count: Option<&ModelQueryCount>, actual: usi
 /// `"flow"` shorthand. Authors who need a different edge write
 /// `{ via, to }` instead.
 const LINKED_TO_DEFAULT_PREDICATE: &str = "ad4m://has_child";
+/// The keys of an object `linkedTo`, `{ via, to }`. The role-gate reader
+/// refuses any other key (`shacl_parser::role_gate_keys`), so both read this.
+const LINKED_TO_VIA: &str = "via";
+const LINKED_TO_TO: &str = "to";
+pub(crate) const LINKED_TO_KEYS: &[&str] = &[LINKED_TO_VIA, LINKED_TO_TO];
 
 /// Substitute `$flow.base`, `$flow.uri` / `$flow.instance`, and `$did`
 /// in a `where` string. Delegates to [`FlowTokens::substitute`] — the
@@ -606,11 +611,11 @@ fn linked_to_parent(linked: &Value, record: &FlowInstanceRecord) -> Result<Value
         }
         Value::Object(obj) => {
             let via = obj
-                .get("via")
+                .get(LINKED_TO_VIA)
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("`linkedTo` object needs a string `via` predicate"))?;
             let to = obj
-                .get("to")
+                .get(LINKED_TO_TO)
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow!("`linkedTo` object needs `to` of `base` or `flow`"))?;
             let id = match to {
@@ -2476,6 +2481,31 @@ mod tests {
             subject: "ad4m://subject".into(),
             current_state: state.into(),
             created_at: None,
+        }
+    }
+
+    /// `linked_to_parent` reads every key in `LINKED_TO_KEYS`: without any
+    /// one of them the object is refused. With the role-gate reader refusing
+    /// every key outside the list (#1144), a stale name left in the list, or
+    /// a key read here but not listed, fails one of the two.
+    #[test]
+    fn linked_to_parent_reads_every_listed_key() {
+        let rec = record("ns://F", "ns://i", "s");
+        let full: serde_json::Map<String, Value> = LINKED_TO_KEYS
+            .iter()
+            .map(|k| (k.to_string(), json!(if *k == LINKED_TO_TO { "base" } else { "ns://has" })))
+            .collect();
+        assert_eq!(
+            linked_to_parent(&Value::Object(full.clone()), &rec).expect("all listed keys"),
+            json!({ "id": "ad4m://subject", "predicate": "ns://has" })
+        );
+        for key in LINKED_TO_KEYS {
+            let mut without = full.clone();
+            without.remove(*key);
+            assert!(
+                linked_to_parent(&Value::Object(without), &rec).is_err(),
+                "`{key}` is listed but linked_to_parent does not need it"
+            );
         }
     }
 
