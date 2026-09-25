@@ -1,134 +1,12 @@
-//! #1120: a link that is withheld from hydration must not select an instance
-//! either.
-//!
-//! #1113 withholds unverified links from the rows that hydrate an instance, and
-//! #1116's `linkStatus` withholds links of the other status. The patterns that
-//! decide *which* instances match (pushed `where`, the class's flags, `COUNT` /
-//! `totalCount`, the two-phase plan's id phase and order keys, `$` projections)
-//! must read the same links. Otherwise a forged `agent` link with an admin as
-//! its claimed author satisfies `{ agent: { eq: X, author: admin } }`, which is
-//! the role check #1103 and #1063 build on.
-//!
-//! Every fixture signs with real [`TestSigner`] keys. A forged link claims a
-//! signer as its author and carries that signer's signature over a different
-//! target, which is what a peer without the key can gossip. Each test also runs
-//! the query with `includeUnverified` (or without `linkStatus`) and asserts the
-//! old answer, so none of them can pass because the withheld link never
-//! mattered.
+//! #1120 without `linkStatus`: a link whose signature does not verify does not
+//! select, count, page or exclude an instance.
 
-use super::test_helpers::execute_model_query_from_json;
-use super::types::{ModelQueryInput, ModelQueryResult};
+use super::super::test_helpers::execute_model_query_from_json;
+use super::super::types::{ModelQueryInput, ModelQueryResult};
+use super::{add, forged, ids, opted_in, run, signed, SG_SHAPE_JSON};
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{Link, LinkExpression, LinkStatus};
 use serde_json::{json, Value};
-
-const SG_SHAPE_JSON: &str = r#"{
-    "className": "Grant",
-    "properties": {
-        "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"sg://Grant"},
-        "agent": {"predicate":"sg://agent","required":false},
-        "name": {"predicate":"sg://name","required":false}
-    },
-    "relations": {
-        "members": { "predicate": "sg://member", "kind": "hasMany", "targetClassName": "" },
-        "replies": { "predicate": "sg://reply", "kind": "hasMany", "targetClassName": "" }
-    }
-}"#;
-
-fn sg_at(second: u32) -> chrono::DateTime<chrono::Utc> {
-    use chrono::TimeZone;
-    chrono::Utc
-        .with_ymd_and_hms(2026, 9, 25, 12, 0, second)
-        .unwrap()
-}
-
-fn sg_link(
-    signer: &TestSigner,
-    source: &str,
-    predicate: &str,
-    target: &str,
-    second: u32,
-    status: LinkStatus,
-) -> LinkExpression {
-    let mut l = LinkExpression::from(signer.sign_at(
-        Link {
-            source: source.to_string(),
-            predicate: Some(predicate.to_string()),
-            target: target.to_string(),
-        },
-        sg_at(second),
-    ));
-    l.status = Some(status);
-    l
-}
-
-/// A Shared link signed by `signer`.
-fn signed(
-    signer: &TestSigner,
-    source: &str,
-    predicate: &str,
-    target: &str,
-    second: u32,
-) -> LinkExpression {
-    sg_link(
-        signer,
-        source,
-        predicate,
-        target,
-        second,
-        LinkStatus::Shared,
-    )
-}
-
-/// A Shared link claiming `signer` as its author, carrying the signer's
-/// signature over another target.
-fn forged(
-    signer: &TestSigner,
-    source: &str,
-    predicate: &str,
-    target: &str,
-    second: u32,
-) -> LinkExpression {
-    let mut l = signed(
-        signer,
-        source,
-        predicate,
-        "literal:string:what-was-signed",
-        second,
-    );
-    l.data.target = target.to_string();
-    assert!(!l.compute_proof_valid(), "the fixture must not verify");
-    l
-}
-
-fn add(store: &SparqlStore, links: impl IntoIterator<Item = LinkExpression>) {
-    for l in links {
-        store.add_link(&l).unwrap();
-    }
-}
-
-async fn run(store: &SparqlStore, query: Value) -> ModelQueryResult {
-    let query: ModelQueryInput = serde_json::from_value(query.clone())
-        .unwrap_or_else(|e| panic!("query {query} does not parse: {e}"));
-    execute_model_query_from_json(store, "Grant", &query, SG_SHAPE_JSON)
-        .await
-        .unwrap()
-}
-
-fn ids(result: &ModelQueryResult) -> Vec<String> {
-    result
-        .instances
-        .iter()
-        .map(|i| i["id"].as_str().unwrap().to_string())
-        .collect()
-}
-
-/// `query` with `includeUnverified: true` added.
-fn opted_in(mut query: Value) -> Value {
-    query["includeUnverified"] = json!(true);
-    query
-}
 
 /// The role check #1103 builds on: "admin wrote an `agent -> mallory` link".
 /// Mallory has no admin key and forges one on a grant admin created. It must
@@ -314,131 +192,6 @@ async fn selection_a_forged_value_does_not_move_an_instance_across_a_page() {
     );
 }
 
-/// A transitive `$` projection walks the relation to any depth. A forged link
-/// on the path must not add what lies behind it to the count or the list.
-///
-/// `g/1 -reply-> r/1` is genuine, `r/1 -reply-> r/2` is forged, and
-/// `r/2 -reply-> r/3` is genuine. Only `r/1` is reachable over verified links.
-#[tokio::test]
-async fn selection_a_forged_link_in_a_transitive_projection_is_not_counted() {
-    let store = SparqlStore::new(None).unwrap();
-    let admin = TestSigner::generate();
-    add(
-        &store,
-        [
-            signed(&admin, "sg://g/1", "ad4m://type", "sg://Grant", 1),
-            signed(&admin, "sg://g/1", "sg://reply", "sg://r/1", 2),
-            forged(&admin, "sg://r/1", "sg://reply", "sg://r/2", 3),
-            signed(&admin, "sg://r/2", "sg://reply", "sg://r/3", 4),
-        ],
-    );
-    let query = json!({
-        "projections": {
-            "$n": { "from": "replies", "count": true, "transitive": true },
-            "$all": { "from": "replies", "transitive": true, "order": { "id": "ASC" } },
-        }
-    });
-
-    let got = run(&store, query.clone()).await;
-    assert_eq!(got.instances[0]["$n"], json!(1), "{}", got.instances[0]);
-    assert_eq!(
-        got.instances[0]["$all"],
-        json!(["sg://r/1"]),
-        "{}",
-        got.instances[0]
-    );
-
-    let got = run(&store, opted_in(query)).await;
-    assert_eq!(got.instances[0]["$n"], json!(3), "the opt-in walks it");
-    assert_eq!(
-        got.instances[0]["$all"],
-        json!(["sg://r/1", "sg://r/2", "sg://r/3"])
-    );
-}
-
-/// `linkStatus` restricts selection the same way: a Local flag does not make a
-/// node conform under `shared`, a Local value does not select, and a Local
-/// name that sorts first does not reorder a Shared-only page.
-///
-/// The one-reifier rule from #1124 holds for selection too: a verified Local
-/// link and a forged Shared link on the same triple do not jointly satisfy a
-/// Shared, verified-only `where`.
-#[tokio::test]
-async fn selection_link_status_restricts_selection_and_order() {
-    let store = SparqlStore::new(None).unwrap();
-    let admin = TestSigner::generate();
-    let local =
-        |s: &str, p: &str, t: &str, sec: u32| sg_link(&admin, s, p, t, sec, LinkStatus::Local);
-    add(
-        &store,
-        [
-            signed(&admin, "sg://g/a", "ad4m://type", "sg://Grant", 1),
-            signed(&admin, "sg://g/b", "ad4m://type", "sg://Grant", 2),
-            signed(&admin, "sg://g/a", "sg://name", "literal:string:m", 3),
-            // b's only name is Local, and sorts before a's.
-            local("sg://g/b", "sg://name", "literal:string:a", 4),
-            // l: typed by a Local flag only.
-            local("sg://g/l", "ad4m://type", "sg://Grant", 5),
-            // A Local agent on a, and on b the same triple Local-valid plus
-            // Shared-forged.
-            local("sg://g/a", "sg://agent", "literal:string:secret", 6),
-            local("sg://g/b", "sg://agent", "literal:string:both", 6),
-            forged(&admin, "sg://g/b", "sg://agent", "literal:string:both", 7),
-        ],
-    );
-
-    let shared = |mut q: Value| {
-        q["linkStatus"] = json!("shared");
-        q
-    };
-
-    let all = run(&store, shared(json!({ "limit": 10 }))).await;
-    assert_eq!(
-        ids(&all),
-        vec!["sg://g/a", "sg://g/b"],
-        "a Local flag conformed"
-    );
-    assert_eq!(all.total_count, 2, "totalCount");
-    let count = run(&store, shared(json!({ "limit": 0 }))).await;
-    assert_eq!(count.total_count, 2, "a Local flag was counted");
-    let unrestricted = run(&store, json!({ "limit": 0 })).await;
-    assert_eq!(unrestricted.total_count, 3, "without linkStatus it counts");
-
-    for clause in [
-        json!({ "agent": "secret" }),
-        json!({ "agent": { "eq": "secret", "author": admin.did } }),
-        json!({ "agent": "both" }),
-    ] {
-        for limit in [json!(null), json!(10)] {
-            let query = shared(json!({ "where": clause, "limit": limit }));
-            let got = run(&store, query.clone()).await;
-            assert!(ids(&got).is_empty(), "{query}: {:?}", ids(&got));
-            assert_eq!(got.total_count, 0, "{query}: totalCount");
-        }
-    }
-    let got = run(&store, json!({ "where": { "agent": "secret" } })).await;
-    assert_eq!(ids(&got), vec!["sg://g/a"], "without linkStatus it selects");
-
-    let by_name = |q: Value| {
-        let mut q = q;
-        q["order"] = json!({ "name": "ASC" });
-        q["limit"] = json!(1);
-        q
-    };
-    let first = run(&store, shared(by_name(json!({})))).await;
-    assert_eq!(
-        ids(&first),
-        vec!["sg://g/a"],
-        "a Local name reordered the page"
-    );
-    let first = run(&store, by_name(json!({}))).await;
-    assert_eq!(
-        ids(&first),
-        vec!["sg://g/b"],
-        "without linkStatus the Local name sorts first"
-    );
-}
-
 /// The other selection patterns: a parent scope's link, and a `$` projection's
 /// `where` on the counted records' values. A forged link must not put an
 /// instance under a parent, or make a target pass a projection's `where`.
@@ -462,10 +215,10 @@ async fn selection_a_forged_link_does_not_pass_a_scope_or_a_projection_where() {
         ],
     );
     let (resolver, _) =
-        super::test_helpers::StaticShapeResolver::from_json("Grant", SG_SHAPE_JSON).unwrap();
+        super::super::test_helpers::StaticShapeResolver::from_json("Grant", SG_SHAPE_JSON).unwrap();
     resolver.register(
         "Reply",
-        super::shape::parse_shape_from_json(
+        super::super::shape::parse_shape_from_json(
             r#"{ "className": "Reply", "properties": {
                 "name": {"predicate":"sg://name","required":false} }, "relations": {} }"#,
             "Reply",
@@ -500,13 +253,13 @@ async fn selection_a_forged_link_does_not_pass_a_scope_or_a_projection_where() {
             }))
             .unwrap();
             let shape = resolver.get_shape("Grant").unwrap();
-            let got = super::query::execute_model_query(store, &shape, &query, resolver)
+            let got = super::super::query::execute_model_query(store, &shape, &query, resolver)
                 .await
                 .unwrap();
             got.instances[0]["$x"].clone()
         }
     };
-    use super::types::ShapeResolver;
+    use super::super::types::ShapeResolver;
     assert_eq!(projected(false).await, json!(1), "a forged value passed");
     assert_eq!(projected(true).await, json!(2), "the opt-in counts it");
 }
@@ -560,7 +313,7 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
             forged(&admin, "sg://n/2", "sg://text", "literal:string:b", 5),
         ],
     );
-    let (resolver, _) = super::test_helpers::StaticShapeResolver::from_json(
+    let (resolver, _) = super::super::test_helpers::StaticShapeResolver::from_json(
         "Grant",
         r#"{ "className": "Grant", "properties": {
             "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"sg://Grant"} },
@@ -582,16 +335,16 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
     ] {
         resolver.register(
             class,
-            super::shape::parse_shape_from_json(json, class).unwrap(),
+            super::super::shape::parse_shape_from_json(json, class).unwrap(),
         );
     }
-    use super::types::ShapeResolver;
+    use super::super::types::ShapeResolver;
     let run_class = |class: &'static str, query: Value| {
         let (store, resolver) = (&store, &resolver);
         async move {
             let query: ModelQueryInput = serde_json::from_value(query).unwrap();
             let shape = resolver.get_shape(class).unwrap();
-            super::query::execute_model_query(store, &shape, &query, resolver)
+            super::super::query::execute_model_query(store, &shape, &query, resolver)
                 .await
                 .unwrap()
         }
@@ -626,144 +379,6 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
         assert_eq!(got.total_count, 2, "{query} with the opt-in");
     }
     assert_eq!(sorted(run_class("Note", json!({})).await), vec!["sg://n/1"]);
-}
-
-/// A typed relation's `where` (`@HasMany(() => T, { through, where })`) reads
-/// each target's values under the query's `linkStatus` too: a Local `status`
-/// must not let a target through a Shared-only read.
-#[tokio::test]
-async fn selection_link_status_applies_to_a_relation_where() {
-    let store = SparqlStore::new(None).unwrap();
-    let admin = TestSigner::generate();
-    add(
-        &store,
-        [
-            signed(&admin, "sg://g/1", "ad4m://type", "sg://Grant", 1),
-            signed(&admin, "sg://g/1", "sg://member", "sg://m/shared", 2),
-            signed(&admin, "sg://g/1", "sg://member", "sg://m/local", 2),
-            signed(
-                &admin,
-                "sg://m/shared",
-                "sg://state",
-                "literal:string:ok",
-                3,
-            ),
-            sg_link(
-                &admin,
-                "sg://m/local",
-                "sg://state",
-                "literal:string:ok",
-                3,
-                LinkStatus::Local,
-            ),
-        ],
-    );
-    let shape_json = json!({
-        "className": "Grant",
-        "properties": {
-            "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"sg://Grant"}
-        },
-        "relations": {
-            "members": {
-                "predicate": "sg://member",
-                "kind": "hasMany",
-                "targetClassName": "",
-                "getter": "SELECT ?target WHERE { <Base> <sg://member> ?target . }",
-                "whereFilter": {"state": "ok"},
-                "wherePredicates": {"state": "sg://state"}
-            }
-        }
-    })
-    .to_string();
-    let members = |link_status: Option<&'static str>| {
-        let (store, shape_json) = (&store, &shape_json);
-        async move {
-            let mut out = Vec::new();
-            for limit in [json!(null), json!(10)] {
-                let query: ModelQueryInput =
-                    serde_json::from_value(json!({ "limit": limit, "linkStatus": link_status }))
-                        .unwrap();
-                let got = execute_model_query_from_json(store, "Grant", &query, shape_json)
-                    .await
-                    .unwrap();
-                let mut m: Vec<String> = got.instances[0]["members"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .map(|v| v.as_str().unwrap().to_string())
-                    .collect();
-                m.sort();
-                out.push(m);
-            }
-            assert_eq!(out[0], out[1], "both plans agree");
-            out.remove(0)
-        }
-    };
-    assert_eq!(members(Some("shared")).await, vec!["sg://m/shared"]);
-    assert_eq!(members(None).await, vec!["sg://m/local", "sg://m/shared"]);
-}
-
-/// A transitive `parent` scope (`Traverse` with `transitive: true`) walks a
-/// property path, which has no link per hop to check. The executor walks it
-/// one guarded step at a time instead, so a forged link in the chain must not
-/// bring in what lies behind it, in either direction, as rows or as a count.
-///
-/// `root -> a` and `b -> c` are genuine, `a -> b` is forged. `c` has an id
-/// that cannot be written as `<…>` (a legacy Flux form), which takes the
-/// string-matching fallback.
-#[tokio::test]
-async fn selection_a_forged_link_does_not_extend_a_transitive_scope() {
-    let store = SparqlStore::new(None).unwrap();
-    let admin = TestSigner::generate();
-    let c = "literal://string:legacyc";
-    add(
-        &store,
-        [
-            signed(&admin, "sg://g/a", "ad4m://type", "sg://Grant", 1),
-            signed(&admin, "sg://g/b", "ad4m://type", "sg://Grant", 2),
-            signed(&admin, c, "ad4m://type", "sg://Grant", 3),
-            signed(&admin, "sg://root", "sg://reply", "sg://g/a", 4),
-            forged(&admin, "sg://g/a", "sg://reply", "sg://g/b", 5),
-            signed(&admin, "sg://g/b", "sg://reply", c, 6),
-        ],
-    );
-    let walk = |anchor: &str, direction: &str| {
-        json!({ "parent": {
-            "ids": [anchor], "predicate": "sg://reply",
-            "transitive": true, "direction": direction } })
-    };
-    let sorted = |r: &ModelQueryResult| {
-        let mut v = ids(r);
-        v.sort();
-        v
-    };
-
-    for (anchor, direction, expected, expected_opted_in) in [
-        (
-            "sg://root",
-            "out",
-            vec!["sg://g/a"],
-            vec!["literal://string:legacyc", "sg://g/a", "sg://g/b"],
-        ),
-        (c, "in", vec!["sg://g/b"], vec!["sg://g/a", "sg://g/b"]),
-    ] {
-        for limit in [json!(null), json!(10)] {
-            let mut query = walk(anchor, direction);
-            query["limit"] = limit;
-            let got = run(&store, query.clone()).await;
-            assert_eq!(sorted(&got), expected, "{query}");
-            assert_eq!(got.total_count, expected.len(), "{query}: totalCount");
-            let got = run(&store, opted_in(query.clone())).await;
-            assert_eq!(sorted(&got), expected_opted_in, "{query} with the opt-in");
-        }
-        let mut count = walk(anchor, direction);
-        count["limit"] = json!(0);
-        assert_eq!(
-            run(&store, count.clone()).await.total_count,
-            expected.len(),
-            "{count}"
-        );
-    }
 }
 
 /// A typed relation (`@HasMany(() => Vote, { through })`) is filled by the
@@ -826,67 +441,6 @@ async fn selection_a_forged_flag_does_not_make_a_typed_relation_target() {
     };
     assert_eq!(votes(false).await, vec!["sg://v/real"]);
     assert_eq!(votes(true).await, vec!["sg://v/real", "sg://v/retyped"]);
-}
-
-/// The cost of the guard on selection. `test_perf_large_dataset_paginated_query`
-/// reads through the opt-in, because its fixtures do not verify, so it never
-/// runs the guard. This is its query over signed links: 3 channels of 1000
-/// messages, one channel's page of 50 by timestamp, a `where` on the channel
-/// and a count. Timed with the default (every selection triple guarded) and
-/// with `includeUnverified` (the pre-#1120 selection SPARQL), on one store.
-#[tokio::test]
-async fn test_perf_guarded_selection_paginated_query() {
-    let store = SparqlStore::new(None).unwrap();
-    let admin = TestSigner::generate();
-    for ch in 0..3u32 {
-        let channel = format!("sg://channel-{ch}");
-        for i in 0..1000u32 {
-            let msg = format!("sg://msg-{ch}-{i}");
-            let second = (i % 50) + 1;
-            add(
-                &store,
-                [
-                    signed(&admin, &msg, "ad4m://type", "sg://Grant", second),
-                    signed(&admin, &msg, "sg://member", &channel, second),
-                    signed(
-                        &admin,
-                        &msg,
-                        "sg://name",
-                        &format!("literal:string:m{i}"),
-                        second,
-                    ),
-                ],
-            );
-        }
-    }
-    let by_time = json!({
-        "where": { "members": "sg://channel-1" },
-        "limit": 50,
-        "order": { "timestamp": "DESC" },
-    });
-    let mut by_name = by_time.clone();
-    by_name["order"] = json!({ "name": "ASC" });
-    let mut timings = Vec::new();
-    for q in [
-        by_time.clone(),
-        opted_in(by_time),
-        by_name.clone(),
-        opted_in(by_name),
-    ] {
-        let start = std::time::Instant::now();
-        let got = run(&store, q.clone()).await;
-        let elapsed = start.elapsed();
-        assert_eq!(got.instances.len(), 50, "{q}");
-        assert_eq!(got.total_count, 1000, "{q}");
-        timings.push(elapsed);
-    }
-    eprintln!(
-        "guarded selection over 3000 signed instances (1000 matching), page of 50: \
-         by timestamp default {:?} / includeUnverified {:?}, by name default {:?} / includeUnverified {:?}",
-        timings[0], timings[1], timings[2], timings[3]
-    );
-    assert!(timings[0].as_secs() < 5, "{:?}", timings[0]);
-    assert!(timings[2].as_secs() < 5, "{:?}", timings[2]);
 }
 
 /// The selection guard joins a reifier per triple, so two links that both pass
