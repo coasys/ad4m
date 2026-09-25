@@ -88,6 +88,7 @@ dependencies = [
  "dirs 5.0.1",
  "env_logger 0.10.2",
  "fake",
+ "flate2",
  "fs_extra",
  "futures",
  "futures-channel",
@@ -110,6 +111,7 @@ dependencies = [
  "libc",
  "log",
  "maplit",
+ "mockito",
  "multibase",
  "multihash",
  "multihash-codetable",
@@ -121,6 +123,7 @@ dependencies = [
  "portpicker",
  "rand 0.8.5",
  "rayon",
+ "rcgen",
  "regex",
  "reqwest 0.11.27",
  "rmcp",
@@ -144,6 +147,7 @@ dependencies = [
  "signal-hook",
  "sodoken",
  "sys_traits",
+ "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tikv-jemalloc-ctl",
@@ -183,7 +187,6 @@ dependencies = [
  "lazy_static",
  "lettre",
  "libc",
- "localtunnel-client",
  "log",
  "log4rs",
  "nix 0.23.2",
@@ -732,6 +735,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "assert-json-diff"
+version = "2.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e4f2b81832e72834d7518d8487a0396a28cc408186a2e8854c0f98011faf12"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -11969,19 +11982,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "localtunnel-client"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50e27b8ea846da5a71f7513edc8de10adc9f8f6856631d255593b8c9a1e28b49"
-dependencies = [
- "anyhow",
- "log",
- "reqwest 0.11.27",
- "serde",
- "tokio",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12553,6 +12553,31 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "mockito"
+version = "1.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90820618712cab19cfc46b274c6c22546a82affcb3c3bdf0f29e3db8e1bb92c0"
+dependencies = [
+ "assert-json-diff",
+ "bytes",
+ "colored 3.1.1",
+ "futures-core",
+ "http 1.5.0",
+ "http-body 1.1.0",
+ "http-body-util",
+ "hyper 1.11.0",
+ "hyper-util",
+ "log",
+ "pin-project-lite",
+ "rand 0.9.5",
+ "regex",
+ "serde_json",
+ "serde_urlencoded",
+ "similar",
+ "tokio",
 ]
 
 [[package]]
@@ -18814,6 +18839,12 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "simple-dns"
