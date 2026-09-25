@@ -4,10 +4,10 @@
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-use crate::agent::kel::{self, fold, AgentType, KeyEntry, KeyEventBody, Scope};
-use crate::agent::resolver::{self, IdentityService};
 #[allow(unused_imports)]
 use crate::agent::kel::adapter::KelAdapter;
+use crate::agent::kel::{self, fold, AgentType, KeyEntry, KeyEventBody, Scope};
+use crate::agent::resolver::{self, IdentityService};
 
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -185,7 +185,9 @@ async fn kel_events(params: Value, _ctx: Ctx) -> Result<Value, WsRpcError> {
                     KeyEventBody::Deactivate { .. } => "deactivate",
                 };
                 let summary = match &ev.body {
-                    KeyEventBody::Inception { keys, agent_type, .. } => {
+                    KeyEventBody::Inception {
+                        keys, agent_type, ..
+                    } => {
                         format!(
                             "{:?} identity created with {} key(s)",
                             agent_type,

@@ -208,8 +208,7 @@ impl IdentityService {
     pub fn install(adapter: Arc<dyn KelAdapter>) {
         let cache = Arc::new(MonotonicityCache::new());
         let reverse_index = Arc::new(ReverseIndex::new());
-        let resolver =
-            AgentLanguageResolver::new(adapter.clone(), cache, reverse_index.clone());
+        let resolver = AgentLanguageResolver::new(adapter.clone(), cache, reverse_index.clone());
 
         let mut svc = IDENTITY_SERVICE.lock().unwrap();
         *svc = Some(IdentityService {
