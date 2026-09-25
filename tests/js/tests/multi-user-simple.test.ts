@@ -818,6 +818,106 @@ describe("Multi-User Simple integration tests", () => {
                 ["priv://local-1", "priv://local-1 -> priv://local-2", "priv://local-2"],
             );
         });
+
+        // Two users can hold the identical Local link. In the store that is
+        // one bare triple with one reifier per author; removing my link must
+        // take neither the co-owner's reifier nor the bare triple with it.
+        // Alice removes her copy directly (perspective.remove) and, on a
+        // second predicate, by replacing it through the model setter.
+        it("removes only my copy of a Local link a co-owner also holds", async function () {
+            this.timeout(300000);
+
+            const { Model, Property, Flag, Ad4mModel, Literal } = await import("@coasys/ad4m");
+
+            @Model({ name: "PrivTag" })
+            class PrivTag extends Ad4mModel {
+                @Flag({ through: "priv://type", value: "priv://tag" })
+                type = "priv://tag";
+                // No defaults: `create` must not write a value of its own
+                // beside the one both users add by hand.
+                @Property({ through: "priv://label", local: true })
+                label!: string;
+                @Property({ through: "priv://colour", local: true })
+                colour!: string;
+            }
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privsame1@example.com", "password1");
+            await createTestUser("privsame2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privsame1@example.com", "password1"), false);
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privsame2@example.com", "password2"), false);
+            const aliceDid = (await alice.agent.me()).did;
+            const bobDid = (await bob.agent.me()).did;
+
+            const aliceHandle = await alice.perspective.add("Local Link Privacy: same link, two users");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Local Link Privacy: same link, two users" }),
+            );
+            const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(
+                aliceHandle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+            const bobHandle = (await bob.perspective.all()).find((p) => p.sharedUrl === neighbourhoodUrl);
+            expect(bobHandle, "Bob joined the neighbourhood").to.not.be.undefined;
+
+            const pa = (await alice.perspective.byUUID(aliceHandle.uuid))!;
+            const pb = (await bob.perspective.byUUID(bobHandle!.uuid))!;
+            await (PrivTag as any).register(pa);
+            await (PrivTag as any).register(pb);
+
+            const tag = await (PrivTag as any).create(pa, {});
+            const sameLabel = Literal.from("same-label").toUrl();
+            const sameColour = Literal.from("same-colour").toUrl();
+            const same = (predicate: string, target: string) => new Link({ source: tag.id, predicate, target });
+
+            // Both add the identical Local links; each sees their own.
+            const alicesLabel = await pa.add(same("priv://label", sameLabel), "local");
+            const bobsLabel = await pb.add(same("priv://label", sameLabel), "local");
+            await pa.add(same("priv://colour", sameColour), "local");
+            await pb.add(same("priv://colour", sameColour), "local");
+            expect(alicesLabel.author).to.equal(aliceDid);
+            expect(bobsLabel.author).to.equal(bobDid);
+
+            const linksOn = async (client: Ad4mClient, uuid: string, predicate: string) =>
+                client.perspective.queryLinks(uuid, new LinkQuery({ source: tag.id, predicate }));
+            for (const [client, uuid, did] of [[alice, aliceHandle.uuid, aliceDid], [bob, bobHandle!.uuid, bobDid]] as const) {
+                const mine = await linksOn(client, uuid, "priv://label");
+                expect(mine.map((l) => l.data.target), "each user sees the label").to.deep.equal([sameLabel]);
+                expect(mine[0].author, "and it is their own copy").to.equal(did);
+            }
+
+            // Alice removes her label link by its expression.
+            await pa.remove(alicesLabel);
+
+            const bobsLabels = await linksOn(bob, bobHandle!.uuid, "priv://label");
+            expect(bobsLabels.map((l) => l.data.target), "Bob still sees his copy").to.deep.equal([sameLabel]);
+            expect(bobsLabels[0].author).to.equal(bobDid);
+            expect(bobsLabels[0].timestamp).to.equal(bobsLabel.timestamp);
+            expect(await linksOn(alice, aliceHandle.uuid, "priv://label"), "Alice sees none").to.have.length(0);
+
+            const asBob = await (PrivTag as any).findOne(pb, { where: { id: tag.id } });
+            expect(asBob, "Bob still finds the tag").to.not.be.null;
+            expect(asBob.label, "Bob's model read still hydrates his copy").to.equal("same-label");
+            const asAlice = await (PrivTag as any).findOne(pa, { where: { id: tag.id } });
+            expect(String(asAlice?.label ?? ""), "Alice's model read has no label").to.not.contain("same-label");
+
+            // Alice replaces her colour through the model setter; that removes
+            // the colour links she can see and must leave Bob's copy alone.
+            await (PrivTag as any).update(pa, tag.id, { colour: "alice-colour" });
+
+            const bobsColours = await linksOn(bob, bobHandle!.uuid, "priv://colour");
+            expect(bobsColours.map((l) => l.data.target), "Bob still sees his colour").to.deep.equal([sameColour]);
+            expect(bobsColours[0].author).to.equal(bobDid);
+            expect((await linksOn(alice, aliceHandle.uuid, "priv://colour")).map((l) => l.data.target), "Alice sees only her new colour")
+                .to.deep.equal([Literal.from("alice-colour").toUrl()]);
+            expect((await (PrivTag as any).findOne(pb, { where: { id: tag.id } })).colour).to.equal("same-colour");
+            expect((await (PrivTag as any).findOne(pa, { where: { id: tag.id } })).colour).to.equal("alice-colour");
+        });
     });
 
     describe("Agent Profiles and Status", () => {

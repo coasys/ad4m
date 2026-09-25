@@ -588,6 +588,8 @@ export class PerspectiveProxy {
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #ensuredSubjectClasses = new Set<string>()
+    /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
+    #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
 
     /**
      * Creates a new PerspectiveProxy instance.
@@ -849,9 +851,27 @@ export class PerspectiveProxy {
     /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     *
+     * Concurrent callers share one in-flight RPC. Nothing is kept after it
+     * settles, so every call made after that fetches from the executor again.
+     * {@link acceptInterpretation} and {@link rejectInterpretation} detach the
+     * in-flight RPC, so a read issued after they resolve never joins a read
+     * that started before the write.
+     * Each caller gets its own copy of the array.
      */
     async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
-        return await this.#client.interpretationOverlays(this.#handle.uuid)
+        if (this.#overlaysInFlight) {
+            return [...(await this.#overlaysInFlight)]
+        }
+        const pending = this.#client.interpretationOverlays(this.#handle.uuid)
+        this.#overlaysInFlight = pending
+        try {
+            return [...(await pending)]
+        } finally {
+            if (this.#overlaysInFlight === pending) {
+                this.#overlaysInFlight = null
+            }
+        }
     }
 
     /**
@@ -860,7 +880,12 @@ export class PerspectiveProxy {
      * `property` to accept a single predicate; omit it for the whole base.
      */
     async acceptInterpretation(base: string, property?: string): Promise<boolean> {
-        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        try {
+            return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            // A read already in flight may predate this write; later callers must not join it.
+            this.#overlaysInFlight = null
+        }
     }
 
     /**
@@ -869,7 +894,12 @@ export class PerspectiveProxy {
      * rejected `update` drops the overlay and keeps the real value.
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
-        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        try {
+            return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            // A read already in flight may predate this write; later callers must not join it.
+            this.#overlaysInFlight = null
+        }
     }
 
     /**
