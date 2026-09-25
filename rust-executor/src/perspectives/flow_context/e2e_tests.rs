@@ -1,10 +1,6 @@
-//! End-to-end integration test — the onion-shell test-cut Nico called
-//! out on 2026-08-26 ("cut based on what we can test really, stack it
-//! like onions").
-//!
-//! Extracted into its own file on 2026-08-27 as part of PR #929 review
-//! R4 — the tests below cover the pure halves of the module against
-//! hand-built inputs; this file covers the composition against a real
+//! End-to-end integration test — the onion-shell test cut. The unit tests
+//! in `render.rs` cover the pure halves of the module against hand-built
+//! inputs; this file covers the composition against a real
 //! [`PerspectiveInstance`].
 //!
 //! # What it exercises
@@ -15,25 +11,25 @@
 //! - SHACLFlow definition seeded as actual links (writer half of the
 //!   parser round-trip: `parse_flow_to_links` → `add_link`)
 //! - FlowInstance minted via the runtime primitive (`mint_flow_instance`
-//!   — the same call the auto-processor will make)
+//!   — the same call the auto-processor makes)
 //! - `gather_active_flow_contexts` walking the perspective through the
 //!   model_query layer
 //! - resulting `FlowContext[]` fed to `build_interpretation_input` —
-//!   what `run.rs` does after slice 10.3c wired both call sites.
+//!   what `run.rs` does now that both call sites are wired.
 //!
-//! If this test stays green, slice 10.3c's `run.rs` wiring is by
-//! construction correct: the two lines it replaced (previously passing
-//! `&[]` to `build_interpretation_input`) now receive the exact
-//! `Vec<FlowContext>` this test builds, and slice 10.2's unit tests
-//! (in `render.rs` / `interpretation::input_builder`) already cover
-//! what happens on that value inside the prompt builder.
+//! If this test stays green, the `run.rs` wiring is by construction
+//! correct: the two lines that previously passed `&[]` to
+//! `build_interpretation_input` now receive the exact
+//! `Vec<FlowContext>` this test builds, and the unit tests in
+//! `render.rs` + `interpretation::input_builder` already cover what
+//! happens on that value inside the prompt builder.
 //!
 //! No LLM is spun up — `setup_perspective_no_llm` gives a real
 //! `PerspectiveInstance`. The only piece that would need Ollama is the
 //! AIService, which none of the code paths under test touch.
 
-use super::loader::gather_active_flow_contexts;
-use crate::perspectives::flow_classes::mint_flow_instance;
+use super::loader::{gather_active_flow_contexts, load_all_flow_instances, load_flow_instances};
+use crate::perspectives::flow_classes::{advance_flow_instance_state, mint_flow_instance};
 use crate::perspectives::interpretation::{
     build_interpretation_input, ExistingInstances, TranscriptTurn,
 };
@@ -141,7 +137,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()]).await;
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -174,7 +170,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         base_uri.to_string(),
         "ad4m://task/other-batch-item".to_string(),
     ];
-    let scoped = gather_active_flow_contexts(&perspective, &multi_matching).await;
+    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None).await;
     assert_eq!(
         scoped.len(),
         1,
@@ -186,7 +182,8 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    This is the property that lets batch-scoped passes ignore
     //    flows running on unrelated bases.
     let other =
-        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()]).await;
+        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()], None)
+            .await;
     assert!(
         other.is_empty(),
         "batch narrowed to a different subject must drop the running flow, got {other:?}"
@@ -196,7 +193,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     used to sweep every FlowInstance on the perspective and
     //     inject it into every prompt (unbounded). The fix makes empty
     //     mean empty — no flow context, no unbounded sweep.
-    let empty = gather_active_flow_contexts(&perspective, &[] as &[String]).await;
+    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None).await;
     assert!(
         empty.is_empty(),
         "empty subjects must not surface any flows, got {empty:?}"
@@ -204,12 +201,13 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
 
     // 7) The real payoff: feed the gathered context into the
     //    interpretation prompt builder — the same call `run.rs`
-    //    makes after slice 10.3c substituted this vector for `&[]`.
+    //    makes now that this vector replaces the earlier `&[]`.
     //    The prompt must carry an `active_flows` array whose only
     //    element identifies our Delivery instance by name.
     let existing = ExistingInstances::new();
     let transcript = vec![TranscriptTurn::from_speaker_text("A", "irrelevant")];
-    let prompt = build_interpretation_input(&[], &transcript, &existing, &contexts);
+    let prompt =
+        build_interpretation_input(&[], &transcript, &existing, &contexts, &Default::default());
     let parsed: serde_json::Value = serde_json::from_str(&prompt).expect("prompt is valid JSON");
     let flows_in_prompt = parsed
         .get("active_flows")
@@ -226,5 +224,72 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
             .and_then(|v| v.as_str())
             .expect("active_flows[0].flow is a string"),
         "Delivery"
+    );
+}
+
+/// On a perspective where `FlowInstance` has never been registered,
+/// `load_flow_instances` and `load_all_flow_instances` must return
+/// `Ok(vec![])` — not propagate the "No SHACL shape stored" error.
+#[tokio::test(flavor = "multi_thread")]
+async fn load_flow_instances_absent_class_returns_empty() {
+    let (perspective, _, _) = setup_perspective_no_llm(&[]).await;
+
+    let scoped = load_flow_instances(&perspective, &["ad4m://task/x".to_string()])
+        .await
+        .expect("absent class must not error");
+    assert!(scoped.is_empty());
+
+    let all = load_all_flow_instances(&perspective)
+        .await
+        .expect("absent class must not error");
+    assert!(all.is_empty());
+}
+
+/// `gather_active_flow_contexts` must use the `Local` `currentState` cache
+/// rather than deriving.  Observable: set the cache to "scoped" WITHOUT any
+/// transition proposals in the graph.  The fold, seeing no quorum, returns
+/// "identified" (genesis state).  Only cache-first can return "scoped".
+#[tokio::test(flavor = "multi_thread")]
+async fn gather_active_flow_contexts_cache_first_skips_derive() {
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+
+    let flow_links =
+        parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links");
+    for link in flow_links {
+        perspective
+            .add_link(link, LinkStatus::Local, None, &ctx)
+            .await
+            .expect("add_link(flow definition)");
+    }
+
+    let base_uri = "ad4m://task/cache-first-test";
+    let inst_uri = mint_flow_instance(
+        &mut perspective,
+        "delivery://DeliveryFlow",
+        base_uri,
+        "identified",
+        "cache-first-inst-1",
+        None,
+        &ctx,
+    )
+    .await
+    .expect("mint_flow_instance");
+
+    // Advance the Local cache to "scoped" WITHOUT any proposals.
+    // The fold sees no quorum and would return "identified".
+    // Only a cache-first reader can produce "scoped".
+    advance_flow_instance_state(&mut perspective, &inst_uri, "scoped", None, &ctx)
+        .await
+        .expect("advance_flow_instance_state to scoped");
+
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
+    assert_eq!(
+        contexts.len(),
+        1,
+        "one instance ⇒ one context, got {contexts:?}"
+    );
+    assert_eq!(
+        contexts[0].current_state, "scoped",
+        "Local cache at 'scoped' must be returned (fold would give 'identified' — no proposals)"
     );
 }

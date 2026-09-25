@@ -12,6 +12,8 @@ node_modules
 executor/src/tst-tmp
 executor/scripts/note-ipfs-hash
 executor/scripts/perspective-diff-sync-hash
+tests/js/scripts/perspective-diff-sync-hash
+tests/js/scripts/server-link-language-hash
 executorsrc/tests/publishing-agent/ad4m/data/db.json
 .DS_Store
 tests/js/ad4m/users/*
@@ -91,3 +93,4 @@ rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs
 
 # Overnight watchdog scratch — logs and repro scripts, not source
 .overnight-status/
+.codegraph/
