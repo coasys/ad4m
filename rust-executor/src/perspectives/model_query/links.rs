@@ -204,10 +204,7 @@ pub(super) async fn attach_links(
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
         let viewer = crate::perspectives::link_visibility::viewer_author_filter(
-            viewer_did,
-            "_reifier",
-            "author",
-            "predicate",
+            viewer_did, "_reifier", "author",
         );
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{

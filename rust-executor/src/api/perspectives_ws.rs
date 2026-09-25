@@ -1165,8 +1165,27 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
     let viewer = viewer_did(&ctx)?;
+
+    // A `FlowInstance` read is where a user learns a flow's state, and the
+    // `currentState` cache is a Local link private to whoever's request wrote
+    // it. So the state is derived for the requesting user first and their
+    // own cache brought in line with it; the query below then returns it.
+    // Only this class pays for the derivation. Best effort: a read-only token
+    // gets no refresh, and a failed one is logged, never the read's error.
+    // See `flow_instance::viewer_cache`.
+    if class_name == crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS {
+        let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+        crate::perspectives::flow_instance::viewer_cache::refresh_for_read(
+            &mut perspective,
+            &uuid,
+            &query_json,
+            &ctx.capabilities,
+            &agent_context,
+        )
+        .await;
+    }
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
@@ -2091,34 +2110,6 @@ async fn reject_flow_proposal_handler(
     Ok(serde_json::json!({ "retractedLinks": retracted }))
 }
 
-/// Start a `FlowInstance`. The executor mints it, because the instance's
-/// `currentState` cache is engine-reserved and a client write of it is
-/// refused. See `flow_classes::start_flow_instance`.
-async fn start_flow_instance_handler(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    let flow_uri = params.require_str("flowUri")?;
-    let base_expression = params.require_str("baseExpression")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_update_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    let instance_uri = crate::perspectives::flow_classes::start_flow_instance(
-        &mut perspective,
-        &flow_uri,
-        &base_expression,
-        &agent_context,
-    )
-    .await
-    .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::String(instance_uri))
-}
-
 async fn propose_flow_transition_handler(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -2688,7 +2679,6 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "perspective.proposeFlowTransition",
         propose_flow_transition_handler,
     );
-    map.register("perspective.startFlowInstance", start_flow_instance_handler);
     map.register("perspective.verifyFlowReceipt", verify_flow_receipt_handler);
     map.register("perspective.flowValidOutputs", flow_valid_outputs_handler);
     map.register("perspective.mintFlowReceipt", mint_flow_receipt_handler);

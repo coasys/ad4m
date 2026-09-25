@@ -1373,6 +1373,22 @@ pub async fn run_engine_proposal_pass(
             .map(str::trim)
             .filter(|r| !r.is_empty());
 
+        // The sweep after this pass reports what the proposal settles; see
+        // `catch_up_before_voting` for why the proposer derives first.
+        for outcome in crate::perspectives::flow_instance::pass::catch_up_before_voting(
+            perspective,
+            &transition.instance_uri,
+            context,
+        )
+        .await
+        {
+            log::info!(
+                "run_engine_proposal_pass: recorded {} {} → {} before proposing",
+                outcome.instance_uri,
+                outcome.from_state,
+                outcome.to_state
+            );
+        }
         match write_proposal(perspective, transition, &acting_did, rationale, context).await {
             Ok(uri) => minted.push(uri),
             Err(e) => log::debug!("run_engine_proposal_pass: {label} not written: {e:#}"),

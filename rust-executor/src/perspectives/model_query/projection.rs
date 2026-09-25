@@ -672,10 +672,7 @@ pub(super) fn projection_verified_pattern(
     if transitive || guard.is_open() {
         String::new()
     } else if joins_reifier {
-        format!(
-            "   {}\n",
-            guard.on_reifier("?_prj_reif", &format!("<{safe_pred}>"))
-        )
+        format!("   {}\n", guard.on_reifier("?_prj_reif"))
     } else {
         format!(
             "   {}\n",

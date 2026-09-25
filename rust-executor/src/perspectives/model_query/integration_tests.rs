@@ -413,97 +413,6 @@ const ENGINE_CACHE_SHAPE_JSON: &str = r#"{
     "relations": {}
 }"#;
 
-/// The flow engine writes its `currentState` cache as a Local link authored by
-/// whichever agent's request ran the pass. Bob drives a transition, so the
-/// cache is Bob's link. Alice co-owns the perspective and must still read the
-/// state, or her `FlowInstance.findAll` shows the instance with no state.
-///
-/// The exemption is for the engine-derived predicates only. Bob's Local link
-/// on `cache://note` in the same instance stays hidden from Alice. Both the
-/// single-query plan and the paginated two-phase plan are checked, since each
-/// builds its own hydration query.
-#[tokio::test]
-async fn engine_derived_local_links_are_visible_to_co_owners_and_nothing_else_is() {
-    use crate::types::LinkStatus;
-
-    const ALICE: &str = "did:key:z6MkAlice";
-    const BOB: &str = "did:key:z6MkBob";
-
-    let store = SparqlStore::new(None).unwrap();
-    let base = "literal:string:flow_instance_1";
-    for (pred, target, ts, status) in [
-        (
-            "ad4m://type",
-            "cache://EngineCached",
-            "1700000000000",
-            LinkStatus::Shared,
-        ),
-        (
-            "ad4m://flow/current_state",
-            "literal:string:InReview",
-            "1700000000001",
-            LinkStatus::Local,
-        ),
-        (
-            "cache://note",
-            "literal:string:bob_private",
-            "1700000000002",
-            LinkStatus::Local,
-        ),
-    ] {
-        store
-            .add_link(&make_link_by(BOB, base, pred, target, ts, status))
-            .unwrap();
-    }
-
-    for (label, input) in [
-        ("single-query plan", ModelQueryInput::default()),
-        (
-            "paginated plan",
-            ModelQueryInput {
-                limit: Some(10),
-                ..Default::default()
-            },
-        ),
-    ] {
-        let as_alice = fixture_query_from_json_for_viewer(
-            &store,
-            "EngineCached",
-            &input,
-            ENGINE_CACHE_SHAPE_JSON,
-            Some(ALICE),
-        )
-        .await
-        .unwrap();
-        assert_eq!(as_alice.instances.len(), 1, "{label}");
-        let row = &as_alice.instances[0];
-        assert_eq!(
-            row["currentState"],
-            json!("InReview"),
-            "{label}: Alice must read the engine's cache that Bob's request wrote"
-        );
-        assert!(
-            row["note"].is_null(),
-            "{label}: Bob's ordinary Local link must stay hidden from Alice, got {}",
-            row["note"]
-        );
-    }
-
-    // The link-scan path (`get_links`) applies the same rule.
-    let links = store
-        .query_links_for_viewer(Some(base), None, None, None, None, None, Some(ALICE))
-        .unwrap();
-    let predicates: Vec<&str> = links
-        .iter()
-        .filter_map(|l| l.data.predicate.as_deref())
-        .collect();
-    assert!(
-        predicates.contains(&"ad4m://flow/current_state"),
-        "got {predicates:?}"
-    );
-    assert!(!predicates.contains(&"cache://note"), "got {predicates:?}");
-}
-
 /// `total_count` must count only the instances the viewer gets back.
 ///
 /// `hidden` is built entirely from Alice's Local links on the shape's own
@@ -10677,8 +10586,8 @@ async fn links_inside_an_include_sub_query() {
 
 /// `links` rows follow the same viewer rule as hydration (#1024). The option
 /// accepts any predicate IRI, so without it a co-owner could read another
-/// user's Local links by naming their predicate. The engine-derived
-/// `currentState` cache is the one Local link every viewer gets back.
+/// user's Local links by naming their predicate. The flow engine's
+/// `currentState` cache is a Local link like any other: its author's alone.
 #[tokio::test]
 async fn links_rows_are_viewer_scoped() {
     use crate::types::LinkStatus;
@@ -10743,12 +10652,15 @@ async fn links_rows_are_viewer_scoped() {
             .await
             .unwrap();
             assert_eq!(res.instances.len(), 1);
+            // A key with no visible row may be absent altogether.
             let mut t: Vec<String> = res.instances[0]["__links"][key]
                 .as_array()
-                .unwrap_or_else(|| panic!("__links.{key} missing: {}", res.instances[0]))
-                .iter()
-                .map(|r| r["data"]["target"].as_str().unwrap().to_string())
-                .collect();
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| r["data"]["target"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
             t.sort();
             t
         }
@@ -10761,8 +10673,13 @@ async fn links_rows_are_viewer_scoped() {
     );
     assert_eq!(
         targets(Some(ALICE), "currentState").await,
+        Vec::<String>::new(),
+        "Bob's Local currentState cache is his alone; Alice derives her own"
+    );
+    assert_eq!(
+        targets(Some(BOB), "currentState").await,
         vec!["literal:string:InReview"],
-        "the engine's cache is visible to every viewer"
+        "Bob reads his own cache"
     );
     assert_eq!(
         targets(None, "app://undeclared").await,
