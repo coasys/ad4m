@@ -3312,6 +3312,27 @@ mod traverse_scope_tests {
         );
     }
 
+    /// A transitive scope read for a viewer that was not walked matches
+    /// nothing. The `+` path would reach through every agent's links,
+    /// another user's Local ones included, and `execute_model_query` always
+    /// walks for a viewer, so only a direct caller of the builder gets here.
+    /// Executor scope keeps the path.
+    #[test]
+    fn traverse_scope_transitive_unwalked_for_a_viewer_matches_nothing() {
+        let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
+        assert!(q.walked.is_none());
+        let (conformance, where_extra) =
+            build_query_patterns(&traverse_shape(), &q, None, Some("did:key:z6MkBob"));
+        assert_eq!(conformance, "    FILTER(false)");
+        assert_eq!(where_extra, "");
+
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None, None);
+        assert!(
+            conformance.contains("?_anchor <test://comment>+ ?source ."),
+            "executor scope: {conformance}"
+        );
+    }
+
     #[test]
     fn traverse_scope_inward_swaps_the_terms() {
         let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::In, None));

@@ -655,6 +655,101 @@ async fn total_count_matches_what_the_viewer_can_hydrate() {
     }
 }
 
+/// `total_count` for a viewer counts only the instances hydration returns,
+/// when what selects an instance is not one of its own rows.
+///
+/// A class with no flag and no required property is selected by its scope
+/// alone: `<folder> <note://in> ?source`, a Shared link on the *parent*,
+/// which Bob may see. `hidden`'s only row is Alice's Local `body`, so
+/// hydration returns nothing for it to Bob, and without
+/// `count_visibility_guard` the count would still include it. `listed` has a
+/// Shared `body` and is counted for everyone. Alice and executor scope get
+/// both.
+#[tokio::test]
+async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate() {
+    use super::types::Scope;
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+    const NOTE_SHAPE_JSON: &str = r#"{
+        "className": "Note",
+        "properties": {
+            "body": { "predicate": "note://body", "required": false }
+        },
+        "relations": {}
+    }"#;
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, pred, target, ts, status) in [
+        (
+            "note://folder",
+            "note://in",
+            "note://hidden",
+            "1700000000000",
+            LinkStatus::Shared,
+        ),
+        (
+            "note://hidden",
+            "note://body",
+            "literal:string:secret",
+            "1700000000001",
+            LinkStatus::Local,
+        ),
+        (
+            "note://folder",
+            "note://in",
+            "note://listed",
+            "1700000000002",
+            LinkStatus::Shared,
+        ),
+        (
+            "note://listed",
+            "note://body",
+            "literal:string:public",
+            "1700000000003",
+            LinkStatus::Shared,
+        ),
+    ] {
+        store
+            .add_link(&make_link_by(ALICE, source, pred, target, ts, status))
+            .unwrap();
+    }
+
+    let run = |limit: usize, viewer: Option<&'static str>| {
+        let store = &store;
+        async move {
+            let input = ModelQueryInput {
+                parent: Some(Scope::Raw {
+                    id: "note://folder".to_string(),
+                    predicate: "note://in".to_string(),
+                }),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            fixture_query_from_json_for_viewer(store, "Note", &input, NOTE_SHAPE_JSON, viewer)
+                .await
+                .unwrap()
+        }
+    };
+
+    let paged = run(10, Some(BOB)).await;
+    let ids: Vec<&str> = paged
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["note://listed"], "Bob's rows");
+    assert_eq!(paged.total_count, 1, "Bob's paged total");
+    assert_eq!(run(0, Some(BOB)).await.total_count, 1, "Bob's count()");
+
+    for viewer in [Some(ALICE), None] {
+        assert_eq!(run(10, viewer).await.instances.len(), 2, "{viewer:?}");
+        assert_eq!(run(10, viewer).await.total_count, 2, "{viewer:?}");
+        assert_eq!(run(0, viewer).await.total_count, 2, "{viewer:?} count()");
+    }
+}
+
 #[tokio::test]
 async fn test_full_model_query_with_where_filter() {
     // Create an in-memory store
