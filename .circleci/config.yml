@@ -318,6 +318,26 @@ jobs:
             cd ./tests/js && LLM_E2E=1 pnpm run test-integration
           no_output_timeout: 60m
 
+  integration-tests-sfu:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run SFU wind tunnel tests
+          command: cd ./tests/js && pnpm run test-sfu
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: on_fail
+          command: |
+            mkdir -p /tmp/test-artifacts
+            cp -r /tmp/ad4m-sfu-test-* /tmp/test-artifacts/ 2>/dev/null || true
+      - store_artifacts:
+          when: on_fail
+          path: /tmp/test-artifacts
+          destination: sfu-test-logs
+
   integration-tests-cli:
     machine: true
     resource_class: coasys/marvin-light
@@ -378,6 +398,9 @@ workflows:
           requires:
             - build-and-test
       - integration-tests-model:
+          requires:
+            - build-and-test
+      - integration-tests-sfu:
           requires:
             - build-and-test
 
