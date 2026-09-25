@@ -19,6 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
+use super::sparql_builder::verified_triple_filter;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
@@ -31,10 +32,14 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// batched SPARQL query: `?source <pred> ?target` with `VALUES ?target { ... }`
 /// containing all instance IDs.  The results are attached to each instance
 /// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
+///
+/// A link whose signature did not verify is not read unless the query opted in
+/// with `include_unverified` ([`verified_triple_filter`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -58,8 +63,9 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
+        let verified = verified_triple_filter(safe_pred, include_unverified);
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target . }}",
+            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{verified} }}",
             target_constraint
         );
         let result_json = store.query(&sparql)?;
@@ -108,6 +114,10 @@ pub fn resolve_reverse_relations(
 /// metadata in the shape, delegates to either [`resolve_forward_include`]
 /// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
 /// are passed through to the recursive call.
+///
+/// `include_unverified` is the parent query's opt-in. A sub-query that does not
+/// set its own inherits it, so a caller that asked to see unverified rows sees
+/// them on the included instances too; an explicit `false` still wins.
 pub(super) async fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -115,6 +125,7 @@ pub(super) async fn resolve_includes_recursive(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -127,11 +138,14 @@ pub(super) async fn resolve_includes_recursive(
             None => continue,
         };
 
-        let sub_query = match include_val {
+        let mut sub_query = match include_val {
             IncludeValue::Bool(true) => ModelQueryInput::default(),
             IncludeValue::SubQuery(sq) => *sq.clone(),
             _ => continue,
         };
+        if sub_query.include_unverified.is_none() {
+            sub_query.include_unverified = include_unverified;
+        }
 
         // Checked here, where the include is recognised, rather than down in
         // hydration: both resolvers return early when the relation holds no
@@ -553,8 +567,9 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
+    let verified = verified_triple_filter(safe_pred, sub_query.include_unverified);
     let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint} }}"
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{verified} }}"
     );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;

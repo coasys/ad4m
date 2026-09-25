@@ -339,6 +339,28 @@ export type Query = {
    */
   deepQuery?: boolean;
   /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * By default the executor withholds every link whose stored signature
+   * verdict is not valid, so a forged or tampered link never becomes a
+   * property value, a relation target, `author` or `updatedAt`. That
+   * includes a typed relation's generated conformance getter. A `getter` you
+   * write yourself runs as written, so it reads unverified links unless it
+   * joins the link's `ad4m://ontology/proofValid` itself. Set this to
+   * `true` only to *display* an unverified claim, e.g. a UI that marks a value
+   * as unverified. Anything that acts on the data, such as a vote counter or a
+   * role check, must leave it off.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * The same applies to the rows under `__links`, to the order behind
+   * `limit`/`offset` and to `$` projections. Which instances are *selected*
+   * (`where`, the class's flags, `count`/`totalCount`, `transitive`
+   * projections) still matches unverified links, see
+   * https://github.com/coasys/ad4m/issues/1120.
+   */
+  includeUnverified?: boolean;
+  /**
    * Return the individual links behind each instance, with their own author,
    * timestamp, signature and signature verdict, under `instance.__links`. For
    * a collection this is per-item provenance: who added each member, when, and
@@ -547,6 +569,8 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 
@@ -609,6 +633,8 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.includeUnverified}. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 

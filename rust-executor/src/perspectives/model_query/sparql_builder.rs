@@ -95,9 +95,26 @@ fn typed_number_literal(n: f64) -> Option<String> {
 /// timestamps; a caller that read them as rows would count one instance three
 /// times against a limit. Aggregating is therefore not an optimisation — it is
 /// what makes a row mean an instance.
-pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
+///
+/// Unless `include_unverified`, only links whose signature verified are probed
+/// (#1113), so an unverified earlier link cannot move an instance up the page.
+/// The probe is a required pattern: a source whose probe link never verified
+/// has no timestamp and is left off a timestamp-ordered page, although
+/// `COUNT`, which matches conformance on the bare triple, still counts it
+/// (#1120).
+pub(super) fn build_timestamp_probe(
+    shape: &ModelShape,
+    include_unverified: Option<bool>,
+) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
+    // The probe joins one reifier per link, so the verdict is read off that
+    // same reifier (see [`proof_valid_filter`]).
+    let verified = if include_unverified.unwrap_or(false) {
+        ""
+    } else {
+        " ?_r <ad4m://ontology/proofValid> \"true\" ."
+    };
 
     if let Some(prop) = shape.properties.iter().find(|p| {
         // `emittable_iri` on the initial: the value is inlined as `<…>`
@@ -113,7 +130,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     }) {
         let initial = prop.initial_value.as_ref().unwrap();
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
@@ -125,13 +142,13 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
 
     format!(
-        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts_v ."
+        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}"
     )
 }
 
@@ -243,7 +260,7 @@ pub(super) fn build_instance_sparql(
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
-                let ts_probe = build_timestamp_probe(shape);
+                let ts_probe = build_timestamp_probe(shape, query.include_unverified);
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
 {conformance}
@@ -263,20 +280,32 @@ pub(super) fn build_instance_sparql(
                 // filtered set, so there is no index to lose here.
                 // The xsd:double cast yields the numeric sort key when the
                 // value parses as a number.
+                let verified = verified_link_exists(
+                    "?source",
+                    predicate,
+                    "?_sort_raw",
+                    query.include_unverified,
+                );
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
+            OPTIONAL {{ ?source <{predicate}> ?_sort_raw .{verified} BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Projection(predicate) => {
+                let verified = verified_link_exists(
+                    "?source",
+                    predicate,
+                    "?_proj_t",
+                    query.include_unverified,
+                );
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_proj_t . }}
+            OPTIONAL {{ ?source <{predicate}> ?_proj_t .{verified} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -284,11 +313,19 @@ pub(super) fn build_instance_sparql(
                 rel_pred,
                 prop_pred,
             } => {
+                let rel_verified =
+                    verified_link_exists("?source", rel_pred, "?_rp_rel", query.include_unverified);
+                let prop_verified = verified_link_exists(
+                    "?_rp_rel",
+                    prop_pred,
+                    "?_rp_raw",
+                    query.include_unverified,
+                );
                 format!(
                     r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
+            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel .{rel_verified} OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw .{prop_verified} BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
         }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
@@ -299,6 +336,7 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        let proof_valid = proof_valid_filter(query.include_unverified);
         InstanceQueryPlan::Single(format!(
             r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
@@ -308,8 +346,90 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{proof_valid}{local_status}}}"#
         ))
+    }
+}
+
+/// SPARQL fragment withholding rows whose link signature did not verify — the
+/// `model_query` default (#1046 §2, #1113).
+///
+/// Each row of the instance query is one link, joined through its own reifier,
+/// and since #1064 the reifier's `proofValid` is computed from the signature on
+/// every insert rather than taken from the caller. So requiring it to be
+/// `"true"` drops exactly the links whose signature does not verify, and a link
+/// with no verdict at all is dropped with them: the triple pattern is required,
+/// not `OPTIONAL`, so absence fails closed. That is the same rule the flow
+/// engine applies by hand (`proof.valid == Some(true)`), and the reason it
+/// matters for hydration in particular is last-write-wins — without it, a later
+/// forged link on a scalar property *becomes* the property's value.
+///
+/// Why the join is sound: the reifier IRI is keyed on author, source,
+/// predicate, normalized target and timestamp (`make_reifier_iri` in
+/// `sparql_store.rs`), not on the triple alone. Two links asserting the same
+/// triple under different authors or timestamps get different reifiers, each
+/// with one `author`, one `timestamp` and one `proofValid`. So putting this
+/// pattern next to the `author`/`timestamp` reads is not a cross product, and a
+/// forged link cannot borrow a genuine sibling's verdict. A reifier holds two
+/// verdicts only when the same link expression is ingested twice, and then
+/// every projected column is identical. That is also why the cut is "a `true`
+/// exists" rather than "no `false` exists": the latter would let a
+/// re-ingestion of a genuine link suppress it.
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// and the `__links` rows (`links.rs`). [`verified_link_exists`] does the same
+/// for the reads that match a bare triple: the reverse relations, the order
+/// keys of the two-phase plan's pagination subquery, and the non-transitive
+/// projections. So an unverified link cannot reorder a page, push a genuine
+/// instance past `limit`, or change a `$` count. The timestamp order key reads
+/// the verdict off its own reifier in [`build_timestamp_probe`]. A typed
+/// relation's generated getter gets it on its own triple in
+/// `getters::verify_relation_getter`; a hand-written getter runs as written.
+///
+/// What decides *which* instances match still reads the bare triple, which
+/// exists as soon as any link asserts it, so it still matches unverified
+/// links: conformance, pushed `where`, `COUNT` / `totalCount`, and transitive
+/// projections. See #1120.
+///
+/// Empty when the query opts in with `includeUnverified`.
+pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
+    if include_unverified.unwrap_or(false) {
+        ""
+    } else {
+        "    ?_reifier <ad4m://ontology/proofValid> \"true\" .\n"
+    }
+}
+
+/// [`proof_valid_filter`] for reads that match the bare triple
+/// `?source <predicate> ?target` instead of joining one reifier per row: the
+/// reverse-relation reads in `relations.rs`, which hydrate `belongsToOne` /
+/// `belongsToMany` values. The row is kept when at least one link asserting the
+/// triple verified. `FILTER EXISTS` rather than a join, so two verified links
+/// over one triple do not return the source twice.
+///
+/// Empty when `include_unverified` is `Some(true)`.
+pub(super) fn verified_triple_filter(predicate: &str, include_unverified: Option<bool>) -> String {
+    verified_link_exists("?source", predicate, "?target", include_unverified)
+}
+
+/// The `FILTER EXISTS` behind [`verified_triple_filter`], for any
+/// `subject <predicate> object` pattern: the pagination subquery's sort keys
+/// and the non-transitive projections use it with their own variables.
+///
+/// Empty when `include_unverified` is `Some(true)`.
+pub(super) fn verified_link_exists(
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    include_unverified: Option<bool>,
+) -> String {
+    if include_unverified.unwrap_or(false) {
+        String::new()
+    } else {
+        format!(
+            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( {subject} <{predicate}> {object} )>> . ?_pv <ad4m://ontology/proofValid> \"true\" . }}"
+        )
     }
 }
 
@@ -1691,7 +1811,7 @@ mod tests {
     #[test]
     fn timestamp_probe_skips_flag_with_non_iri_initial() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let probe = build_timestamp_probe(&s);
+        let probe = build_timestamp_probe(&s, Some(true));
         assert!(
             !probe.contains("<true>"),
             "must not inline a non-IRI initial: {probe}"
@@ -1702,7 +1822,7 @@ mod tests {
         );
         // A parseable initial keeps the targeted reified form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let probe = build_timestamp_probe(&s);
+        let probe = build_timestamp_probe(&s, Some(true));
         assert!(
             probe.contains("<todo://yes>"),
             "a parseable initial stays targeted: {probe}"

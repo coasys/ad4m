@@ -95,6 +95,8 @@ mod link_author;
 mod link_author_tests;
 mod links;
 mod projection;
+#[cfg(test)]
+mod proof_valid_tests;
 mod query;
 mod relations;
 #[cfg(test)]

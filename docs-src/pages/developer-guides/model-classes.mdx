@@ -767,7 +767,7 @@ const appointed = await Reviewer.findAll(perspective, {
 });
 ```
 
-This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it.
+This matters wherever `author` works as an authority check, such as role gating. Any peer can add a link to an instance someone else created. If the check only looked at who created the instance, a peer could add `agent -> themselves` to an admin's role instance and pass it. The check reads the author each link claims. Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands it also matches a link whose signature did not verify, so see [Unverified Links](#unverified-links) before you rely on it.
 
 - `{ agent: { author: admin } }` with no value operator: admin wrote some `agent` link, whatever its value.
 - `author` combines with the other operators: `{ note: { contains: "ok", author: admin } }` is "admin wrote a `note` link containing ok", `{ status: { not: "archived", author: admin } }` is "admin wrote a `status` link other than archived".
@@ -891,7 +891,7 @@ const posts = await Post.query(perspective).links(["comments"]).get();
 ```
 
 - **Entries** are property or relation names the model declares, or absolute predicate IRIs. An IRI may be one the model does not declare. If an entry matches both, the name wins.
-- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. A link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should require `proof.valid`. `data.target` is the target exactly as it was signed (a literal written in another encoding than `Literal.from(v).toUrl()` keeps its original bytes), and the verdict was computed over those bytes, so verifying `proof` yourself gives the same answer. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
+- **Rows** have the shape of the `LinkExpression` that `perspective.get()` returns (`LinkRow` in the SDK). That includes `proof.valid` / `proof.invalid`, the signature verdict the executor recorded when it stored the link. `valid` is `true` only when the signature verifies against `author`. Links whose signature did not verify are left out unless the query sets `includeUnverified` (see [Unverified Links](#unverified-links)), so by default every row reads `valid: true`. With `includeUnverified`, a link stored without a proof arrives with an empty `key` and `signature` and `valid: false`. `invalid` is always `!valid` (never `null`), as in `perspective.get()`, so `invalid: true` covers both a failed signature and a link nobody signed; to tell them apart, check whether `proof.signature` is empty. Anything that acts on a row, such as counting a vote or honouring a grant, should still require `proof.valid`, so it stays correct when the query sets `includeUnverified`. `data.target` is the target exactly as it was signed (a literal written in another encoding than `Literal.from(v).toUrl()` keeps its original bytes), and the verdict was computed over those bytes, so verifying `proof` yourself gives the same answer. Rows are sorted oldest first, and ties have a fixed order, so every replica returns the same array.
 - **Per-item provenance for collections:** `links: ["members"]` answers "who added each member, when, and does their signature hold". The plain `members` array stays as it is.
 - **Every requested entry is present** on every returned instance, as `[]` when it has no such link. A query that doesn't ask has no `__links` key.
 - **Errors instead of `[]`:** the query fails for an entry that is neither a declared name nor an absolute IRI, such as a typo. It also fails for a reverse relation (`@BelongsToOne` / `@BelongsToMany`). Those links point *at* the instance, and `links` reads outgoing links only, so ask for the relation on the class at the other end.
@@ -922,6 +922,45 @@ const comments = await Comment.query(perspective)
   .parent(recipeId, "recipe://comment")
   .get();
 ```
+
+### Unverified Links
+
+Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
+
+This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A relation `where`, as in `@HasMany(() => Comment, { through: "recipe://comment", where: { status: "approved" } })`, reads each target's values through the same filter, so an unverified `status` link neither admits a comment nor drops one. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
+
+```typescript
+@HasMany({
+  getter: `SELECT ?target WHERE {
+    <Base> <recipe://comment> ?target .
+    ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( <Base> <recipe://comment> ?target )>> ;
+       <ad4m://ontology/proofValid> "true" .
+  }`,
+})
+comments: string[] = [];
+```
+
+To *show* an unverified claim, for example a UI that marks a value as unverified, opt in:
+
+```typescript
+const recipes = await Recipe.findAll(perspective, { includeUnverified: true });
+
+// or with the query builder
+const recipes = await Recipe.query(perspective).includeUnverified().get();
+```
+
+Included relations inherit the setting unless their own sub-query sets `includeUnverified`. Never use the opt-in for data you act on, such as vote counts or role checks.
+
+> **Current limit:** unverified links are skipped by what *hydrates* an instance (except a hand-written `getter`, see above), by the rows under `__links`, by the sort order behind `limit`/`offset`, and by `$` projection counts and lists. A forged link therefore cannot change a value, reorder a page or push a genuine instance off it. What decides *which* instances match does not skip them yet: `where` conditions pushed into SPARQL, the class's flags, `count`/`totalCount` and `transitive` `$` projections still match unverified links. The consequences:
+>
+> - **Re-typing.** A forged flag link can make an existing node show up as an instance of a class it never belonged to. It comes back with only its genuine links, but it comes back, and on a page it takes a slot like any other instance. A node with no verified links at all cannot be conjured this way.
+> - **Selection by a forged value.** `where: { name: "x" }` can return an instance that hydrates with a different, verified `name`.
+> - **Per-link `author`.** `{ agent: { eq: did, author: admin } }` can match through a forged `agent -> did` link that claims admin as its author.
+> - **Counts.** `count` and `totalCount` include instances matched only through unverified links, so they can be larger than the rows you can page through.
+>
+> Until [#1120](https://github.com/coasys/ad4m/issues/1120) lands, do not rely on `where`, `count` or membership in a query result for role checks or vote counting.
+>
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
 
 ### Query Engine
 
