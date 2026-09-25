@@ -25,7 +25,9 @@
  * Which instances are *selected* follows the same rule (#1120): a Shared-only
  * `where` on the Local note does not return the card, nor count it. For the
  * same reason the card is flagged in a Local link as well as a Shared one, so
- * that it is an instance under `linkStatus: 'local'` too.
+ * that it is an instance under `linkStatus: 'local'` too. A second card flagged
+ * only in a Shared link is not an instance under `'local'`, though its Local
+ * note is read without `linkStatus`.
  *
  * Run with:
  *   pnpm ts-mocha -p tsconfig.json --timeout 120000 --exit tests/model/model-link-status.test.ts
@@ -248,6 +250,47 @@ describe("Ad4mModel — linkStatus reads", function () {
       .linkStatus("shared")
       .get();
     expect(viaBuilder[0]?.remarks ?? []).to.not.include(remarkId);
+  });
+
+  it("needs a Local flag under linkStatus: 'local'", async () => {
+    // A second card, flagged only in a Shared link, with a private Local note.
+    const shared = new LinkStatusCard(perspective);
+    shared.title = "shared-only card";
+    await shared.save();
+    const saved = await perspective.get(
+      new LinkQuery({ source: shared.id, predicate: "lsc://note" })
+    );
+    if (saved.length) await perspective.removeLinks(saved);
+    await perspective.add(
+      new Link({
+        source: shared.id,
+        predicate: "lsc://note",
+        target: Literal.from("private note").toUrl(),
+      }),
+      "local"
+    );
+    const byNote = { where: { note: "private note" } };
+
+    // Without linkStatus: my private note on a shared card is read.
+    const all = await LinkStatusCard.findAll(perspective, byNote);
+    expect(all.map((c) => c.id)).to.deep.equal([shared.id]);
+    expect(all[0].note).to.equal("private note");
+
+    // Under 'local' the card is not an instance: its flag is Shared only.
+    const local = { ...byNote, linkStatus: "local" as const };
+    expect(await LinkStatusCard.findAll(perspective, local)).to.deep.equal([]);
+    const { results, totalCount } = await LinkStatusCard.findAllAndCount(perspective, {
+      ...local,
+      limit: 10,
+    });
+    expect(results).to.deep.equal([]);
+    expect(totalCount).to.equal(0);
+    expect(await LinkStatusCard.count(perspective, local)).to.equal(0);
+    const ids = (await LinkStatusCard.findAll(perspective, { linkStatus: "local" })).map(
+      (c) => c.id
+    );
+    expect(ids, "the Local-flagged card is").to.include(cardId);
+    expect(ids).to.not.include(shared.id);
   });
 
   // Runs last: it adds a forged Local `note` link the cases above must not see.

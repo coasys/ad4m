@@ -166,3 +166,73 @@ async fn selection_link_status_applies_to_a_relation_where() {
     assert_eq!(members(Some("shared")).await, vec!["sg://m/shared"]);
     assert_eq!(members(None).await, vec!["sg://m/local", "sg://m/shared"]);
 }
+
+/// `linkStatus: "local"` reads the instance as it exists in Local links, its
+/// flag included: a card flagged only in a Shared link is not a Local
+/// instance, even with a Local note on it. On #1124 it was returned, with the
+/// note hydrated. Without `linkStatus` the note stays readable.
+#[tokio::test]
+async fn selection_link_status_local_needs_a_local_flag() {
+    let store = SparqlStore::new(None).unwrap();
+    let admin = TestSigner::generate();
+    let local =
+        |s: &str, p: &str, t: &str, sec: u32| sg_link(&admin, s, p, t, sec, LinkStatus::Local);
+    add(
+        &store,
+        [
+            // s: flagged only in a Shared link, with a Local note.
+            signed(&admin, "sg://g/s", "ad4m://type", "sg://Grant", 1),
+            local("sg://g/s", "sg://agent", "literal:string:secret", 2),
+            // l: flagged in a Local link, so `local` is not empty.
+            local("sg://g/l", "ad4m://type", "sg://Grant", 3),
+            local("sg://g/l", "sg://agent", "literal:string:mine", 4),
+        ],
+    );
+
+    let local_q = |mut q: Value| {
+        q["linkStatus"] = json!("local");
+        q
+    };
+    for limit in [json!(null), json!(10)] {
+        let query = local_q(json!({ "limit": limit }));
+        let got = run(&store, query.clone()).await;
+        assert_eq!(
+            ids(&got),
+            vec!["sg://g/l"],
+            "{query}: a Shared flag conformed"
+        );
+        assert_eq!(got.total_count, 1, "{query}: totalCount");
+
+        let query = local_q(json!({ "where": { "agent": "secret" }, "limit": limit }));
+        let got = run(&store, query.clone()).await;
+        assert!(ids(&got).is_empty(), "{query}: {:?}", ids(&got));
+        assert_eq!(got.total_count, 0, "{query}: totalCount");
+    }
+    let count = run(
+        &store,
+        local_q(json!({ "where": { "agent": "secret" }, "limit": 0 })),
+    )
+    .await;
+    assert_eq!(
+        count.total_count, 0,
+        "limit 0 counted the Shared-flagged card"
+    );
+    let count = run(&store, local_q(json!({ "limit": 0 }))).await;
+    assert_eq!(
+        count.total_count, 1,
+        "limit 0 counted the Shared-flagged card"
+    );
+
+    // Without linkStatus: my private note on a shared card.
+    for limit in [json!(null), json!(10)] {
+        let query = json!({ "where": { "agent": "secret" }, "limit": limit });
+        let got = run(&store, query.clone()).await;
+        assert_eq!(ids(&got), vec!["sg://g/s"], "{query}");
+        assert_eq!(
+            got.instances[0]["agent"],
+            json!("secret"),
+            "{query}: the note"
+        );
+        assert_eq!(got.total_count, 1, "{query}: totalCount");
+    }
+}
