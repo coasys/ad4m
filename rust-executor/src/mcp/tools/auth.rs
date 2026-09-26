@@ -114,13 +114,17 @@ impl Ad4mMcpHandler {
         // `request_capability` is in AUTH_TOOLS, so `call_tool` never rejects it —
         // it must stay reachable to *create* a request. Whether the request is
         // auto-permitted is decided here, by the same check every gated tool uses.
-        let caller_authenticated = self.check_auth("request_capability", &context).await;
-        self.handle_capability_request(params.0, caller_authenticated)
+        // Creating the request needs only that the tool stay reachable; auto-permitting it
+        // (the inline code that generate_jwt mints into an ALL_CAPABILITY token) needs the
+        // PERMIT capability, which a multi-user user token does not hold.
+        self.adopt_header_credential(&context).await;
+        let caller_can_permit = self.caller_can_permit().await;
+        self.handle_capability_request(params.0, caller_can_permit)
             .await
     }
 
     /// Body of [`Self::request_capability`], split from the transport wrapper so
-    /// tests can drive both authentication verdicts: a `RequestContext<RoleServer>`
+    /// tests can drive both permit verdicts: a `RequestContext<RoleServer>`
     /// cannot be fabricated outside rmcp (its `Peer` constructor is `pub(crate)`,
     /// see `harness_bridge.rs`), so the wrapper stays a shim around `check_auth`
     /// and everything decidable lives here.
@@ -142,7 +146,7 @@ impl Ad4mMcpHandler {
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
-        caller_authenticated: bool,
+        caller_can_permit: bool,
     ) -> String {
         let auth_info = AuthInfo {
             app_name: p.app_name.clone(),
@@ -156,11 +160,11 @@ impl Ad4mMcpHandler {
 
         let request_id = cap_request_capability(auth_info.clone()).await;
 
-        if !caller_authenticated {
+        if !caller_can_permit {
             return json!({
                 "request_id": request_id,
-                "message": "Capability request created but NOT auto-permitted: this session is \
-                    not authenticated. The executor admin must approve the request (ADAM \
+                "message": "Capability request created but NOT auto-permitted: this session may \
+                    not grant capabilities. The executor admin must approve the request (ADAM \
                     Launcher), then call generate_jwt with this request_id and the code shown \
                     to the admin. To auto-permit instead, authenticate first — send the admin \
                     credential or an existing JWT in the Authorization header."
@@ -557,5 +561,60 @@ mod capability_mint_tests {
             v["code"].as_str().is_some(),
             "no-credential flow should still return the code inline: {resp}"
         );
+    }
+
+    /// The escalation of issue #851 sub-problem 3, through the capability layer: a
+    /// multi-user user token authenticates but holds no PERMIT capability, so it must
+    /// not auto-permit an ALL_CAPABILITY mint. A token that does hold PERMIT still may.
+    #[tokio::test]
+    async fn a_token_without_permit_may_not_auto_permit() {
+        use crate::agent::capabilities::{
+            get_user_default_capabilities, token::generate_jwt, types::AuthInfo, Capability,
+            ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+        };
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+
+        let jwt_with = |caps: Vec<Capability>| {
+            generate_jwt(
+                "test-app".to_string(),
+                DEFAULT_TOKEN_VALID_PERIOD,
+                AuthInfo {
+                    app_name: "test-app".to_string(),
+                    app_desc: String::new(),
+                    app_domain: None,
+                    app_url: None,
+                    app_icon_path: None,
+                    capabilities: Some(caps),
+                    user_email: None,
+                },
+            )
+            .expect("the wallet is unlocked in tests")
+        };
+
+        let handler = handler_with_admin_credential();
+
+        // A user-capability token authenticates but cannot auto-permit.
+        *handler.context.auth_token.write().await = Some(jwt_with(get_user_default_capabilities()));
+        assert!(
+            !handler.caller_can_permit().await,
+            "a user token without PERMIT was allowed to auto-permit a capability mint"
+        );
+        let resp = handler
+            .handle_capability_request(mint_params(), handler.caller_can_permit().await)
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+        assert!(
+            v.get("code").is_none(),
+            "a user token received a mint code: {resp}"
+        );
+
+        // A token that holds PERMIT (here, ALL_CAPABILITY) still auto-permits.
+        *handler.context.auth_token.write().await = Some(jwt_with(vec![ALL_CAPABILITY.clone()]));
+        assert!(handler.caller_can_permit().await);
+
+        // The admin credential in the session auto-permits.
+        *handler.context.auth_token.write().await = Some("test-admin-credential".to_string());
+        assert!(handler.caller_can_permit().await);
     }
 }
