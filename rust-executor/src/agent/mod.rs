@@ -245,11 +245,7 @@ pub struct AgentSignature {
 
 impl AgentSignature {
     pub fn from_message(message: String) -> Result<AgentSignature, AnyError> {
-        let signature = sign_string_hex(message)?;
-        Ok(AgentSignature {
-            signature,
-            public_key: signing_key_id(),
-        })
+        Self::from_message_for_context(message, &AgentContext::main_agent())
     }
 
     /// Signs `message` with the key of `context`: the main agent, or a user's own key.
@@ -551,22 +547,25 @@ impl AgentService {
         Ok(agent_data.did)
     }
 
+    /// The file that holds a user's agent profile.
+    pub fn user_profile_path(&self, user_email: &str) -> Result<path::PathBuf, AnyError> {
+        validate_user_email_for_path(user_email)?;
+        Ok(path::Path::new(&self.users_dir)
+            .join(user_email)
+            .join("profile.json"))
+    }
+
     /// Store agent profile for a specific user
     pub fn store_user_agent_profile(
         &self,
         user_email: &str,
         agent: &Agent,
     ) -> Result<(), AnyError> {
-        validate_user_email_for_path(user_email)?;
-        // Create user-specific profile directory
-        let user_profile_dir = format!("{}/{}", self.users_dir, user_email);
-        std::fs::create_dir_all(&user_profile_dir)?;
-
-        // Store profile in user-specific file
-        let profile_path = format!("{}/profile.json", user_profile_dir);
-        let profile_json = serde_json::to_string(agent)?;
-        std::fs::write(profile_path, profile_json)?;
-
+        let profile_path = self.user_profile_path(user_email)?;
+        if let Some(user_profile_dir) = profile_path.parent() {
+            std::fs::create_dir_all(user_profile_dir)?;
+        }
+        std::fs::write(profile_path, serde_json::to_string(agent)?)?;
         Ok(())
     }
 
@@ -627,10 +626,9 @@ impl AgentService {
 
     /// Load agent profile for a specific user
     pub fn load_user_agent_profile(&self, user_email: &str) -> Result<Option<Agent>, AnyError> {
-        validate_user_email_for_path(user_email)?;
-        let profile_path = format!("{}/{}/profile.json", self.users_dir, user_email);
+        let profile_path = self.user_profile_path(user_email)?;
 
-        if !std::path::Path::new(&profile_path).exists() {
+        if !profile_path.exists() {
             return Ok(None);
         }
 

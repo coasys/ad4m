@@ -1,4 +1,4 @@
-//! Guards for calls that act on the node itself.
+//! Who a session acts as, and guards for calls that act on the node itself.
 //!
 //! On a multi-user node, a user session (a JWT whose `sub` names a user) acts for that
 //! user only. Calls that change or use the node's own identity, wallet, files or
@@ -7,6 +7,7 @@
 //! token carries, because the default user capabilities overlap the ones these calls
 //! check.
 
+use crate::agent::AgentContext;
 use crate::api::ws_handler::WsRpcError;
 use crate::types::RequestContext;
 
@@ -18,6 +19,15 @@ pub fn refuse_user_session(ctx: &RequestContext, what: &str) -> Result<(), WsRpc
         )));
     }
     Ok(())
+}
+
+/// The agent a session signs and publishes as: the user of a user session, otherwise the
+/// node's main agent.
+pub fn session_agent_context(ctx: &RequestContext) -> AgentContext {
+    match ctx.user_email.clone() {
+        Some(user_email) => AgentContext::for_user_email(user_email),
+        None => AgentContext::main_agent(),
+    }
 }
 
 #[cfg(test)]
@@ -46,5 +56,21 @@ mod tests {
     #[test]
     fn operator_sessions_pass() {
         assert!(refuse_user_session(&ctx(None), "agent.lock").is_ok());
+    }
+
+    #[test]
+    fn a_user_session_acts_as_its_user() {
+        assert_eq!(
+            session_agent_context(&ctx(Some("alice@example.org"))),
+            AgentContext::for_user_email("alice@example.org".to_string())
+        );
+    }
+
+    #[test]
+    fn an_operator_session_acts_as_the_main_agent() {
+        assert_eq!(
+            session_agent_context(&ctx(None)),
+            AgentContext::main_agent()
+        );
     }
 }

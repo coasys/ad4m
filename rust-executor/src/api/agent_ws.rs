@@ -18,7 +18,7 @@ use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
-use super::guards::refuse_user_session;
+use super::guards::{refuse_user_session, session_agent_context};
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -185,38 +185,14 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // If dm_language provided, update it. A user session updates the user's own profile,
-    // never the node's main agent.
-    if let (Some(dm_lang), Some(user_email)) = (body.dm_language.clone(), ctx.user_email.clone()) {
-        let did = AgentService::get_user_did_by_email(&user_email)
-            .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
-        // Keep the stored perspective. The DID always comes from the user's key.
-        let perspective = AgentService::with_global_instance(|agent_service| {
-            agent_service.load_user_agent_profile(&user_email)
-        })
-        .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
-        .and_then(|profile| profile.perspective);
-        let agent = Agent {
-            did,
-            direct_message_language: Some(dm_lang),
-            perspective,
-        };
-        AgentService::with_global_instance(|agent_service| {
-            agent_service.store_user_agent_profile(&user_email, &agent)
-        })
-        .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
-        if let Err(e) =
-            AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email)).await
-        {
-            log::warn!(
-                "Failed to publish user profile after DM language update: {}",
-                e
-            );
-        }
-        if body.public_perspective.is_none() {
-            return Ok(serde_json::to_value(agent)?);
-        }
-    } else if let Some(dm_lang) = body.dm_language {
+    // A user session updates the user's own profile, never the node's main agent.
+    if let Some(user_email) = ctx.user_email.clone() {
+        let agent = update_user_profile(user_email, body).await?;
+        publish_agent_updated(&agent).await;
+        return Ok(serde_json::to_value(agent)?);
+    }
+
+    if let Some(dm_lang) = body.dm_language {
         AgentService::with_mutable_global_instance(|agent_service| {
             if let Some(ref mut agent) = agent_service.agent {
                 agent.direct_message_language = Some(dm_lang.clone());
@@ -234,100 +210,100 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         }
     }
 
-    // If public_perspective provided, update it
     if let Some(pub_persp) = body.public_perspective {
-        // For multi-user mode
-        if let Some(user_email) = ctx.user_email.clone() {
-            let agent_data = AgentService::get_user_agent_data(&user_email)
-                .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
+        let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
+            .links
+            .iter()
+            .map(link_expression_input_to_decorated)
+            .collect();
 
-            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
-                .links
-                .iter()
-                .map(|lei| link_expression_input_to_decorated(lei))
-                .collect();
-
-            // Keep the user's DM language: this call may update only the perspective.
-            let direct_message_language = AgentService::with_global_instance(|agent_service| {
-                agent_service.load_user_agent_profile(&user_email)
-            })
-            // A failed read must not look like "no DM language", or the store below drops it.
-            .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
-            .and_then(|profile| profile.direct_message_language);
-            let agent = Agent {
-                did: agent_data.did,
-                direct_message_language,
-                perspective: Some(DomainPerspective {
+        AgentService::with_mutable_global_instance(|agent_service| {
+            if let Some(ref mut agent) = agent_service.agent {
+                agent.perspective = Some(DomainPerspective {
                     links: decorated_links,
-                }),
-            };
-
-            AgentService::with_global_instance(|agent_service| {
-                agent_service.store_user_agent_profile(&user_email, &agent)
-            })
-            .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
-
-            if let Err(e) =
-                AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email))
-                    .await
-            {
-                log::warn!(
-                    "Failed to publish updated user profile to agent language: {}",
-                    e
-                );
-            }
-
-            return Ok(serde_json::to_value(agent)?);
-        } else {
-            // Main agent path
-            let decorated_links: Vec<DecoratedLinkExpression> = pub_persp
-                .links
-                .iter()
-                .map(|lei| link_expression_input_to_decorated(lei))
-                .collect();
-
-            AgentService::with_mutable_global_instance(|agent_service| {
-                if let Some(ref mut agent) = agent_service.agent {
-                    agent.perspective = Some(DomainPerspective {
-                        links: decorated_links,
-                    });
-                    if let Some(ref passphrase) = agent_service.passphrase {
-                        agent_service.save(passphrase.clone());
-                    }
+                });
+                if let Some(ref passphrase) = agent_service.passphrase {
+                    agent_service.save(passphrase.clone());
                 }
-            });
-
-            if let Err(e) =
-                AgentService::publish_agent_to_language(&AgentContext::main_agent()).await
-            {
-                log::warn!(
-                    "Failed to publish agent expression after profile update: {}",
-                    e
-                );
             }
+        });
+
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!(
+                "Failed to publish agent expression after profile update: {}",
+                e
+            );
         }
     }
 
-    // Return updated agent
     let agent = AgentService::with_global_instance(|agent_service| {
         agent_service
             .agent
             .clone()
             .ok_or_else(|| WsRpcError::not_found("Agent not found"))
     })?;
+    publish_agent_updated(&agent).await;
+    Ok(serde_json::to_value(agent)?)
+}
 
+/// Applies an `agent.updateProfile` request to a user's own profile: one load, one store,
+/// one publish. Fields the request leaves out keep their stored values. The DID always
+/// comes from the user's key, never from the stored profile.
+async fn update_user_profile(
+    user_email: String,
+    body: UpdateProfileRequest,
+) -> Result<Agent, WsRpcError> {
+    let did = AgentService::get_user_did_by_email(&user_email)
+        .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
+    let stored = AgentService::with_global_instance(|agent_service| {
+        agent_service.load_user_agent_profile(&user_email)
+    })
+    .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
+    .unwrap_or_default();
+
+    let agent = Agent {
+        did,
+        direct_message_language: body.dm_language.or(stored.direct_message_language),
+        perspective: match body.public_perspective {
+            Some(perspective) => Some(DomainPerspective {
+                links: perspective
+                    .links
+                    .iter()
+                    .map(link_expression_input_to_decorated)
+                    .collect(),
+            }),
+            None => stored.perspective,
+        },
+    };
+    AgentService::with_global_instance(|agent_service| {
+        agent_service.store_user_agent_profile(&user_email, &agent)
+    })
+    .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
+
+    if let Err(e) =
+        AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email)).await
+    {
+        log::warn!(
+            "Failed to publish updated user profile to agent language: {}",
+            e
+        );
+    }
+    Ok(agent)
+}
+
+/// Announces a changed profile on `agent-updated`. The event stream filters the event by
+/// the DID in the payload.
+async fn publish_agent_updated(agent: &Agent) {
     get_global_pubsub()
         .await
         .publish(
             &AGENT_UPDATED_TOPIC,
-            &serde_json::to_string(&agent).unwrap_or_else(|e| {
+            &serde_json::to_string(agent).unwrap_or_else(|e| {
                 log::error!("Failed to serialize agent for pubsub: {e}");
                 String::new()
             }),
         )
         .await;
-
-    Ok(serde_json::to_value(agent)?)
 }
 
 /// Publishes the main agent to the agent language without holding up the caller.
@@ -520,13 +496,10 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     // A user session signs as the user, never as the node's main agent.
-    let sig = match ctx.user_email.clone() {
-        Some(user_email) => InternalAgentSignature::from_message_for_context(
-            body.message,
-            &AgentContext::for_user_email(user_email),
-        ),
-        None => InternalAgentSignature::from_message(body.message),
-    }
+    let sig = InternalAgentSignature::from_message_for_context(
+        body.message,
+        &session_agent_context(&ctx),
+    )
     .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let out: AgentSignature = sig.into();
@@ -705,6 +678,8 @@ async fn get_trusted_agents(_params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn add_trusted_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's trust list decides whose languages this node installs and runs.
+    refuse_user_session(&ctx, "agent.addTrustedAgents")?;
 
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -726,6 +701,7 @@ async fn delete_trusted_agents(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_TRUSTED_AGENTS_DELETE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.deleteTrustedAgents")?;
 
     let body: TrustedAgentsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -746,6 +722,8 @@ async fn delete_trusted_agents(
 async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The proofs belong to the node's main agent.
+    refuse_user_session(&ctx, "agent.getEntanglementProofs")?;
 
     let proofs = get_entanglement_proofs();
     Ok(serde_json::to_value(
