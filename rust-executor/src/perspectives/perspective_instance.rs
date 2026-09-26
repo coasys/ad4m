@@ -23,6 +23,7 @@ use crate::pubsub::{
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
     RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
+use crate::runtime_service::notification_access::notifications_to_fire;
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
@@ -4178,19 +4179,16 @@ impl PerspectiveInstance {
         });
     }
 
-    fn all_notifications_for_perspective_id(uuid: String) -> Result<Vec<Notification>, AnyError> {
-        Ok(Ad4mDb::with_global_instance(|db| db.get_notifications())?
-            .into_iter()
-            .filter(|n| n.perspective_ids.contains(&uuid))
-            .collect())
-    }
-
-    async fn calc_notification_trigger_matches(
+    pub(crate) async fn calc_notification_trigger_matches(
         &self,
     ) -> Result<BTreeMap<Notification, Vec<serde_json::Value>>, AnyError> {
         let uuid = self.uuid.clone();
 
-        let notifications = Self::all_notifications_for_perspective_id(uuid.clone())?;
+        let handle = self.persisted.lock().await.clone();
+        let notifications = notifications_to_fire(
+            Ad4mDb::with_global_instance(|db| db.get_notifications())?,
+            &handle,
+        );
         //log::info!("🔔 NOTIFICATIONS: Found {} notifications for perspective {}", notifications.len(), uuid);
 
         //log::info!("🔔 NOTIFICATIONS: All triggers:\n{}", notifications.iter()
