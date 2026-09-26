@@ -369,19 +369,26 @@ pub async fn generate_capability_token(request_id: String, rand: String) -> Resu
 
     let auth = {
         let mut attempts = FAILED_CODE_ATTEMPTS.lock().map_err(|e| e.to_string())?;
-        if attempts.get(&request_id).copied().unwrap_or(0) >= MAX_CODE_ATTEMPTS {
-            return Err("Too many wrong codes for this request; request access again".to_string());
-        }
         match get_request(&auth_key)? {
             Some(auth) => {
                 attempts.remove(&request_id);
                 auth
+            }
+            // Callers without a token reach this, so only ids with a permitted request get an
+            // entry, and the entry goes when the request does. A made-up id records nothing.
+            None if !requests_map::has_requests_for(&request_id)? => {
+                attempts.remove(&request_id);
+                return Err("Can't find permitted request".to_string());
             }
             None => {
                 let count = attempts.entry(request_id.clone()).or_insert(0);
                 *count += 1;
                 if *count >= MAX_CODE_ATTEMPTS {
                     requests_map::remove_requests_for(&request_id)?;
+                    attempts.remove(&request_id);
+                    return Err(
+                        "Too many wrong codes for this request; request access again".to_string(),
+                    );
                 }
                 return Err("Can't find permitted request".to_string());
             }
@@ -645,17 +652,46 @@ mod app_token_tests {
     async fn a_request_stops_accepting_codes_after_too_many_wrong_ones() {
         let (request_id, code) = permitted_request().await;
         let wrong = if code == "100000" { "100001" } else { "100000" };
+        let mut last_err = String::new();
         for _ in 0..MAX_CODE_ATTEMPTS {
-            assert!(
-                generate_capability_token(request_id.clone(), wrong.to_string())
-                    .await
-                    .is_err()
-            );
+            last_err = generate_capability_token(request_id.clone(), wrong.to_string())
+                .await
+                .unwrap_err();
         }
-        let err = generate_capability_token(request_id.clone(), code)
+        assert!(last_err.contains("Too many wrong codes"), "{}", last_err);
+        assert!(generate_capability_token(request_id.clone(), code)
             .await
-            .unwrap_err();
-        assert!(err.contains("Too many wrong codes"), "{}", err);
+            .is_err());
+    }
+
+    // `agent.generateJwt` needs no token, so anyone can send made-up request ids. They must
+    // not leave entries behind, or repeated calls fill memory.
+    #[tokio::test]
+    async fn made_up_request_ids_leave_no_attempt_entries() {
+        for i in 0..10_000 {
+            let _ = generate_capability_token(format!("made-up-{}", i), "100000".to_string()).await;
+        }
+        let left = FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|id| id.starts_with("made-up-"))
+            .count();
+        assert_eq!(left, 0);
+    }
+
+    // The entry for a real request goes once its codes are gone.
+    #[tokio::test]
+    async fn a_locked_out_request_leaves_no_attempt_entry() {
+        let (request_id, code) = permitted_request().await;
+        let wrong = if code == "100000" { "100001" } else { "100000" };
+        for _ in 0..MAX_CODE_ATTEMPTS {
+            let _ = generate_capability_token(request_id.clone(), wrong.to_string()).await;
+        }
+        assert!(!FAILED_CODE_ATTEMPTS
+            .lock()
+            .unwrap()
+            .contains_key(&request_id));
     }
 
     #[tokio::test]

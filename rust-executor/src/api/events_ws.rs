@@ -159,7 +159,9 @@ pub(crate) async fn build_event_stream(
     let d_persp_added = resolved_did.clone();
     let d_persp_removed = resolved_did.clone();
     let d_persp_updated = resolved_did.clone();
-    let d_sync = resolved_did.clone();
+    // Lazy for the same reason as the auto-processor below: the launcher's socket opens
+    // before `agent.generate()` on first run, and must still get sync-state afterwards.
+    let d_sync = Arc::new(LazyDid::new(auth_token.clone(), resolved_did.clone()));
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
@@ -320,12 +322,19 @@ pub(crate) async fn build_event_stream(
         "perspective-updated",
         d_persp_updated
     );
-    let s_sync = did_stream!(
-        pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
-        "sync-state-change",
-        d_sync,
-        matches_sync_state_owner
-    );
+    let s_sync = BroadcastStream::new(pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| {
+            let did_cell = d_sync.clone();
+            async move {
+                match result {
+                    Ok(ref msg) if matches_sync_state_owner(msg, did_cell.get().as_deref()) => {
+                        Some(wrap_event("sync-state-change", msg))
+                    }
+                    _ => None,
+                }
+            }
+        });
 
     // ── Link events ──
     let s_link_added = owner_stream!(
@@ -654,17 +663,22 @@ pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
 
 /// A capability request carries the request id that `agent.generateJwt` redeems, and a
 /// notification install request carries the webhook's credentials, so only sessions that can
-/// approve apps receive them. Every other exception goes to every session.
+/// approve apps receive them. The listed kinds go to every session; anything unreadable goes
+/// only to approvers.
 pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
+    use crate::types::{ExceptionInfo, ExceptionType};
     if can_approve_apps {
         return true;
     }
-    match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(exception) => !matches!(
-            exception.get("type").and_then(|t| t.as_str()),
-            Some("CAPABILITY_REQUESTED" | "INSTALL_NOTIFICATION_REQUEST")
-        ),
-        Err(_) => false,
+    let Ok(exception) = serde_json::from_str::<ExceptionInfo>(msg) else {
+        return false;
+    };
+    // No `_` arm: a new exception type does not compile until someone decides who sees it.
+    match exception.r#type {
+        ExceptionType::LanguageIsNotLoaded
+        | ExceptionType::ExpressionIsNotVerified
+        | ExceptionType::AgentIsUntrusted => true,
+        ExceptionType::CapabilityRequested | ExceptionType::InstallNotificationRequest => false,
     }
 }
 
@@ -1289,5 +1303,62 @@ mod app_approval_event_tests {
                 .is_err(),
             "a session that cannot approve apps received an app event"
         );
+    }
+
+    // A type this build does not know may carry anything, so it goes to approvers only.
+    #[test]
+    fn exceptions_of_an_unknown_type_reach_only_sessions_that_can_approve_apps() {
+        let unknown = r#"{"title":"t","message":"m","type":"SOME_NEW_TYPE","addon":"secret"}"#;
+        assert!(!exception_visible(unknown, false));
+        assert!(exception_visible(unknown, true));
+    }
+
+    // Goes through `build_event_stream`, so a sync-state stream that broadcasts, or that
+    // keeps the DID it saw at connect time, fails here. The socket opens before the main
+    // agent has a DID, as the launcher's does on first run.
+    #[tokio::test]
+    async fn sync_state_reaches_a_socket_opened_before_the_did_resolved() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
+            .expect("the test agent has a DID");
+        crate::agent::AgentService::with_mutable_global_instance(|a| a.did = None);
+        let mut stream = build_event_stream(String::new(), None, false, false).await;
+        crate::agent::AgentService::with_mutable_global_instance(|a| {
+            a.did = Some(main_did.clone())
+        });
+
+        let event = |uuid: &str, owner: &str| {
+            serde_json::json!({
+                "perspective": { "uuid": uuid, "state": "Synced", "owners": [owner] },
+                "state": "\"Synced\"",
+            })
+            .to_string()
+        };
+        let pubsub = get_global_pubsub().await;
+        pubsub
+            .publish(
+                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
+                &event("sync-of-another-agent", "did:key:someone-else"),
+            )
+            .await;
+        pubsub
+            .publish(
+                &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
+                &event("sync-of-the-main-agent", &main_did),
+            )
+            .await;
+
+        let received = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = stream.next().await.expect("the stream stays open");
+                if event.contains("sync-state-change") {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("the socket gets sync-state once the DID exists");
+        assert!(received.contains("sync-of-the-main-agent"), "{}", received);
     }
 }
