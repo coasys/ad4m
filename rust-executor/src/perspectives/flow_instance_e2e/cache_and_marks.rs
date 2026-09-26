@@ -444,6 +444,60 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
     );
 }
 
+/// A user whose first act on an instance is a manual mint gets the edge it
+/// settles reported. Mallory holds no cache here (the main agent minted the
+/// instance), so without `catch_up_before_voting` in `propose::mint` the
+/// sweep after her proposal would be her first pass, a silent catch-up, and
+/// the `{n: 1}` edge her own vote settles would go unreported.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_first_act_mint_reports_the_edge_it_settles() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let instance = f.instance_uri.clone();
+    let mallory = second_agent("mallory-first-mint@e2e.test");
+
+    let out = propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &mallory)
+        .await
+        .expect("Mallory mints");
+    assert!(out.minted, "no proposal was open, so this call mints");
+    assert_eq!(
+        out.outcomes.len(),
+        1,
+        "the default {{n: 1}} rule settles at mint, and that is reported: {out:?}"
+    );
+    assert_eq!(
+        (
+            out.outcomes[0].from_state.as_str(),
+            out.outcomes[0].to_state.as_str()
+        ),
+        ("identified", "scoped")
+    );
+    assert_eq!(
+        out.outcomes[0].contributing_proposal_uris,
+        vec![out.proposal_uri]
+    );
+}
+
+/// The engine's proposal pass, run as a user who never derived the instance:
+/// the proposer derives first (`catch_up_before_voting` in
+/// `run_engine_proposal_pass`), so the next sweep reports the `{n: 1}` edge
+/// the engine's own proposal settled instead of taking it for history.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_proposal_by_a_user_with_no_cache_is_reported_by_the_next_sweep() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let mallory = second_agent("mallory-engine-mint@e2e.test");
+
+    let minted = f.run_pass_as(&mallory).await;
+    assert_eq!(minted.len(), 1, "the engine mints one proposal: {minted:?}");
+
+    let swept = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert_eq!(
+        swept.len(),
+        1,
+        "the edge the engine's proposal settled is an event for its proposer: {swept:?}"
+    );
+    assert_eq!(swept[0].contributing_proposal_uris, minted);
+}
+
 /// A newcomer with nothing to catch up on: the first pass writes the cache
 /// (silently, trivially) and the FIRST edge to settle afterwards is
 /// reported — catch-up must not eat the first real event.
