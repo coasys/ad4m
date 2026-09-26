@@ -229,6 +229,31 @@ async fn only_granted_notifications_fire() {
     assert_eq!(fired, vec![granted], "a granted notification must fire");
 }
 
+// Delivery reads the grant when a notification fires. A cached notification list would
+// keep firing a notification after the operator withdrew its grant.
+#[tokio::test]
+async fn a_withdrawn_grant_stops_the_notification() {
+    setup();
+    let mut perspectives = Perspectives::default();
+    let mut perspective = perspectives.add(None);
+    let id = store(&[&perspective.uuid], None, true);
+
+    add_matching_link(&mut perspective).await;
+    assert_eq!(firing(&perspective).await, vec![id.clone()]);
+
+    call(
+        "runtime.grantNotification",
+        json!({ "id": id, "granted": false }),
+        admin_ctx(),
+    )
+    .await
+    .expect("the operator withdraws the grant");
+    assert!(
+        firing(&perspective).await.is_empty(),
+        "a notification fired after its grant was withdrawn"
+    );
+}
+
 #[tokio::test]
 async fn notification_never_fires_for_a_perspective_its_owner_cannot_read() {
     setup();
