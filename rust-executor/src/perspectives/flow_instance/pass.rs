@@ -1,11 +1,12 @@
 //! The background sweep: derive every instance in scope, then record what
 //! the fold already decided.
 //!
-//! This module observes; it does not decide. It writes exactly two things —
+//! This module observes; it does not decide. It writes exactly three things —
 //! the `currentState` cache, so a reader without a perspective sees the
-//! fold's answer, and `resolved_as → "fired"` marks, so UIs can list history
+//! fold's answer, `resolved_as → "fired"` marks, so UIs can list history
 //! and the mint side can tell a new consensus event from one it has already
-//! seen. Neither is ever read back as authority.
+//! seen, and one caught-up link per user and instance (see "Catch-up"
+//! below). None is ever read back as authority.
 //!
 //! **It deletes nothing.** A replica's view is partial by construction: a
 //! proposal can arrive before the evidence it cites, and the settling links
@@ -34,7 +35,7 @@
 //!   already recorded this consensus event?" test (so [`FireOutcome`]s are
 //!   emitted once per event per replica). Never an input to the fold.
 //!
-//! Both are written **`Local`** (#987): every replica — and, on a multi-user
+//! The cache and the marks are written **`Local`** (#987): every replica — and, on a multi-user
 //! host, every user, since a Local link is private to its author (#1024) —
 //! materialises only its own derivation. Shared, they were a claim a UI would display unverified,
 //! a value two replicas with different partial views would overwrite in each
@@ -48,24 +49,29 @@
 //! history would, on its first pass, find every settled edge unmarked and
 //! report each one as new. It must not: those events happened before this
 //! replica was watching. So the **first** pass a user runs over an
-//! instance, with no verified `Local` cache of their own on it yet, is a
-//! silent catch-up: it marks what has settled and writes
-//! the cache, and emits nothing. From then on the user *has* a cache, so
-//! every later pass reports normally. The aim: **no event flood on join; no
-//! missed events for edges that settle after catch-up.** The user who mints
-//! an instance writes their cache at the mint, and a user whose first act on
-//! an instance is a vote catches up just before it
+//! instance they have not caught up on ([`has_caught_up`]) is a silent
+//! catch-up: it marks what has settled, writes the cache and the user's
+//! `Local` [`CAUGHT_UP_PREDICATE`] link, and emits nothing. From then on
+//! the user has caught up, so every later pass reports normally. The aim:
+//! **no event flood on join; no missed events for edges that settle after
+//! catch-up.** The user who minted an instance has caught up by
+//! construction: it had no history before they watched it. A user whose
+//! first act on an instance is a vote catches up just before it
 //! ([`catch_up_before_voting`]), so the edge their vote settles is reported.
 //!
-//! The evidence is the acting user's own cache, never another user's and
-//! never a mark: on a multi-user host any user may write a Local
-//! `currentState` or mark with any value, so evidence someone else wrote
-//! would let them switch the catch-up off for everyone. The cost is that a
+//! The evidence is a link the acting user signed, never another user's and
+//! never a mark: on a multi-user host any user may write a Local link with
+//! any value, so evidence someone else wrote would let them switch the
+//! catch-up off for everyone. It is not the cache either: a `FlowInstance`
+//! read writes the reader's cache and marks nothing
+//! (`super::viewer_cache`), so a cache says the user has derived the
+//! current state, not that their history is recorded. The cost is that a
 //! user's first pass over an instance another user of this replica already
-//! derived is silent too. See `first_pass_here` in
-//! [`run_flow_consensus_pass`].
+//! derived is silent too, and that the same DID minting on one replica
+//! counts as caught up on every other replica it runs on. See
+//! `first_pass_here` in [`run_flow_consensus_pass`].
 //!
-//! **Two known gaps**, both in what is reported (outcomes go to logs and to
+//! **A known gap**, in what is reported (outcomes go to logs and to
 //! propose/accept responses only; the state is unaffected):
 //!
 //! - *A co-owner's catch-up can mute an edge for everyone.* Catch-up is per
@@ -80,17 +86,13 @@
 //!   user's propose/accept `outcomes` list edges other users of the host
 //!   settled since that user's last pass, which the "non-empty outcomes =
 //!   your transition fired" reading of the response does not expect.
-//! - *A read before the first pass switches the catch-up off.* A
-//!   `FlowInstance` read writes the reader's cache and no marks
-//!   (`super::viewer_cache`), so a user who reads an instance with history
-//!   before their first pass over it gets that history reported as new.
 //!
-//! Both are tracked in <https://github.com/coasys/ad4m/issues/1152>.
+//! It is tracked in <https://github.com/coasys/ad4m/issues/1152>.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{
-    advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE,
+    advance_flow_instance_state, FLOW_CURRENT_STATE_PREDICATE, FLOW_URI_PREDICATE,
 };
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_flow_instances, load_shacl_flows, retain_selected_flows,
@@ -99,7 +101,12 @@ use crate::perspectives::flow_context::{
 use crate::perspectives::flow_instance::atom::{FIRED_MARK, RESOLVED_AS_PREDICATE};
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
+
+/// The acting user's "caught up" link on a `FlowInstance`: `Local`, from the
+/// instance to the user's DID, written by the user's first pass over it
+/// (the catch-up) and by nothing else. See [`has_caught_up`].
+pub(crate) const CAUGHT_UP_PREDICATE: &str = "ad4m://flow/caught_up";
 
 /// One consensus event this replica recorded for the first time: the atoms
 /// that settled an edge, now marked, with the cache advanced to match.
@@ -206,15 +213,15 @@ pub async fn run_flow_consensus_pass(
         };
         let already_marked = read_set.marked_proposals();
 
-        // Catch-up (module doc): never derived by this user = no verified
-        // Local cache of their own. Marks are per replica, so on a join every
-        // settled edge is unmarked, and reporting them all would be a flood of
-        // events that happened before this replica watched. The pass still
-        // marks them and ALWAYS writes the cache — that is what makes the
-        // next pass an ordinary one, so an edge settling afterwards is not
-        // missed. Those marks count for every user of the replica, so a
-        // co-owner's catch-up can mute an edge for a user who was already
-        // watching (module doc, "Two known gaps").
+        // Catch-up (module doc): this user has not caught up = no caught-up
+        // link and no mint of their own. Marks are per replica, so on a join
+        // every settled edge is unmarked, and reporting them all would be a
+        // flood of events that happened before this replica watched. The pass
+        // still marks them and ALWAYS writes the cache and the caught-up
+        // link — that is what makes the next pass an ordinary one, so an edge
+        // settling afterwards is not missed. Those marks count for every user
+        // of the replica, so a co-owner's catch-up can mute an edge for a user
+        // who was already watching (module doc, "A known gap").
         let own_cache = match local_cached_state(perspective, &record.instance_uri, &viewer_did)
             .await
         {
@@ -227,10 +234,20 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
-        // Catch-up is per user: only the acting user's own verified cache
-        // says they derived this instance before. Another user's Local cache
-        // or mark is not evidence, since any user may write one.
-        let first_pass_here = own_cache.is_none();
+        // Catch-up is per user, and only a link the acting user signed says
+        // they caught up. Not their cache: a read writes that too.
+        let first_pass_here = match has_caught_up(perspective, &record.instance_uri, &viewer_did)
+            .await
+        {
+            Ok(caught_up) => !caught_up,
+            Err(e) => {
+                log::warn!(
+                        "run_flow_consensus_pass: reading the catch-up of {} failed; skipping instance this pass: {e:#}",
+                        record.instance_uri
+                    );
+                continue;
+            }
+        };
 
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
@@ -274,12 +291,13 @@ pub async fn run_flow_consensus_pass(
             &record.instance_uri,
             write_cache.then_some(derived.state.as_str()),
             &to_mark,
+            first_pass_here.then_some(viewer_did.as_str()),
             context,
         )
         .await
         {
             Ok(()) if first_pass_here => log::info!(
-                "run_flow_consensus_pass: first derivation of {} on this replica — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
+                "run_flow_consensus_pass: first pass over {} by {viewer_did} — caught up silently at `{}` ({} settled edge(s) marked, none reported)",
                 record.instance_uri,
                 derived.state,
                 fresh.len()
@@ -372,16 +390,55 @@ pub(crate) async fn local_cached_state(
     }
 }
 
+/// Whether `viewer_did` has caught up on `instance_uri`, so that their pass
+/// reports what settles instead of recording it silently.
+///
+/// Yes when a link `viewer_did` signed says so: their own `Local`
+/// [`CAUGHT_UP_PREDICATE`] link (a pass of theirs recorded the history), or
+/// the instance's `flowUri` link (they minted it, so it had no history
+/// before they watched). Another user's link says nothing about this user,
+/// and any user may write a Local link with any value, so a link counts
+/// only when its author is `viewer_did` and its signature verifies for them.
+///
+/// The cache is not evidence: a `FlowInstance` read writes it too
+/// (`super::viewer_cache`), and a read records no history.
+pub(crate) async fn has_caught_up(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+    viewer_did: &str,
+) -> anyhow::Result<bool> {
+    let links = perspective
+        .get_links_for_viewer(
+            &LinkQuery {
+                source: Some(instance_uri.to_string()),
+                ..Default::default()
+            },
+            Some(viewer_did),
+        )
+        .await?;
+    Ok(links.iter().any(|l| {
+        let signed_by_viewer = || l.author == viewer_did && l.compute_proof_valid();
+        match l.data.predicate.as_deref() {
+            Some(CAUGHT_UP_PREDICATE) => {
+                l.status == Some(LinkStatus::Local)
+                    && l.data.target == viewer_did
+                    && signed_by_viewer()
+            }
+            Some(FLOW_URI_PREDICATE) => signed_by_viewer(),
+            _ => false,
+        }
+    }))
+}
+
 /// Catch up before the acting user writes a vote or a proposal on
-/// `instance_uri`, if they have never derived it.
+/// `instance_uri`, if they have not caught up on it ([`has_caught_up`]).
 ///
 /// The catch-up is per user (module doc), so without this a user whose
 /// first act on an instance is a vote would take the edge that vote
 /// settles for history and report nothing. Deriving first records the
-/// history silently and writes the user's cache, so the pass after the vote
-/// reports exactly what the vote settled. Returns what that pass reports,
-/// which is nothing when it is a catch-up. A user who holds their own cache
-/// costs one cache read.
+/// history silently, so the pass after the vote reports exactly what the
+/// vote settled. Returns what that pass reports, which is nothing when it
+/// is a catch-up. A user who has caught up costs one link read.
 pub(crate) async fn catch_up_before_voting(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,
@@ -392,23 +449,26 @@ pub(crate) async fn catch_up_before_voting(
         // The vote itself needs the DID and fails with its own message.
         Err(_) => return Vec::new(),
     };
-    match local_cached_state(perspective, instance_uri, &viewer_did).await {
-        Ok(Some(_)) => Vec::new(),
-        Ok(None) | Err(_) => {
+    match has_caught_up(perspective, instance_uri, &viewer_did).await {
+        Ok(true) => Vec::new(),
+        Ok(false) | Err(_) => {
             let only = [instance_uri.to_string()];
             run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await
         }
     }
 }
 
-/// Write the cache and the marks in one batch, so a crash between them can
-/// never leave a marked history with an un-advanced cache. Both are
-/// bookkeeping, so a rollback costs nothing but a repeat next pass.
+/// Write the cache, the marks and (on a catch-up, `caught_up_by`) the
+/// user's caught-up link in one batch, so a crash between them can never
+/// leave a marked history with an un-advanced cache, or a caught-up link
+/// over history that is not marked. All three are bookkeeping, so a
+/// rollback costs nothing but a repeat next pass.
 async fn write_state_and_marks(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,
     advance_to: Option<&str>,
     mark_fired: &[String],
+    caught_up_by: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let batch_id = perspective.create_batch().await;
@@ -437,6 +497,21 @@ async fn write_state_and_marks(
                 )
                 .await
                 .map_err(|e| anyhow::anyhow!("marking {uri} fired failed: {e:#}"))?;
+        }
+        if let Some(did) = caught_up_by {
+            // Signed as the user, not billed: bookkeeping, like the cache
+            // (`write_local_current_state`).
+            let link = Link {
+                source: instance_uri.to_string(),
+                predicate: Some(CAUGHT_UP_PREDICATE.to_string()),
+                target: did.to_string(),
+            };
+            let signed: LinkExpression =
+                crate::agent::create_signed_expression(link.normalize(), context)?.into();
+            perspective
+                .add_link_expression(signed, LinkStatus::Local, Some(batch_id.clone()))
+                .await
+                .map_err(|e| anyhow::anyhow!("writing the caught-up link failed: {e:#}"))?;
         }
         anyhow::Ok(())
     }
