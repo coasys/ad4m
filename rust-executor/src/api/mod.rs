@@ -175,8 +175,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 });
         });
 
-        let listener =
-            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+        let listener = bind_api(SocketAddr::from(([127, 0, 0, 1], port))).await?;
         axum::serve(listener, app.into_make_service()).await?;
     } else {
         let address: [u8; 4] = if config.localhost.unwrap_or(true) {
@@ -186,7 +185,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         };
 
         let addr = SocketAddr::from((address, port));
-        let listener = tokio::net::TcpListener::bind(addr).await?;
+        let listener = bind_api(addr).await?;
         // Log after the bind, not before it: test harnesses (tests/js/utils
         // startExecutor) treat this line as "the API accepts connections",
         // and a client that connected on the pre-bind line got ECONNREFUSED.
@@ -195,4 +194,13 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     }
 
     Ok(())
+}
+
+/// Bind the cleartext API listener. The OS error alone ("Address already in
+/// use") does not say which port; the executor exits on this error, so it is
+/// the operator's only clue.
+async fn bind_api(addr: SocketAddr) -> Result<tokio::net::TcpListener, AnyError> {
+    tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("could not bind the API to {}: {}", addr, e))
 }

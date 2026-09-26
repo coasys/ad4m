@@ -752,6 +752,14 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(api::start_server(config)).unwrap();
+        // The REST API is the executor's client surface. A panic here would
+        // end only this thread and leave a process running with no API, and
+        // the JS test harness would wait for its "API server starting" line
+        // until mocha's 1200 s timeout. Exit instead, so whoever started the
+        // executor sees the failure.
+        if let Err(e) = runtime.block_on(api::start_server(config)) {
+            error!("REST API server failed, exiting: {:?}", e);
+            std::process::exit(1);
+        }
     })
 }
