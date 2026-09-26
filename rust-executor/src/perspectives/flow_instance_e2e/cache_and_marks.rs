@@ -54,7 +54,7 @@ async fn the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do() {
     assert_eq!(outcomes[0].voters, vec![acting_did(&f)]);
     assert_eq!(f.cached_state().await, "scoped", "the cache was written");
     assert!(
-        f.read_set().await.marked_proposals().contains(&minted),
+        f.read_set().await.marked_proposals(&acting_did(&f)).contains(&minted),
         "and the settling proposal was marked"
     );
     assert_eq!(f.derived().await.state, "scoped");
@@ -282,7 +282,7 @@ async fn a_synced_vote_triggers_this_replicas_own_pass() {
         "the synced vote must trigger the pass that heals the cache"
     );
     assert!(
-        f.read_set().await.marked_proposals().contains(&minted),
+        f.read_set().await.marked_proposals(&acting_did(&f)).contains(&minted),
         "and that pass marks the settling proposal"
     );
     assert_eq!(
@@ -370,7 +370,7 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
         "review",
         "but the cache is written (review → changes_requested → review)"
     );
-    let marked = b.read_set().await.marked_proposals();
+    let marked = b.read_set().await.marked_proposals(&acting_did(&b));
     assert!(
         marked.contains(&h1) && marked.contains(&h2),
         "and the settled history is marked: {marked:?}"
@@ -437,7 +437,7 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
         first.is_empty(),
         "the main agent never derived this instance: its first pass is a silent catch-up, got {first:?}"
     );
-    let marked = b.read_set().await.marked_proposals();
+    let marked = b.read_set().await.marked_proposals(&acting_did(&b));
     assert!(
         marked.contains(&h1) && marked.contains(&h2),
         "and the history is marked: {marked:?}"

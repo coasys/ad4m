@@ -32,7 +32,8 @@
 //! - **Mark** — a `resolved_as → "fired"` link on each proposal whose votes
 //!   settled an edge. It is a history index for UIs and this pass's "have I
 //!   already recorded this consensus event?" test (so [`FireOutcome`]s are
-//!   emitted once per event per replica). Never an input to the fold.
+//!   emitted once per event per user of each replica). Never an input to
+//!   the fold.
 //!
 //! Both are written **`Local`** (#987): every replica — and, on a multi-user
 //! host, every user, since a Local link is private to its author (#1024) —
@@ -44,27 +45,35 @@
 //!
 //! ## Catch-up
 //!
-//! Because the marks are per replica, a replica that joins a flow with
-//! history would, on its first pass, find every settled edge unmarked and
-//! report each one as new. It must not: those events happened before this
-//! replica was watching. So the **first** pass a user runs over an
-//! instance, with no verified `Local` cache of their own on it yet, is a
-//! silent catch-up: it marks what has settled and writes
-//! the cache, and emits nothing. From then on the user *has* a cache, so
-//! every later pass reports normally. The invariant: **no event flood on
-//! join; no missed events for edges that settle after catch-up.** The user
-//! who mints an instance writes their cache at the mint, and a user whose
-//! first act on an instance is a vote catches up just before it
-//! ([`catch_up_before_voting`]), so the edge their vote settles is reported.
+//! Because the marks are per user of a replica, a user who comes to a flow
+//! with history would, on their first pass, find every settled edge
+//! unmarked and report each one as new. They must not: those events
+//! happened before this user was watching. So the **first** pass a user
+//! runs over an instance, with no verified `Local` cache of their own on it
+//! yet, is a silent catch-up: it marks what has settled, in that user's
+//! name, and writes their cache, and emits nothing. From then on the user
+//! *has* a cache, so every later pass reports normally. The invariant, per
+//! user: **no event flood on join; no missed events for edges that settle
+//! after catch-up.** The user who mints an instance writes their cache at
+//! the mint, and a user whose first act on an instance is a vote catches up
+//! just before it ([`catch_up_before_voting`]), so the edge their vote
+//! settles is reported.
 //!
-//! The evidence is the acting user's own cache, never another user's and
-//! never a mark: on a multi-user host any user may write a Local
-//! `currentState` or mark with any value, so evidence someone else wrote
-//! would let them switch the catch-up off for everyone. The cost is that a
-//! user's first pass over an instance another user of this replica already
-//! derived is silent too; the edges it records were reported to that other
-//! user's pass, or settled before this user acted. See `first_pass_here` in
-//! [`run_flow_consensus_pass`].
+//! Both the evidence and the marks are the acting user's own, never another
+//! user's. On a multi-user host any user may write a Local `currentState`
+//! or mark with any value, so a cache someone else wrote would let them
+//! switch the catch-up off for everyone. And a co-owner's catch-up marks the
+//! edges it finds settled, which may include one that settled after this
+//! user's own catch-up; counted here, that mark would mute this user's
+//! report of the edge. The sync sweep runs the owners in list order, so that
+//! is a matter of who passes first. See `first_pass_here` and
+//! `already_marked` in [`run_flow_consensus_pass`].
+//!
+//! Known gap: a `FlowInstance` read writes the reader's cache and no marks
+//! (`super::viewer_cache`). A user who reads an instance with history before
+//! their first pass over it therefore has a cache without having caught up,
+//! and that first pass reports the history as new. Outcomes go to logs and
+//! to propose/accept responses only.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
@@ -183,10 +192,8 @@ pub async fn run_flow_consensus_pass(
                 continue;
             }
         };
-        let already_marked = read_set.marked_proposals();
-
         // Catch-up (module doc): never derived by this user = no verified
-        // Local cache of their own. Marks are per replica, so on a join every
+        // Local cache of their own. Marks are per user, so on a join every
         // settled edge is unmarked, and reporting them all would be a flood of
         // events that happened before this replica watched. The pass still
         // marks them and ALWAYS writes the cache — that is what makes the
@@ -209,6 +216,10 @@ pub async fn run_flow_consensus_pass(
         // says they derived this instance before. Another user's Local cache
         // or mark is not evidence, since any user may write one.
         let first_pass_here = own_cache.is_none();
+        // Only the acting user's own marks: a co-owner's catch-up marks what
+        // it finds settled, and must not mute this user's report of an edge
+        // that settled after this user's catch-up.
+        let already_marked = read_set.marked_proposals(&viewer_did);
 
         // An edge is new to this replica when some atom that settled it is
         // not yet marked. The mark is bookkeeping, so this comparison can
@@ -357,10 +368,9 @@ pub(crate) async fn local_cached_state(
 /// first act on an instance is a vote would take the edge that vote
 /// settles for history and report nothing. Deriving first records the
 /// history silently and writes the user's cache, so the pass after the vote
-/// reports exactly what the vote settled. Returns what this pass recorded
-/// as new, which is empty unless another user of this replica had already
-/// marked some of the history. A user who holds their own cache costs one
-/// cache read.
+/// reports exactly what the vote settled. Returns what that pass reports,
+/// which is nothing when it is a catch-up. A user who holds their own cache
+/// costs one cache read.
 pub(crate) async fn catch_up_before_voting(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,

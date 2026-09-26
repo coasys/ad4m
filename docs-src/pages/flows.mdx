@@ -261,7 +261,7 @@ after.outcomes;      // [] — Alice already voted
 
 *From `flow-task-handover.test.ts`, Part 1.*
 
-There is no "already fired" guard, and there must not be one. The `resolved_as → "fired"` mark the engine writes is a `Local` display index, never an input to the derivation.
+There is no "already fired" guard, and there must not be one. The `resolved_as → "fired"` mark the engine writes is a `Local` display index, never an input to the derivation. Each user of a host keeps their own marks, so an edge is reported once to each user: in `outcomes` when that user's own call is the first of their passes to see it settled.
 
 ### Contention
 

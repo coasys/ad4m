@@ -130,13 +130,13 @@ impl ReadSet {
         }
     }
 
-    /// Proposal URIs already carrying **this replica's** `Local`
-    /// `resolved_as → "fired"` mark. Bookkeeping for [`pass`](super::pass), never an
-    /// input to the fold; a peer's `Shared` mark is not counted.
-    pub fn marked_proposals(&self) -> HashSet<String> {
+    /// Proposal URIs already carrying `marker_did`'s own `Local`
+    /// `resolved_as → "fired"` mark on this replica. Bookkeeping for [`pass`](super::pass), never an
+    /// input to the fold; a peer's `Shared` mark and a co-owner's `Local` one are not counted.
+    pub fn marked_proposals(&self, marker_did: &str) -> HashSet<String> {
         self.proposals
             .iter()
-            .filter(|p| marked_fired(&p.links))
+            .filter(|p| marked_fired(&p.links, marker_did))
             .map(|p| p.uri.clone())
             .collect()
     }

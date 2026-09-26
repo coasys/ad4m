@@ -135,7 +135,7 @@ async fn the_proposal_read_keeps_every_verified_link_the_atom_rules_read() {
     expected.sort();
     assert_eq!(voters, expected, "Carol's forged vote adds no voter");
     assert!(
-        read_set.marked_proposals().contains(&proposal),
+        read_set.marked_proposals(&me).contains(&proposal),
         "the pass's own mark reads as this replica's mark"
     );
     assert_eq!(f.derived().await.state, "scoped");

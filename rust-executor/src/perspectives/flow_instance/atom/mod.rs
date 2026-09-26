@@ -358,10 +358,17 @@ pub fn valid_votes(
     votes.into_iter().map(|(_, v)| v).collect()
 }
 
-/// Whether **this replica** marked this proposal fired: a `Local`
-/// `resolved_as → "fired"` link. Marks are per-replica bookkeeping (#987), so
-/// a peer's mark is not a mark here — a forged one cannot mute this replica's
+/// Whether `marker_did` marked this proposal fired **on this replica**: a
+/// `Local` `resolved_as → "fired"` link signed by `marker_did`
+/// ([`signed_by`]). Marks are per-replica bookkeeping (#987), so a peer's
+/// mark is not a mark here — a forged one cannot mute this replica's
 /// once-only [`FireOutcome`](super::pass::FireOutcome).
+///
+/// They are per user too. On a multi-user host every user of the replica
+/// runs the pass and marks what it derived, and a co-owner's mark says what
+/// the co-owner has recorded, not what `marker_did` has. Counting it let one
+/// user's silent catch-up mark an edge that another user, already watching,
+/// had not yet been told about, so nobody reported it.
 ///
 /// # "This replica's" is only true of links this replica read
 ///
@@ -386,9 +393,12 @@ pub fn valid_votes(
 /// history and so the consensus pass knows which edges it has already
 /// recorded. A forged mark therefore moves nothing in either direction — it
 /// cannot fabricate history, and it cannot hide a proposal from the fold.
-pub fn marked_fired(links: &[DecoratedLinkExpression]) -> bool {
-    links_on(links, RESOLVED_AS_PREDICATE)
-        .any(|l| l.status == Some(LinkStatus::Local) && field_value(&l.data.target) == FIRED_MARK)
+pub fn marked_fired(links: &[DecoratedLinkExpression], marker_did: &str) -> bool {
+    links_on(links, RESOLVED_AS_PREDICATE).any(|l| {
+        l.status == Some(LinkStatus::Local)
+            && signed_by(l, marker_did)
+            && field_value(&l.data.target) == FIRED_MARK
+    })
 }
 
 impl TransitionAtom {
@@ -834,7 +844,7 @@ mod tests {
     #[test]
     fn only_a_local_fired_mark_is_a_mark() {
         let mut links = honest_proposal(ALICE, "review", "approved", "h1", T1);
-        assert!(!marked_fired(&links));
+        assert!(!marked_fired(&links, ALICE));
 
         let mut peer_mark = link(
             RESOLVED_AS_PREDICATE,
@@ -846,20 +856,57 @@ mod tests {
         peer_mark.status = Some(LinkStatus::Shared);
         links.push(peer_mark);
         assert!(
-            !marked_fired(&links),
+            !marked_fired(&links, ALICE),
             "a peer's shared mark is not this replica's mark"
         );
 
         let mut own_mark = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, true, T3);
         own_mark.status = Some(LinkStatus::Local);
         links.push(own_mark);
-        assert!(marked_fired(&links), "our own local mark is");
+        assert!(marked_fired(&links, ALICE), "our own local mark is");
 
         let mut other_value = link(RESOLVED_AS_PREDICATE, &literal("rejected"), ALICE, true, T3);
         other_value.status = Some(LinkStatus::Local);
         assert!(
-            !marked_fired(&[other_value]),
+            !marked_fired(&[other_value], ALICE),
             "only the `fired` value marks a proposal fired"
+        );
+    }
+
+    /// Marks are per user as well as per replica. On a multi-user host a
+    /// co-owner's `Local` mark records what the co-owner derived: counted
+    /// for another user, one user's catch-up would mute the other's report
+    /// of an edge (the e2e case is
+    /// `a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later`). A
+    /// `Local` mark that names the user but does not verify is not theirs
+    /// either.
+    #[test]
+    fn a_fired_mark_counts_only_for_the_user_who_signed_it() {
+        let links = honest_proposal(ALICE, "review", "approved", "h1", T1);
+
+        let mut co_owners = links.clone();
+        let mut mallorys = link(
+            RESOLVED_AS_PREDICATE,
+            &literal(FIRED_MARK),
+            MALLORY,
+            true,
+            T3,
+        );
+        mallorys.status = Some(LinkStatus::Local);
+        co_owners.push(mallorys);
+        assert!(marked_fired(&co_owners, MALLORY), "Mallory's own mark");
+        assert!(
+            !marked_fired(&co_owners, ALICE),
+            "a co-owner's Local mark is not Alice's mark"
+        );
+
+        let mut unsigned = links;
+        let mut forged = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, false, T3);
+        forged.status = Some(LinkStatus::Local);
+        unsigned.push(forged);
+        assert!(
+            !marked_fired(&unsigned, ALICE),
+            "a Local mark in Alice's name whose signature fails is not hers"
         );
     }
 
@@ -909,12 +956,12 @@ mod tests {
         };
 
         assert!(
-            arrived.marked_proposals().contains("proposal://p1"),
+            arrived.marked_proposals(MALLORY).contains("proposal://p1"),
             "precondition: read as handed over, the sender's claim IS taken as \
              our mark — this is the forgery the seam exists to answer"
         );
         assert!(
-            arrived.reverified().marked_proposals().is_empty(),
+            arrived.reverified().marked_proposals(MALLORY).is_empty(),
             "a carried `Local` mark must not count as this replica's: we have \
              marked nothing we never read"
         );
