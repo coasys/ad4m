@@ -137,68 +137,87 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
     let app = api_router(state);
 
+    let cleartext_ip = cleartext_ip(&config);
+
     if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
-        let cert_path = tls_config.cert_file_path.clone();
-        let key_path = tls_config.key_file_path.clone();
-
-        log::info!("Starting API server (HTTP) on 127.0.0.1:{}", port);
-        log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
-
         let tls_state = AppState {
             admin_credential: admin_credential.clone(),
             auto_permit_cap_requests: auto_permit,
         };
         let tls_app = api_router(tls_state);
 
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-                .await
-                .map_err(|e| deno_core::anyhow::anyhow!("TLS config error: {}", e))?;
-
-        tokio::spawn(async move {
-            axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
-                .serve(tls_app.into_make_service())
-                .await
-                // Same reasoning as the MCP HTTPS listener: the cleartext API
-                // below is bound to 127.0.0.1 because TLS is *configured*, not
-                // because this task bound. If it fails, the API has no remote
-                // surface, and "TLS server error" is not a sentence an operator
-                // maps to that outage.
-                .unwrap_or_else(|e| {
-                    log::error!(
-                        "API HTTPS listener on port {tls_port} stopped: {e}. The remote API is \
-                         now unavailable: the cleartext listener is on 127.0.0.1:{port} because \
-                         TLS is configured. Free port {tls_port} and restart the executor to \
-                         restore remote access."
+        // A bad certificate or key is not fatal: the API keeps serving on
+        // 127.0.0.1, as when the HTTPS bind fails below. The launcher embeds
+        // the executor and relies on this. It starts with a broken TLS path
+        // so the user can fix it on the Hosting page.
+        match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &tls_config.cert_file_path,
+            &tls_config.key_file_path,
+        )
+        .await
+        {
+            Ok(rustls_config) => {
+                log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
+                tokio::spawn(async move {
+                    axum_server::bind_rustls(
+                        SocketAddr::from(([0, 0, 0, 0], tls_port)),
+                        rustls_config,
                     )
+                    .serve(tls_app.into_make_service())
+                    .await
+                    // Same reasoning as the MCP HTTPS listener: the cleartext API
+                    // below is bound to 127.0.0.1 because TLS is *configured*, not
+                    // because this task bound. If it fails, the API has no remote
+                    // surface, and "TLS server error" is not a sentence an operator
+                    // maps to that outage.
+                    .unwrap_or_else(|e| {
+                        log::error!(
+                            "API HTTPS listener on port {tls_port} stopped: {e}. The remote API \
+                             is now unavailable: the cleartext listener is on 127.0.0.1:{port} \
+                             because TLS is configured. Free port {tls_port} and restart the \
+                             executor to restore remote access."
+                        )
+                    });
                 });
-        });
-
-        let listener = bind_api(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-        axum::serve(listener, app.into_make_service()).await?;
-    } else {
-        let address: [u8; 4] = if config.localhost.unwrap_or(true) {
-            [127, 0, 0, 1]
-        } else {
-            [0, 0, 0, 0]
-        };
-
-        let addr = SocketAddr::from((address, port));
-        let listener = bind_api(addr).await?;
-        // Log after the bind, not before it: test harnesses (tests/js/utils
-        // startExecutor) treat this line as "the API accepts connections",
-        // and a client that connected on the pre-bind line got ECONNREFUSED.
-        log::info!("API server starting on http://{}/api/v1", addr);
-        axum::serve(listener, app.into_make_service()).await?;
+            }
+            Err(e) => log::error!(
+                "API HTTPS listener on port {tls_port} not started: TLS config error for \
+                 certificate {} and key {}: {e}. The remote API is unavailable: the cleartext \
+                 listener is on 127.0.0.1:{port} because TLS is configured. Fix the TLS \
+                 settings and restart the executor to restore remote access.",
+                tls_config.cert_file_path,
+                tls_config.key_file_path,
+            ),
+        }
     }
+
+    let addr = SocketAddr::from((cleartext_ip, port));
+    let listener = bind_api(addr).await?;
+    // Log after the bind, not before it: test harnesses (tests/js/utils
+    // startExecutor) treat this line as "the API accepts connections",
+    // and a client that connected on the pre-bind line got ECONNREFUSED.
+    log::info!("API server starting on http://{}/api/v1", addr);
+    axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
 }
 
+/// The address of the cleartext API listener. With TLS configured, remote
+/// clients use the HTTPS listener, so the cleartext one stays on 127.0.0.1.
+/// That holds even when the HTTPS listener fails: falling back to 0.0.0.0
+/// would expose credentials in cleartext.
+pub(crate) fn cleartext_ip(config: &Ad4mConfig) -> [u8; 4] {
+    if config.tls.is_some() || config.localhost.unwrap_or(true) {
+        [127, 0, 0, 1]
+    } else {
+        [0, 0, 0, 0]
+    }
+}
+
 /// Bind the cleartext API listener. The OS error alone ("Address already in
-/// use") does not say which port; the executor exits on this error, so it is
-/// the operator's only clue.
+/// use") does not say which port, and executor binaries exit on this error
+/// (see `exit_when_api_fails`), so it is the operator's only clue.
 async fn bind_api(addr: SocketAddr) -> Result<tokio::net::TcpListener, AnyError> {
     tokio::net::TcpListener::bind(addr)
         .await
