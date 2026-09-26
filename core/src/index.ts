@@ -44,6 +44,6 @@ export * from './shacl/NodeExpression'
 export * from './shacl/builders'
 export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
-export { RpcError } from "./apiClient";
+export { RpcError, CONNECT_FAILED_STATUS } from "./apiClient";
 /** @deprecated Use `RpcError` instead. */
 export { RpcError as RestError } from "./apiClient";

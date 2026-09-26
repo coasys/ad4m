@@ -6,7 +6,11 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
+    /**
+     * Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500).
+     * Client-side failures: 408 call timeout, 503 connection lost or client
+     * closed, CONNECT_FAILED_STATUS (504) no connection within the budget.
+     */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
@@ -47,7 +51,12 @@ export interface CallOptions {
 /** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
-/** Maximum reconnect delay in ms. */
+/**
+ * Maximum reconnect delay in ms. Equal to CONNECT_TIMEOUT_MS by coincidence,
+ * not tuning: no retry wait inside one connect budget reaches it (the 7th
+ * attempt would fall past the budget). It only sets the pause before a
+ * subscriber-only client starts its next cycle.
+ */
 const MAX_RECONNECT_DELAY_MS = 30_000
 
 /** Initial reconnect delay in ms. */
@@ -57,9 +66,19 @@ const INITIAL_RECONNECT_DELAY_MS = 500
  * How long a caller waits for a WebSocket connection before `call()` rejects.
  * Within this budget, failed connect attempts are retried with backoff, so a
  * client created a moment before the executor binds its port still connects.
- * After it, the waiting calls reject with a 503 instead of hanging.
+ * After it, the waiting calls reject with CONNECT_FAILED_STATUS instead of
+ * hanging.
  */
 const CONNECT_TIMEOUT_MS = 30_000
+
+/**
+ * `RpcError.status` when no WebSocket connection opened within the connect
+ * budget. Distinct from 503, which the client uses for a connection that was
+ * lost or closed, so a caller can tell "the executor is not there" apart by
+ * status alone. 504 because the client gave up waiting (a timeout); a 5xx, so
+ * `status >= 500` retry checks still treat it as a server-side failure.
+ */
+export const CONNECT_FAILED_STATUS = 504
 
 /** Counter for generating unique request IDs. */
 let _idCounter = 0
@@ -152,6 +171,9 @@ export class ApiClient {
         }
 
         this._wsClosed = false
+        // Every cycle restarts the backoff. A call made after a failed cycle
+        // then retries within its budget: at the cap, its first retry would
+        // land at the budget's end.
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
         this._wsReady = new Promise<void>((resolve, reject) => {
             this._wsReadyResolve = resolve
@@ -183,7 +205,7 @@ export class ApiClient {
         this._ws = null
         stuck?.close()
 
-        reject(new RpcError(503, `WebSocket could not connect to ${this._getWsEndpoint()} within ${CONNECT_TIMEOUT_MS}ms`))
+        reject(new RpcError(CONNECT_FAILED_STATUS, `WebSocket could not connect to ${this._getWsEndpoint()} within ${CONNECT_TIMEOUT_MS}ms`))
 
         // Subscribers have no call to fail. Keep retrying for them, as
         // onclose does after an established connection drops.
@@ -342,8 +364,8 @@ export class ApiClient {
 
     /**
      * Ensure WS is connected and ready. Lazy — connects on first use.
-     * Rejects with a 503 if no connection opens within CONNECT_TIMEOUT_MS,
-     * or if the client is closed while waiting.
+     * Rejects with CONNECT_FAILED_STATUS if no connection opens within
+     * CONNECT_TIMEOUT_MS, or with a 503 if the client is closed while waiting.
      */
     private async _ready(): Promise<void> {
         this._ensureWs()

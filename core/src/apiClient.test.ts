@@ -1,4 +1,4 @@
-import { ApiClient, RpcError } from "./apiClient"
+import { ApiClient, CONNECT_FAILED_STATUS, RpcError } from "./apiClient"
 
 /**
  * Unit tests for ApiClient AbortSignal support.
@@ -234,12 +234,17 @@ describe('ApiClient AbortSignal support', () => {
  * - 'open': opens normally.
  * - 'hang': stays CONNECTING forever (a black-holed SYN).
  * Once the script runs out, every further attempt refuses.
+ *
+ * close() fires onclose synchronously unless `asyncClose` is set. Real
+ * sockets (`ws`, browsers) report the close later, after the client may have
+ * opened a newer socket; `asyncClose` reproduces that.
  */
 type ConnectOutcome = 'refuse' | 'open' | 'hang'
 
 class ScriptedWebSocket {
     static script: ConnectOutcome[] = []
     static instances: ScriptedWebSocket[] = []
+    static asyncClose = false
 
     readyState = 0 /* CONNECTING */
     sent: string[] = []
@@ -270,7 +275,15 @@ class ScriptedWebSocket {
     }
 
     close() {
-        if (this.readyState === 3) return
+        if (this.readyState >= 2) return
+        if (ScriptedWebSocket.asyncClose) {
+            this.readyState = 2 /* CLOSING */
+            setTimeout(() => {
+                this.readyState = 3
+                this.onclose?.()
+            }, 5)
+            return
+        }
         this.readyState = 3
         this.onclose?.()
     }
@@ -297,6 +310,7 @@ describe('ApiClient first-connect failures', () => {
         jest.useFakeTimers()
         ScriptedWebSocket.script = []
         ScriptedWebSocket.instances = []
+        ScriptedWebSocket.asyncClose = false
         // The client logs every WebSocket error event; keep the output clean.
         errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
     })
@@ -355,7 +369,8 @@ describe('ApiClient first-connect failures', () => {
         expect(call.status).toBe('rejected')
         const err = call.error as RpcError
         expect(err).toBeInstanceOf(RpcError)
-        expect(err.status).toBe(503)
+        // Not 503: that is a lost connection, this one never existed.
+        expect(err.status).toBe(CONNECT_FAILED_STATUS)
         expect(err.body).toMatch(/could not connect to ws:\/\/127\.0\.0\.1:1234\/api\/v1\/ws within 30000ms/)
         // The token is a credential; it must not leak into error messages.
         expect(err.message).not.toContain('secret-token')
@@ -375,7 +390,7 @@ describe('ApiClient first-connect failures', () => {
 
         await jest.advanceTimersByTimeAsync(30_000)
         expect(call.status).toBe('rejected')
-        expect((call.error as RpcError).status).toBe(503)
+        expect((call.error as RpcError).status).toBe(CONNECT_FAILED_STATUS)
         // The stuck socket is closed rather than leaked.
         expect(ScriptedWebSocket.instances[0].readyState).toBe(3)
 
@@ -446,6 +461,129 @@ describe('ApiClient first-connect failures', () => {
         // with a dead socket; it keeps retrying at the capped backoff.
         await jest.advanceTimersByTimeAsync(60_000)
         expect(ScriptedWebSocket.instances.length).toBeGreaterThan(attempts)
+
+        client.closeAll()
+    })
+
+    it('a call after a connect-budget rejection gets the initial backoff, not the cap', async () => {
+        ScriptedWebSocket.script = []
+        const client = makeClient()
+        const first = track(client.call('agent.status'))
+        await jest.advanceTimersByTimeAsync(30_000)
+        expect(first.status).toBe('rejected')
+
+        // The executor came up while nobody was calling. The next call's
+        // first attempt is refused, and its retry must come after 500 ms.
+        // Carrying the failed cycle's 30 s delay over would put the retry
+        // at the end of this call's budget.
+        const attemptsBefore = ScriptedWebSocket.instances.length
+        ScriptedWebSocket.script = ['refuse', 'open']
+        const second = track(client.call<string>('agent.status'))
+        await jest.advanceTimersByTimeAsync(510)
+        expect(ScriptedWebSocket.instances.length).toBe(attemptsBefore + 2)
+        const ws = ScriptedWebSocket.instances[ScriptedWebSocket.instances.length - 1]
+        expect(ws.sent).toHaveLength(1)
+        const req = JSON.parse(ws.sent[0]) as AnyMsg
+        ws.serverPush({ id: req.id, result: 'ok' })
+        await jest.advanceTimersByTimeAsync(0)
+        expect(second.status).toBe('resolved')
+
+        client.closeAll()
+    })
+
+    it('calls made during a connect attempt or its backoff share one socket', async () => {
+        ScriptedWebSocket.script = ['refuse', 'open']
+        const client = makeClient()
+        const calls = [track(client.call<string>('a'))]
+        await jest.advanceTimersByTimeAsync(1) // first attempt refused, retry scheduled
+
+        // Calls arriving during the backoff sleep wait for the scheduled
+        // retry. Opening their own socket would skip the backoff.
+        calls.push(track(client.call<string>('b')), track(client.call<string>('c')))
+        await jest.advanceTimersByTimeAsync(1)
+        expect(ScriptedWebSocket.instances).toHaveLength(1)
+
+        await jest.advanceTimersByTimeAsync(510)
+        expect(ScriptedWebSocket.instances).toHaveLength(2)
+        const ws = ScriptedWebSocket.instances[1]
+        expect(ws.sent.map((m) => (JSON.parse(m) as AnyMsg).type)).toEqual(['a', 'b', 'c'])
+        for (const m of ws.sent) ws.serverPush({ id: (JSON.parse(m) as AnyMsg).id, result: 'ok' })
+        await jest.advanceTimersByTimeAsync(0)
+        expect(calls.map((c) => c.status)).toEqual(['resolved', 'resolved', 'resolved'])
+
+        client.closeAll()
+    })
+
+    it("a closed socket's late onclose does not touch the socket that replaced it", async () => {
+        ScriptedWebSocket.asyncClose = true
+        ScriptedWebSocket.script = ['open', 'open']
+        const client = makeClient()
+        client.connect()
+        await jest.advanceTimersByTimeAsync(1)
+        expect(ScriptedWebSocket.instances[0].readyState).toBe(1)
+
+        client.closeAll() // the first socket's onclose arrives 5 ms later
+        const call = track(client.call<string>('x'))
+        await jest.advanceTimersByTimeAsync(1)
+        const ws = ScriptedWebSocket.instances[1]
+        expect(ws.sent).toHaveLength(1)
+
+        await jest.advanceTimersByTimeAsync(10) // the late onclose fires
+        expect(call.status).toBe('pending')
+        ws.serverPush({ id: (JSON.parse(ws.sent[0]) as AnyMsg).id, result: 'ok' })
+        await jest.advanceTimersByTimeAsync(0)
+        expect(call.status).toBe('resolved')
+
+        client.closeAll()
+    })
+
+    it('an opened connection leaves only the ping timer running', async () => {
+        ScriptedWebSocket.script = ['open']
+        const client = makeClient()
+        client.connect()
+        await jest.advanceTimersByTimeAsync(1)
+        expect(ScriptedWebSocket.instances[0].readyState).toBe(1)
+        // The connect-budget timer is cleared on open. A leftover one keeps
+        // a one-shot CLI script alive for up to 30 s after its last call.
+        expect(jest.getTimerCount()).toBe(1)
+
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    it('closeAll() during a connect leaves no timer behind', async () => {
+        ScriptedWebSocket.script = ['hang']
+        const client = makeClient()
+        client.connect()
+        await jest.advanceTimersByTimeAsync(1)
+        expect(jest.getTimerCount()).toBe(1) // the connect budget
+
+        client.closeAll()
+        expect(jest.getTimerCount()).toBe(0)
+    })
+
+    it('a healthy connection is not closed when the connect budget would have run out', async () => {
+        ScriptedWebSocket.script = ['open']
+        const client = makeClient()
+        const first = track(client.call<string>('a'))
+        await jest.advanceTimersByTimeAsync(1)
+        const ws = ScriptedWebSocket.instances[0]
+        ws.serverPush({ id: (JSON.parse(ws.sent[0]) as AnyMsg).id, result: 'ok' })
+        await jest.advanceTimersByTimeAsync(0)
+        expect(first.status).toBe('resolved')
+
+        // Past the 30 s budget of the cycle that opened this socket.
+        await jest.advanceTimersByTimeAsync(31_000)
+        expect(ws.readyState).toBe(1)
+        expect(ScriptedWebSocket.instances).toHaveLength(1)
+
+        const second = track(client.call<string>('b'))
+        await jest.advanceTimersByTimeAsync(0)
+        const requests = ws.sent.map((m) => JSON.parse(m) as AnyMsg).filter((m) => m.type !== 'ping')
+        expect(requests.map((m) => m.type)).toEqual(['a', 'b'])
+        ws.serverPush({ id: requests[1].id, result: 'ok' })
+        await jest.advanceTimersByTimeAsync(0)
+        expect(second.status).toBe('resolved')
 
         client.closeAll()
     })
