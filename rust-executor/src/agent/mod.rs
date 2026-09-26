@@ -88,6 +88,14 @@ pub struct AgentStore {
     signing_key_id: String,
     keystore: String,
     agent: Option<Agent>,
+    /// Fingerprint of the keys in `keystore`, written while `agent.json.legacy` exists; see
+    /// `AgentService::unlock_from_legacy_backup`.
+    #[serde(
+        rename = "keystoreFingerprint",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    keystore_fingerprint: Option<String>,
 }
 
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
@@ -294,14 +302,14 @@ lazy_static! {
 /// bookkeeping without decoupling them.
 static AGENT_PUBLISH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// SHA-256 over the names and public keys of a key set, in name order.
-fn key_set_fingerprint(keys: impl IntoIterator<Item = (String, Option<Vec<u8>>)>) -> String {
+/// SHA-256 over the names and public keys in a wallet, in name order.
+fn key_set_fingerprint(wallet: &dyn crate::wallet::WalletBackend) -> String {
     use sha2::{Digest, Sha256};
-    let mut keys: Vec<_> = keys.into_iter().collect();
-    keys.sort();
+    let mut names = wallet.list_key_names();
+    names.sort();
     let mut hasher = Sha256::new();
-    for (name, public_key) in keys {
-        let public_key = public_key.unwrap_or_default();
+    for name in names {
+        let public_key = wallet.get_public_key(&name).unwrap_or_default();
         hasher.update((name.len() as u64).to_le_bytes());
         hasher.update(name.as_bytes());
         hasher.update((public_key.len() as u64).to_le_bytes());
@@ -717,57 +725,46 @@ impl AgentService {
     /// The legacy key only saw the first 24 bytes of the space-padded passphrase, so
     /// `pw` and `pw ` (or two passphrases that differ after byte 24) open the same legacy
     /// file. The rewrite binds the file to whichever of them was typed. Until an unlock
-    /// succeeds on the rewritten file, a failed unlock falls back to this copy.
+    /// opens the rewritten file directly, a failed unlock on a locked node falls back to
+    /// this copy (`unlock_from_legacy_backup`).
     fn legacy_backup_file(&self) -> String {
         format!("{}.legacy", self.file)
     }
 
-    /// Fingerprint of the keys the agent file held at its last write, kept while the legacy
-    /// backup exists. Keys added after the migration (a new user, the signing key) exist
-    /// only in the rewritten file, which the fallback cannot open, so the fallback may
-    /// replace the file only while the backup holds these same keys.
-    fn legacy_backup_keys_file(&self) -> String {
-        format!("{}.legacy-keys", self.file)
-    }
-
-    /// Tries `password` on the legacy backup. On success the keys are unlocked and the
-    /// agent file is rewritten under `password`. On failure the backend gets back the
-    /// keystore it had before. Refuses when the agent file holds keys the backup lacks,
-    /// see `legacy_backup_keys_file`.
+    /// Tries `password` on the legacy backup. On success the keys are unlocked and the agent
+    /// file is rewritten under `password`. Refuses, and changes nothing, unless the agent
+    /// file's fingerprint shows that it holds exactly the backup's keys: the rewrite would
+    /// lose any other key (a new user, a regenerated main key).
     fn unlock_from_legacy_backup(&mut self, password: &str) -> Result<(), AnyError> {
-        let read_keystore = |path: &str| -> Result<String, AnyError> {
-            let store: AgentStore = serde_json::from_str(&std::fs::read_to_string(path)?)?;
-            Ok(store.keystore)
+        let read_store = |path: &str| -> Result<AgentStore, AnyError> {
+            Ok(serde_json::from_str(&std::fs::read_to_string(path)?)?)
         };
-        let legacy = read_keystore(&self.legacy_backup_file())?;
+        let legacy = read_store(&self.legacy_backup_file())?.keystore;
         if !crate::wallet::is_legacy_keystore(&legacy) {
             return Err(anyhow!("the keystore backup is not in the legacy format"));
         }
-        // Check the backup's keys in a scratch wallet, so a refusal leaves the backend as it was.
-        let mut scratch = crate::wallet::Wallet::new();
-        scratch.load(legacy.clone());
-        scratch.unlock(password.to_string())?;
-        let backup_keys = key_set_fingerprint(scratch.list_key_names().into_iter().map(|name| {
-            let public_key = scratch.get_public_key(&name);
-            (name, public_key)
-        }));
-        if std::fs::read_to_string(self.legacy_backup_keys_file()).ok() != Some(backup_keys) {
+        let current = read_store(&self.file)?;
+        let scratch = crate::wallet::LocalWallet::new();
+        scratch.load(&legacy);
+        scratch.unlock(password)?;
+        if current.keystore_fingerprint != Some(key_set_fingerprint(&scratch)) {
+            // Logged, not returned: `unlock` reports its own error, so a caller that guesses
+            // passphrases does not learn that this one opens the backup.
             log::warn!(
                 "🔑 The passphrase opens the legacy keystore backup {}, but the agent file holds \
-                 keys the backup lacks. The agent file opens only with the passphrase used when \
-                 it was rewritten; both files stay as they are.",
+                 keys the backup lacks. Only the passphrase that rewrote the agent file opens it; \
+                 both files stay as they are.",
                 self.legacy_backup_file()
             );
             return Err(anyhow!(
                 "the agent file holds keys that its legacy backup lacks"
             ));
         }
-        let current = read_keystore(&self.file)?;
 
         let backend = wallet_backend();
         backend.load(&legacy);
         if let Err(e) = backend.unlock(password) {
-            backend.load(&current);
+            backend.load(&current.keystore);
             return Err(e);
         }
         match self.try_save(password) {
@@ -782,19 +779,25 @@ impl AgentService {
 
     pub fn unlock(&mut self, password: String) -> Result<(), AnyError> {
         let backend = wallet_backend();
+        // An unlocked node never falls back: the backup's keys would replace keys in memory
+        // that the node may not have saved yet.
+        let was_unlocked = backend.is_unlocked();
         let mut result = backend.unlock(&password);
-        if result.is_ok() && !self.legacy_keystore {
-            // The rewritten file opened, so the passphrase it is bound to is the one in use.
-            match std::fs::remove_file(self.legacy_backup_file()) {
+        let backup_exists = std::path::Path::new(&self.legacy_backup_file()).exists();
+        if result.is_ok() && !self.legacy_keystore && backup_exists {
+            // The keys can open from memory that `lock` re-encrypted under another
+            // passphrase, so bind the agent file to this one before the backup goes.
+            match self.try_save(&password).and_then(|_| {
+                std::fs::remove_file(self.legacy_backup_file()).map_err(AnyError::from)
+            }) {
                 Ok(()) => log::info!("🔑 Removed the legacy keystore backup."),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => log::warn!("🔑 Could not remove the legacy keystore backup: {}", e),
+                Err(e) => log::warn!("🔑 Kept the legacy keystore backup: {}", e),
             }
-            let _ = std::fs::remove_file(self.legacy_backup_keys_file());
         }
         if result.is_err()
+            && !was_unlocked
             && !self.legacy_keystore
-            && std::path::Path::new(&self.legacy_backup_file()).exists()
+            && backup_exists
             && self.unlock_from_legacy_backup(&password).is_ok()
         {
             result = Ok(());
@@ -867,6 +870,11 @@ impl AgentService {
     pub fn try_save(&self, password: &str) -> Result<(), AnyError> {
         let backend = wallet_backend();
         let keystore = backend.export(password);
+        // Taken after the export: a key that arrives in between only stops the fallback
+        // until the next save.
+        let keystore_fingerprint = std::path::Path::new(&self.legacy_backup_file())
+            .exists()
+            .then(|| key_set_fingerprint(backend.as_ref()));
 
         let store = AgentStore {
             did: self.did.clone().ok_or(anyhow!("no DID to save"))?,
@@ -880,21 +888,8 @@ impl AgentService {
                 .ok_or(anyhow!("no signing key id to save"))?,
             keystore,
             agent: self.agent.clone(),
+            keystore_fingerprint,
         };
-
-        // While the legacy backup exists, the fingerprint next to it names the keys this file
-        // holds. It goes before the write and comes back after it, so it never names keys
-        // that the file does not hold.
-        let backup_keys_file = std::path::Path::new(&self.legacy_backup_file())
-            .exists()
-            .then(|| self.legacy_backup_keys_file());
-        if let Some(path) = &backup_keys_file {
-            match std::fs::remove_file(path) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
-            }
-        }
 
         // The temp file starts as 0600 and then takes the mode of the file it replaces, so
         // an operator's `chmod` on the agent file survives the rename.
@@ -914,20 +909,6 @@ impl AgentService {
         file.sync_all()?;
         drop(file);
         std::fs::rename(&tmp, &self.file)?;
-
-        if let Some(path) = backup_keys_file {
-            let keys = key_set_fingerprint(backend.list_key_names().into_iter().map(|name| {
-                let public_key = backend.get_public_key(&name);
-                (name, public_key)
-            }));
-            // Without the fingerprint the fallback refuses, which is the safe side.
-            if let Err(e) = std::fs::write(&path, keys) {
-                log::warn!(
-                    "🔑 Could not record the keys next to the legacy keystore backup: {}",
-                    e
-                );
-            }
-        }
         Ok(())
     }
 
@@ -1733,8 +1714,6 @@ mod tests {
 
         restart_and_unlock(variant).expect("the legacy key ignores a trailing space");
         assert!(!crate::wallet::is_legacy_keystore(&keystore_on_disk()));
-        // A save that adds no key, such as a profile update, keeps the fallback open.
-        AgentService::with_global_instance(|svc| svc.save(variant.to_string()));
 
         restart_and_unlock(owner).expect("the real passphrase still opens the migrated file");
         assert_eq!(
@@ -1754,55 +1733,145 @@ mod tests {
         setup_agent();
     }
 
-    /// Keys added after a migration under a variant passphrase exist only in the rewritten
-    /// file. The real passphrase opens the legacy backup, which lacks them, so the fallback
-    /// must refuse instead of replacing the file.
-    #[test]
-    fn the_legacy_fallback_never_drops_keys_added_after_the_migration() {
-        ensure_setup();
+    /// An agent file, under a fresh app path, whose keystore an older executor wrote under
+    /// `passphrase`. Keep the temp dir alive while the test runs.
+    fn legacy_agent_file(passphrase: &str) -> (tempfile::TempDir, String) {
         let tmp = tempfile::tempdir().expect("create temp dir");
         let app_path = tmp.path().to_str().unwrap().to_string();
         std::fs::create_dir_all(format!("{}/ad4m", app_path)).expect("create ad4m dir");
         let agent_file = format!("{}/ad4m/agent.json", app_path);
-        let owner = "owner passphrase";
-        let variant = "owner passphrase ";
-        let added = "added-after-migration";
-
         {
             let global = AgentService::global_instance();
             let mut lock = global.lock().unwrap();
             *lock = Some(AgentService::new(app_path.clone()));
             let svc = lock.as_mut().unwrap();
             svc.create_new_keys();
-            svc.save(owner.to_string());
+            svc.save(passphrase.to_string());
         }
         let mut store: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&agent_file).unwrap()).unwrap();
         let current = store["keystore"].as_str().unwrap().to_string();
         store["keystore"] =
-            serde_json::Value::String(crate::wallet::reencrypt_as_legacy(&current, owner));
+            serde_json::Value::String(crate::wallet::reencrypt_as_legacy(&current, passphrase));
         std::fs::write(&agent_file, store.to_string()).unwrap();
+        (tmp, agent_file)
+    }
 
-        let restart_and_unlock = |password: &str| -> Result<(), AnyError> {
-            wallet_backend().lock("scratch");
-            AgentService::with_mutable_global_instance(|svc| {
-                svc.load();
-                svc.unlock(password.to_string())
-            })
-        };
+    /// Unlocks from a locked backend and no stored passphrase, as after a restart.
+    fn restart_and_unlock(password: &str) -> Result<(), AnyError> {
+        wallet_backend().lock("scratch");
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.passphrase = None;
+            svc.load();
+            svc.unlock(password.to_string())
+        })
+    }
 
-        restart_and_unlock(variant).expect("the legacy key ignores a trailing space");
+    const OWNER: &str = "owner passphrase";
+    /// Opens a legacy file written under `OWNER`: the legacy key ignored a trailing space.
+    const VARIANT: &str = "owner passphrase ";
+
+    /// Keys added after a migration under a variant passphrase exist only in the rewritten
+    /// file. The real passphrase opens the legacy backup, which lacks them, so the fallback
+    /// must refuse and change nothing.
+    #[test]
+    fn the_legacy_fallback_never_drops_keys_added_after_the_migration() {
+        ensure_setup();
+        let (_tmp, agent_file) = legacy_agent_file(OWNER);
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
         // A new user's key, saved the way `create_user` saves it.
-        wallet_backend().generate_keypair(added).unwrap();
-        AgentService::with_global_instance(|svc| svc.save(variant.to_string()));
+        wallet_backend().generate_keypair("added").unwrap();
+        AgentService::with_global_instance(|svc| svc.save(VARIANT.to_string()));
         let migrated = std::fs::read_to_string(&agent_file).unwrap();
 
-        assert!(restart_and_unlock(owner).is_err());
+        assert!(restart_and_unlock(OWNER).is_err());
         assert_eq!(std::fs::read_to_string(&agent_file).unwrap(), migrated);
         assert!(std::path::Path::new(&format!("{}.legacy", agent_file)).exists());
+        assert!(!wallet_backend().is_unlocked());
+        assert!(AgentService::with_global_instance(|svc| svc
+            .passphrase
+            .is_none()));
 
-        restart_and_unlock(variant).expect("the rewritten file opens under its passphrase");
-        assert!(wallet_backend().get_public_key(added).is_some());
+        restart_and_unlock(VARIANT).expect("the rewritten file opens under its passphrase");
+        assert!(wallet_backend().get_public_key("added").is_some());
+
+        setup_agent();
+    }
+
+    /// `agent.generate` on a migrated node replaces the main key under the same name. The
+    /// fingerprint covers public keys, so the fallback does not bring the old identity back.
+    #[test]
+    fn the_legacy_fallback_never_restores_a_replaced_key() {
+        ensure_setup();
+        let (_tmp, _agent_file) = legacy_agent_file(OWNER);
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
+        wallet_backend()
+            .generate_keypair(crate::wallet::KEY_NAME_MAIN)
+            .unwrap();
+        let new_main = wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN);
+        AgentService::with_global_instance(|svc| svc.save(VARIANT.to_string()));
+
+        assert!(restart_and_unlock(OWNER).is_err());
+        restart_and_unlock(VARIANT).expect("the rewritten file opens under its passphrase");
+        assert_eq!(
+            wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN),
+            new_main
+        );
+
+        setup_agent();
+    }
+
+    /// A save that adds no key, such as a profile update, keeps the fallback open.
+    #[test]
+    fn a_save_without_new_keys_keeps_the_legacy_fallback_open() {
+        ensure_setup();
+        let (_tmp, _agent_file) = legacy_agent_file(OWNER);
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
+        let main_key = wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN);
+        AgentService::with_global_instance(|svc| svc.save(VARIANT.to_string()));
+
+        restart_and_unlock(OWNER).expect("the real passphrase still opens the node");
+        assert_eq!(
+            wallet_backend().get_public_key(crate::wallet::KEY_NAME_MAIN),
+            main_key
+        );
+
+        setup_agent();
+    }
+
+    /// `agent.lock` saves under the passphrase that unlocked the node but re-encrypts memory
+    /// under the one it gets, so the next unlock opens memory, not the file. The backup goes
+    /// only once the agent file opens with that passphrase too.
+    #[test]
+    fn the_backup_goes_only_once_the_agent_file_opens_with_the_passphrase() {
+        ensure_setup();
+        let (_tmp, agent_file) = legacy_agent_file(OWNER);
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.lock(OWNER.to_string());
+            svc.unlock(OWNER.to_string())
+                .expect("memory opens under the lock passphrase");
+        });
+        assert!(!std::path::Path::new(&format!("{}.legacy", agent_file)).exists());
+
+        restart_and_unlock(OWNER).expect("the agent file opens with the passphrase in use");
+
+        setup_agent();
+    }
+
+    /// On an unlocked node, a failed unlock never falls back: the backup's keys would replace
+    /// a key in memory that the node has not saved yet.
+    #[test]
+    fn an_unlocked_node_never_falls_back_to_the_legacy_backup() {
+        ensure_setup();
+        let (_tmp, _agent_file) = legacy_agent_file(OWNER);
+        restart_and_unlock(VARIANT).expect("the variant opens the legacy file");
+        wallet_backend().generate_keypair("not-saved-yet").unwrap();
+
+        let result =
+            AgentService::with_mutable_global_instance(|svc| svc.unlock(OWNER.to_string()));
+        assert!(result.is_err());
+        assert!(wallet_backend().get_public_key("not-saved-yet").is_some());
 
         setup_agent();
     }
