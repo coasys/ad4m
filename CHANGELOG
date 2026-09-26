@@ -34,6 +34,11 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- A client call no longer hangs forever when the first WebSocket connect fails [#1173](https://github.com/coasys/ad4m/pull/1173)
+  - Failed connect attempts (e.g. ECONNREFUSED while the executor is still starting) are retried with backoff for up to 30 s. After that, waiting calls reject with `RpcError` status `CONNECT_FAILED_STATUS` (504, exported from `@coasys/ad4m`), which is distinct from the 503 of a connection that was lost or closed.
+  - **Behaviour change:** `waitForSubscription()` (used by `PerspectiveClient` subscriptions) now rejects after 30 s instead of waiting forever. An app that starts before its executor should catch this and retry.
+  - The reconnect backoff restarts at 500 ms on every connect cycle. A subscriber-only client against an executor that stays down now retries in bursts (500 ms, 1 s, 2 s … within each 30 s cycle, then a 30 s pause) rather than settling at one attempt every 30 s.
+  - The executor logs `API server starting on …` after the port is bound, not before, and exits with status 1 when the REST API server fails (e.g. the port is taken) instead of running on without an API.
 - Holochain zome calls no longer queue behind each other node-wide [#1133](https://github.com/coasys/ad4m/issues/1133)
   - The Holochain service loop awaited every request to completion, so a cheap telepresence `send_broadcast` waited behind every other space's `sync()`/`pull`, and presence, call signalling and cursors stalled for 10–30 s. Requests are now dispatched concurrently (bounded at 32 in flight); only `InstallApp`/`RemoveApp`/`EnableApp`/`Shutdown` serialize, and they wait for in-flight calls and hold back new ones for their duration only.
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).
