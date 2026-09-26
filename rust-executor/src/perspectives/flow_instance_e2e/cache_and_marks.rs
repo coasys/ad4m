@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::flow_instance::viewer_cache::sync_for_context;
 // ---------------------------------------------------------------------------
 // The cache is a cache
 // ---------------------------------------------------------------------------
@@ -330,6 +331,30 @@ async fn drop_local_cache(f: &mut Fixture) {
         .expect("drop the local cache");
 }
 
+/// Replace replica `to`'s copy of the flow instance with `from`'s, as sync
+/// delivers it: `from`'s Shared links, signatures intact, and no Local link
+/// (no cache, no catch-up marker). `to`'s acting user did not mint it.
+async fn receive_instance(from: &Fixture, to: &mut Fixture) {
+    let own: Vec<LinkExpression> = links_of(to, &to.instance_uri)
+        .await
+        .into_iter()
+        .map(LinkExpression::from)
+        .collect();
+    to.perspective
+        .remove_links(own, None)
+        .await
+        .expect("drop this replica's own copy of the instance");
+    for link in links_of(from, &from.instance_uri).await {
+        if link.status == Some(LinkStatus::Local) {
+            continue;
+        }
+        to.perspective
+            .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+            .await
+            .expect("receive an instance link");
+    }
+}
+
 /// Copy every link of `proposal_uris` from replica `from` into replica
 /// `to`, as sync would (Shared, signatures intact), without going through
 /// the sync trigger so the test controls when the pass runs.
@@ -360,7 +385,7 @@ async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
     // Replica B: same definition, the flow instance as sync delivers it (no
     // cache), and A's history.
     let mut b = seed_review_flow().await;
-    drop_local_cache(&mut b).await;
+    receive_instance(&a, &mut b).await;
     replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
 
     let first = consensus_pass(&mut b).await;
@@ -414,7 +439,7 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
     let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
 
     let mut b = seed_review_flow().await;
-    drop_local_cache(&mut b).await;
+    receive_instance(&a, &mut b).await;
     replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
 
     let mallory = second_agent("mallory-catch-up@e2e.test");
@@ -463,7 +488,7 @@ async fn a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later() {
     let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
 
     let mut b = seed_review_flow().await;
-    drop_local_cache(&mut b).await;
+    receive_instance(&a, &mut b).await;
     replicate_proposals(&a, &mut b, &[&h1]).await;
     assert!(
         consensus_pass(&mut b).await.is_empty(),
@@ -568,6 +593,113 @@ async fn a_newcomer_with_no_history_reports_the_first_settle_after_its_first_pas
     let outcomes = consensus_pass(&mut f).await;
     assert_eq!(outcomes.len(), 1, "got {outcomes:?}");
     assert_eq!(f.cached_state().await, "scoped");
+}
+
+/// A read is not a catch-up. Replica B receives an instance with history,
+/// and B's user reads it before any pass: the read derives the state and
+/// writes the user's cache, but marks nothing. The user's first proposal
+/// must still catch up first, so its `outcomes` hold only the edge the
+/// proposal settles, not the history the read left unmarked.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_before_the_first_proposal_does_not_switch_off_the_catch_up() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    let mut b = seed_review_flow().await;
+    receive_instance(&a, &mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+
+    let written = sync_for_context(&mut b.perspective, "{}", &b.ctx)
+        .await
+        .expect("the read derives");
+    assert_eq!(written, 1, "the read writes the reader's cache");
+    assert_eq!(b.cached_state().await, "review");
+    assert!(
+        b.read_set().await.marked_proposals().is_empty(),
+        "and marks nothing"
+    );
+
+    let instance = b.instance_uri.clone();
+    let out = propose_flow_transition(&mut b.perspective, &instance, "approved", &[], None, &b.ctx)
+        .await
+        .expect("propose");
+    let reported: Vec<(&str, &str)> = out
+        .outcomes
+        .iter()
+        .map(|o| (o.from_state.as_str(), o.to_state.as_str()))
+        .collect();
+    assert_eq!(
+        reported,
+        vec![("review", "approved")],
+        "only the edge this proposal settled is reported: {out:?}"
+    );
+    assert_eq!(
+        out.outcomes[0].contributing_proposal_uris,
+        vec![out.proposal_uri.clone()]
+    );
+}
+
+/// The same for the sweep: a read before the user's first pass leaves the
+/// pass a silent catch-up, and the next edge to settle is reported once.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_read_before_the_first_pass_does_not_switch_off_the_catch_up() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    let mut b = seed_review_flow().await;
+    receive_instance(&a, &mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+    sync_for_context(&mut b.perspective, "{}", &b.ctx)
+        .await
+        .expect("the read derives");
+
+    let first = consensus_pass(&mut b).await;
+    assert!(
+        first.is_empty(),
+        "the first pass is a silent catch-up, got {first:?}"
+    );
+    let marked = b.read_set().await.marked_proposals();
+    assert!(
+        marked.contains(&h1) && marked.contains(&h2),
+        "and the history is marked: {marked:?}"
+    );
+
+    // Seeding B re-keyed the main agent, so its first pass on A is a
+    // catch-up of its own.
+    assert!(consensus_pass(&mut a).await.is_empty());
+    let h3 = settle(&mut a, "h3", "review", "approved").await;
+    replicate_proposals(&a, &mut b, &[&h3]).await;
+    let later = consensus_pass(&mut b).await;
+    assert_eq!(
+        later.len(),
+        1,
+        "an edge after the catch-up is reported: {later:?}"
+    );
+    assert_eq!(later[0].contributing_proposal_uris, vec![h3]);
+}
+
+/// The user who minted an instance has watched it from its start, so there
+/// is no history to catch up on: the first edge to settle is reported, even
+/// when it settles by another agent's votes and the minter never proposed
+/// or voted (no pre-vote catch-up ran).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_minters_first_settle_is_reported_without_a_catch_up() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let bob = TestSigner::generate();
+    let seal = seal_for(&f, "scoped").await;
+    let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+
+    let outcomes = consensus_pass(&mut f).await;
+    assert_eq!(
+        outcomes.len(),
+        1,
+        "the minter's first settle is an event: {outcomes:?}"
+    );
+    assert_eq!(outcomes[0].voters, vec![bob.did.clone()]);
+    assert_eq!(outcomes[0].contributing_proposal_uris, vec![bobs]);
+    assert!(consensus_pass(&mut f).await.is_empty(), "and only once");
 }
 
 // ---------------------------------------------------------------------------
