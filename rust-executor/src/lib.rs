@@ -37,6 +37,7 @@ pub mod types;
 
 use std::thread::JoinHandle;
 
+use deno_core::error::AnyError;
 use log::{error, info, warn};
 use tokio::sync::oneshot;
 
@@ -214,8 +215,13 @@ async fn holochain_signal_receiver() {
     }
 }
 
-/// Runs the REST server and the deno core runtime
-pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+/// Runs the REST server and the deno core runtime.
+///
+/// Returns the REST API server's thread. It ends with `Err` when the server
+/// cannot start or stops, e.g. when the API port is taken. `run` never exits
+/// the process itself, because the launcher embeds it and must stay up to show
+/// the error. Executor binaries pass the handle to [`exit_when_api_fails`].
+pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     #[cfg(unix)]
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
@@ -752,14 +758,29 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        // The REST API is the executor's client surface. A panic here would
-        // end only this thread and leave a process running with no API, and
-        // the JS test harness would wait for its "API server starting" line
-        // until mocha's 1200 s timeout. Exit instead, so whoever started the
-        // executor sees the failure.
-        if let Err(e) = runtime.block_on(api::start_server(config)) {
-            error!("REST API server failed, exiting: {:?}", e);
-            std::process::exit(1);
+        let result = runtime.block_on(api::start_server(config));
+        if let Err(e) = &result {
+            error!("REST API server failed: {:?}", e);
         }
+        result
     })
+}
+
+/// For executor binaries: exit with status 1 once the REST API thread from
+/// [`run`] fails or panics.
+///
+/// Without it, a failed API ends only its own thread and leaves a process
+/// running with no API. The JS test harness then waits for the
+/// "API server starting" line until mocha's 1200 s timeout. Embedders that
+/// must outlive a failed API (the launcher) join the handle themselves.
+pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
+    std::thread::spawn(move || {
+        let reason = match api_thread.join() {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("{:?}", e),
+            Err(_) => String::from("the REST API thread panicked"),
+        };
+        error!("REST API server failed, exiting: {}", reason);
+        std::process::exit(1);
+    });
 }
