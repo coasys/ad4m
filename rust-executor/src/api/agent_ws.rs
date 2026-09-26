@@ -111,7 +111,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 /// agent.byDid — get agent by DID
@@ -492,7 +492,7 @@ async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 // ── Auth ──
@@ -589,7 +589,7 @@ async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 
     let token = params.require_str("token")?;
     apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 // ── Status ──

@@ -125,8 +125,12 @@ pub async fn events_ws(
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
+    let can_approve_apps =
+        check_capability(&context.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_events_ws(socket, auth_token, user_email, is_admin, can_approve_apps)
+    }))
 }
 
 /// Build the merged event stream for a given user.
@@ -137,6 +141,7 @@ pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    can_approve_apps: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -159,7 +164,6 @@ pub(crate) async fn build_event_stream(
     let d_link_updated = resolved_did.clone();
     let d_agent_status = resolved_did.clone();
     let d_agent_updated = resolved_did.clone();
-    let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
@@ -272,12 +276,15 @@ pub(crate) async fn build_event_stream(
         d_agent_updated,
         matches_agent_did
     );
-    let s_apps = did_stream!(
-        pubsub.subscribe(&APPS_CHANGED).await,
-        "apps-changed",
-        d_apps,
-        matches_apps_user
-    );
+    // Apps belong to the node owner: only sessions that can approve apps see their changes.
+    let s_apps = BroadcastStream::new(pubsub.subscribe(&APPS_CHANGED).await)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| async move {
+            match result {
+                Ok(msg) if can_approve_apps => Some(wrap_event("apps-changed", &msg)),
+                _ => None,
+            }
+        });
 
     let s_hosting = {
         let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
@@ -379,11 +386,16 @@ pub(crate) async fn build_event_stream(
         d_notif,
         matches_notification_owner
     );
-    let s_exc = broadcast_stream_nested!(
-        pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
-        "exception-occurred",
-        "exception"
-    );
+    let s_exc = BroadcastStream::new(pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await)
+        .filter_map(|r| async { handle_broadcast_result(r) })
+        .filter_map(move |result| async move {
+            match result {
+                Ok(msg) if exception_visible(&msg, can_approve_apps) => {
+                    Some(wrap_event_nested("exception-occurred", "exception", &msg))
+                }
+                _ => None,
+            }
+        });
 
     // ── AI events ──
     let s_trans = did_stream!(
@@ -518,10 +530,12 @@ async fn handle_events_ws(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    can_approve_apps: bool,
 ) {
     log::info!("Events WebSocket connected");
 
-    let mut event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let mut event_stream =
+        build_event_stream(auth_token, user_email, is_admin, can_approve_apps).await;
 
     loop {
         tokio::select! {
@@ -635,19 +649,17 @@ pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
     }
 }
 
-pub(crate) fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::Object(auth)) = map.get("auth") {
-                    if let Some(serde_json::Value::String(user_did)) = auth.get("user_did") {
-                        return user_did == did;
-                    }
-                }
-            }
-            true
+/// A capability request carries the request id that `agent.generateJwt` redeems, so only
+/// sessions that can approve apps receive it. Every other exception goes to every session.
+pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
+    if can_approve_apps {
+        return true;
+    }
+    match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(exception) => {
+            exception.get("type").and_then(|t| t.as_str()) != Some("CAPABILITY_REQUESTED")
         }
+        Err(_) => false,
     }
 }
 
@@ -1131,4 +1143,88 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod app_approval_event_tests {
+    use super::*;
+    use crate::types::{ExceptionInfo, ExceptionType};
+    use std::time::Duration;
+
+    fn exception(kind: ExceptionType) -> String {
+        serde_json::to_string(&ExceptionInfo {
+            title: "title".to_string(),
+            message: "message".to_string(),
+            r#type: kind,
+            addon: Some("{\"requestId\":\"request-1\"}".to_string()),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn capability_requests_reach_only_sessions_that_can_approve_apps() {
+        let request = exception(ExceptionType::CapabilityRequested);
+        assert!(exception_visible(&request, true));
+        assert!(!exception_visible(&request, false));
+    }
+
+    #[test]
+    fn other_exceptions_reach_every_session() {
+        let untrusted = exception(ExceptionType::AgentIsUntrusted);
+        assert!(exception_visible(&untrusted, false));
+        assert!(exception_visible(&untrusted, true));
+    }
+
+    #[test]
+    fn unreadable_exceptions_reach_only_sessions_that_can_approve_apps() {
+        assert!(!exception_visible("not json", false));
+        assert!(exception_visible("not json", true));
+    }
+
+    // An app token used to reach every connected socket through `apps-changed`, including
+    // sockets that never authenticated. Only sessions that can approve apps get the event now.
+    #[tokio::test]
+    async fn sessions_that_cannot_approve_apps_never_see_app_events() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let pubsub = get_global_pubsub().await;
+        let mut other = build_event_stream(String::new(), None, false, false).await;
+        let mut approver = build_event_stream(String::new(), None, false, true).await;
+
+        pubsub
+            .publish(&APPS_CHANGED, &"{\"requestId\":\"request-1\"}".to_string())
+            .await;
+        pubsub
+            .publish(
+                &EXCEPTION_OCCURRED_TOPIC,
+                &exception(ExceptionType::CapabilityRequested),
+            )
+            .await;
+
+        let mut seen = Vec::new();
+        for _ in 0..2 {
+            let event = tokio::time::timeout(Duration::from_secs(5), approver.next())
+                .await
+                .expect("the approver receives both events")
+                .expect("the stream stays open");
+            seen.push(event);
+        }
+        assert!(
+            seen.iter().any(|e| e.contains("apps-changed")),
+            "{:?}",
+            seen
+        );
+        assert!(
+            seen.iter().any(|e| e.contains("exception-occurred")),
+            "{:?}",
+            seen
+        );
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(500), other.next())
+                .await
+                .is_err(),
+            "a session that cannot approve apps received an app event"
+        );
+    }
 }
