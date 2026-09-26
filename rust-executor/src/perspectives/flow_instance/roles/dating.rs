@@ -11,7 +11,7 @@
 use super::evidence::granter_authorised;
 use crate::perspectives::flow_evaluator::{did_literal_url, target_names_did};
 use crate::perspectives::flow_instance::time::parse_link_timestamp;
-use crate::perspectives::shacl_parser::ModelQuery;
+use crate::perspectives::shacl_parser::{ModelQuery, PropertyCondition};
 use crate::types::LinkExpression;
 use chrono::{DateTime, Utc};
 use serde_json::{Map, Value};
@@ -32,8 +32,8 @@ pub struct GrantDating {
     translated_query: Value,
     /// The DID fields, by property name, sorted.
     pub fields: Vec<String>,
-    /// Whether the rule's `author` is `$did`, so the grantee's own links
-    /// date the grant.
+    /// Whether the grantee's own links date the grant: the rule's `author`
+    /// is exactly `$did` and it has no DID field.
     pub by_grantee: bool,
 }
 
@@ -47,12 +47,16 @@ impl GrantDating {
         }
         fields.sort();
         fields.dedup();
+        // With a DID field, the grantee's own links add nothing: a grantee the
+        // author condition accepts already dates the grant through
+        // `granter_authorised`, and another granter it accepts must be able to.
+        let by_grantee = fields.is_empty() && authored_by_grantee(role, None);
         Ok(Self {
             did: did.to_string(),
             did_literal: did_literal_url(did)?,
             translated_query: translated_query.clone(),
             fields,
-            by_grantee: authored_by_grantee(role, None),
+            by_grantee,
         })
     }
 
@@ -95,25 +99,22 @@ impl GrantDating {
         grant_links: &[LinkExpression],
         grantees_own_links: &[LinkExpression],
     ) -> Option<String> {
-        if !self.is_datable() {
-            return None;
-        }
-        let mut starts = Vec::with_capacity(2);
-        if !self.fields.is_empty() {
-            starts.push(earliest(
+        let start = if !self.fields.is_empty() {
+            earliest(
                 grant_links
                     .iter()
                     .filter(|l| self.is_grant_link(l, instance_id)),
-            )?);
-        }
-        if self.by_grantee {
-            starts.push(earliest(
+            )
+        } else if self.by_grantee {
+            earliest(
                 grantees_own_links
                     .iter()
                     .filter(|l| self.is_grantees_own_link(l, instance_id)),
-            )?);
-        }
-        starts.into_iter().max().map(|(_, at)| at)
+            )
+        } else {
+            None
+        };
+        start.map(|(_, at)| at)
     }
 }
 
@@ -171,10 +172,12 @@ fn did_fields(where_clause: &Map<String, Value>, did: &str, out: &mut Vec<String
     }
 }
 
-/// Whether the rule's `author`, at any level, names `$did`. `didProperty:
-/// "author"` says the same thing (the translator writes it as
-/// `author: <did>`); a `where.author` beside it is a field, not an author
-/// condition.
+/// Whether the rule's `author`, at any level, is `$did` itself: the bare
+/// value or `{ equals: "$did" }`, the same exactness [`did_fields`] asks of a
+/// field. `$did` in an `in` list beside another author is not the grantee's
+/// own grant. `didProperty: "author"` says the same thing (the translator
+/// writes it as `author: <did>`); a `where.author` beside it is a field, not
+/// an author condition.
 fn authored_by_grantee(query: &ModelQuery, inherited_did_property: Option<&str>) -> bool {
     let did_property = query.did_property.as_deref().or(inherited_did_property);
     let own = query.did_property.as_deref() == Some("author")
@@ -183,8 +186,11 @@ fn authored_by_grantee(query: &ModelQuery, inherited_did_property: Option<&str>)
                 .r#where
                 .as_ref()
                 .and_then(|w| w.get("author"))
-                .and_then(|c| serde_json::to_string(c).ok())
-                .is_some_and(|c| c.contains("$did")));
+                .is_some_and(|c| match c {
+                    PropertyCondition::Str(s) => s == "$did",
+                    PropertyCondition::Equals { equals } => equals.as_str() == Some("$did"),
+                    _ => false,
+                }));
     own || query
         .or
         .iter()
