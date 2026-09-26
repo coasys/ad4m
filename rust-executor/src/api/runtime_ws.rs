@@ -12,6 +12,7 @@ use crate::runtime_service::RuntimeService;
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
+use super::guards::refuse_user_session;
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest,
     ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
@@ -113,6 +114,8 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.exportData")?;
 
     let body: ExportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -163,6 +166,8 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // Reads or writes any path on the host and the whole node database.
+    refuse_user_session(&ctx, "runtime.importData")?;
 
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

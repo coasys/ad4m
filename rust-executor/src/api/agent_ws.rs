@@ -18,6 +18,7 @@ use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -184,8 +185,38 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let body: UpdateProfileRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // If dm_language provided, update it
-    if let Some(dm_lang) = body.dm_language {
+    // If dm_language provided, update it. A user session updates the user's own profile,
+    // never the node's main agent.
+    if let (Some(dm_lang), Some(user_email)) = (body.dm_language.clone(), ctx.user_email.clone()) {
+        let did = AgentService::get_user_did_by_email(&user_email)
+            .map_err(|e| WsRpcError::internal(format!("User agent not available: {}", e)))?;
+        // Keep the stored perspective. The DID always comes from the user's key.
+        let perspective = AgentService::with_global_instance(|agent_service| {
+            agent_service.load_user_agent_profile(&user_email)
+        })
+        .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
+        .and_then(|profile| profile.perspective);
+        let agent = Agent {
+            did,
+            direct_message_language: Some(dm_lang),
+            perspective,
+        };
+        AgentService::with_global_instance(|agent_service| {
+            agent_service.store_user_agent_profile(&user_email, &agent)
+        })
+        .map_err(|e| WsRpcError::internal(format!("Failed to store user profile: {}", e)))?;
+        if let Err(e) =
+            AgentService::publish_agent_to_language(&AgentContext::for_user_email(user_email)).await
+        {
+            log::warn!(
+                "Failed to publish user profile after DM language update: {}",
+                e
+            );
+        }
+        if body.public_perspective.is_none() {
+            return Ok(serde_json::to_value(agent)?);
+        }
+    } else if let Some(dm_lang) = body.dm_language {
         AgentService::with_mutable_global_instance(|agent_service| {
             if let Some(ref mut agent) = agent_service.agent {
                 agent.direct_message_language = Some(dm_lang.clone());
@@ -216,9 +247,16 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
                 .map(|lei| link_expression_input_to_decorated(lei))
                 .collect();
 
+            // Keep the user's DM language: this call may update only the perspective.
+            let direct_message_language = AgentService::with_global_instance(|agent_service| {
+                agent_service.load_user_agent_profile(&user_email)
+            })
+            .ok()
+            .flatten()
+            .and_then(|profile| profile.direct_message_language);
             let agent = Agent {
                 did: agent_data.did,
-                direct_message_language: None,
+                direct_message_language,
                 perspective: Some(DomainPerspective {
                     links: decorated_links,
                 }),
@@ -310,6 +348,7 @@ fn spawn_main_agent_publish() {
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.generate")?;
 
     let body: GenerateAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -369,6 +408,7 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.lock")?;
 
     let body: LockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -396,6 +436,7 @@ async fn lock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_SIGN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.unlock")?;
 
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -478,8 +519,15 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: SignMessageRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let sig = InternalAgentSignature::from_message(body.message)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    // A user session signs as the user, never as the node's main agent.
+    let sig = match ctx.user_email.clone() {
+        Some(user_email) => InternalAgentSignature::from_message_for_context(
+            body.message,
+            &AgentContext::for_user_email(user_email),
+        ),
+        None => InternalAgentSignature::from_message(body.message),
+    }
+    .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let out: AgentSignature = sig.into();
     Ok(serde_json::to_value(out)?)
@@ -712,6 +760,7 @@ async fn get_entanglement(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.addEntanglementProofs")?;
 
     let body: EntanglementProofsWrapper = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -767,6 +816,7 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 async fn delete_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.deleteEntanglementProofs")?;
 
     let body: EntanglementProofsWrapper = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -814,6 +864,7 @@ async fn entanglement_proof_preflight(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "agent.entanglementProofPreflight")?;
 
     let body: EntanglementProofPreflightRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

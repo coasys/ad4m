@@ -251,6 +251,17 @@ impl AgentSignature {
             public_key: signing_key_id(),
         })
     }
+
+    /// Signs `message` with the key of `context`: the main agent, or a user's own key.
+    pub fn from_message_for_context(
+        message: String,
+        context: &AgentContext,
+    ) -> Result<AgentSignature, AnyError> {
+        Ok(AgentSignature {
+            signature: sign_string_hex_for_context(message, context)?,
+            public_key: signing_key_id_for_context(context)?,
+        })
+    }
 }
 
 impl From<AgentSignature> for crate::types::AgentSignature {
