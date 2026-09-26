@@ -54,7 +54,10 @@ async fn the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do() {
     assert_eq!(outcomes[0].voters, vec![acting_did(&f)]);
     assert_eq!(f.cached_state().await, "scoped", "the cache was written");
     assert!(
-        f.read_set().await.marked_proposals(&acting_did(&f)).contains(&minted),
+        f.read_set()
+            .await
+            .marked_proposals(&acting_did(&f))
+            .contains(&minted),
         "and the settling proposal was marked"
     );
     assert_eq!(f.derived().await.state, "scoped");
@@ -282,7 +285,10 @@ async fn a_synced_vote_triggers_this_replicas_own_pass() {
         "the synced vote must trigger the pass that heals the cache"
     );
     assert!(
-        f.read_set().await.marked_proposals(&acting_did(&f)).contains(&minted),
+        f.read_set()
+            .await
+            .marked_proposals(&acting_did(&f))
+            .contains(&minted),
         "and that pass marks the settling proposal"
     );
     assert_eq!(
@@ -471,8 +477,7 @@ async fn a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later() {
     replicate_proposals(&a, &mut b, &[&h2]).await;
 
     let mallory = second_agent("mallory-late-edge@e2e.test");
-    let for_mallory =
-        run_flow_consensus_pass(&mut b.perspective, None, &mallory, None, None).await;
+    let for_mallory = run_flow_consensus_pass(&mut b.perspective, None, &mallory, None, None).await;
     assert!(
         for_mallory.is_empty(),
         "Mallory never derived this instance: her first pass is a silent catch-up, got {for_mallory:?}"
@@ -485,7 +490,10 @@ async fn a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later() {
         "the edge that settled after the main agent's catch-up is reported to it: {for_main:?}"
     );
     assert_eq!(
-        (for_main[0].from_state.as_str(), for_main[0].to_state.as_str()),
+        (
+            for_main[0].from_state.as_str(),
+            for_main[0].to_state.as_str()
+        ),
         ("changes_requested", "review")
     );
     assert_eq!(for_main[0].contributing_proposal_uris, vec![h2]);
@@ -519,7 +527,10 @@ async fn a_first_act_mint_reports_the_edge_it_settles() {
         ),
         ("identified", "scoped")
     );
-    assert_eq!(out.outcomes[0].contributing_proposal_uris, vec![out.proposal_uri]);
+    assert_eq!(
+        out.outcomes[0].contributing_proposal_uris,
+        vec![out.proposal_uri]
+    );
 }
 
 /// The engine's proposal pass, run as a user who never derived the instance:

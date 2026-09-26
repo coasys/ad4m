@@ -901,7 +901,13 @@ mod tests {
         );
 
         let mut unsigned = links;
-        let mut forged = link(RESOLVED_AS_PREDICATE, &literal(FIRED_MARK), ALICE, false, T3);
+        let mut forged = link(
+            RESOLVED_AS_PREDICATE,
+            &literal(FIRED_MARK),
+            ALICE,
+            false,
+            T3,
+        );
         forged.status = Some(LinkStatus::Local);
         unsigned.push(forged);
         assert!(
