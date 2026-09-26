@@ -38,7 +38,6 @@ pub fn language_main_module_url() -> Url {
     Url::parse("https://ad4m.language/bootstrap").unwrap()
 }
 
-/// Create worker options for language-specific runtimes.
 /// The AD4M service extensions available to the language runtime, in the order the
 /// runtime and the snapshot builder both register them. One list keeps the two in step:
 /// an extension present at snapshot build time but absent at runtime (or the reverse)
@@ -46,7 +45,8 @@ pub fn language_main_module_url() -> Url {
 ///
 /// The wallet extension no longer appears here. It exposed `globalThis.WALLET` — the
 /// node's main private key, keystore export and lock — to every language, which no
-/// language uses. Languages sign through `signature_service` / `agent_service` instead.
+/// language uses. Languages sign through `signature_service` / `agent_service` instead,
+/// and `agent_service` carries no unlock, lock, reload or profile-write op.
 pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
     vec![
         utils_service::init(),
@@ -60,6 +60,7 @@ pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
     ]
 }
 
+/// Create worker options for language-specific runtimes.
 /// These runtimes have the same Rust service extensions but minimal JS bootstrap.
 pub fn language_worker_options() -> WorkerOptions {
     WorkerOptions {
@@ -128,6 +129,32 @@ mod tests {
             .await
             .unwrap();
         assert!(signature.contains("object"), "SIGNATURE is {signature}");
+    }
+
+    /// `AGENT.unlock` let any language probe the node's passphrase, `AGENT.lock` lock the
+    /// node under a passphrase of its choosing, `AGENT.load` reload the keystore, and
+    /// `AGENT.save_agent_profile` overwrite the node's profile. Signing stays.
+    #[tokio::test]
+    async fn a_language_runtime_cannot_unlock_lock_reload_or_rewrite_the_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            "agent-ops-check".to_string(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        for op in ["unlock", "lock", "load", "save_agent_profile"] {
+            let kind = runtime
+                .execute(&format!("typeof globalThis.AGENT.{op}"))
+                .await
+                .unwrap();
+            assert!(kind.contains("undefined"), "AGENT.{op} is {kind}");
+        }
+        let sign = runtime
+            .execute("typeof globalThis.AGENT.sign")
+            .await
+            .unwrap();
+        assert!(sign.contains("function"), "AGENT.sign is {sign}");
     }
 
     /// The legitimate signing path stays: languages sign through signature_service and
