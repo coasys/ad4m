@@ -444,6 +444,62 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
     );
 }
 
+/// One user's catch-up cannot mute another user's report. The main agent
+/// on replica B has caught up and holds its cache; then an edge settles on A
+/// and syncs to B. The sync sweep runs the owners in list order, so Mallory,
+/// a co-owner who never derived the instance, can pass first: her pass is a
+/// silent catch-up and marks the new edge. The main agent's pass after it
+/// must still report that edge, because Mallory's mark records what she
+/// derived, not what the main agent has seen.
+///
+/// Ignored: this is the first known gap in the `pass` module doc. The pass
+/// counts any user's Local mark, so today `for_main` is `[]`. The fix
+/// (count only the acting user's own marks) changes what a user's
+/// propose/accept `outcomes` contain, and is open in #1152.
+#[ignore = "known gap: a co-owner's catch-up mutes a later edge (#1152)"]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+
+    let mut b = seed_review_flow().await;
+    drop_local_cache(&mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1]).await;
+    assert!(
+        consensus_pass(&mut b).await.is_empty(),
+        "the main agent catches up on B"
+    );
+
+    // Seeding B re-keyed the main agent, so its first pass on A is a
+    // catch-up too (see the newcomer test above).
+    assert!(consensus_pass(&mut a).await.is_empty());
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+    replicate_proposals(&a, &mut b, &[&h2]).await;
+
+    let mallory = second_agent("mallory-late-edge@e2e.test");
+    let for_mallory = run_flow_consensus_pass(&mut b.perspective, None, &mallory, None, None).await;
+    assert!(
+        for_mallory.is_empty(),
+        "Mallory never derived this instance: her first pass is a silent catch-up, got {for_mallory:?}"
+    );
+
+    let for_main = consensus_pass(&mut b).await;
+    assert_eq!(
+        for_main.len(),
+        1,
+        "the edge that settled after the main agent's catch-up is reported to it: {for_main:?}"
+    );
+    assert_eq!(
+        (
+            for_main[0].from_state.as_str(),
+            for_main[0].to_state.as_str()
+        ),
+        ("changes_requested", "review")
+    );
+    assert_eq!(for_main[0].contributing_proposal_uris, vec![h2]);
+    assert!(consensus_pass(&mut b).await.is_empty(), "and only once");
+}
+
 /// A user whose first act on an instance is a manual mint gets the edge it
 /// settles reported. Mallory holds no cache here (the main agent minted the
 /// instance), so without `catch_up_before_voting` in `propose::mint` the
