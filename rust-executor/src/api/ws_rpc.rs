@@ -461,8 +461,7 @@ mod socket_tests {
     #[tokio::test]
     async fn a_token_revoked_mid_connection_gets_401_and_the_socket_closes() {
         let addr = start_server().await;
-        let dir = tempfile::tempdir().unwrap();
-        apps_map::set_data_file_path(dir.path().join("apps.json").to_string_lossy().into());
+        crate::test_utils::use_test_apps_file();
         let token = generate_jwt(
             "socket-test".to_string(),
             3600,

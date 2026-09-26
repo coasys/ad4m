@@ -669,8 +669,7 @@ mod token_validity_tests {
     // revokeToken() must end existing connections, not only new ones.
     #[test]
     fn a_revoked_app_token_stops_working() {
-        let dir = tempfile::tempdir().unwrap();
-        apps_map::set_data_file_path(dir.path().join("apps.json").to_string_lossy().into());
+        crate::test_utils::use_test_apps_file();
         let token = format!("revoked-app-token-{}", uuid::Uuid::new_v4());
         let request_key = format!("key-{}", uuid::Uuid::new_v4());
         let app = AuthInfoExtended {

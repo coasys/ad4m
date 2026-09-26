@@ -71,3 +71,15 @@ pub fn expired_user_token(email: &str) -> String {
     )
     .unwrap()
 }
+
+/// Points the app registry at one temp file for the whole test process. Tests that insert
+/// apps call this and use their own unique keys: a temp dir per test would race when tests
+/// run in parallel, because the registry's file path is global.
+pub fn use_test_apps_file() {
+    static APPS_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    let dir =
+        APPS_DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for the app registry"));
+    crate::agent::capabilities::apps_map::set_data_file_path(
+        dir.path().join("apps.json").to_string_lossy().into(),
+    );
+}

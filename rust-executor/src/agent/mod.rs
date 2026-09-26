@@ -1470,10 +1470,7 @@ mod agent_context_tests {
     #[test]
     fn a_revoked_token_acts_as_nobody() {
         setup();
-        let dir = tempfile::tempdir().unwrap();
-        capabilities::apps_map::set_data_file_path(
-            dir.path().join("apps.json").to_string_lossy().into(),
-        );
+        crate::test_utils::use_test_apps_file();
         let token =
             crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
         let request_key = format!("key-{}", uuid::Uuid::new_v4());
