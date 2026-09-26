@@ -33,10 +33,13 @@ struct KeystoreEnvelope {
 }
 
 const KEYSTORE_VERSION: u8 = 2;
-// RFC 9106 §4, second recommended option: 64 MiB, 3 passes, 4 lanes.
-const KDF_MEMORY_KIB: u32 = 64 * 1024;
-const KDF_PASSES: u32 = 3;
-const KDF_LANES: u32 = 4;
+// Argon2id with the argon2 crate's defaults, OWASP's minimum: 19 MiB, 2 passes, 1 lane.
+// The legacy format paid exactly this cost on every save, without using the result, so
+// the fix changes no node's memory or CPU profile. The envelope records the parameters,
+// so they can rise later without breaking existing files.
+const KDF_MEMORY_KIB: u32 = 19 * 1024;
+const KDF_PASSES: u32 = 2;
+const KDF_LANES: u32 = 1;
 // Upper bounds for parameters read from a file, so a tampered file cannot stall unlock.
 const KDF_MEMORY_KIB_MAX: u32 = 1024 * 1024;
 const KDF_PASSES_MAX: u32 = 16;
