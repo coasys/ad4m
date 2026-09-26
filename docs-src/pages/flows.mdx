@@ -217,6 +217,8 @@ Read `FlowProposeResult` with this table. A bare outcome list cannot tell these 
 
 **An empty outcome list is a normal answer.** A vote short of quorum is a landed vote, not a failure.
 
+`outcomes` lists the edges this call recorded on this executor for the first time. The first time you vote on an instance you did not start, the executor first records the edges that settled before, and does not list them. Reading the instance (`FlowInstance.findAll` / `findOne`) does not count as that first time.
+
 Two agents who want the same transition both press the same button. The second call finds the open proposal for that edge and co-signs it instead of minting a twin:
 
 ```typescript
