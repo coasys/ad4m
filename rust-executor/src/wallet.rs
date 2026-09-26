@@ -1,117 +1,217 @@
-use argon2::password_hash::Salt;
-use argon2::{self, Argon2, PasswordHasher};
+use argon2::{self, Argon2};
 use base64::Engine;
-use crypto_box::aead::Aead;
-use crypto_box::{Nonce, PublicKey as cPublicKey, SalsaBox, SecretKey as cSecretKey};
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use did_key::{CoreSign, DIDCore, Ed25519KeyPair, KeyMaterial, PatchedKeyPair};
 use lazy_static::lazy_static;
 use once_cell::sync::OnceCell;
+use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::convert::TryInto;
 use std::sync::{Arc, Mutex, RwLock};
+use zeroize::Zeroizing;
 
-fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
-    //If length of slice is not 32 then take the first 32 bytes
+/// On-disk keystore format, version 2.
+///
+/// Argon2id derives the key from the whole passphrase and a random salt, and every write
+/// draws a fresh random nonce for XChaCha20-Poly1305. The KDF parameters travel with the
+/// ciphertext, so they can change later without breaking existing files.
+#[derive(Serialize, Deserialize)]
+struct KeystoreEnvelope {
+    v: u8,
+    kdf: String,
+    m: u32,
+    t: u32,
+    p: u32,
+    salt: String,
+    nonce: String,
+    ct: String,
+}
 
-    if slice.len() != 32 {
-        let mut array: [u8; 32] = [0u8; 32];
-        let _i = 0;
-        for (i, byte) in slice.iter().enumerate() {
-            if i == 32 {
-                break;
-            }
+const KEYSTORE_VERSION: u8 = 2;
+// Argon2id with the argon2 crate's defaults, OWASP's minimum: 19 MiB, 2 passes, 1 lane.
+// The legacy format paid exactly this cost on every save, without using the result, so
+// the fix changes no node's memory or CPU profile. The envelope records the parameters,
+// so they can rise later without breaking existing files.
+const KDF_MEMORY_KIB: u32 = 19 * 1024;
+const KDF_PASSES: u32 = 2;
+const KDF_LANES: u32 = 1;
+// Upper bounds for parameters read from a file, so a tampered file cannot stall unlock.
+const KDF_MEMORY_KIB_MAX: u32 = 1024 * 1024;
+const KDF_PASSES_MAX: u32 = 16;
+const KDF_LANES_MAX: u32 = 16;
+
+const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::STANDARD_NO_PAD;
+
+fn derive_key(
+    passphrase: &str,
+    salt: &[u8],
+    m: u32,
+    t: u32,
+    p: u32,
+) -> Result<Zeroizing<[u8; 32]>, AnyError> {
+    let params = argon2::Params::new(m, t, p, Some(32))
+        .map_err(|e| anyhow!("invalid keystore KDF parameters: {}", e))?;
+    let mut key = Zeroizing::new([0u8; 32]);
+    Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
+        .hash_password_into(passphrase.as_bytes(), salt, key.as_mut())
+        .map_err(|e| anyhow!("keystore key derivation failed: {}", e))?;
+    Ok(key)
+}
+
+/// Encrypt the serialised keystore under `passphrase`, in format version 2.
+fn encrypt(payload: &str, passphrase: &str) -> String {
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce);
+    let key = derive_key(passphrase, &salt, KDF_MEMORY_KIB, KDF_PASSES, KDF_LANES)
+        .expect("the fixed KDF parameters are valid");
+    let ct = XChaCha20Poly1305::new(key.as_ref().into())
+        .encrypt(XNonce::from_slice(&nonce), payload.as_bytes())
+        .expect("XChaCha20-Poly1305 encryption does not fail");
+    serde_json::to_string(&KeystoreEnvelope {
+        v: KEYSTORE_VERSION,
+        kdf: "argon2id".to_string(),
+        m: KDF_MEMORY_KIB,
+        t: KDF_PASSES,
+        p: KDF_LANES,
+        salt: B64.encode(salt),
+        nonce: B64.encode(nonce),
+        ct: B64.encode(ct),
+    })
+    .expect("the keystore envelope serialises")
+}
+
+/// Decrypt a keystore written by [`encrypt`], or one in the legacy format.
+fn decrypt(cipher: &str, passphrase: &str) -> Result<Zeroizing<String>, AnyError> {
+    if is_legacy_keystore(cipher) {
+        return legacy::decrypt(cipher, passphrase);
+    }
+    let envelope: KeystoreEnvelope =
+        serde_json::from_str(cipher).map_err(|e| anyhow!("unreadable keystore: {}", e))?;
+    if envelope.v != KEYSTORE_VERSION || envelope.kdf != "argon2id" {
+        return Err(anyhow!(
+            "unsupported keystore format: version {}, KDF {}",
+            envelope.v,
+            envelope.kdf
+        ));
+    }
+    if envelope.m > KDF_MEMORY_KIB_MAX || envelope.t > KDF_PASSES_MAX || envelope.p > KDF_LANES_MAX
+    {
+        return Err(anyhow!(
+            "keystore KDF parameters exceed the allowed maximum"
+        ));
+    }
+    let salt = B64
+        .decode(&envelope.salt)
+        .map_err(|e| anyhow!("unreadable keystore salt: {}", e))?;
+    let nonce = B64
+        .decode(&envelope.nonce)
+        .map_err(|e| anyhow!("unreadable keystore nonce: {}", e))?;
+    if nonce.len() != 24 {
+        return Err(anyhow!("the keystore nonce must hold 24 bytes"));
+    }
+    let ct = B64
+        .decode(&envelope.ct)
+        .map_err(|e| anyhow!("unreadable keystore ciphertext: {}", e))?;
+    let key = derive_key(passphrase, &salt, envelope.m, envelope.t, envelope.p)?;
+    let mut plain = Zeroizing::new(
+        XChaCha20Poly1305::new(key.as_ref().into())
+            .decrypt(XNonce::from_slice(&nonce), ct.as_slice())
+            .map_err(|_| anyhow!("wrong passphrase or corrupt keystore"))?,
+    );
+    String::from_utf8(std::mem::take(&mut *plain))
+        .map(Zeroizing::new)
+        .map_err(|_| anyhow!("the keystore does not hold UTF-8 text"))
+}
+
+/// True for a keystore in the legacy format, which nothing writes any more.
+/// The next save after an unlock rewrites it in format version 2.
+pub fn is_legacy_keystore(cipher: &str) -> bool {
+    !cipher.trim().is_empty() && !cipher.trim_start().starts_with('{')
+}
+
+/// Re-encrypts a keystore in the legacy format, so tests can reproduce files that older
+/// executors left behind.
+#[cfg(test)]
+pub(crate) fn reencrypt_as_legacy(cipher: &str, passphrase: &str) -> String {
+    let plain = decrypt(cipher, passphrase).expect("the test keystore decrypts");
+    legacy::encrypt(&plain, passphrase)
+}
+
+/// Keystore format 1, kept only to read existing files. Its key came from the first 24
+/// bytes of the passphrase alone (the Argon2 output never reached it), and every write
+/// reused a zero nonce.
+mod legacy {
+    use super::B64;
+    use argon2::password_hash::Salt;
+    use argon2::{Argon2, PasswordHasher};
+    use base64::Engine;
+    use crypto_box::aead::Aead;
+    use crypto_box::{Nonce, PublicKey, SalsaBox, SecretKey};
+    use deno_core::anyhow::anyhow;
+    use deno_core::error::AnyError;
+    use zeroize::Zeroizing;
+
+    pub(super) fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
+        let mut array = [0u8; 32];
+        for (i, byte) in slice.iter().take(32).enumerate() {
             array[i] = *byte;
         }
         array
-    } else {
-        let array: [u8; 32] = slice.try_into().expect("slice with incorrect length");
-        array
     }
-}
 
-fn padded(passphrase: String) -> String {
-    let mut passphrase = passphrase.clone();
-    while passphrase.len() < 32 {
-        passphrase.push(' ');
+    /// Pads to 32 bytes (not characters), exactly as the legacy writer did.
+    fn padded(passphrase: &str) -> String {
+        let mut padded = passphrase.to_string();
+        while padded.len() < 32 {
+            padded.push(' ');
+        }
+        padded
     }
-    passphrase
-}
 
-fn encrypt(payload: String, passphrase: String) -> String {
-    let passphrase = padded(passphrase);
-    let b64_passphrase =
-        base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
-    let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
+    fn salsa_box(passphrase: &str) -> Result<SalsaBox, AnyError> {
+        let passphrase = padded(passphrase);
+        let b64_passphrase = B64.encode(passphrase.as_bytes());
+        // Fails for passphrases over 48 bytes; the legacy writer never produced such a file.
+        let salt = Salt::from_b64(&b64_passphrase)
+            .map_err(|_| anyhow!("wrong passphrase or corrupt keystore"))?;
+        let derived = Argon2::default()
+            .hash_password(passphrase.as_bytes(), salt)
+            .map_err(|e| anyhow!("legacy keystore key derivation failed: {}", e))?
+            .to_string()
+            .replace("$argon2id$v=19$m=19456,t=2,p=1$", "");
+        let secret_key = SecretKey::from(slice_to_u8_array(derived.as_bytes()));
+        let public_key = PublicKey::from(&secret_key);
+        Ok(SalsaBox::new(&public_key, &secret_key))
+    }
 
-    // Derive secret key from passphrase
-    let argon2 = Argon2::default();
-    //NOTE: we need to be sure to enforce min password size so we ensure that we will always get 32 bytes to work from
-    let derived_secret_key = argon2
-        .hash_password(passphrase.as_bytes(), salt)
-        .unwrap()
-        .to_string();
+    pub(super) fn decrypt(cipher: &str, passphrase: &str) -> Result<Zeroizing<String>, AnyError> {
+        let bytes = B64
+            .decode(cipher.as_bytes())
+            .map_err(|e| anyhow!("unreadable legacy keystore: {}", e))?;
+        let plain = salsa_box(passphrase)?
+            .decrypt(&Nonce::default(), bytes.as_slice())
+            .map_err(|_| anyhow!("wrong passphrase or corrupt keystore"))?;
+        String::from_utf8(plain)
+            .map(Zeroizing::new)
+            .map_err(|_| anyhow!("the keystore does not hold UTF-8 text"))
+    }
 
-    let preambel = "$argon2id$v=19$m=19456,t=2,p=1$";
-    let derived_secret_key = derived_secret_key.replace(preambel, "");
-
-    let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let slice = slice_to_u8_array(derived_secret_key_bytes);
-    let secret_key = cSecretKey::from(slice);
-    let public_key = cPublicKey::from(&secret_key);
-
-    // Create the Box (encryptor/decryptor) using the derived secret key and the public key
-    let crypto_box = SalsaBox::new(&public_key, &secret_key);
-
-    //let nonce = SalsaBox::generate_nonce(&mut OsRng);
-    //let nonce: GenericArray<u8, _> = [0u8; 24].into();
-    let nonce = Nonce::default();
-
-    // Encrypt
-    let encrypted_data = crypto_box.encrypt(&nonce, payload.as_bytes()).unwrap();
-
-    base64::engine::general_purpose::STANDARD_NO_PAD.encode(encrypted_data)
-}
-
-fn decrypt(payload: String, passphrase: String) -> Result<String, crypto_box::aead::Error> {
-    let passphrase = padded(passphrase);
-    let b64_passphrase =
-        base64::engine::general_purpose::STANDARD_NO_PAD.encode(passphrase.as_bytes());
-    let salt = Salt::from_b64(&b64_passphrase).expect("salt from passphrase to work");
-
-    // Derive secret key from passphrase
-    let argon2 = Argon2::default();
-    let derived_secret_key = argon2
-        .hash_password(passphrase.as_bytes(), salt)
-        .unwrap()
-        .to_string();
-
-    let preambel = "$argon2id$v=19$m=19456,t=2,p=1$";
-    let derived_secret_key = derived_secret_key.replace(preambel, "");
-    let derived_secret_key_bytes = derived_secret_key.as_bytes();
-    let slice = slice_to_u8_array(derived_secret_key_bytes);
-    let secret_key = cSecretKey::from(slice);
-    let public_key = cPublicKey::from(&secret_key);
-
-    // Create the Box (encryptor/decryptor) using the derived secret key and the public key
-    let crypto_box = SalsaBox::new(&public_key, &secret_key);
-
-    //Pretty sure this not gonna work since this will be a different nonce to what is generated on encrypt
-    let nonce = Nonce::default();
-
-    let payload_bytes = base64::engine::general_purpose::STANDARD_NO_PAD
-        .decode(payload.as_bytes())
-        .expect("Could not decode payload");
-
-    // Decrypt
-    let decrypted_data = crypto_box
-        .decrypt(&nonce, payload_bytes.as_slice())
-        .map(|data| String::from_utf8(data).expect("decrypted array to be a string"));
-
-    decrypted_data
+    /// Writes the legacy format, so tests can build files that older executors left behind.
+    #[cfg(test)]
+    pub(super) fn encrypt(payload: &str, passphrase: &str) -> String {
+        let ct = salsa_box(passphrase)
+            .expect("legacy test passphrases stay within 48 bytes")
+            .encrypt(&Nonce::default(), payload.as_bytes())
+            .expect("encryption does not fail");
+        B64.encode(ct)
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -239,16 +339,18 @@ impl Wallet {
 
     pub fn lock(&mut self, passphrase: String) {
         if let Some(keys) = &self.keys {
-            let string = serde_json::to_string(&keys).unwrap();
-            let encrypted = encrypt(string, passphrase);
-            self.cipher = Some(encrypted);
+            let string = Zeroizing::new(serde_json::to_string(&keys).unwrap());
+            self.cipher = Some(encrypt(&string, &passphrase));
             self.keys = None;
         }
     }
 
     pub fn unlock(&mut self, passphrase: String) -> Result<(), AnyError> {
-        let string = decrypt(self.cipher.clone().expect("No cypher selected"), passphrase)
-            .map_err(|err| anyhow!(err))?;
+        let cipher = self
+            .cipher
+            .as_deref()
+            .ok_or_else(|| anyhow!("no keystore loaded"))?;
+        let string = decrypt(cipher, &passphrase)?;
         let keys: Keys = serde_json::from_str(&string)?;
         self.keys = Some(keys);
         Ok(())
@@ -260,8 +362,8 @@ impl Wallet {
 
     pub fn export(&mut self, passphrase: String) -> String {
         if let Some(keys) = &self.keys {
-            let string = serde_json::to_string(keys).unwrap();
-            let encrypted = encrypt(string, passphrase);
+            let string = Zeroizing::new(serde_json::to_string(keys).unwrap());
+            let encrypted = encrypt(&string, &passphrase);
             self.cipher = Some(encrypted.clone());
             encrypted
         } else {
@@ -754,11 +856,11 @@ mod tests {
             1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24,
             25, 26, 27, 28, 29, 30, 31, 32,
         ];
-        let result = slice_to_u8_array(slice);
+        let result = legacy::slice_to_u8_array(slice);
         assert_eq!(slice, &result);
 
         let slice_short: &[u8] = &[1, 2, 3];
-        let result = slice_to_u8_array(slice_short);
+        let result = legacy::slice_to_u8_array(slice_short);
         let expected: [u8; 32] = [
             1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             0, 0, 0,
@@ -770,19 +872,15 @@ mod tests {
     fn test_encrypt_decrypt_multiple() {
         let passphrase = "test".to_string();
         let payload = "test".to_string();
-        let encrypted = encrypt(payload.clone(), passphrase.clone());
-        println!("Got encrypted: {}", encrypted);
-        let decrypted = decrypt(encrypted, passphrase);
-        println!("Got decrypted: {:?}", decrypted);
-        assert_eq!(payload, decrypted.unwrap());
+        let encrypted = encrypt(&payload, &passphrase);
+        let decrypted = decrypt(&encrypted, &passphrase);
+        assert_eq!(payload, *decrypted.unwrap());
 
         let passphrase = "test".to_string();
         let payload = "test".to_string();
-        let encrypted = encrypt(payload.clone(), passphrase.clone());
-        println!("Got encrypted: {}", encrypted);
-        let decrypted = decrypt(encrypted, passphrase);
-        println!("Got decrypted: {:?}", decrypted);
-        assert_eq!(payload, decrypted.unwrap());
+        let encrypted = encrypt(&payload, &passphrase);
+        let decrypted = decrypt(&encrypted, &passphrase);
+        assert_eq!(payload, *decrypted.unwrap());
     }
 
     #[test]
@@ -790,11 +888,133 @@ mod tests {
         let passphrase = "test_passphrase".to_string();
         let wrong_passphrase = "wrong_passphrase".to_string();
         let payload = "test_payload".to_string();
-        let encrypted = encrypt(payload.clone(), passphrase.clone());
-        println!("Got encrypted: {}", encrypted);
+        let encrypted = encrypt(&payload, &passphrase);
         assert_ne!(payload, encrypted);
-        let decrypted = decrypt(encrypted, wrong_passphrase);
+        let decrypted = decrypt(&encrypted, &wrong_passphrase);
         assert!(decrypted.is_err());
+    }
+
+    fn wallet_with_a_key() -> Wallet {
+        let mut wallet = Wallet::new();
+        wallet.generate_keypair("main".to_string());
+        wallet
+    }
+
+    // Keystore format 1 derived its key from the first 24 bytes of the passphrase only,
+    // so a second passphrase with the same first 24 bytes opened the keystore.
+    #[test]
+    fn keystore_key_depends_on_the_whole_passphrase() {
+        let owner = "correct horse battery staple, first";
+        let other = "correct horse battery staple, other";
+        assert_eq!(owner.as_bytes()[..24], other.as_bytes()[..24]);
+        let cipher = wallet_with_a_key().export(owner.to_string());
+
+        let mut wallet = Wallet::new();
+        wallet.load(cipher);
+        assert!(wallet.unlock(other.to_string()).is_err());
+        assert!(wallet.unlock(owner.to_string()).is_ok());
+    }
+
+    // Format 1 reused one key and a zero nonce on every write, so two saves of the same
+    // keystore produced the same bytes, and two saves of different keystores leaked the
+    // XOR of their plaintexts.
+    #[test]
+    fn every_export_draws_a_fresh_salt_and_nonce() {
+        let mut wallet = wallet_with_a_key();
+        let first = wallet.export("passphrase".to_string());
+        let second = wallet.export("passphrase".to_string());
+        assert_ne!(first, second);
+        let first: KeystoreEnvelope = serde_json::from_str(&first).unwrap();
+        let second: KeystoreEnvelope = serde_json::from_str(&second).unwrap();
+        assert_ne!(first.salt, second.salt);
+        assert_ne!(first.nonce, second.nonce);
+    }
+
+    // Format 1 panicked for passphrases over 48 bytes, which crashed the executor.
+    #[test]
+    fn long_passphrases_lock_and_unlock() {
+        let passphrase = "a long passphrase made of many words. ".repeat(6);
+        assert!(passphrase.len() > 200);
+        let cipher = wallet_with_a_key().export(passphrase.clone());
+
+        let mut wallet = Wallet::new();
+        wallet.load(cipher);
+        assert!(wallet.unlock("short".to_string()).is_err());
+        assert!(wallet.unlock(passphrase).is_ok());
+    }
+
+    #[test]
+    fn keystore_records_its_format_and_kdf_parameters() {
+        let cipher = wallet_with_a_key().export("passphrase".to_string());
+        let envelope: KeystoreEnvelope = serde_json::from_str(&cipher).unwrap();
+        assert_eq!(envelope.v, KEYSTORE_VERSION);
+        assert_eq!(envelope.kdf, "argon2id");
+        assert_eq!(
+            (envelope.m, envelope.t, envelope.p),
+            (KDF_MEMORY_KIB, KDF_PASSES, KDF_LANES)
+        );
+        assert_eq!(B64.decode(&envelope.salt).unwrap().len(), 16);
+        assert_eq!(B64.decode(&envelope.nonce).unwrap().len(), 24);
+    }
+
+    #[test]
+    fn legacy_keystore_unlocks_and_exports_in_the_new_format() {
+        let keys = serde_json::to_string(wallet_with_a_key().keys.as_ref().unwrap()).unwrap();
+        let legacy_cipher = legacy::encrypt(&keys, "legacy passphrase");
+        assert!(is_legacy_keystore(&legacy_cipher));
+
+        let mut wallet = Wallet::new();
+        wallet.load(legacy_cipher);
+        assert!(wallet.unlock("wrong passphrase".to_string()).is_err());
+        wallet.unlock("legacy passphrase".to_string()).unwrap();
+        assert!(wallet.get_public_key(&"main".to_string()).is_some());
+
+        let migrated = wallet.export("legacy passphrase".to_string());
+        assert!(!is_legacy_keystore(&migrated));
+        let mut reloaded = Wallet::new();
+        reloaded.load(migrated);
+        reloaded.unlock("legacy passphrase".to_string()).unwrap();
+    }
+
+    #[test]
+    fn legacy_keystore_refuses_a_long_wrong_passphrase_without_panicking() {
+        let legacy_cipher = legacy::encrypt("{}", "legacy passphrase");
+        let mut wallet = Wallet::new();
+        wallet.load(legacy_cipher);
+        assert!(wallet.unlock("x".repeat(200)).is_err());
+    }
+
+    // Byte-based padding: a passphrase with multi-byte characters still opens a legacy file.
+    #[test]
+    fn legacy_keystore_with_a_non_ascii_passphrase_unlocks() {
+        let keys = serde_json::to_string(wallet_with_a_key().keys.as_ref().unwrap()).unwrap();
+        let legacy_cipher = legacy::encrypt(&keys, "pässwörd ☕");
+        let mut wallet = Wallet::new();
+        wallet.load(legacy_cipher);
+        wallet.unlock("pässwörd ☕".to_string()).unwrap();
+    }
+
+    #[test]
+    fn corrupt_or_tampered_keystores_fail_without_panicking() {
+        for cipher in ["not base64 at all!", "{\"v\":2}", "{not json"] {
+            let mut wallet = Wallet::new();
+            wallet.load(cipher.to_string());
+            assert!(
+                wallet.unlock("passphrase".to_string()).is_err(),
+                "{}",
+                cipher
+            );
+        }
+
+        let cipher = wallet_with_a_key().export("passphrase".to_string());
+        let mut envelope: KeystoreEnvelope = serde_json::from_str(&cipher).unwrap();
+        envelope.m = KDF_MEMORY_KIB_MAX + 1;
+        let mut wallet = Wallet::new();
+        wallet.load(serde_json::to_string(&envelope).unwrap());
+        assert!(wallet.unlock("passphrase".to_string()).is_err());
+
+        let mut wallet = Wallet::new();
+        assert!(wallet.unlock("passphrase".to_string()).is_err());
     }
 
     #[test]

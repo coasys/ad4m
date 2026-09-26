@@ -68,6 +68,7 @@ dependencies = [
  "axum-server",
  "base64 0.21.7",
  "candle-core",
+ "chacha20poly1305",
  "chat-gpt-lib-rs",
  "chrono",
  "cid",
@@ -163,6 +164,7 @@ dependencies = [
  "voice_activity_detector",
  "webbrowser",
  "x509-parser 0.16.0",
+ "zeroize",
  "zip 0.6.6",
 ]
 
