@@ -328,7 +328,9 @@ export async function startExecutor(dataPath: string,
                 recentOutput.join('\n'),
             ));
         };
-        const onExit = (code: number | null, signal: NodeJS.Signals | null) =>
+        // 'close', not 'exit': 'exit' can fire while the pipes still hold the
+        // executor's last lines, which are the ones that say why it died.
+        const onClose = (code: number | null, signal: NodeJS.Signals | null) =>
             fail(`exited before it was ready (code ${code}, signal ${signal})`);
         const onError = (error: Error) => fail(`could not be started: ${error.message}`);
         const timer = setTimeout(() => {
@@ -336,14 +338,14 @@ export async function startExecutor(dataPath: string,
             executorProcess!.kill('SIGKILL');
             fail(`was not ready after ${EXECUTOR_STARTUP_TIMEOUT_MS / 1000} s`);
         }, EXECUTOR_STARTUP_TIMEOUT_MS);
-        executorProcess!.once('exit', onExit);
+        executorProcess!.once('close', onClose);
         executorProcess!.once('error', onError);
 
         const maybeResolve = () => {
             if (!resolved && apiReady && mcpReady) {
                 resolved = true;
                 clearTimeout(timer);
-                executorProcess!.off('exit', onExit);
+                executorProcess!.off('close', onClose);
                 executorProcess!.off('error', onError);
                 resolve();
             }
