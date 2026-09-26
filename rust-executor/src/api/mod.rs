@@ -186,9 +186,11 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         };
 
         let addr = SocketAddr::from((address, port));
-        log::info!("API server starting on http://{}/api/v1", addr);
-
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        // Log after the bind, not before it: test harnesses (tests/js/utils
+        // startExecutor) treat this line as "the API accepts connections",
+        // and a client that connected on the pre-bind line got ECONNREFUSED.
+        log::info!("API server starting on http://{}/api/v1", addr);
         axum::serve(listener, app.into_make_service()).await?;
     }
 
