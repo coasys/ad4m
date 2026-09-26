@@ -77,13 +77,24 @@ pub fn insert_app(
     Ok(())
 }
 
-pub fn revoke_app(request_key: &str) -> Result<(), String> {
+/// Revokes the app that `token_or_request_id` names: its request id, which the SDK sends, or
+/// its JWT, which the RPC's field name (`token`) promises. A value that names no app is an
+/// error: a revoke that reports success and revokes nothing ends the search for a leak
+/// (#1060).
+pub fn revoke_app(token_or_request_id: &str) -> Result<(), String> {
     let mut apps = APPS.lock().map_err(|e| e.to_string())?;
-    if let Some(app) = apps.get_mut(request_key) {
-        app.revoked = true;
-        persist_apps_to_file(&apps).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    let key = if apps.contains_key(token_or_request_id) {
+        Some(token_or_request_id.to_string())
+    } else {
+        apps.iter()
+            .find(|(_, app)| crate::utils::constant_time_eq(&app.token, token_or_request_id))
+            .map(|(key, _)| key.clone())
+    };
+    let Some(app) = key.and_then(|key| apps.get_mut(&key)) else {
+        return Err("No app matches this token or request id".to_string());
+    };
+    app.revoked = true;
+    persist_apps_to_file(&apps).map_err(|e| e.to_string())
 }
 
 pub fn remove_app(request_key: &str) -> Result<(), String> {

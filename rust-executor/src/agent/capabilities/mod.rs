@@ -116,8 +116,12 @@ pub struct TokenCheck {
 }
 
 impl TokenCheck {
-    /// The admin credential, the empty token and a token that does not decode carry no
-    /// expiry: the capability check already limits what they reach.
+    /// `expires_at` stays `None` in two different cases. The admin credential and the empty
+    /// token never expire. A token that does not decode got no capabilities when the
+    /// connection opened, so every capability check refuses it; `None` there does not mean
+    /// "never expires", and a caller that skips the capability check must not read it so.
+    /// (Failing it here instead would turn a wallet that was locked at connect time into a
+    /// 401 on every request, even on calls that check no capability.)
     pub fn new(token: &str, is_admin_credential: bool) -> Self {
         let expires_at = if is_admin_credential || token.is_empty() {
             None

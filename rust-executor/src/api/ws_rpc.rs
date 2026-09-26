@@ -428,7 +428,11 @@ mod socket_tests {
 
     /// Sends one request and returns its reply, skipping pushed events.
     async fn call(ws: &mut Client, id: &str, op: &str) -> Value {
-        let request = json!({"id": id, "type": op, "params": {}}).to_string();
+        call_with(ws, id, op, json!({})).await
+    }
+
+    async fn call_with(ws: &mut Client, id: &str, op: &str, params: Value) -> Value {
+        let request = json!({"id": id, "type": op, "params": params}).to_string();
         ws.send(WsMessage::Text(request.into())).await.unwrap();
         loop {
             let frame = tokio::time::timeout(Duration::from_secs(10), ws.next())
@@ -457,7 +461,7 @@ mod socket_tests {
     }
 
     // revokeToken() used to leave open connections working: the token was checked at the
-    // upgrade only.
+    // upgrade only. The operator revokes through the RPC, by the app's JWT (#1060).
     #[tokio::test]
     async fn a_token_revoked_mid_connection_gets_401_and_the_socket_closes() {
         let addr = start_server().await;
@@ -482,7 +486,15 @@ mod socket_tests {
         let before = call(&mut ws, "1", "agent.status").await;
         assert_ne!(before["error"]["code"], 401, "{before}");
 
-        apps_map::revoke_app(&request_key).unwrap();
+        let mut operator = connect(addr, ADMIN).await;
+        let revoked = call_with(
+            &mut operator,
+            "revoke",
+            "agent.revokeToken",
+            json!({ "token": token }),
+        )
+        .await;
+        assert!(revoked.get("error").is_none(), "{revoked}");
         let after = call(&mut ws, "2", "agent.status").await;
         assert_eq!(after["error"]["code"], 401, "{after}");
         assert_eq!(close_code(&mut ws).await, Some(CLOSE_TOKEN_ENDED));
