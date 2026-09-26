@@ -21,7 +21,7 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification`| perspective owner      | Notification triggered               |
+//! | `notification-triggered`      | `notification`| notification owner     | Notification triggered               |
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -161,8 +161,8 @@ pub(crate) async fn build_event_stream(
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
-    let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
+    let notification_email = user_email.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
@@ -370,15 +370,26 @@ pub(crate) async fn build_event_stream(
         "message-received",
         "message"
     );
-    let s_notif = did_stream_nested!(
-        pubsub
+    // Keyed on the session's user email, not its DID: a notification records
+    // its owner by email, and a main-agent session has no email at all.
+    let s_notif = {
+        let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
-            .await,
-        "notification-triggered",
-        "notification",
-        d_notif,
-        matches_notification_owner
-    );
+            .await;
+        BroadcastStream::new(rx)
+            .filter_map(|r| async { handle_broadcast_result(r) })
+            .filter_map(move |result| {
+                let email = notification_email.clone();
+                async move {
+                    match result {
+                        Ok(ref msg) if matches_notification_owner(msg, email.as_deref()) => Some(
+                            wrap_event_nested("notification-triggered", "notification", msg),
+                        ),
+                        _ => None,
+                    }
+                }
+            })
+    };
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
         "exception-occurred",
@@ -679,21 +690,14 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
     }
 }
 
-pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map
-                    .get("perspectiveId")
-                    .or_else(|| map.get("perspective_id"))
-                {
-                    return perspective_is_owned_by(uuid, did);
-                }
-            }
-            true
-        }
-    }
+/// A triggered notification carries its owner's trigger matches and webhook
+/// secret, so only the owner's sessions receive it: the managed user named in
+/// `notification.userEmail`, or main-agent sessions (no user email) when that
+/// is null. The perspective's other owners do not. A malformed event reaches
+/// nobody.
+pub(crate) fn matches_notification_owner(msg: &str, session_email: Option<&str>) -> bool {
+    serde_json::from_str::<crate::types::TriggeredNotification>(msg)
+        .is_ok_and(|event| event.notification.user_email.as_deref() == session_email)
 }
 
 pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
@@ -1131,4 +1135,54 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod notification_owner_filter_tests {
+    //! A triggered notification carries the owner's trigger matches and
+    //! webhook secret, so only the owner's sessions may receive it.
+    use super::matches_notification_owner;
+    use crate::types::{Notification, TriggeredNotification};
+
+    fn event(owner: Option<&str>) -> String {
+        serde_json::to_string(&TriggeredNotification {
+            notification: Notification {
+                id: "notification".to_string(),
+                granted: true,
+                description: String::new(),
+                app_name: String::new(),
+                app_url: String::new(),
+                app_icon_path: String::new(),
+                trigger: String::new(),
+                perspective_ids: vec!["perspective".to_string()],
+                webhook_url: String::new(),
+                webhook_auth: "secret".to_string(),
+                user_email: owner.map(str::to_string),
+            },
+            perspective_id: "perspective".to_string(),
+            trigger_match: "[]".to_string(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn triggered_notification_reaches_only_its_owners_sessions() {
+        let main_agents = event(None);
+        assert!(matches_notification_owner(&main_agents, None));
+        assert!(!matches_notification_owner(&main_agents, Some("alice@x")));
+
+        let alices = event(Some("alice@x"));
+        assert!(matches_notification_owner(&alices, Some("alice@x")));
+        assert!(!matches_notification_owner(&alices, Some("bob@x")));
+        assert!(!matches_notification_owner(&alices, None));
+    }
+
+    #[test]
+    fn malformed_event_reaches_nobody() {
+        assert!(!matches_notification_owner("not json", None));
+        assert!(!matches_notification_owner(
+            r#"{"perspectiveId":"p"}"#,
+            None
+        ));
+    }
 }

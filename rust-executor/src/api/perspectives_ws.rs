@@ -28,7 +28,7 @@ use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 /// `SharedDb`. Running it directly on the async request thread stalls the
 /// tokio runtime for the whole RPC round-trip. Wrap it in
 /// `spawn_blocking` so only a blocking-pool worker waits on the network.
-async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
+pub(crate) async fn get_perspective_or_404(uuid: &str) -> Result<PerspectiveInstance, WsRpcError> {
     if let Some(p) = get_perspective(uuid) {
         return Ok(p);
     }

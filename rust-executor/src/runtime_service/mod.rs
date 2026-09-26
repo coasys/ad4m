@@ -1,5 +1,6 @@
 use std::io::Read;
 use std::{fs::File, sync::Mutex};
+pub(crate) mod notification_access;
 pub mod runtime_service_extension;
 use std::sync::Arc;
 
@@ -180,8 +181,9 @@ impl RuntimeService {
         })
         .map_err(|e| e.to_string())?;
 
-        // For managed users (user_email is Some), auto-grant the notification
-        // Only the main agent (user_email is None) needs manual approval
+        // A managed user's notification is granted now: the caller has refused
+        // every perspective the user does not own (see `notification_access`).
+        // The main agent's notification waits for operator approval.
         if user_email.is_some() {
             let mut notification =
                 Ad4mDb::with_global_instance(|db| db.get_notification(notification_id.clone()))
