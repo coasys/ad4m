@@ -108,7 +108,7 @@ async fn create_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let controller = LanguageController::global_instance();
     let content_json: serde_json::Value =
         serde_json::from_str(&body.content).unwrap_or(Value::String(body.content));
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    let agent_context = AgentContext::from_request(&ctx);
 
     let url = controller
         .expression_create(&body.language_address, content_json, &agent_context)

@@ -390,6 +390,7 @@ async fn open_transcription_stream(
             body.model_id,
             body.params.map(|p| p.into()),
             ctx.auth_token.clone(),
+            ctx.is_admin_credential,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;

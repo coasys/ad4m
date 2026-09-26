@@ -25,7 +25,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::capabilities::*;
-use crate::agent::AgentService;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
@@ -59,13 +58,11 @@ pub async fn ws_rpc(
     let token = query.token.unwrap_or_default();
 
     // Build RequestContext once for the lifetime of this connection.
-    let capabilities = capabilities_from_token(token.clone(), state.admin_credential.clone());
     let is_admin = is_admin_credential_token(&token, &state.admin_credential);
-
-    let user_email = user_email_from_token(token.clone());
-    let user_did = user_email
-        .as_ref()
-        .and_then(|email| AgentService::get_user_did_by_email(email).ok());
+    let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
+        &token,
+        capabilities_from_token(token.clone(), state.admin_credential.clone()),
+    );
 
     // Per-connection base context.  The dispatcher clones this and
     // injects a fresh `cancel_token` for each in-flight request.
@@ -80,6 +77,11 @@ pub async fn ws_rpc(
     });
 
     ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token))
+}
+
+/// Whether a connection receives the agent's event stream: only with agent read access.
+pub(crate) fn may_receive_events(ctx: &RequestContext) -> bool {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).is_ok()
 }
 
 // ── Connection handler ──────────────────────────────────────────────────────
@@ -102,7 +104,14 @@ async fn handle_ws(
     let user_email_for_events = ctx.user_email.clone();
     let is_admin_for_events = ctx.is_admin_credential;
     let tx_events = tx.clone();
+    // Events carry the agent's data, so a connection receives them only with agent read
+    // access — the same rule as `/ws/events`. Without it (for example an unauthenticated
+    // socket on a node that has an admin credential), no event stream starts.
+    let may_read_events = may_receive_events(&ctx);
     tokio::spawn(async move {
+        if !may_read_events {
+            return;
+        }
         let event_stream = super::events_ws::build_event_stream(
             token_for_events,
             user_email_for_events,
@@ -225,9 +234,11 @@ async fn handle_ws(
         }
 
         tokio::spawn(async move {
-            // Re-check token revocation on every request so that
-            // revokeToken() takes effect immediately for existing connections.
-            if let Err(e) = check_token_revoked(&token_for_dispatch) {
+            // Re-check the token on every request: revokeToken() and token expiry
+            // take effect immediately for existing connections.
+            if let Err(e) =
+                check_token_still_valid(&token_for_dispatch, base_ctx.is_admin_credential)
+            {
                 // Remove the inflight entry BEFORE sending the terminal
                 // reply — same ordering as the normal-completion path
                 // below, and for the same reason: a `request.cancel`
@@ -286,5 +297,46 @@ async fn handle_ws(
     drop(tx);
     if let Err(e) = write_handle.await {
         log::error!("WS RPC writer task failed: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod event_gate_tests {
+    use super::*;
+
+    fn ctx(capabilities: Vec<Capability>) -> RequestContext {
+        RequestContext {
+            capabilities: Ok(capabilities),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+        }
+    }
+
+    // On a node with an admin credential, an empty token gets only these capabilities.
+    // Such a socket used to receive the main agent's event stream all the same.
+    #[test]
+    fn an_unauthenticated_socket_receives_no_events() {
+        let unauthenticated = ctx(vec![
+            AGENT_AUTH_CAPABILITY.clone(),
+            RUNTIME_USER_MANAGEMENT_READ_ENABLED_CAPABILITY.clone(),
+        ]);
+        assert!(!may_receive_events(&unauthenticated));
+    }
+
+    #[test]
+    fn sessions_with_agent_read_access_receive_events() {
+        assert!(may_receive_events(&ctx(vec![ALL_CAPABILITY.clone()])));
+        assert!(may_receive_events(&ctx(get_user_default_capabilities())));
+    }
+
+    #[test]
+    fn a_session_whose_token_failed_receives_no_events() {
+        let mut failed = ctx(vec![]);
+        failed.capabilities = Err("token expired".to_string());
+        assert!(!may_receive_events(&failed));
     }
 }

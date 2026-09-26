@@ -176,7 +176,12 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 delta_rx = None;
 
                 let sid = match service
-                    .open_transcription_stream(model_id.clone(), None, auth.auth_token.clone())
+                    .open_transcription_stream(
+                        model_id.clone(),
+                        None,
+                        auth.auth_token.clone(),
+                        auth.is_admin_credential,
+                    )
                     .await
                 {
                     Ok(id) => id,

@@ -107,6 +107,23 @@ pub fn check_token_revoked(token: &String) -> Result<(), String> {
     Ok(())
 }
 
+/// Re-validates a connection's token for one request.
+///
+/// The admin credential and the empty token carry no expiry. Any other token must still
+/// decode (signature and expiry) and must not have been revoked. Long-lived connections
+/// call this on every request: a token that expires or gets revoked mid-connection stops
+/// working at once, instead of reaching handlers that re-derive the agent from it and fall
+/// back to the node's main agent when it no longer decodes.
+pub fn check_token_still_valid(token: &str, is_admin_credential: bool) -> Result<(), String> {
+    check_token_revoked(&token.to_string())?;
+    if is_admin_credential || token.is_empty() {
+        return Ok(());
+    }
+    decode_jwt(token.to_string())
+        .map(|_| ())
+        .map_err(|e| format!("Unauthorized access: {}", e))
+}
+
 pub fn user_email_from_token(token: String) -> Option<String> {
     if token.is_empty() {
         return None;
@@ -579,5 +596,40 @@ mod tests {
 
         // Note: We can't easily test the multi-user mode grant of LOGIN and CREATE capabilities
         // without setting up the database, but the logic is tested by integration tests
+    }
+}
+
+#[cfg(test)]
+mod token_validity_tests {
+    use super::*;
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet};
+
+    // A connection used to check its token only when it opened. A token that expired
+    // mid-connection kept its capabilities, and handlers that re-derive the agent from the
+    // token fell back to the node's main agent once it no longer decoded.
+    #[test]
+    fn an_expired_token_stops_working_for_every_request() {
+        setup_wallet();
+        setup_agent();
+        let err =
+            check_token_still_valid(&expired_user_token("expired@example.org"), false).unwrap_err();
+        assert!(err.contains("Unauthorized"), "{err}");
+    }
+
+    #[test]
+    fn a_valid_token_keeps_working() {
+        setup_wallet();
+        setup_agent();
+        let token = crate::user_management::generate_user_jwt("valid@example.org", "test").unwrap();
+        assert!(check_token_still_valid(&token, false).is_ok());
+    }
+
+    #[test]
+    fn garbage_fails_and_the_admin_credential_and_empty_token_pass() {
+        setup_wallet();
+        setup_agent();
+        assert!(check_token_still_valid("not-a-jwt", false).is_err());
+        assert!(check_token_still_valid("the-admin-credential", true).is_ok());
+        assert!(check_token_still_valid("", false).is_ok());
     }
 }

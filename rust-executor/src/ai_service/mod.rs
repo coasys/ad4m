@@ -1994,11 +1994,15 @@ impl AIService {
         model_id: String,
         _params: Option<VoiceActivityParams>,
         auth_token: String,
+        is_admin_credential: bool,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
 
-        // Extract user email from token for billing and ownership tracking
-        let user_email = crate::agent::capabilities::user_email_from_token(auth_token.clone());
+        // The stream's owner, for billing, ownership and event filtering. A token that no
+        // longer decodes opens no stream.
+        let agent_context =
+            crate::agent::AgentContext::from_auth_token(auth_token, is_admin_credential)?;
+        let user_email = agent_context.user_email.clone();
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -2049,10 +2053,9 @@ impl AIService {
         let billing_email = user_email.clone();
         let billing_model_id = model_id.clone();
 
-        // Resolve user DID for SSE event filtering (multi-user isolation)
-        let user_did =
-            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(auth_token))
-                .ok();
+        // Resolve user DID for SSE event filtering (multi-user isolation). Text without an
+        // owner DID would reach every session, so the stream does not open without one.
+        let user_did = Some(crate::agent::did_for_context(&agent_context)?);
 
         // Clone the streams map so the thread can remove itself on exit
         let streams_map = self.transcription_streams.clone();
@@ -2323,9 +2326,10 @@ impl AIService {
         model_id: String,
         samples: Vec<f32>,
         auth_token: String,
+        is_admin_credential: bool,
     ) -> Result<String> {
         let stream_id = self
-            .open_transcription_stream(model_id, None, auth_token.clone())
+            .open_transcription_stream(model_id, None, auth_token.clone(), is_admin_credential)
             .await?;
 
         // Subscribe to the broadcast BEFORE feeding so we don't drop any
