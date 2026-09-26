@@ -370,3 +370,58 @@ async fn a_grant_made_before_the_vote_by_an_accepted_author_settles_the_edge() {
     g.mint_one().await;
     assert_eq!(g.derived().await.state, "scoped", "self-granted role");
 }
+
+/// "Self-nominate or admin-appoint": the rule accepts `owner` links from the
+/// grantee or from admin. Admin appoints the voter before the vote, on a role
+/// instance the voter never wrote on, and the appointment alone is the grant.
+/// Both spellings are pinned: the translator collapses the `or` arms into the
+/// `in` list, so the two must date alike.
+///
+/// Red on 1159's first head (bb73a7644): any author condition that merely
+/// contained `$did` also required a link the grantee wrote on the instance,
+/// so admin's appointment granted nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_admin_appointment_under_a_self_or_admin_rule_grants() {
+    const ROLE_TASK: &str = "ad4m://task/role";
+    let admin = TestSigner::generate();
+    let shapes = [
+        (
+            "or arms",
+            serde_json::json!({
+                "className": "ns://Task",
+                "didProperty": "owner",
+                "or": [
+                    { "className": "ns://Task", "where": { "author": "$did" } },
+                    { "className": "ns://Task", "where": { "author": admin.did } },
+                ],
+            }),
+        ),
+        (
+            "in list",
+            serde_json::json!({
+                "className": "ns://Task",
+                "didProperty": "owner",
+                "where": { "author": { "in": ["$did", admin.did] } },
+            }),
+        ),
+    ];
+    for (shape, from_role) in shapes {
+        let mut f = seed_satisfied_fixture(None).await;
+        let me = acting_did(&f);
+        for (predicate, target) in [
+            ("ns://type", "ns://task".to_string()),
+            ("ns://title", literal("Reviewer seat")),
+            ("ns://owner", literal(&me)),
+        ] {
+            sync_signed_at(&mut f, &admin, ROLE_TASK, predicate, &target, long_ago()).await;
+        }
+        set_consensus_rule(&mut f, "delivery://Delivery.scoped", &rule(from_role)).await;
+        tick().await;
+        f.mint_one().await;
+        assert_eq!(
+            f.derived().await.state,
+            "scoped",
+            "{shape}: admin appointed the voter before the vote, which the rule accepts"
+        );
+    }
+}
