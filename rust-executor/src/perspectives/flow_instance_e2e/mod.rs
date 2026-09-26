@@ -33,6 +33,7 @@ use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff}
 
 mod cache_and_marks;
 mod content_addressed_uri;
+mod grant_dating;
 mod manual_path;
 mod outputs_commitment;
 mod produced_by;
