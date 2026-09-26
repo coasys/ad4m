@@ -413,6 +413,18 @@ pub struct VoiceActivityParams {
     pub time_before_speech: Option<u64>,
 }
 
+/// The owner of a new transcription stream: the caller's email (billing, ownership) and DID
+/// (event filtering). A caller whose token no longer works, or whose DID does not resolve,
+/// owns nothing and opens no stream: text without an owner DID would reach every session.
+fn transcription_stream_owner(
+    auth_token: String,
+    is_admin_credential: bool,
+) -> Result<(Option<String>, String)> {
+    let context = crate::agent::AgentContext::from_auth_token(auth_token, is_admin_credential)?;
+    let did = crate::agent::did_for_context(&context)?;
+    Ok((context.user_email, did))
+}
+
 impl AIService {
     pub fn new() -> Result<Self> {
         let service = AIService {
@@ -1997,12 +2009,7 @@ impl AIService {
         is_admin_credential: bool,
     ) -> Result<String> {
         let model_size = Self::get_whisper_model_size(model_id.clone())?;
-
-        // The stream's owner, for billing, ownership and event filtering. A token that no
-        // longer decodes opens no stream.
-        let agent_context =
-            crate::agent::AgentContext::from_auth_token(auth_token, is_admin_credential)?;
-        let user_email = agent_context.user_email.clone();
+        let (user_email, user_did) = transcription_stream_owner(auth_token, is_admin_credential)?;
 
         // MEMORY OPTIMIZATION: Load each Whisper model size ONCE and share across all streams using that size
         // Arc cloning is cheap (just increments ref count), saves 500MB-1.5GB per stream!
@@ -2053,9 +2060,7 @@ impl AIService {
         let billing_email = user_email.clone();
         let billing_model_id = model_id.clone();
 
-        // Resolve user DID for SSE event filtering (multi-user isolation). Text without an
-        // owner DID would reach every session, so the stream does not open without one.
-        let user_did = Some(crate::agent::did_for_context(&agent_context)?);
+        let user_did = Some(user_did);
 
         // Clone the streams map so the thread can remove itself on exit
         let streams_map = self.transcription_streams.clone();
@@ -3066,5 +3071,53 @@ mod tests {
         assert!(0.32 < 0.33, "Below threshold should be rejected");
         assert!(!(0.33 < 0.33), "At threshold should pass");
         assert!(!(0.50 < 0.33), "Above threshold should pass");
+    }
+}
+
+#[cfg(test)]
+mod transcription_owner_tests {
+    use super::transcription_stream_owner;
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    // A stream whose owner did not resolve used to open with a null owner DID, and the event
+    // filter delivers such text to every session.
+    #[test]
+    fn a_caller_whose_token_expired_opens_no_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = expired_user_token("expired@example.org");
+        assert!(transcription_stream_owner(token, false).is_err());
+    }
+
+    #[test]
+    fn a_user_without_a_key_opens_no_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token =
+            crate::user_management::generate_user_jwt("no.key.stream@example.org", "test").unwrap();
+        assert!(transcription_stream_owner(token, false).is_err());
+    }
+
+    #[test]
+    fn a_user_owns_their_stream_and_the_admin_credential_owns_as_the_node() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = "stream.owner@example.org";
+        crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+        let (user_email, did) = transcription_stream_owner(token, false).unwrap();
+        assert_eq!(user_email.as_deref(), Some(email));
+        assert_eq!(
+            did,
+            crate::agent::AgentService::get_user_did_by_email(email).unwrap()
+        );
+
+        let (admin_email, admin_did) =
+            transcription_stream_owner("the-admin-credential".to_string(), true).unwrap();
+        assert!(admin_email.is_none());
+        assert_eq!(admin_did, crate::agent::did());
     }
 }

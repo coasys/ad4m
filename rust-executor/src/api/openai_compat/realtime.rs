@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::capabilities::{check_capability, TokenCheck, AI_TRANSCRIBE_CAPABILITY};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::types::ModelType;
@@ -51,6 +51,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         let _ = socket.close().await;
         return;
     }
+    let token_check = TokenCheck::new(&auth.auth_token, auth.is_admin_credential);
 
     let mut stream_id: Option<String> = None;
     let mut delta_rx: Option<broadcast::Receiver<String>> = None;
@@ -96,6 +97,13 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
             Ev::Ws(None) | Ev::Ws(Some(Err(_))) => break,
             Ev::Ws(Some(Ok(m))) => m,
         };
+
+        // Check the token again on every client message: expiry and revokeToken() end the
+        // session, as they do on the RPC socket.
+        if let Err(e) = token_check.check() {
+            let _ = send_error(&mut socket, "unauthorized", &e).await;
+            break;
+        }
 
         let text = match msg {
             Message::Text(t) => t.to_string(),

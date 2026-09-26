@@ -93,57 +93,75 @@ pub fn check_capability(
     Ok(())
 }
 
-pub fn check_token_revoked(token: &String) -> Result<(), String> {
-    // Use constant-time comparison to prevent timing attacks
-    if let Some(app) = apps_map::get_apps()
-        .iter()
-        .find(|app| constant_time_eq(&app.token, token))
-    {
-        if app.revoked.unwrap_or(false) {
-            return Err("Unauthorized access".to_string());
-        }
-    };
-
+pub fn check_token_revoked(token: &str) -> Result<(), String> {
+    if apps_map::is_revoked(token) {
+        return Err("Unauthorized access".to_string());
+    }
     Ok(())
 }
 
-/// Re-validates a connection's token for one request.
+/// Seconds of clock skew that JWT validation allows (jsonwebtoken's default leeway).
+const TOKEN_EXPIRY_LEEWAY_SECONDS: u64 = 60;
+
+/// Checks a connection's token again on every request and event, without the wallet.
 ///
-/// The admin credential and the empty token carry no expiry. Any other token must still
-/// decode (signature and expiry) and must not have been revoked. Long-lived connections
-/// call this on every request: a token that expires or gets revoked mid-connection stops
-/// working at once, instead of reaching handlers that re-derive the agent from it and fall
-/// back to the node's main agent when it no longer decodes.
-pub fn check_token_still_valid(token: &str, is_admin_credential: bool) -> Result<(), String> {
-    check_token_revoked(&token.to_string())?;
-    if is_admin_credential || token.is_empty() {
-        return Ok(());
-    }
-    decode_jwt(token.to_string())
-        .map(|_| ())
-        .map_err(|e| format!("Unauthorized access: {}", e))
+/// The token's signature gets checked once, when the connection opens: its capabilities come
+/// from that check. After that, revocation and the expiry read at connect decide, so a token
+/// that expires or gets revoked during a connection stops working at once, and a locked
+/// wallet does not look like a bad token.
+#[derive(Clone)]
+pub struct TokenCheck {
+    token: String,
+    expires_at: Option<u64>,
 }
 
+impl TokenCheck {
+    /// The admin credential, the empty token and a token that does not decode carry no
+    /// expiry: the capability check already limits what they reach.
+    pub fn new(token: &str, is_admin_credential: bool) -> Self {
+        let expires_at = if is_admin_credential || token.is_empty() {
+            None
+        } else {
+            decode_jwt(token.to_string())
+                .ok()
+                .map(|claims| claims.expires_at())
+        };
+        Self {
+            token: token.to_string(),
+            expires_at,
+        }
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        check_token_revoked(&self.token)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX);
+        match self.expires_at {
+            Some(expires_at) if now > expires_at + TOKEN_EXPIRY_LEEWAY_SECONDS => {
+                Err("Unauthorized access: the token has expired".to_string())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_expiry(token: &str, expires_at: u64) -> Self {
+        Self {
+            token: token.to_string(),
+            expires_at: Some(expires_at),
+        }
+    }
+}
+
+/// The user a token names, if any. Only the login flows set `sub`, and a token keeps naming
+/// that user whatever the multi-user setting says, so a user token never acts as the node.
 pub fn user_email_from_token(token: String) -> Option<String> {
     if token.is_empty() {
         return None;
     }
-
-    // Check if multi-user mode is enabled - if not, never return a user context
-    use crate::db::Ad4mDb;
-    let multi_user_enabled =
-        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
-
-    if !multi_user_enabled {
-        return None;
-    }
-
-    // Try to decode JWT and extract user email from sub field
-    if let Ok(claims) = decode_jwt(token) {
-        claims.sub
-    } else {
-        None
-    }
+    decode_jwt(token).ok().and_then(|claims| claims.sub)
 }
 
 /// Update last_seen timestamp for the user from the auth token
@@ -602,34 +620,68 @@ mod tests {
 #[cfg(test)]
 mod token_validity_tests {
     use super::*;
-    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet};
+    use crate::test_utils::{setup_agent, setup_wallet};
 
-    // A connection used to check its token only when it opened. A token that expired
-    // mid-connection kept its capabilities, and handlers that re-derive the agent from the
-    // token fell back to the node's main agent once it no longer decoded.
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    // A connection used to check its token only when it opened, so a token that expired
+    // during a connection kept its capabilities.
     #[test]
-    fn an_expired_token_stops_working_for_every_request() {
-        setup_wallet();
-        setup_agent();
-        let err =
-            check_token_still_valid(&expired_user_token("expired@example.org"), false).unwrap_err();
-        assert!(err.contains("Unauthorized"), "{err}");
+    fn a_token_past_its_expiry_stops_working() {
+        let expired = TokenCheck::with_expiry("some-token", unix_now() - 3600);
+        let err = expired.check().unwrap_err();
+        assert!(err.contains("expired"), "{err}");
     }
 
     #[test]
-    fn a_valid_token_keeps_working() {
+    fn expiry_allows_the_same_leeway_as_jwt_validation() {
+        let just_expired = TokenCheck::with_expiry("some-token", unix_now() - 10);
+        assert!(just_expired.check().is_ok());
+    }
+
+    #[test]
+    fn a_valid_token_keeps_working_and_carries_its_expiry() {
         setup_wallet();
         setup_agent();
         let token = crate::user_management::generate_user_jwt("valid@example.org", "test").unwrap();
-        assert!(check_token_still_valid(&token, false).is_ok());
+        let check = TokenCheck::new(&token, false);
+        assert!(check.expires_at.is_some());
+        assert!(check.check().is_ok());
     }
 
     #[test]
-    fn garbage_fails_and_the_admin_credential_and_empty_token_pass() {
+    fn the_admin_credential_the_empty_token_and_garbage_carry_no_expiry() {
         setup_wallet();
         setup_agent();
-        assert!(check_token_still_valid("not-a-jwt", false).is_err());
-        assert!(check_token_still_valid("the-admin-credential", true).is_ok());
-        assert!(check_token_still_valid("", false).is_ok());
+        assert!(TokenCheck::new("the-admin-credential", true)
+            .check()
+            .is_ok());
+        assert!(TokenCheck::new("", false).check().is_ok());
+        // Garbage gets no capabilities at connect; the check adds nothing on top.
+        assert!(TokenCheck::new("not-a-jwt", false).expires_at.is_none());
+    }
+
+    // revokeToken() must end existing connections, not only new ones.
+    #[test]
+    fn a_revoked_app_token_stops_working() {
+        let dir = tempfile::tempdir().unwrap();
+        apps_map::set_data_file_path(dir.path().join("apps.json").to_string_lossy().into());
+        let token = format!("revoked-app-token-{}", uuid::Uuid::new_v4());
+        let request_key = format!("key-{}", uuid::Uuid::new_v4());
+        let app = AuthInfoExtended {
+            request_id: request_key.clone(),
+            auth: AuthInfo::default(),
+        };
+        apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        let check = TokenCheck::with_expiry(&token, unix_now() + 3600);
+        assert!(check.check().is_ok());
+        apps_map::revoke_app(&request_key).unwrap();
+        assert!(check.check().is_err());
+        apps_map::remove_app(&request_key).unwrap();
     }
 }

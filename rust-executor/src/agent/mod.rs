@@ -38,9 +38,10 @@ impl AgentContext {
     /// The agent a token acts as.
     ///
     /// The empty token, the admin credential and operator tokens act as the main agent. A user
-    /// token acts as its user in multi-user mode. Any other token, such as an expired or
-    /// unreadable one, acts as nobody: this returns an error, never the main agent. The caller
-    /// says whether the token is the admin credential, because only the caller knows it.
+    /// token acts as its user, whatever the multi-user setting says. Any other token, such as
+    /// an expired, revoked or unreadable one, acts as nobody: this returns an error, never the
+    /// main agent. The caller says whether the token is the admin credential, because only the
+    /// caller knows it.
     pub fn from_auth_token(
         auth_token: String,
         is_admin_credential: bool,
@@ -48,14 +49,9 @@ impl AgentContext {
         if is_admin_credential || auth_token.is_empty() {
             return Ok(Self::main_agent());
         }
+        capabilities::check_token_revoked(&auth_token).map_err(|e| anyhow!(e))?;
         let claims = capabilities::decode_jwt(auth_token)?;
-        let multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
-            db.get_multi_user_enabled().unwrap_or(false)
-        });
-        Ok(match claims.sub {
-            Some(user_email) if multi_user => Self::for_user_email(user_email),
-            _ => Self::main_agent(),
-        })
+        Ok(Self::for_session(claims.sub))
     }
 
     /// The agent a session acts as: the user it resolved at authentication, or the main agent
@@ -1045,21 +1041,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_agent_context_from_auth_token() {
-        // Test with empty token (main agent)
-        let empty_token = String::new();
-        let context = AgentContext::from_auth_token(empty_token, false).unwrap();
-        assert!(
-            context.is_main_agent,
-            "Empty token should result in main agent context"
-        );
-        assert!(
-            context.user_email.is_none(),
-            "Empty token should have no user email"
-        );
-    }
-
     // User key management tests
 
     #[test]
@@ -1430,7 +1411,7 @@ mod tests {
 
 #[cfg(test)]
 mod agent_context_tests {
-    use super::AgentContext;
+    use super::{capabilities, AgentContext};
     use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
 
     fn setup() {
@@ -1474,16 +1455,36 @@ mod agent_context_tests {
         assert!(empty.unwrap().is_main_agent);
     }
 
+    // A user token used to act as the node's main agent once multi-user mode read as off
+    // (switched off, or a failed read of the setting).
     #[test]
-    fn a_user_token_acts_as_the_main_agent_on_a_single_user_node() {
+    fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {
         setup();
         let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
         let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
-        assert!(
-            AgentContext::from_auth_token(token, false)
-                .unwrap()
-                .is_main_agent
+        let context = AgentContext::from_auth_token(token, false).unwrap();
+        assert!(!context.is_main_agent);
+        assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
+    }
+
+    #[test]
+    fn a_revoked_token_acts_as_nobody() {
+        setup();
+        let dir = tempfile::tempdir().unwrap();
+        capabilities::apps_map::set_data_file_path(
+            dir.path().join("apps.json").to_string_lossy().into(),
         );
+        let token =
+            crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
+        let request_key = format!("key-{}", uuid::Uuid::new_v4());
+        let app = capabilities::AuthInfoExtended {
+            request_id: request_key.clone(),
+            auth: capabilities::AuthInfo::default(),
+        };
+        capabilities::apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        capabilities::apps_map::revoke_app(&request_key).unwrap();
+        assert!(AgentContext::from_auth_token(token, false).is_err());
+        capabilities::apps_map::remove_app(&request_key).unwrap();
     }
 
     // Handlers and event streams take the user their session resolved at authentication.

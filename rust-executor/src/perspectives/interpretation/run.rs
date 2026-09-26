@@ -1092,12 +1092,14 @@ pub async fn run_interpretation_with_harness_and_model(
         .collect();
 
     // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — admin-credential from env (matches the /v1
-    // openai-compat path) + a fresh per-pass auth-token slot. Every existing
-    // MCP tool (`query_*`, `get_*`, subject/perspective tools) becomes
-    // visible to the LLM through `Ad4mToolProvider`.
+    // pass-scoped McpContext — the executor's configured admin credential (so
+    // an admin caller's token acts as the main agent, as on the RPC socket)
+    // + a fresh per-pass auth-token slot. Every existing MCP tool (`query_*`,
+    // `get_*`, subject/perspective tools) becomes visible to the LLM through
+    // `Ad4mToolProvider`.
     let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
+        admin_credential: crate::config::configured_admin_credential()
+            .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok()),
         auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
