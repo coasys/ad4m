@@ -53,15 +53,24 @@
 //!      accepts, the same function that decides who may revoke. The grant
 //!      counts from the earliest grant link.
 //!   2. **`author: "$did"`** (and `didProperty: "author"`, which says the
-//!      same). The grant is the instance itself, written by the grantee. It
-//!      counts from the earliest link on the instance, on a predicate the
-//!      class declares, whose signature verifies and whose author is the
-//!      candidate.
-//!   3. A rule with both counts from the later of the two: both must hold.
-//!   4. A rule with neither, or an instance where a kind the rule needs has
-//!      no qualifying link, grants nothing: the instance contributes no
-//!      window. Nothing else dates a grant, not the instance's own timestamp,
-//!      not a link from anyone the rule does not accept.
+//!      same), in a rule with no DID field. The grant is the instance
+//!      itself, written by the grantee. It counts from the earliest link on
+//!      the instance, on a predicate the class declares, whose signature
+//!      verifies and whose author is the candidate. The author condition
+//!      must be `$did` itself: `author: { in: ["$did", admin] }` is not.
+//!   3. A rule with a DID field is dated by rule 1 alone, even where it also
+//!      says `author: "$did"`. Rule 1 already accepts the grantee's own link
+//!      on the field when the author condition admits `$did`, and it must
+//!      also accept a link from any other granter the condition admits
+//!      (`author: { in: ["$did", admin] }`, or `or` arms `author: "$did"` /
+//!      `author: admin`, which the translator collapses into that list). So
+//!      in a rule whose `or` arms mix a DID field with a separate
+//!      `author: "$did"` arm, a candidate who matches only that arm is not
+//!      granted.
+//!   4. A rule with neither, or an instance with no qualifying link, grants
+//!      nothing: the instance contributes no window. Nothing else dates a
+//!      grant, not the instance's own timestamp, not a link from anyone the
+//!      rule does not accept.
 //!
 //!   Before #1063 the grant counted from the earliest link naming the DID
 //!   from any author, signed or not, and a rule with no `didProperty` fell
@@ -227,8 +236,8 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         None => None,
     };
 
-    // Under `author: "$did"` any link the grantee wrote on the instance can
-    // date the grant, so the role query asks for every predicate the class
+    // Under `author: "$did"` with no DID field any link the grantee wrote on
+    // the instance can date the grant, so the role query asks for every predicate the class
     // declares. Asked once per role; unused otherwise.
     let mut own_link_keys: Option<Vec<String>> = None;
 

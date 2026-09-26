@@ -1018,8 +1018,8 @@ mod tests {
             None
         );
 
-        // With a DID field as well, both must hold and the later one wins:
-        // Alice's own earliest link is at T1, her `agent` link at T3.
+        // With a DID field as well, the field alone dates it: Alice's own
+        // earliest link is at T1, but her `agent` link is at T3.
         let both = json!({ "className": "ns://Reviewer", "didProperty": "agent", "where": { "author": "$did" } });
         let early_own = role_link("rank", "lead", ALICE(), true, T1);
         let assignment = grant_link_by(ALICE(), ALICE(), T3);
@@ -1035,7 +1035,59 @@ mod tests {
         assert_eq!(
             alice_granted_at(both, Vec::new(), vec![early_own]),
             None,
-            "without the `agent` link one half is missing, so there is no grant"
+            "without the `agent` link there is no grant"
+        );
+    }
+
+    /// `$did` beside another granter is not a self-granted rule. With a DID
+    /// field, admin's `agent` link alone dates Alice's grant, in both
+    /// spellings of "Alice or admin" (the translator collapses the `or` arms
+    /// into the `in` list). Without one, `$did` in the list dates nothing,
+    /// like `$did` in any other `in` list.
+    #[test]
+    fn a_did_beside_another_granter_is_not_a_self_granted_rule() {
+        let in_list = json!({ "className": "ns://Reviewer", "didProperty": "agent",
+                              "where": { "author": { "in": ["$did", ADMIN()] } } });
+        let or_arms = json!({ "className": "ns://Reviewer", "didProperty": "agent", "or": [
+            { "className": "ns://Reviewer", "where": { "author": "$did" } },
+            { "className": "ns://Reviewer", "where": { "author": ADMIN() } } ] });
+        for (shape, rule) in [("in list", in_list), ("or arms", or_arms)] {
+            assert_eq!(
+                alice_granted_at(rule.clone(), vec![grant_link(ALICE(), T1)], Vec::new())
+                    .as_deref(),
+                Some(T1),
+                "{shape}: admin's appointment is the grant"
+            );
+            let own = grant_link_by(ALICE(), ALICE(), T2);
+            assert_eq!(
+                alice_granted_at(rule, vec![own.clone()], vec![own]).as_deref(),
+                Some(T2),
+                "{shape}: so is Alice's own `agent` link"
+            );
+        }
+
+        let no_field = json!({ "className": "ns://Reviewer",
+                               "where": { "author": { "in": ["$did", ADMIN()] }, "rank": "lead" } });
+        let by_alice = role_link("rank", "lead", ALICE(), true, T1);
+        assert_eq!(alice_granted_at(no_field, Vec::new(), vec![by_alice]), None);
+    }
+
+    /// `or` arms mixing a DID field with an `author: "$did"` arm are dated by
+    /// the DID field alone: a candidate matching only the `author: "$did"`
+    /// arm is not granted (fail closed, documented in `flows.mdx`).
+    #[test]
+    fn mixed_or_arms_are_dated_by_the_did_field_alone() {
+        let mixed = json!({ "className": "ns://Reviewer", "or": [
+            { "className": "ns://Reviewer", "didProperty": "agent" },
+            { "className": "ns://Reviewer", "where": { "author": "$did", "rank": "lead" } } ] });
+        let by_alice = role_link("rank", "lead", ALICE(), true, T1);
+        assert_eq!(
+            alice_granted_at(mixed.clone(), Vec::new(), vec![by_alice.clone()]),
+            None
+        );
+        assert_eq!(
+            alice_granted_at(mixed, vec![grant_link(ALICE(), T2)], vec![by_alice]).as_deref(),
+            Some(T2)
         );
     }
 
