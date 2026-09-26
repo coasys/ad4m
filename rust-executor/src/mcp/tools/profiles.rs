@@ -99,9 +99,15 @@ async fn update_agent_perspective(
         let agent_data = AgentService::get_user_agent_data(&user_email)
             .map_err(|e| format!("User agent not available: {}", e))?;
 
+        // Keep the user's DM language: this call updates only the perspective.
+        let direct_message_language = AgentService::with_global_instance(|agent_service| {
+            agent_service.load_user_agent_profile(&user_email)
+        })
+        .map_err(|e| format!("Failed to load user profile: {}", e))?
+        .and_then(|profile| profile.direct_message_language);
         let agent = Agent {
             did: agent_data.did,
-            direct_message_language: None,
+            direct_message_language,
             perspective: Some(Perspective { links }),
         };
 

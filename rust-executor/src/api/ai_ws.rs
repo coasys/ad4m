@@ -262,6 +262,8 @@ async fn get_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     } else {
         None
     };
+    // The default model is the one most likely to carry a key: same strip as `ai.models`.
+    let model = model.and_then(|model| models_for_session(vec![model], &ctx).pop());
 
     Ok(serde_json::to_value(model)?)
 }
@@ -597,6 +599,46 @@ mod model_key_tests {
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].api.as_ref().unwrap().api_key, "");
         assert_eq!(models[0].api.as_ref().unwrap().model, "gpt");
+    }
+
+    // Goes through the `ai.getDefaultModel` handler, which returned the stored model
+    // unfiltered.
+    #[tokio::test]
+    async fn user_sessions_get_the_default_model_without_its_provider_key() {
+        use crate::types::ModelApiInput;
+        Ad4mDb::init_global_instance(":memory:").unwrap();
+        let id = Ad4mDb::with_global_instance(|db| {
+            db.add_model(&ModelInput {
+                name: "Remote".to_string(),
+                api: Some(ModelApiInput {
+                    base_url: "https://api.example.org/v1".to_string(),
+                    api_key: "sk-provider-secret".to_string(),
+                    model: "gpt".to_string(),
+                    api_type: "OPEN_AI".to_string(),
+                    max_num_ctx: None,
+                }),
+                local: None,
+                model_type: ModelType::Llm,
+            })
+        })
+        .unwrap();
+        Ad4mDb::with_global_instance(|db| db.set_default_model(ModelType::Llm, &id)).unwrap();
+        let session = |user_email: Option<&str>| {
+            Arc::new(RequestContext {
+                capabilities: Ok(vec![AI_READ_CAPABILITY.clone()]),
+                ..ctx(user_email)
+            })
+        };
+        let params = serde_json::json!({ "modelType": "LLM" });
+
+        let user = get_default_model(params.clone(), session(Some("a@example.org")))
+            .await
+            .unwrap();
+        assert_eq!(user["id"], id.as_str());
+        assert_eq!(user["api"]["apiKey"], "");
+
+        let operator = get_default_model(params, session(None)).await.unwrap();
+        assert_eq!(operator["api"]["apiKey"], "sk-provider-secret");
     }
 
     #[test]

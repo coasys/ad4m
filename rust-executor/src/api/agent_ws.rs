@@ -251,8 +251,8 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
             let direct_message_language = AgentService::with_global_instance(|agent_service| {
                 agent_service.load_user_agent_profile(&user_email)
             })
-            .ok()
-            .flatten()
+            // A failed read must not look like "no DM language", or the store below drops it.
+            .map_err(|e| WsRpcError::internal(format!("Failed to load user profile: {}", e)))?
             .and_then(|profile| profile.direct_message_language);
             let agent = Agent {
                 did: agent_data.did,
