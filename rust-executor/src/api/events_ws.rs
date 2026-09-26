@@ -15,7 +15,7 @@
 //! | `perspective-added`           | (inline)      | owner DID              | New perspective created              |
 //! | `perspective-removed`         | (inline)      | owner DID              | Perspective deleted                  |
 //! | `perspective-updated`         | (inline)      | owner DID              | Perspective metadata updated         |
-//! | `sync-state-change`           | (inline)      | broadcast              | Neighbourhood sync state changed     |
+//! | `sync-state-change`           | (inline)      | perspective owners     | Neighbourhood sync state changed     |
 //! | `link-added`                  | (inline)      | owner DID              | Link added to perspective            |
 //! | `link-removed`                | (inline)      | owner DID              | Link removed from perspective        |
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
@@ -159,6 +159,7 @@ pub(crate) async fn build_event_stream(
     let d_persp_added = resolved_did.clone();
     let d_persp_removed = resolved_did.clone();
     let d_persp_updated = resolved_did.clone();
+    let d_sync = resolved_did.clone();
     let d_link_added = resolved_did.clone();
     let d_link_removed = resolved_did.clone();
     let d_link_updated = resolved_did.clone();
@@ -319,9 +320,11 @@ pub(crate) async fn build_event_stream(
         "perspective-updated",
         d_persp_updated
     );
-    let s_sync = broadcast_stream!(
+    let s_sync = did_stream!(
         pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
-        "sync-state-change"
+        "sync-state-change",
+        d_sync,
+        matches_sync_state_owner
     );
 
     // ── Link events ──
@@ -649,17 +652,40 @@ pub(crate) fn matches_agent_did(msg: &str, current_did: Option<&str>) -> bool {
     }
 }
 
-/// A capability request carries the request id that `agent.generateJwt` redeems, so only
-/// sessions that can approve apps receive it. Every other exception goes to every session.
+/// A capability request carries the request id that `agent.generateJwt` redeems, and a
+/// notification install request carries the webhook's credentials, so only sessions that can
+/// approve apps receive them. Every other exception goes to every session.
 pub(crate) fn exception_visible(msg: &str, can_approve_apps: bool) -> bool {
     if can_approve_apps {
         return true;
     }
     match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(exception) => {
-            exception.get("type").and_then(|t| t.as_str()) != Some("CAPABILITY_REQUESTED")
-        }
+        Ok(exception) => !matches!(
+            exception.get("type").and_then(|t| t.as_str()),
+            Some("CAPABILITY_REQUESTED" | "INSTALL_NOTIFICATION_REQUEST")
+        ),
         Err(_) => false,
+    }
+}
+
+/// A sync-state event carries the whole perspective record (owners, neighbourhood), so it
+/// reaches only sessions that may access the perspective: its owners, and the node's main
+/// agent for an unowned one. The same rule as `helpers::can_access_perspective`.
+pub(crate) fn matches_sync_state_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return false;
+    };
+    let Some(handle) = serde_json::from_str::<serde_json::Value>(msg)
+        .ok()
+        .and_then(|event| event.get("perspective").cloned())
+        .and_then(|p| serde_json::from_value::<crate::types::PerspectiveHandle>(p).ok())
+    else {
+        return false;
+    };
+    if handle.is_unowned() {
+        crate::agent::AgentService::with_global_instance(|agent| agent.did.as_deref() == Some(did))
+    } else {
+        handle.is_owned_by(did)
     }
 }
 
@@ -1166,6 +1192,43 @@ mod app_approval_event_tests {
         let request = exception(ExceptionType::CapabilityRequested);
         assert!(exception_visible(&request, true));
         assert!(!exception_visible(&request, false));
+    }
+
+    // Notification install requests carry the webhook's credentials.
+    #[test]
+    fn notification_install_requests_reach_only_sessions_that_can_approve_apps() {
+        let request = exception(ExceptionType::InstallNotificationRequest);
+        assert!(exception_visible(&request, true));
+        assert!(!exception_visible(&request, false));
+    }
+
+    // Sync-state events used to reach every session with the perspective's full record.
+    #[test]
+    fn sync_state_events_reach_only_the_perspectives_owners() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let event = |owners: Option<Vec<&str>>| {
+            serde_json::json!({
+                "perspective": {
+                    "uuid": "p-1",
+                    "state": "Synced",
+                    "owners": owners,
+                },
+                "state": "\"Synced\"",
+            })
+            .to_string()
+        };
+        let owned = event(Some(vec!["did:key:alice"]));
+        assert!(matches_sync_state_owner(&owned, Some("did:key:alice")));
+        assert!(!matches_sync_state_owner(&owned, Some("did:key:bob")));
+        assert!(!matches_sync_state_owner(&owned, None));
+
+        let main_did = crate::agent::AgentService::with_global_instance(|a| a.did.clone())
+            .expect("the test agent has a DID");
+        let unowned = event(None);
+        assert!(matches_sync_state_owner(&unowned, Some(&main_did)));
+        assert!(!matches_sync_state_owner(&unowned, Some("did:key:bob")));
+        assert!(!matches_sync_state_owner("not json", Some(&main_did)));
     }
 
     #[test]
