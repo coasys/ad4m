@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::flow_instance::pass::CAUGHT_UP_PREDICATE;
 use crate::perspectives::flow_instance::viewer_cache::sync_for_context;
 // ---------------------------------------------------------------------------
 // The cache is a cache
@@ -700,6 +701,87 @@ async fn a_minters_first_settle_is_reported_without_a_catch_up() {
     assert_eq!(outcomes[0].voters, vec![bob.did.clone()]);
     assert_eq!(outcomes[0].contributing_proposal_uris, vec![bobs]);
     assert!(consensus_pass(&mut f).await.is_empty(), "and only once");
+}
+
+/// The catch-up leaves a `Local` caught-up link, signed by the user, on the
+/// instance; that link, not the cache, is what makes the next pass report.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_catch_up_writes_the_users_own_local_caught_up_link() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+
+    let mut b = seed_review_flow().await;
+    receive_instance(&a, &mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1]).await;
+    assert!(consensus_pass(&mut b).await.is_empty(), "a silent catch-up");
+
+    let caught_up: Vec<_> = links_of(&b, &b.instance_uri)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some(CAUGHT_UP_PREDICATE))
+        .collect();
+    assert_eq!(caught_up.len(), 1, "one caught-up link: {caught_up:?}");
+    assert_eq!(caught_up[0].status, Some(LinkStatus::Local));
+    assert_eq!(caught_up[0].author, acting_did(&b));
+    assert_eq!(caught_up[0].data.target, acting_did(&b));
+}
+
+/// A co-owner cannot switch another user's catch-up off with a caught-up
+/// link either: neither one in her own name that points at the main agent,
+/// nor one that claims the main agent as its author over a signature that
+/// does not verify. The main agent's first pass is still a silent catch-up.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_planted_caught_up_link_does_not_switch_off_the_catch_up() {
+    let mut a = seed_review_flow().await;
+    let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
+    let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
+
+    let mut b = seed_review_flow().await;
+    receive_instance(&a, &mut b).await;
+    replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
+    let main_did = acting_did(&b);
+
+    let mallory = second_agent("mallory-caught-up@e2e.test");
+    b.perspective
+        .add_link(
+            Link {
+                source: b.instance_uri.clone(),
+                predicate: Some(CAUGHT_UP_PREDICATE.to_string()),
+                target: main_did.clone(),
+            },
+            LinkStatus::Local,
+            None,
+            &mallory,
+        )
+        .await
+        .expect("a co-owner may write a Local link of their own");
+    b.perspective
+        .add_link_expression(
+            LinkExpression {
+                author: main_did.clone(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                data: Link {
+                    source: b.instance_uri.clone(),
+                    predicate: Some(CAUGHT_UP_PREDICATE.to_string()),
+                    target: main_did.clone(),
+                },
+                proof: crate::types::ExpressionProof {
+                    key: format!("{main_did}#key"),
+                    signature: "not-a-signature".to_string(),
+                },
+                status: Some(LinkStatus::Local),
+            },
+            LinkStatus::Local,
+            None,
+        )
+        .await
+        .expect("store a Local link that claims the main agent as its author");
+
+    let first = consensus_pass(&mut b).await;
+    assert!(
+        first.is_empty(),
+        "the main agent never caught up: its first pass is silent, got {first:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------
