@@ -10,7 +10,9 @@ file; keep `CLAUDE.md` as `@AGENTS.md`.
 ## Build and test
 
 ```bash
-pnpm build                 # deno snapshot + cargo build --release (needed after any js_core/*.js change)
+pnpm build                 # deno snapshot + cargo build --release (needed after any js_core/*.js or
+                           # extension-list change; with a stale snapshot, deno_core panics at runtime
+                           # creation: "Extensions from snapshot loaded in wrong order")
 cargo build --release      # Rust-only change
 pnpm test                  # = cargo test --release -- --test-threads=1  (serial: global singletons)
 cargo test --release -- --test-threads=1 <name>   # one test

@@ -109,6 +109,27 @@ mod tests {
         );
     }
 
+    /// The wallet extension's JS installed `globalThis.WALLET`. A language runtime booted from
+    /// the embedded snapshot must not have it. This also catches a snapshot generated before
+    /// the extension went away.
+    #[tokio::test]
+    async fn a_language_runtime_has_no_wallet_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            "wallet-check".to_string(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        let wallet = runtime.execute("typeof globalThis.WALLET").await.unwrap();
+        assert!(wallet.contains("undefined"), "WALLET is {wallet}");
+        let signature = runtime
+            .execute("typeof globalThis.SIGNATURE")
+            .await
+            .unwrap();
+        assert!(signature.contains("object"), "SIGNATURE is {signature}");
+    }
+
     /// The legitimate signing path stays: languages sign through signature_service and
     /// act as their agent through agent_service.
     #[test]
