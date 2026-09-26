@@ -51,10 +51,10 @@
 //! instance, with no verified `Local` cache of their own on it yet, is a
 //! silent catch-up: it marks what has settled and writes
 //! the cache, and emits nothing. From then on the user *has* a cache, so
-//! every later pass reports normally. The invariant: **no event flood on
-//! join; no missed events for edges that settle after catch-up.** The user
-//! who mints an instance writes their cache at the mint, and a user whose
-//! first act on an instance is a vote catches up just before it
+//! every later pass reports normally. The aim: **no event flood on join; no
+//! missed events for edges that settle after catch-up.** The user who mints
+//! an instance writes their cache at the mint, and a user whose first act on
+//! an instance is a vote catches up just before it
 //! ([`catch_up_before_voting`]), so the edge their vote settles is reported.
 //!
 //! The evidence is the acting user's own cache, never another user's and
@@ -62,9 +62,30 @@
 //! `currentState` or mark with any value, so evidence someone else wrote
 //! would let them switch the catch-up off for everyone. The cost is that a
 //! user's first pass over an instance another user of this replica already
-//! derived is silent too; the edges it records were reported to that other
-//! user's pass, or settled before this user acted. See `first_pass_here` in
+//! derived is silent too. See `first_pass_here` in
 //! [`run_flow_consensus_pass`].
+//!
+//! **Two known gaps**, both in what is reported (outcomes go to logs and to
+//! propose/accept responses only; the state is unaffected):
+//!
+//! - *A co-owner's catch-up can mute an edge for everyone.* Catch-up is per
+//!   user, but marks are read per replica: any user's `Local` mark counts as
+//!   "already recorded". If an edge settles after user A caught up, and
+//!   co-owner B, who never derived the instance, passes before A does (the
+//!   sync sweep runs the owners in list order), B's silent catch-up marks the
+//!   edge and A's pass then finds it marked. Nobody on the replica reports
+//!   it. Pinned by the ignored test
+//!   `a_co_owners_catch_up_does_not_mute_an_edge_that_settles_later`.
+//!   Counting only the acting user's own marks fixes this, but also makes a
+//!   user's propose/accept `outcomes` list edges other users of the host
+//!   settled since that user's last pass, which the "non-empty outcomes =
+//!   your transition fired" reading of the response does not expect.
+//! - *A read before the first pass switches the catch-up off.* A
+//!   `FlowInstance` read writes the reader's cache and no marks
+//!   (`super::viewer_cache`), so a user who reads an instance with history
+//!   before their first pass over it gets that history reported as new.
+//!
+//! Both are tracked in <https://github.com/coasys/ad4m/issues/1152>.
 
 use super::{fold_read_set, FlowInstance};
 use crate::agent::AgentContext;
@@ -191,8 +212,9 @@ pub async fn run_flow_consensus_pass(
         // events that happened before this replica watched. The pass still
         // marks them and ALWAYS writes the cache — that is what makes the
         // next pass an ordinary one, so an edge settling afterwards is not
-        // missed. Invariant: no event flood on join; no missed events for
-        // edges that settle after catch-up.
+        // missed. Those marks count for every user of the replica, so a
+        // co-owner's catch-up can mute an edge for a user who was already
+        // watching (module doc, "Two known gaps").
         let own_cache = match local_cached_state(perspective, &record.instance_uri, &viewer_did)
             .await
         {
@@ -357,10 +379,9 @@ pub(crate) async fn local_cached_state(
 /// first act on an instance is a vote would take the edge that vote
 /// settles for history and report nothing. Deriving first records the
 /// history silently and writes the user's cache, so the pass after the vote
-/// reports exactly what the vote settled. Returns what this pass recorded
-/// as new, which is empty unless another user of this replica had already
-/// marked some of the history. A user who holds their own cache costs one
-/// cache read.
+/// reports exactly what the vote settled. Returns what that pass reports,
+/// which is nothing when it is a catch-up. A user who holds their own cache
+/// costs one cache read.
 pub(crate) async fn catch_up_before_voting(
     perspective: &mut PerspectiveInstance,
     instance_uri: &str,
