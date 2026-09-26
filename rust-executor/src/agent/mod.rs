@@ -35,13 +35,37 @@ pub struct AgentContext {
 }
 
 impl AgentContext {
-    /// Create AgentContext from auth token string
-    pub fn from_auth_token(auth_token: String) -> Self {
-        let user_email = capabilities::user_email_from_token(auth_token);
-        Self {
-            is_main_agent: user_email.is_none(),
-            user_email,
+    /// The agent a token acts as.
+    ///
+    /// The empty token, the admin credential and operator tokens act as the main agent. A user
+    /// token acts as its user, whatever the multi-user setting says. Any other token, such as
+    /// an expired, revoked or unreadable one, acts as nobody: this returns an error, never the
+    /// main agent. The caller says whether the token is the admin credential, because only the
+    /// caller knows it.
+    pub fn from_auth_token(
+        auth_token: String,
+        is_admin_credential: bool,
+    ) -> Result<Self, AnyError> {
+        if is_admin_credential || auth_token.is_empty() {
+            return Ok(Self::main_agent());
         }
+        capabilities::check_token_revoked(&auth_token).map_err(|e| anyhow!(e))?;
+        let claims = capabilities::decode_jwt(auth_token)?;
+        Ok(Self::for_session(claims.sub))
+    }
+
+    /// The agent a session acts as: the user it resolved at authentication, or the main agent
+    /// for an operator session. Takes no token, so nothing gets re-decoded.
+    pub fn for_session(user_email: Option<String>) -> Self {
+        match user_email {
+            Some(user_email) => Self::for_user_email(user_email),
+            None => Self::main_agent(),
+        }
+    }
+
+    /// The agent a request acts as. See [`Self::for_session`].
+    pub fn from_request(ctx: &crate::types::RequestContext) -> Self {
+        Self::for_session(ctx.user_email.clone())
     }
 
     /// Create AgentContext for main agent
@@ -1017,24 +1041,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_agent_context_from_auth_token() {
-        // Test with empty token (main agent)
-        let empty_token = String::new();
-        let context = AgentContext::from_auth_token(empty_token);
-        assert!(
-            context.is_main_agent,
-            "Empty token should result in main agent context"
-        );
-        assert!(
-            context.user_email.is_none(),
-            "Empty token should have no user email"
-        );
-
-        // Note: Full JWT token testing will be added in integration tests
-        // since it requires more complex setup with JWT tokens and user creation
-    }
-
     // User key management tests
 
     #[test]
@@ -1400,5 +1406,90 @@ mod tests {
         // create_new_keys(); re-initialising the agent re-generates the key
         // and syncs the DID, preventing mismatches for subsequent tests.
         setup_agent();
+    }
+}
+
+#[cfg(test)]
+mod agent_context_tests {
+    use super::{capabilities, AgentContext};
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    fn setup() {
+        setup_wallet();
+        setup_agent();
+    }
+
+    // A token that no longer decoded used to act as the node's main agent.
+    #[test]
+    fn an_expired_user_token_acts_as_nobody() {
+        setup();
+        let _multi_user = MultiUserMode::on();
+        let token = expired_user_token("expired@example.org");
+        assert!(AgentContext::from_auth_token(token, false).is_err());
+    }
+
+    #[test]
+    fn an_unreadable_token_acts_as_nobody() {
+        setup();
+        let _multi_user = MultiUserMode::on();
+        assert!(AgentContext::from_auth_token("not-a-jwt".to_string(), false).is_err());
+    }
+
+    #[test]
+    fn a_user_token_acts_as_its_user() {
+        setup();
+        let _multi_user = MultiUserMode::on();
+        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let context = AgentContext::from_auth_token(token, false).unwrap();
+        assert!(!context.is_main_agent);
+        assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
+    }
+
+    #[test]
+    fn the_admin_credential_and_the_empty_token_act_as_the_main_agent() {
+        setup();
+        let _multi_user = MultiUserMode::on();
+        let admin = AgentContext::from_auth_token("the-admin-credential".to_string(), true);
+        assert!(admin.unwrap().is_main_agent);
+        let empty = AgentContext::from_auth_token(String::new(), false);
+        assert!(empty.unwrap().is_main_agent);
+    }
+
+    // A user token used to act as the node's main agent once multi-user mode read as off
+    // (switched off, or a failed read of the setting).
+    #[test]
+    fn a_user_token_acts_as_its_user_when_multi_user_mode_is_off() {
+        setup();
+        let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+        let token = crate::user_management::generate_user_jwt("alice@example.org", "test").unwrap();
+        let context = AgentContext::from_auth_token(token, false).unwrap();
+        assert!(!context.is_main_agent);
+        assert_eq!(context.user_email.as_deref(), Some("alice@example.org"));
+    }
+
+    #[test]
+    fn a_revoked_token_acts_as_nobody() {
+        setup();
+        crate::test_utils::use_test_apps_file();
+        let token =
+            crate::user_management::generate_user_jwt("revoked@example.org", "test").unwrap();
+        let request_key = format!("key-{}", uuid::Uuid::new_v4());
+        let app = capabilities::AuthInfoExtended {
+            request_id: request_key.clone(),
+            auth: capabilities::AuthInfo::default(),
+        };
+        capabilities::apps_map::insert_app(request_key.clone(), app, token.clone()).unwrap();
+        capabilities::apps_map::revoke_app(&request_key).unwrap();
+        assert!(AgentContext::from_auth_token(token, false).is_err());
+        capabilities::apps_map::remove_app(&request_key).unwrap();
+    }
+
+    // Handlers and event streams take the user their session resolved at authentication.
+    #[test]
+    fn a_session_acts_as_the_user_it_resolved() {
+        let user = AgentContext::for_session(Some("alice@example.org".to_string()));
+        assert!(!user.is_main_agent);
+        assert_eq!(user.user_email.as_deref(), Some("alice@example.org"));
+        assert!(AgentContext::for_session(None).is_main_agent);
     }
 }

@@ -101,6 +101,17 @@ pub fn get_app(request_key: &str) -> Result<Option<App>, String> {
     Ok(apps.get(request_key).cloned())
 }
 
+/// Whether the operator revoked the app that holds this token. Scans in place, without
+/// copying the app list, because connections call it on every request and event.
+pub fn is_revoked(token: &str) -> bool {
+    APPS.lock()
+        .map(|apps| {
+            apps.values()
+                .any(|app| crate::utils::constant_time_eq(&app.token, token) && app.revoked)
+        })
+        .unwrap_or(true)
+}
+
 pub fn get_apps() -> Vec<crate::types::Apps> {
     let apps = APPS.lock().unwrap();
     apps.iter()

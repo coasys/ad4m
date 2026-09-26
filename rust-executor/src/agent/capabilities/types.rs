@@ -109,4 +109,9 @@ impl Claims {
             capabilities,
         }
     }
+
+    /// Unix time (seconds) after which the token no longer validates.
+    pub fn expires_at(&self) -> u64 {
+        self.exp
+    }
 }
