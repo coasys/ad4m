@@ -369,8 +369,11 @@ describe('ApiClient first-connect failures', () => {
         expect(call.status).toBe('rejected')
         const err = call.error as RpcError
         expect(err).toBeInstanceOf(RpcError)
-        // Not 503: that is a lost connection, this one never existed.
+        // Not 503: that is a lost connection, this one never existed. The
+        // literal pins the value callers branch on; the constant alone would
+        // pass with 503 too.
         expect(err.status).toBe(CONNECT_FAILED_STATUS)
+        expect(CONNECT_FAILED_STATUS).toBe(504)
         expect(err.body).toMatch(/could not connect to ws:\/\/127\.0\.0\.1:1234\/api\/v1\/ws within 30000ms/)
         // The token is a credential; it must not leak into error messages.
         expect(err.message).not.toContain('secret-token')
