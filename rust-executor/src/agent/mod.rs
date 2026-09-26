@@ -273,6 +273,10 @@ pub struct AgentService {
     pub agent: Option<Agent>,
     #[serde(skip)]
     pub passphrase: Option<String>,
+    /// The loaded agent file holds a keystore in the legacy format; the next unlock
+    /// rewrites it in the current one.
+    #[serde(skip)]
+    legacy_keystore: bool,
 }
 
 lazy_static! {
@@ -360,6 +364,7 @@ impl AgentService {
             agent: None,
             signing_key_id: None,
             passphrase: None,
+            legacy_keystore: false,
         });
 
         (*agent_instance).as_mut().unwrap().create_new_keys();
@@ -379,6 +384,7 @@ impl AgentService {
             agent: None,
             signing_key_id: None,
             passphrase: None,
+            legacy_keystore: false,
         }
     }
 
@@ -694,6 +700,11 @@ impl AgentService {
         let backend = wallet_backend();
         let result = backend.unlock(&password);
         if result.is_ok() {
+            if self.legacy_keystore {
+                self.save(password.clone());
+                self.legacy_keystore = false;
+                log::info!("🔑 Rewrote the keystore in the current format.");
+            }
             self.passphrase = Some(password);
             let key_count = backend.list_key_names().len();
             log::debug!("🔑 Wallet unlocked. {} key(s) present.", key_count);
@@ -760,6 +771,7 @@ impl AgentService {
         self.did_document = Some(dump.did_document);
         self.signing_key_id = Some(dump.signing_key_id);
 
+        self.legacy_keystore = crate::wallet::is_legacy_keystore(&dump.keystore);
         {
             let backend = wallet_backend();
             backend.load(&dump.keystore);
@@ -1399,6 +1411,56 @@ mod tests {
         // current "main" key. The test above replaced the "main" key via
         // create_new_keys(); re-initialising the agent re-generates the key
         // and syncs the DID, preventing mismatches for subsequent tests.
+        setup_agent();
+    }
+    /// An agent file that an older executor wrote holds a legacy keystore. The first
+    /// unlock rewrites it in the current format, and it still unlocks afterwards.
+    #[test]
+    fn unlock_rewrites_a_legacy_keystore_in_the_current_format() {
+        ensure_setup();
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let app_path = tmp.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{}/ad4m", app_path)).expect("create ad4m dir");
+        let agent_file = format!("{}/ad4m/agent.json", app_path);
+        let keystore_on_disk = || -> String {
+            let store: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&agent_file).unwrap()).unwrap();
+            store["keystore"].as_str().unwrap().to_string()
+        };
+
+        {
+            let global = AgentService::global_instance();
+            let mut lock = global.lock().unwrap();
+            *lock = Some(AgentService::new(app_path.clone()));
+            let svc = lock.as_mut().unwrap();
+            svc.create_new_keys();
+            svc.save("migration passphrase".to_string());
+        }
+
+        let mut store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&agent_file).unwrap()).unwrap();
+        store["keystore"] = serde_json::Value::String(crate::wallet::reencrypt_as_legacy(
+            &keystore_on_disk(),
+            "migration passphrase",
+        ));
+        std::fs::write(&agent_file, store.to_string()).unwrap();
+        assert!(crate::wallet::is_legacy_keystore(&keystore_on_disk()));
+
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            assert!(svc.unlock("wrong passphrase".to_string()).is_err());
+            assert!(crate::wallet::is_legacy_keystore(&keystore_on_disk()));
+            svc.unlock("migration passphrase".to_string())
+                .expect("the legacy keystore unlocks");
+        });
+        assert!(!crate::wallet::is_legacy_keystore(&keystore_on_disk()));
+
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.load();
+            svc.unlock("migration passphrase".to_string())
+                .expect("the rewritten keystore unlocks");
+        });
+
         setup_agent();
     }
 }
