@@ -111,7 +111,7 @@ async fn get_apps(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 /// agent.byDid — get agent by DID
@@ -489,10 +489,22 @@ async fn sign_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn remove_app(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
     let request_id = params.require_str("id")?;
     apps_map::remove_app(&request_id).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
+}
+
+/// Approved apps belong to the node's operator. The default user capabilities include
+/// AGENT_UPDATE, so without this a user session could remove or revoke the operator's apps.
+fn refuse_app_management_by_users(ctx: &RequestContext) -> Result<(), WsRpcError> {
+    if ctx.user_email.is_some() {
+        return Err(WsRpcError::forbidden(
+            "Apps belong to the node's operator; a user session may not remove or revoke them",
+        ));
+    }
+    Ok(())
 }
 
 // ── Auth ──
@@ -586,10 +598,11 @@ async fn generate_jwt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_app_management_by_users(&ctx)?;
 
     let token = params.require_str("token")?;
     apps_map::revoke_app(&token).map_err(|e| WsRpcError::internal(e))?;
-    Ok(serde_json::to_value(apps_map::get_apps())?)
+    Ok(serde_json::to_value(apps_map::client_view())?)
 }
 
 // ── Status ──
@@ -965,5 +978,39 @@ mod tests {
             link_expression_input_to_decorated(&input).status,
             Some(LinkStatus::Shared)
         );
+    }
+}
+
+#[cfg(test)]
+mod app_management_tests {
+    use crate::agent::capabilities::get_user_default_capabilities;
+    use crate::api::ws_handler::build_handler_map;
+    use crate::types::RequestContext;
+    use serde_json::json;
+    use std::sync::Arc;
+
+    // The default user capabilities include AGENT_UPDATE, which these calls check, so a user
+    // session could remove or revoke the operator's apps.
+    #[tokio::test]
+    async fn user_sessions_cannot_remove_or_revoke_apps() {
+        let user = Arc::new(RequestContext {
+            capabilities: Ok(get_user_default_capabilities()),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: false,
+            user_email: Some("apps.user@example.org".to_string()),
+            user_did: None,
+            cancel_token: None,
+        });
+        for (op, params) in [
+            ("agent.removeApp", json!({ "id": "some-request-id" })),
+            ("agent.revokeToken", json!({ "token": "some-request-id" })),
+        ] {
+            let err = build_handler_map()
+                .dispatch(op, params, user.clone())
+                .await
+                .expect_err(op);
+            assert_eq!(err.code, 403, "{op}: {}", err.message);
+        }
     }
 }
