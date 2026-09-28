@@ -6,6 +6,12 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: without an admin credential, a caller with no token is the operator on a loopback listener only** [#1059](https://github.com/coasys/ad4m/issues/1059)
+  - Before, such a caller got `ALL_CAPABILITY` and `is_admin_credential` on every API listener, including one bound with `--localhost false` and the HTTPS listener TLS starts on `0.0.0.0`. Anyone who could route to the port could read every app token (`agent.getApps`), unlock the agent and manage users.
+  - Now each listener is marked with where it bound. On a network listener a caller with no token gets the anonymous set a node with a credential gives: it can request a capability, and sign up and log in in multi-user mode. The single-user local mode on `127.0.0.1` is unchanged.
+  - Set an admin credential (`AD4M_ADMIN_CREDENTIAL`) on any node you administer over the network. The executor warns at startup when a network listener has none.
+  - The Docker image now requires `ADMIN_CREDENTIAL`: its executor listens on `0.0.0.0`, so its own setup (agent generation, model registration, the WE frontend) needs the credential. The container exits at start without it.
+  - MCP is unchanged: without a credential it already binds loopback, except with an explicit `MCP_HOST`, which warns.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
   - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.

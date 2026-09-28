@@ -7,6 +7,16 @@ if [ "$(id -u)" = "0" ]; then
     exec gosu ad4m "$0" "$@"
 fi
 
+# The executor listens on 0.0.0.0 in this container. Without an admin credential,
+# a caller with no token on a network listener is anonymous (#1059), so nothing in
+# this script (agent setup, model registration, the WE frontend) could act as the
+# operator. Fail here, before anything starts, instead of halfway through setup.
+if [ -z "${ADMIN_CREDENTIAL:-}" ]; then
+    echo "ERROR: ADMIN_CREDENTIAL is not set." >&2
+    echo "       Set it to a long random secret and restart the container." >&2
+    exit 1
+fi
+
 # ── First-run init ──────────────────────────────────────────────────────────
 # Use the Docker seed (local bootstrap languages, no external dependencies)
 # unless the operator supplies a custom seed via NETWORK_BOOTSTRAP_SEED.
@@ -70,11 +80,7 @@ if [ -d /opt/ad4m/models ] && [ "$(ls -A /opt/ad4m/models 2>/dev/null)" ]; then
 fi
 
 # ── Build executor args ─────────────────────────────────────────────────────
-EXTRA_ARGS=()
-
-if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
-    EXTRA_ARGS+=(--admin-credential "$ADMIN_CREDENTIAL")
-fi
+EXTRA_ARGS=(--admin-credential "$ADMIN_CREDENTIAL")
 
 if [ "${ENABLE_MULTI_USER:-}" = "true" ]; then
     EXTRA_ARGS+=(--enable-multi-user true)
@@ -104,11 +110,7 @@ fi
 AD4M_CLI_URL="http://localhost:12000"
 
 run_ad4m_cli() {
-    if [ -n "${ADMIN_CREDENTIAL:-}" ]; then
-        ad4m --executor-url "${AD4M_CLI_URL}" --admin-credential "${ADMIN_CREDENTIAL}" "$@"
-    else
-        ad4m --executor-url "${AD4M_CLI_URL}" --no-capability "$@"
-    fi
+    ad4m --executor-url "${AD4M_CLI_URL}" --admin-credential "${ADMIN_CREDENTIAL}" "$@"
 }
 
 wait_for_executor() {
@@ -297,9 +299,6 @@ setup_ai_models() {
     if [ -z "$(ls -A "${KALOSM_CACHE}" 2>/dev/null)" ]; then
         return
     fi
-    if [ -z "${ADMIN_CREDENTIAL:-}" ]; then
-        return
-    fi
     if ! command -v websocat >/dev/null 2>&1; then
         echo "WARNING: websocat not found, skipping AI model registration." >&2
         return
@@ -442,10 +441,6 @@ inject_we_auth() {
     local we_dist="/opt/ad4m/we-dist"
 
     if [ -f "${we_dist}/SKIPPED" ] || [ ! -f "${we_dist}/index.html" ]; then
-        return
-    fi
-
-    if [ -z "${ADMIN_CREDENTIAL:-}" ]; then
         return
     fi
 

@@ -78,7 +78,7 @@ ad4m-executor run \
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
 | `--port` | 12000 | API port (WebSocket RPC + HTTP) |
-| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access |
+| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access on a loopback-bound API only; with `--localhost false` or TLS, callers with no token can only request a capability |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
 | `--hc-admin-port` | 2000 | Holochain admin port |
@@ -127,7 +127,7 @@ as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 
 If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (`references/setup.md` → "WebSocket RPC API (Fallback)"): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
 
-**Test-only mode, not a security bug:** on a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without an admin credential set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
+**No admin credential: the empty token is the operator on loopback only.** On a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access, including `agent.unlock`, on an API listener bound to a loopback address (the default, `--localhost true`). This is the single-user local mode. On a listener bound to any other address (`--localhost false`, or the HTTPS listener when TLS is configured) a caller with no token is anonymous: it can request a capability (`agent.requestCapability`), and sign up and log in when multi-user mode is on, and nothing else. To administer a node over the network, set an admin credential. Before [#1059](https://github.com/coasys/ad4m/issues/1059) the empty token had full access on every listener.
 
 ### Step 5: Verify
 
