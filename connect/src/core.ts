@@ -8,6 +8,12 @@ import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteH
 import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
+/** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
+const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+
+/** \`error\` is set for 'unauthenticated': the refusal, which decides whether the token is dropped. */
+type AuthReading = { state: 'authenticated' | 'locked' | 'unauthenticated'; error?: any };
+
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
@@ -150,18 +156,35 @@ export default class Ad4mConnect extends EventTarget {
       });
     }
 
-    // Standalone mode - connect directly
-    try {
-      await checkConnection(this.baseUrl);
-      setLocal("ad4m-url", this.url);
-      this.ad4mClient = this.buildClient();
-      await this.checkAuth();
-      return this.ad4mClient;
-    } catch (error) {
-      console.error('[Ad4m Connect] Connection failed:', error);
+    // Standalone mode - connect directly.
+    //
+    // The health check and the first authenticated call run together. The health check exists to
+    // turn a wrong URL into a readable error, and awaiting it before opening the socket cost every
+    // successful connect an extra round trip. Its answer still decides: when it fails, its error is
+    // the one thrown, and the auth answer is dropped unapplied.
+    const client = new Ad4mClient(this.baseUrl, this.token, false);
+    const [health, auth] = await Promise.allSettled([checkConnection(this.baseUrl), this.readAuth(client)]);
+    if (health.status === 'rejected') {
+      client.close();
+      console.error('[Ad4m Connect] Connection failed:', health.reason);
       this.notifyConnectionChange("error");
-      throw error;
+      throw health.reason;
     }
+    setLocal("ad4m-url", this.url);
+    this.adoptClient(client);
+    this.applyAuth(auth.status === 'fulfilled' ? auth.value : { state: 'unauthenticated', error: auth.reason });
+    return this.ad4mClient;
+  }
+
+  /** Make this client the connection, closing the one it replaces. */
+  private adoptClient(client: Ad4mClient): void {
+    this.notifyConnectionChange("connecting");
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
+    if (this.ad4mClient && this.ad4mClient !== client && typeof this.ad4mClient.close === 'function') {
+      this.ad4mClient.close();
+    }
+    this.ad4mClient = client;
+    this.notifyConnectionChange("connected");
   }
 
   private buildClient(): Ad4mClient {
@@ -190,48 +213,65 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async checkAuth(): Promise<boolean> {
+    console.log('[Ad4m Connect] Checking authentication status...');
+    return this.applyAuth(await this.readAuth(this.ad4mClient));
+  }
+
+  /**
+   * What the executor says about this session, with nothing applied yet.
+   *
+   * \`agent.status\` first: on a session that is authorised and unlocked — every connect after the
+   * first — it answers in one call. \`agent.isLocked\` needs no capability, so it is the one that can
+   * tell a locked wallet from a refused token; it is asked only when \`status\` fails, or answers
+   * without saying whether the wallet is unlocked.
+   */
+  private async readAuth(client: Ad4mClient): Promise<AuthReading> {
+    let statusError: any;
     try {
-      console.log('[Ad4m Connect] Checking authentication status...');
-
-      // isLocked may not exist on older executors (404). Treat errors
-      // as "not locked" and fall through to the status check.
-      let isLocked = false;
-      try {
-        isLocked = await this.ad4mClient.agent.isLocked();
-      } catch (lockErr) {
-        const msg = lockErr?.message || '';
-        if (msg === "Cannot extractByTags from a ciphered wallet. You must unlock first.") {
-          console.log('[Ad4m Connect] Agent wallet is locked (error path)');
-          this.notifyAuthChange("locked");
-          return true;
-        }
-        // 404 / network error → assume not locked
-        console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
-      }
-
-      if (isLocked) {
-        console.log('[Ad4m Connect] Agent wallet is locked');
-        this.notifyAuthChange("locked");
-      } else {
-        await this.ad4mClient.agent.status();
-        this.ad4mClient.startSubscriptions();
-        this.notifyAuthChange("authenticated");
-      }
-
-      return true;
+      const status = await client.agent.status();
+      if (status?.isUnlocked === true) return { state: 'authenticated' };
+      if (status?.isUnlocked === false) return { state: 'locked' };
     } catch (error) {
-      console.error('[Ad4m Connect] Authentication check failed:', error);
-      
-      // Clear token if it's invalid (signed by different agent)
-      if (error.message === "InvalidSignature") {
-        console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
-        this.token = '';
-        removeLocal('ad4m-token');
-      }
-      
-      this.notifyAuthChange("unauthenticated");
-      return false;
+      if (error?.message === LOCKED_WALLET) return { state: 'locked' };
+      statusError = error;
     }
+
+    // isLocked may not exist on older executors (404). Treat errors as "not locked".
+    let locked = false;
+    try {
+      locked = await client.agent.isLocked();
+    } catch (lockErr) {
+      const msg = lockErr?.message || '';
+      if (msg === LOCKED_WALLET) return { state: 'locked' };
+      console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
+    }
+    if (locked) return { state: 'locked' };
+    if (!statusError) return { state: 'authenticated' };
+    return { state: 'unauthenticated', error: statusError };
+  }
+
+  /** Act on what \`readAuth\` found. Answers whether it found anything usable — see \`checkAuth\`. */
+  private applyAuth(reading: AuthReading): boolean {
+    if (reading.state === 'locked') {
+      console.log('[Ad4m Connect] Agent wallet is locked');
+      this.notifyAuthChange("locked");
+      return true;
+    }
+    if (reading.state === 'authenticated') {
+      this.ad4mClient.startSubscriptions();
+      this.notifyAuthChange("authenticated");
+      return true;
+    }
+
+    console.error('[Ad4m Connect] Authentication check failed:', reading.error);
+    // Clear token if it's invalid (signed by different agent)
+    if (reading.error?.message === "InvalidSignature") {
+      console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
+      this.token = '';
+      removeLocal('ad4m-token');
+    }
+    this.notifyAuthChange("unauthenticated");
+    return false;
   }
 
   // Disconnect and clean up

@@ -178,6 +178,70 @@ describe('Ad4mConnect', () => {
     });
   });
 
+  describe('connect() — round trips', () => {
+    /*
+      Every standalone connect waited on the health check before opening the socket, then asked
+      isLocked, then status — three round trips before an app could make its first call. The health
+      check now runs beside the auth read, and an unlocked session answers in one call.
+    */
+    it('asks for status without waiting on the health check', async () => {
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: true });
+
+      const conn = new Ad4mConnect(defaultOptions);
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(mockAgent.status).toHaveBeenCalled());
+      releaseHealth();
+      await connecting;
+
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('does not ask isLocked when status says the wallet is unlocked', async () => {
+      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: true });
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('reads a locked wallet from status alone', async () => {
+      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: false });
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
+    it('reports a locked wallet, not a bad token, when status is refused', async () => {
+      // isLocked needs no capability, so it can tell the two apart where status cannot.
+      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      mockAgent.isLocked.mockResolvedValueOnce(true);
+      setLocal('ad4m-token', 'kept-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(conn.authState).toBe('locked');
+      expect(conn.token).toBe('kept-token');
+    });
+
+    it('applies nothing from the auth read when the health check fails', async () => {
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
+      setLocal('ad4m-token', 'kept-token');
+      const conn = new Ad4mConnect(defaultOptions);
+      const auth: string[] = [];
+      conn.addEventListener('authstatechange', (e: any) => auth.push(e.detail));
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(conn.connectionState).toBe('error');
+      expect(conn.token).toBe('kept-token');
+      expect(auth).toEqual([]);
+    });
+  });
+
   describe('checkAuth()', () => {
     it('sets auth to locked when agent is locked', async () => {
       mockAgent.isLocked.mockResolvedValueOnce(true);
