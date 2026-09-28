@@ -1,6 +1,8 @@
 //! API test utilities and shared test infrastructure.
 
 #[cfg(test)]
+pub mod anonymous_access_tests;
+#[cfg(test)]
 pub mod error_tests;
 #[cfg(test)]
 pub mod flow_ws_tests;

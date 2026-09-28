@@ -26,6 +26,7 @@ pub mod runtime_ws;
 pub mod users_ws;
 pub mod ws_handler;
 
+use crate::agent::capabilities::ListenerReach;
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
@@ -119,6 +120,24 @@ pub fn api_router(state: AppState) -> Router {
     .layer(cors)
 }
 
+/// The API router for one listener, marked with who can connect to it.
+///
+/// Every listener the executor binds goes through here, so the auth extractors know whether
+/// a caller without a token is on this machine. Without an admin credential that caller is
+/// the operator on a loopback listener, and anonymous on any other (#1059).
+pub fn listener_router(state: AppState, addr: &SocketAddr) -> Router {
+    let reach = ListenerReach::of(addr);
+    if reach == ListenerReach::Network && state.admin_credential.is_none() {
+        log::warn!(
+            "API on {addr} is reachable from the network and no --admin-credential is set. \
+             Callers there without a token can only request a capability (or sign up and log \
+             in, in multi-user mode); they are not the operator. Set an admin credential to \
+             administer this node remotely."
+        );
+    }
+    api_router(state).layer(Extension(reach))
+}
+
 /// Start the API server (HTTP + WebSocket).
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
@@ -131,11 +150,9 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     let auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
 
     let state = AppState {
-        admin_credential: admin_credential.clone(),
+        admin_credential,
         auto_permit_cap_requests: auto_permit,
     };
-
-    let app = api_router(state);
 
     if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
@@ -145,11 +162,8 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         log::info!("Starting API server (HTTP) on 127.0.0.1:{}", port);
         log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
 
-        let tls_state = AppState {
-            admin_credential: admin_credential.clone(),
-            auto_permit_cap_requests: auto_permit,
-        };
-        let tls_app = api_router(tls_state);
+        let tls_addr = SocketAddr::from(([0, 0, 0, 0], tls_port));
+        let tls_app = listener_router(state.clone(), &tls_addr);
 
         let rustls_config =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
@@ -157,7 +171,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 .map_err(|e| deno_core::anyhow::anyhow!("TLS config error: {}", e))?;
 
         tokio::spawn(async move {
-            axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
+            axum_server::bind_rustls(tls_addr, rustls_config)
                 .serve(tls_app.into_make_service())
                 .await
                 // Same reasoning as the MCP HTTPS listener: the cleartext API
@@ -177,6 +191,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
         let listener =
             tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
+        let app = listener_router(state, &listener.local_addr()?);
         axum::serve(listener, app.into_make_service()).await?;
     } else {
         let address: [u8; 4] = if config.localhost.unwrap_or(true) {
@@ -189,6 +204,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         log::info!("API server starting on http://{}/api/v1", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
+        let app = listener_router(state, &listener.local_addr()?);
         axum::serve(listener, app.into_make_service()).await?;
     }
 

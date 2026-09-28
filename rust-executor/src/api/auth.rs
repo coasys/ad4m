@@ -2,7 +2,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
 use crate::agent::capabilities::{
-    capabilities_from_token, is_admin_credential_token, user_email_from_token, Capability,
+    capabilities_on, is_admin_credential_token, user_email_from_token, Capability, ListenerReach,
 };
 use crate::agent::AgentService;
 use crate::types::RequestContext;
@@ -73,10 +73,11 @@ where
         // Track last_seen for multi-user mode
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
 
+        let reach = listener_reach(&parts.extensions);
         let capabilities =
-            capabilities_from_token(auth_header.clone(), app_state.admin_credential.clone());
+            capabilities_on(auth_header.clone(), app_state.admin_credential.clone(), reach);
         let is_admin_credential =
-            is_admin_credential_token(&auth_header, &app_state.admin_credential);
+            is_admin_credential_token(&auth_header, &app_state.admin_credential, reach);
 
         Ok(AuthContext {
             capabilities,
@@ -84,6 +85,24 @@ where
             auth_token: auth_header,
             is_admin_credential,
         })
+    }
+}
+
+/// The reach of the listener a request arrived on, as `api::listener_router` marked it.
+/// An unmarked router reads as `Network`: nothing has shown that its callers are on this
+/// machine, so an anonymous caller there is not the operator.
+pub fn listener_reach(extensions: &axum::http::Extensions) -> ListenerReach {
+    extensions
+        .get::<ListenerReach>()
+        .copied()
+        .unwrap_or(ListenerReach::Network)
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ListenerReach {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(listener_reach(&parts.extensions))
     }
 }
 
