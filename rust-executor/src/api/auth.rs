@@ -2,7 +2,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
 use crate::agent::capabilities::{
-    capabilities_on, is_admin_credential_token, user_email_from_token, Capability, ListenerReach,
+    capabilities_on, is_admin_credential_token_on, user_email_from_token, Capability, ListenerReach,
 };
 use crate::agent::AgentService;
 use crate::types::RequestContext;
@@ -80,7 +80,7 @@ where
             reach,
         );
         let is_admin_credential =
-            is_admin_credential_token(&auth_header, &app_state.admin_credential, reach);
+            is_admin_credential_token_on(&auth_header, &app_state.admin_credential, reach);
 
         Ok(AuthContext {
             capabilities,

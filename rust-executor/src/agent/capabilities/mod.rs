@@ -65,11 +65,17 @@ impl ListenerReach {
     }
 }
 
+/// [`is_admin_credential_token_on`] for a caller on a loopback listener: for the MCP server,
+/// where [`capabilities_from_token`] explains why loopback holds.
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+    is_admin_credential_token_on(token, admin_credential, ListenerReach::Loopback)
+}
+
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
 /// When admin_credential is None (legacy single-user mode), an empty token is treated as admin,
 /// but only on a loopback listener. On a network listener it is an anonymous caller (#1059).
-pub fn is_admin_credential_token(
+pub fn is_admin_credential_token_on(
     token: &str,
     admin_credential: &Option<String>,
     reach: ListenerReach,
@@ -295,9 +301,9 @@ pub async fn track_last_seen_from_token(token: String) {
 
 /// [`capabilities_on`] for a caller on a loopback listener.
 ///
-/// Only the MCP server calls this. Loopback holds there because `mcp::server::resolve_host`
-/// binds an MCP server with no admin credential to loopback. The exception is an explicit
-/// `MCP_HOST`, which it warns about.
+/// For the MCP server. Loopback holds there because `mcp::server::resolve_host`
+/// binds an MCP server with no admin credential to loopback, and its HTTPS listener does not
+/// start without one. The exception is an explicit `MCP_HOST`, which it warns about.
 pub fn capabilities_from_token(
     token: String,
     admin_credential: Option<String>,
@@ -312,7 +318,7 @@ pub fn capabilities_on(
     reach: ListenerReach,
 ) -> Result<Vec<Capability>, String> {
     // The same test that decides `is_admin_credential`, so the two cannot disagree.
-    if is_admin_credential_token(&token, &admin_credential, reach) {
+    if is_admin_credential_token_on(&token, &admin_credential, reach) {
         return Ok(vec![ALL_CAPABILITY.clone()]);
     }
 
@@ -593,12 +599,12 @@ mod tests {
     #[test]
     fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
         let empty = String::new();
-        assert!(is_admin_credential_token(
+        assert!(is_admin_credential_token_on(
             &empty,
             &None,
             ListenerReach::Loopback
         ));
-        assert!(!is_admin_credential_token(
+        assert!(!is_admin_credential_token_on(
             &empty,
             &None,
             ListenerReach::Network
@@ -618,7 +624,7 @@ mod tests {
     #[test]
     fn the_admin_credential_is_the_operator_on_the_network() {
         let credential = Some("the-admin-credential".to_string());
-        assert!(is_admin_credential_token(
+        assert!(is_admin_credential_token_on(
             "the-admin-credential",
             &credential,
             ListenerReach::Network

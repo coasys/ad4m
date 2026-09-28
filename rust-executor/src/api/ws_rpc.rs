@@ -61,7 +61,7 @@ pub async fn ws_rpc(
 
     // Build RequestContext once for the lifetime of this connection.
     let capabilities = capabilities_on(token.clone(), state.admin_credential.clone(), reach);
-    let is_admin = is_admin_credential_token(&token, &state.admin_credential, reach);
+    let is_admin = is_admin_credential_token_on(&token, &state.admin_credential, reach);
 
     let user_email = user_email_from_token(token.clone());
     let user_did = user_email
