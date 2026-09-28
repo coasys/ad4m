@@ -381,3 +381,102 @@ async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
     );
     assert_eq!(f.derived().await.state, "review");
 }
+
+/// Register `ns://Task` again with its `owner` property declared
+/// `monotonic`, as the class author (this agent, the owner) would.
+async fn declare_owner_monotonic(f: &mut Fixture) {
+    use crate::perspectives::interpretation_test_support::TASK_SDNA;
+    use crate::perspectives::perspective_instance::SdnaType;
+    let mut shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
+    for property in shacl["properties"].as_array_mut().expect("properties") {
+        if property["path"] == "ns://owner" {
+            property["monotonic"] = serde_json::Value::Bool(true);
+        }
+    }
+    f.perspective
+        .add_sdna(
+            "ns://Task".to_string(),
+            String::new(),
+            SdnaType::SubjectClass,
+            Some(shacl.to_string()),
+            &f.ctx,
+        )
+        .await
+        .expect("add_sdna");
+}
+
+async fn owner_grants(f: &Fixture) -> Vec<LinkExpression> {
+    f.perspective
+        .get_links(&LinkQuery {
+            source: Some(TASK.to_string()),
+            predicate: Some("ns://owner".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(LinkExpression::from)
+        .collect()
+}
+
+/// T4 (#1176). A role class that declares its DID property `monotonic`: the
+/// Shared grant survives a peer's removal and a local one, and a generic
+/// `ad4m://flow/retracted` tombstone from its own author does not end it
+/// either, so later votes still count. Only `role_grant_revoked` ends it, as
+/// of its timestamp. (Red without the flag: the peer's removal applies and
+/// the vote in the middle settles nothing.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_role_grant_ends_only_by_revocation() {
+    use crate::perspectives::monotonic::retraction_for;
+
+    let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
+    declare_owner_monotonic(&mut f).await;
+    let me = acting_did(&f);
+    f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Shared)
+        .await;
+    let grant = owner_grants(&f).await.pop().expect("the grant");
+
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff {
+            additions: vec![],
+            removals: vec![grant.clone()],
+        })
+        .await
+        .expect("sync a peer's removal");
+    assert_eq!(owner_grants(&f).await, vec![grant.clone()], "peer removal dropped");
+
+    let err = f
+        .perspective
+        .remove_link(grant.clone(), None)
+        .await
+        .expect_err("a local removal of a declared grant is refused");
+    assert!(format!("{err:#}").contains("is monotonic"), "{err:#}");
+
+    let tombstone = retraction_for(&grant).expect("retraction_for");
+    f.link(
+        &tombstone.source,
+        tombstone.predicate.as_deref().expect("predicate"),
+        &tombstone.target,
+        LinkStatus::Shared,
+    )
+    .await;
+    assert_eq!(
+        owner_grants(&f).await,
+        vec![grant.clone()],
+        "a generic retraction does not end a declared grant"
+    );
+
+    tick().await;
+    settle(&mut f, "p1", "review", "changes_requested").await;
+
+    tick().await;
+    revoke_own_role(&mut f, TASK).await;
+    tick().await;
+    propose(&mut f, "p2", "changes_requested", "review").await;
+    assert!(
+        consensus_pass(&mut f).await.is_empty(),
+        "the revocation ends the grant for votes after it"
+    );
+    assert_eq!(f.derived().await.state, "changes_requested");
+    assert_eq!(owner_grants(&f).await, vec![grant], "and the grant stays in the graph");
+}

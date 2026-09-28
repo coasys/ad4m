@@ -193,6 +193,7 @@ describe('SHACLShape', () => {
         hasValue: 'expectedValue',
         resolveLanguage: 'literal',
         local: true,
+        monotonic: true,
         writable: true,
         setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
         adder: [{ action: 'addLink', source: 'this', predicate: 'test://items', target: 'value' }],
@@ -200,6 +201,9 @@ describe('SHACLShape', () => {
       });
 
       const links = original.toLinks();
+      // The flag carries the predicate, so the executor never reads sh://path for it.
+      expect(links.find(l => l.predicate === 'ad4m://monotonic')?.target)
+        .toBe('literal:string:test%3A%2F%2Ffield');
       const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
 
       const prop = reconstructed.properties[0];
@@ -214,6 +218,7 @@ describe('SHACLShape', () => {
       expect(prop.hasValue).toBe('expectedValue');
       expect(prop.resolveLanguage).toBe('literal');
       expect(prop.local).toBe(true);
+      expect(prop.monotonic).toBe(true);
       expect(prop.writable).toBe(true);
       expect(prop.setter).toBeDefined();
       expect(prop.adder).toBeDefined();
@@ -395,6 +400,7 @@ describe('SHACLShape', () => {
         pattern: '^[a-z]+$',
         hasValue: 'default',
         local: true,
+        monotonic: true,
         writable: true,
         resolveLanguage: 'literal',
         setter: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
@@ -417,6 +423,7 @@ describe('SHACLShape', () => {
       expect(prop.pattern).toBe('^[a-z]+$');
       expect(prop.hasValue).toBe('default');
       expect(prop.local).toBe(true);
+      expect(prop.monotonic).toBe(true);
       expect(prop.writable).toBe(true);
       expect(prop.resolveLanguage).toBe('literal');
       expect(prop.setter).toEqual(original.properties[0].setter);

@@ -9043,3 +9043,7 @@ mod tests {
 #[cfg(test)]
 #[path = "monotonic_tests.rs"]
 mod monotonic_tests;
+
+#[cfg(test)]
+#[path = "monotonic_declared_tests.rs"]
+mod monotonic_declared_tests;

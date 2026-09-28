@@ -1,10 +1,19 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
+import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle, Literal } from "@coasys/ad4m";
+import { Ad4mModel, Model, Property } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
 let aliceP1: null | PerspectiveProxy = null;
+
+// #1176: a role class whose DID property is declared monotonic, so a grant
+// ends only by a signed revocation, never by a removal.
+@Model({ name: "MonotonicRoleGrant" })
+class MonotonicRoleGrant extends Ad4mModel {
+    @Property({ through: "test://role/member", monotonic: true })
+    member: string = "";
+}
 let bobP1: null | PerspectiveHandle = null;
 
 // `getLinkLang` is a getter (not a value) because callers wire the config in a
@@ -182,6 +191,68 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 await sleep(10000)
                 const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
                 expect(aliceLinks.length, "Alice still holds her vote").to.be.equal(1)
+                const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
+                expect(bobAfter.length, "and so does Bob's replica").to.be.equal(1)
+            })
+
+            // #1176: Alice, the neighbourhood author, registers a class with a
+            // `monotonic` property and writes a grant. Once her declaration has
+            // reached Bob, his executor refuses his removal of the grant, and
+            // Alice keeps it. (That a flag from anyone but the author declares
+            // nothing, and that a synced removal is dropped on ingest, are the
+            // Rust tests in monotonic_declared_tests.rs.)
+            it("Bob's removal of Alice's monotonic role grant is refused and Alice keeps it", async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP = await alice.perspective.add("monotonic role grant")
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test monotonic role grants");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (monotonic role grant)" });
+
+                await MonotonicRoleGrant.register(aliceP)
+                const grant = new MonotonicRoleGrant(aliceP)
+                grant.member = (await bob.agent.me()).did
+                await grant.save()
+
+                const query = new LinkQuery({source: grant.id, predicate: 'test://role/member'})
+                let bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                for (let tries = 0; bobLinks.length < 1 && tries < 60; tries++) {
+                    await sleep(1000)
+                    bobLinks = await bob.perspective.queryLinks(bobP.uuid, query)
+                }
+                expect(bobLinks.length, "Bob received Alice's grant").to.be.equal(1)
+
+                // The declaration is part of the class's SHACL and syncs with it.
+                // No assertion here: without the flag it never arrives, and the
+                // refusal below is what fails.
+                const flag = new LinkQuery({predicate: 'ad4m://monotonic', target: Literal.from('test://role/member').toUrl()})
+                for (let tries = 0; tries < 30; tries++) {
+                    if ((await bob.perspective.queryLinks(bobP.uuid, flag)).length > 0) break
+                    await sleep(1000)
+                }
+
+                let refusal: any = null
+                try {
+                    await bob.perspective.removeLink(bobP.uuid, bobLinks[0])
+                } catch (e) {
+                    refusal = e
+                }
+                expect(refusal, "Bob's removeLink must fail").to.not.be.null
+                expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
+
+                // Give a removal that did get committed time to reach Alice.
+                await sleep(10000)
+                const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
+                expect(aliceLinks.length, "Alice still holds the grant").to.be.equal(1)
                 const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
                 expect(bobAfter.length, "and so does Bob's replica").to.be.equal(1)
             })

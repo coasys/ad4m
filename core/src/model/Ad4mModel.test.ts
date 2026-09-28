@@ -82,6 +82,23 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.relations.local.local).toBe(true);
   });
 
+  it("emits a monotonic property as a flag naming its predicate (#1176)", () => {
+    @Model({ name: "MonotonicGrant" })
+    class MonotonicGrant extends Ad4mModel {
+      @Property({ through: "test://member", monotonic: true })
+      member: string = "";
+
+      @Property({ through: "test://note" })
+      note: string = "";
+    }
+
+    const { shape } = (MonotonicGrant as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("test://member").monotonic).toBe(true);
+    expect(byPath("test://note").monotonic).toBeUndefined();
+    expect(shape.toJSON().properties.find((p: any) => p.path === "test://member").monotonic).toBe(true);
+  });
+
   it("should support NodeExpression transforms in properties", () => {
     // Transforms are now NodeExpression objects, not callable functions
     // The fileToDataUri and other builders are exported from @coasys/ad4m
