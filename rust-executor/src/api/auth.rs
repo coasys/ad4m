@@ -74,8 +74,11 @@ where
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
 
         let reach = listener_reach(&parts.extensions);
-        let capabilities =
-            capabilities_on(auth_header.clone(), app_state.admin_credential.clone(), reach);
+        let capabilities = capabilities_on(
+            auth_header.clone(),
+            app_state.admin_credential.clone(),
+            reach,
+        );
         let is_admin_credential =
             is_admin_credential_token(&auth_header, &app_state.admin_credential, reach);
 
