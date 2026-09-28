@@ -274,6 +274,25 @@ async fn t2_link_mutations_refuses_and_writes_nothing() {
     );
 }
 
+/// `link_mutations` stamps its caller's status on every removal. A removal
+/// labelled Local must not take a Shared vote out of the store unseen.
+#[tokio::test(flavor = "multi_thread")]
+async fn t2_link_mutations_labelled_local_still_refuses_a_shared_link() {
+    let (mut p, ctx) = fixture().await;
+    let vote = own_shared(&mut p, &ctx, ACCEPTED_BY, "did:key:me").await;
+    let mutations = LinkMutations {
+        additions: vec![],
+        removals: vec![as_input(&vote)],
+    };
+
+    assert_monotonic_refusal(
+        p.link_mutations(mutations, LinkStatus::Local, &ctx).await,
+        "link_mutations (Local label)",
+    );
+
+    assert!(present(&p, &vote));
+}
+
 /// The backstop: a removal that reached a batch without passing a refusing
 /// entry point is still refused at commit, and nothing in that batch lands.
 #[tokio::test(flavor = "multi_thread")]
