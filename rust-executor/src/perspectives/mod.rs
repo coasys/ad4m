@@ -25,6 +25,7 @@ pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;
+pub(crate) mod monotonic;
 pub mod ordering;
 pub mod perspective_instance;
 #[cfg(test)]
