@@ -56,6 +56,8 @@ anything that signs, bills or writes.
 ## Types
 
 - `types.rs`: request/response structs for WS (`ts-rs` exported for the SDK).
+  `pnpm run generate:api-types` (in `core/`) writes one file per type into
+  `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
 - `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,

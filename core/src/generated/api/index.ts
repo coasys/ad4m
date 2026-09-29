@@ -1,5 +1,6 @@
-// Auto-generated WS-RPC request/response types from Rust via ts-rs
-// Do NOT edit manually — regenerate with: pnpm run generate:rest-types
+// Re-exports of the WS-RPC request/response types generated from Rust via ts-rs.
+// `pnpm run generate:api-types` regenerates the type files next to this one,
+// not this index: add an export line here for each new exported type.
 //
 // Note: Domain types (Link, LinkInput, LinkExpression, etc.) are NOT re-exported
 // here to avoid conflicts with the hand-written domain classes in the SDK.

@@ -67,16 +67,46 @@ fn committed_sdk_handler_table_is_current() {
         // Generation run: `export_handler_table` is rewriting the file.
         return;
     }
-    let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../core/src/generated/api")
-        .join(FILE_NAME);
-    let Ok(on_disk) = std::fs::read_to_string(&committed) else {
+    let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../core");
+    if !core.join("package.json").exists() {
         // Crate built outside the monorepo: nothing to compare against.
         return;
-    };
+    }
+    let committed = core.join("src/generated/api").join(FILE_NAME);
+    let on_disk = std::fs::read_to_string(&committed).unwrap_or_else(|e| {
+        panic!(
+            "core/src/generated/api/{FILE_NAME} is missing ({e}): run `pnpm run generate:api-types` in core/"
+        )
+    });
     assert_eq!(
         on_disk,
         render_handler_table(&build_handler_map().method_names()),
         "core/src/generated/api/{FILE_NAME} is stale: run `pnpm run generate:api-types` in core/"
     );
+}
+
+/// Protocol features that name a parameter, an event mechanism or a reply
+/// mode rather than a `HandlerMap` method.
+const NON_METHOD_FEATURES: &[&str] = &[
+    "perspective.getAllShacl.names",
+    "events.watch",
+    "modelQuery.cursor",
+    "subscriptions.delta",
+    "operations.async",
+];
+
+/// A feature named after a method must be a registered method, so a client
+/// that sees the feature can call it.
+#[test]
+fn method_features_are_registered_handlers() {
+    let names = build_handler_map().method_names();
+    for feature in crate::api::protocol::PROTOCOL_FEATURES {
+        if NON_METHOD_FEATURES.contains(feature) {
+            continue;
+        }
+        assert!(
+            names.iter().any(|n| n == feature),
+            "PROTOCOL_FEATURES lists `{feature}`, but no handler has that name"
+        );
+    }
 }
