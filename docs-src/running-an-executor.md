@@ -131,6 +131,10 @@ If you're the executor's operator and don't have CLI access handy, the same unlo
 
 **A proxy or tunnel in front of a loopback listener needs an admin credential.** A reverse proxy or tunnel on the same host (nginx, Caddy, Traefik, cloudflared, `tailscale serve`, `ssh -R`) connects to the executor from `127.0.0.1`, so its remote clients arrive on the loopback listener. A request that carries a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, which covers most HTTP proxy configurations. A proxy that sets none of these headers (a raw TCP or stream forward, `ssh -R`, an nginx `proxy_pass` without `proxy_set_header`) is still treated as the operator, and so is every client behind it. Set an admin credential on any node you put a proxy or tunnel in front of.
 
+**No admin credential is a testing/development mode, not a deployment target.** The launcher always sets an admin credential; a node with none configured only happens when `ad4m-executor` is started by hand without `AD4M_ADMIN_CREDENTIAL` or `--admin-credential`. Production deployments must set one.
+
+**A web page open in a browser on the same machine can reach a loopback executor too.** The HTTP API accepts requests from any origin (no CORS restriction), and the WebSocket API doesn't check the `Origin` header either. On a node with no admin credential, that means any page open in a local browser — not just terminal tools — gets the same operator access a local CLI would. Don't run without a credential on a machine where you also browse untrusted sites with a node holding real data.
+
 Before [#1059](https://github.com/coasys/ad4m/issues/1059) the empty token had full access on every listener.
 
 ### Step 5: Verify
