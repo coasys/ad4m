@@ -153,6 +153,50 @@ describe('SHACLFlow', () => {
       expect(reconstructed.states[2].name).toBe('Done');
       expect(reconstructed.states[0].value).toBe(0);
     });
+
+    // #1202 — two states tied on the lowest `value` must yield the same
+    // initial state no matter which `hasState` link the graph hands back
+    // first. A stable sort on `value` alone keeps discovery order for ties,
+    // so two replicas could mint instances in different genesis states.
+    // The tie-break key is the state name (ascending, code-unit order) —
+    // the same key `parse_flow_from_links` uses in rust-executor, so the
+    // concrete winner is pinned, not just "some fixed state".
+    it('breaks a lowest-value tie by state name regardless of hasState link order (#1202)', () => {
+      const fromLinksWithStatesInOrder = (order: Array<[string, number]>) => {
+        const flow = new SHACLFlow('Tie', 'tie://');
+        for (const [name, value] of order) flow.addState({ name, value });
+        // `toLinks` emits `hasState` links in `addState` order, and
+        // `fromLinks` discovers states in `hasState` link order.
+        return SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+      };
+
+      // `review` and `draft` tie at the lowest value; `done` is above both.
+      const reviewFirst = fromLinksWithStatesInOrder([['review', 0], ['draft', 0], ['done', 1]]);
+      const draftFirst = fromLinksWithStatesInOrder([['draft', 0], ['review', 0], ['done', 1]]);
+
+      expect(reviewFirst.states[0].name).toBe(draftFirst.states[0].name);
+      expect(reviewFirst.states[0].name).toBe('draft');
+      expect(reviewFirst.states.map(s => s.name)).toEqual(['draft', 'review', 'done']);
+      expect(draftFirst.states.map(s => s.name)).toEqual(['draft', 'review', 'done']);
+    });
+
+    // Mirrors `parse_flow_from_links_sorts_nan_state_values_last` in
+    // rust-executor. `Literal.fromUrl` decodes `number:NaN` with
+    // `parseFloat`, so a NaN can round-trip. `a.value - b.value` is NaN for
+    // such a pair, which `Array.prototype.sort` treats as engine-defined
+    // rather than "last", so the finite states could land in any relative
+    // order too — and `states[0]` is the initial state.
+    it('sorts a NaN-valued state last so it never becomes the initial state', () => {
+      const flow = new SHACLFlow('Nan', 'nan://');
+      flow.addState({ name: 'done', value: 1 });
+      flow.addState({ name: 'broken', value: NaN });
+      flow.addState({ name: 'identified', value: 0 });
+
+      const reconstructed = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+
+      expect(reconstructed.states.some(s => Number.isNaN(s.value))).toBe(true);
+      expect(reconstructed.states.map(s => s.name)).toEqual(['identified', 'done', 'broken']);
+    });
   });
 
   describe('JSON serialization', () => {

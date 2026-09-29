@@ -244,6 +244,26 @@ export interface FlowState {
 }
 
 /**
+ * Compare two strings by Unicode code point, ascending. This is the order
+ * Rust's `String::cmp` produces (UTF-8 bytes sort in code-point order), so
+ * a sort keyed on it here and in `rust-executor` agrees for every name, not
+ * only ASCII. `<` on JS strings compares UTF-16 code units instead, which
+ * puts U+E000–U+FFFF after the supplementary planes.
+ *
+ * Used by `fromLinks` to break state-value ties (#1202).
+ */
+function compareCodePoints(a: string, b: string): number {
+  const as = Array.from(a);
+  const bs = Array.from(b);
+  const n = Math.min(as.length, bs.length);
+  for (let i = 0; i < n; i++) {
+    const d = as[i].codePointAt(0)! - bs[i].codePointAt(0)!;
+    if (d !== 0) return d;
+  }
+  return as.length - bs.length;
+}
+
+/**
  * Runtime shape check for a decoded `ModelQuery`. Deserialization paths use
  * this to guard against malformed guard arrays leaking into flow metadata
  * (an untyped `Array.isArray` would happily accept `[null]` or `[{}]`).
@@ -426,11 +446,13 @@ export class SHACLFlow {
    * States in this flow.
    *
    * **Ordering convention (James PR #929 R9):** the array is stored sorted
-   * ascending by `value`. `states[0]` is the initial state — the one
+   * ascending by `value`, ties broken by state name ascending (code-point
+   * order), NaN values last. `states[0]` is the initial state — the one
    * {@link FlowInstance.start} mints a fresh instance into. A flow author
    * who wants a specific state as the entry point must give it the lowest
-   * `value` in the set. `fromLinks` enforces this sort, so link-order on
-   * the graph never dictates the initial state.
+   * `value` in the set; two states sharing the lowest value start in the
+   * one whose name sorts first (#1202). `fromLinks` enforces this sort, so
+   * link-order on the graph never dictates the initial state.
    */
   private _states: FlowState[] = [];
 
@@ -971,8 +993,43 @@ export class SHACLFlow {
     // was randomly one of the round-tripped states. Sort by `value` ascending
     // so the "initial state = states[0]" convention (used by
     // `FlowInstance.start`) survives a fromGraph round trip.
+    //
+    // This comparator must stay identical to the one in rust-executor's
+    // `parse_flow_from_links` (`rust-executor/src/perspectives/shacl_parser.rs`):
+    // both runtimes read `states[0]` as the genesis state, and a Rust-side
+    // spawn, `derive_state` and `verify_receipt` all start from it.
+    //
+    // - NaN sorts last. `Literal.fromUrl` decodes `number:NaN` with
+    //   `parseFloat`, so a NaN can arrive; `a.value - b.value` would then be
+    //   NaN, which `Array.prototype.sort` treats as "equal" in an
+    //   engine-defined way that also scrambles the finite states around it.
+    //   A state whose ordering value is undecodable has no claim to being
+    //   first.
+    // - Equal values break on state name, ascending by Unicode code point
+    //   (`compareCodePoints`), which is the order Rust's `String::cmp` gives
+    //   over UTF-8 bytes (#1202). Without this, `sort` is stable and a tie
+    //   kept link-discovery order, which differs between replicas: two
+    //   nodes loading the same definition could mint instances in
+    //   different initial states.
     // The `states` getter returns a defensive copy, so mutate `_states` directly.
-    flow._states.sort((a, b) => a.value - b.value);
+    flow._states.sort((a, b) => {
+      const aNaN = Number.isNaN(a.value);
+      const bNaN = Number.isNaN(b.value);
+      if (aNaN !== bNaN) return aNaN ? 1 : -1;
+      if (!aNaN && a.value !== b.value) return a.value < b.value ? -1 : 1;
+      return compareCodePoints(a.name, b.name);
+    });
+    if (
+      flow._states.length > 1 &&
+      !Number.isNaN(flow._states[0].value) &&
+      flow._states[0].value === flow._states[1].value
+    ) {
+      console.warn(
+        `flow \`${flowUri}\`: states \`${flow._states[0].name}\` and \`${flow._states[1].name}\` ` +
+          `tie on the lowest value ${flow._states[0].value}; ` +
+          `\`${flow._states[0].name}\` is the initial state by name order (#1202)`
+      );
+    }
 
     // Find transitions
     const transitionLinks = links.filter(l =>
