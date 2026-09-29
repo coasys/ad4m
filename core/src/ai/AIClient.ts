@@ -120,29 +120,48 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const streamId = await this.#apiClient.call<string>('ai.transcriptionOpen', { modelId, params });
-
+        // Subscribe before opening, so text pushed before the open reply lands is not
+        // lost. Until the executor assigns the stream id, text events are held.
+        let streamId: string | undefined;
+        const early: { streamId: unknown, text: string }[] = [];
         const unsub = this.#apiClient.subscribe(
             (data) => {
-                if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
+                if (data.type !== 'transcription-text' || !data.text) return;
+                if (streamId === undefined) {
+                    early.push({ streamId: data.streamId, text: data.text as string });
+                } else if (data.streamId === streamId) {
                     streamCallback(data.text as string);
                 }
             }
         );
 
+        try {
+            streamId = await this.#apiClient.call<string>('ai.transcriptionOpen', { modelId, params });
+        } catch (e) {
+            unsub();
+            throw e;
+        }
+
         this.#transcriptionUnsubscribers.set(streamId, unsub);
+        for (const event of early) {
+            if (event.streamId === streamId) streamCallback(event.text);
+        }
+        early.length = 0;
 
         return streamId;
     }
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
-
-        const unsub = this.#transcriptionUnsubscribers.get(streamId);
-        if (unsub) {
-            unsub();
-            this.#transcriptionUnsubscribers.delete(streamId);
+        try {
+            await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
+        } finally {
+            // Release the listener even when the close call fails (e.g. socket down).
+            const unsub = this.#transcriptionUnsubscribers.get(streamId);
+            if (unsub) {
+                unsub();
+                this.#transcriptionUnsubscribers.delete(streamId);
+            }
         }
     }
 
