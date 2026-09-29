@@ -1216,7 +1216,7 @@ describe('Ad4mClient', () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const listeners = {
             agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
-            hosting: jest.fn(), computeLog: jest.fn(),
+            hosting: jest.fn(),
             added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
             message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
         };
@@ -1224,7 +1224,6 @@ describe('Ad4mClient', () => {
         freshClient.agent.addAgentStatusChangedListener(listeners.agentStatus);
         freshClient.agent.addAppChangedListener(listeners.apps);
         freshClient.agent.addHostingUserInfoChangedListener(listeners.hosting);
-        freshClient.agent.addComputeLogUpdatedListener(listeners.computeLog);
         freshClient.perspective.addPerspectiveAddedListener(listeners.added);
         freshClient.perspective.addPerspectiveUpdatedListener(listeners.updated);
         freshClient.perspective.addPerspectiveRemovedListener(listeners.removed);
@@ -1238,7 +1237,6 @@ describe('Ad4mClient', () => {
         ws.emit({ type: 'agent-status-changed', agent: { did: 'did:test:upd' } });
         ws.emit({ type: 'apps-changed' });
         ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c', remainingCredits: '1', freeAccess: false });
-        ws.emit({ type: 'compute-log-updated', id: 'log-1' });
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-a' } });
         ws.emit({ type: 'perspective-updated', perspective: { uuid: 'uuid-a' } });
         ws.emit({ type: 'perspective-removed', uuid: 'uuid-a' });
@@ -1253,6 +1251,12 @@ describe('Ad4mClient', () => {
         expect(listeners.removed).toHaveBeenCalledWith('uuid-a');
         expect(listeners.exception).toHaveBeenCalledWith({ title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' });
         freshClient.close();
+    });
+
+    test('the agent client offers no compute-log listener (the executor sends no such event)', () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        // @ts-expect-error removed: compute-log-updated never reaches the socket
+        expect(freshClient.agent.addComputeLogUpdatedListener).toBeUndefined();
     });
 
     test('a listener added after close() receives events again', async () => {

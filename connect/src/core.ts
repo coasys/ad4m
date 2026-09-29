@@ -261,7 +261,7 @@ export default class Ad4mConnect extends EventTarget {
   // Hosting — credit subscription & polling fallback
 
   /**
-   * Subscribe to real-time credit updates and compute log entries.
+   * Subscribe to real-time credit updates.
    * Polling runs beside them as a safety net.
    */
   startCreditSubscription(): void {
@@ -283,10 +283,6 @@ export default class Ad4mConnect extends EventTarget {
       if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
         this.dispatchEvent(new CustomEvent('creditlow'));
       }
-    });
-
-    this.ad4mClient.agent.addComputeLogUpdatedListener((entry) => {
-      this.dispatchEvent(new CustomEvent('computelogentry', { detail: entry }));
     });
 
     // Always start polling as a safety-net (at a longer 60s interval)

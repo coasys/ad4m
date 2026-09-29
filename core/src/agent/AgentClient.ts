@@ -37,7 +37,6 @@ export type AgentUpdatedCallback = (agent: Agent) => void;
 export type AgentStatusChangedCallback = (agent: Agent) => void;
 export type AgentAppsUpdatedCallback = () => void;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
-export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
 export class AgentClient {
   #apiClient: ApiClient;
@@ -47,7 +46,6 @@ export class AgentClient {
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
-  #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -71,7 +69,6 @@ export class AgentClient {
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
-    this.#computeLogUpdatedCallbacks = [];
     this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
   }
 
@@ -279,11 +276,6 @@ export class AgentClient {
     this.#listen();
   }
 
-  addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
-    this.#computeLogUpdatedCallbacks.push(listener);
-    this.#listen();
-  }
-
   /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
   #listen(): void {
     this.#apiClient.subscribe(this.#onEvent);
@@ -305,9 +297,6 @@ export class AgentClient {
         break;
       case 'hosting-user-info-changed':
         notifyListeners(this.#hostingUserInfoChangedCallbacks, data as unknown as HostingUserInfo);
-        break;
-      case 'compute-log-updated':
-        notifyListeners(this.#computeLogUpdatedCallbacks, data as unknown as ComputeLogEntry);
         break;
     }
   };
