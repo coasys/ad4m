@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import Ad4mConnect from './core';
 import { setLocal, getLocal } from './utils';
+import { AgentStatus } from '@coasys/ad4m';
 
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
     isLocked: vi.fn().mockResolvedValue(false),
-    status: vi.fn().mockResolvedValue({ isInitialized: true }),
+    status: vi.fn(),
     startSubscriptions: vi.fn(),
     requestCapability: vi.fn().mockResolvedValue('req-123'),
     generateJwt: vi.fn().mockResolvedValue('jwt-token'),
@@ -44,10 +45,13 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 });
 
 // Mock @coasys/ad4m
-vi.mock('@coasys/ad4m', () => ({
+vi.mock('@coasys/ad4m', async (importOriginal) => ({
+  ...(await importOriginal() as any),
   Ad4mClient: vi.fn().mockImplementation(() => mockClientInstance),
-  VerificationRequestResult: {},
 }));
+
+/** What \`agent.status\` resolves to: built by the real AgentStatus, which turns a missing flag into false. */
+const agentStatus = (obj: object) => new AgentStatus(obj);
 
 // Mock only checkConnection and isEmbedded from utils (keep the real localStorage helpers)
 vi.mock('./utils', async (importOriginal) => {
@@ -88,7 +92,7 @@ describe('Ad4mConnect', () => {
     mockRuntime.multiUserEnabled.mockClear();
     // Restore default implementations
     mockAgent.isLocked.mockResolvedValue(false);
-    mockAgent.status.mockResolvedValue({ isInitialized: true });
+    mockAgent.status.mockResolvedValue(agentStatus({ isInitialized: true, isUnlocked: true }));
   });
 
   describe('constructor', () => {
@@ -188,7 +192,7 @@ describe('Ad4mConnect', () => {
       const { checkConnection } = await import('./utils');
       let releaseHealth!: () => void;
       (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
-      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: true });
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: true }));
 
       const conn = new Ad4mConnect(defaultOptions);
       const connecting = conn.connect();
@@ -200,7 +204,7 @@ describe('Ad4mConnect', () => {
     });
 
     it('does not ask isLocked when status says the wallet is unlocked', async () => {
-      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: true });
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: true }));
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
       expect(mockAgent.isLocked).not.toHaveBeenCalled();
@@ -208,7 +212,16 @@ describe('Ad4mConnect', () => {
     });
 
     it('reads a locked wallet from status alone', async () => {
-      mockAgent.status.mockResolvedValueOnce({ isInitialized: true, isUnlocked: false });
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: false }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
+    it('reads a status without isUnlocked as locked, without asking isLocked', async () => {
+      // AgentStatus turns a missing flag into false, so no status answer is ambiguous.
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true }));
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
       expect(mockAgent.isLocked).not.toHaveBeenCalled();
@@ -255,7 +268,7 @@ describe('Ad4mConnect', () => {
 
   describe('checkAuth()', () => {
     it('sets auth to locked when agent is locked', async () => {
-      mockAgent.isLocked.mockResolvedValueOnce(true);
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: true, isUnlocked: false }));
 
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();

@@ -224,33 +224,26 @@ export default class Ad4mConnect extends EventTarget {
   /**
    * What the executor says about this session, with nothing applied yet.
    *
-   * \`agent.status\` first: on a session that is authorised and unlocked — every connect after the
-   * first — it answers in one call. \`agent.isLocked\` needs no capability, so it is the one that can
-   * tell a locked wallet from a refused token; it is asked only when \`status\` fails, or answers
-   * without saying whether the wallet is unlocked.
+   * \`agent.status\` first: on an authorised session — every connect after the first — it answers
+   * in one call. \`agent.isLocked\` needs no capability, so when \`status\` fails
+   * it is the one that can tell a locked wallet from a refused token.
    */
   private async readAuth(client: Ad4mClient): Promise<AuthReading> {
     let statusError: any;
     try {
       const status = await client.agent.status();
-      if (status?.isUnlocked === true) return { state: 'authenticated' };
-      if (status?.isUnlocked === false) return { state: 'locked' };
+      return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
       if (error?.message === LOCKED_WALLET) return { state: 'locked' };
       statusError = error;
     }
 
-    // isLocked may not exist on older executors (404). Treat errors as "not locked".
-    let locked = false;
     try {
-      locked = await client.agent.isLocked();
+      if (await client.agent.isLocked()) return { state: 'locked' };
     } catch (lockErr) {
-      const msg = lockErr?.message || '';
-      if (msg === LOCKED_WALLET) return { state: 'locked' };
-      console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
+      if (lockErr?.message === LOCKED_WALLET) return { state: 'locked' };
+      console.warn('[Ad4m Connect] isLocked check failed:', lockErr?.message);
     }
-    if (locked) return { state: 'locked' };
-    if (!statusError) return { state: 'authenticated' };
     return { state: 'unauthenticated', error: statusError };
   }
 
