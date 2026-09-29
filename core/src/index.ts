@@ -19,6 +19,8 @@ export * from "./perspectives/PerspectiveProxy";
 export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";
+// Also exports FlowFireOutcome / FlowProposeResult, the result shapes of the
+// flow write API — they live beside the `proposeTransition()` surface.
 export * from "./perspectives/FlowInstance";
 export * from "./perspectives/SparqlBindings";
 export * from "./perspectives/WakerSubscriptionManager";

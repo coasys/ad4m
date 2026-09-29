@@ -3,6 +3,10 @@ import { ChildProcess } from 'child_process';
 import { pollUntil } from "../utils/utils";
 
 export class TestContext {
+    /** False when the executors run with --run-holochain false: there are no
+     *  Holochain agent infos to exchange, so makeAll*NodesKnown() do nothing. */
+    holochain: boolean = true
+
     #alice: Ad4mClient | undefined
     #bob: Ad4mClient | undefined
     #jim: Ad4mClient | undefined
@@ -52,6 +56,7 @@ export class TestContext {
     }
 
     async makeAllNodesKnown() {
+      if (!this.holochain) return;
       await pollUntil(async () => {
         const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
         const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();
@@ -63,6 +68,7 @@ export class TestContext {
     }
 
     async makeAllThreeNodesKnown() {
+      if (!this.holochain) return;
       await pollUntil(async () => {
         const aliceAgentInfo = await this.#alice!.runtime.hcAgentInfos();
         const bobAgentInfo = await this.#bob!.runtime.hcAgentInfos();

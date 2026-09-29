@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use holochain::conductor::api::{AppInfo, AppStatusFilter, CellInfo};
 use holochain::conductor::config::{ConductorConfig, NetworkConfig, SpaceNetworkOverride};
+use holochain::conductor::error::ConductorError;
 use holochain::conductor::paths::DataRootPath;
 use holochain::conductor::{ConductorBuilder, ConductorHandle};
 use holochain::prelude::hash_type::Agent;
@@ -25,19 +26,21 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use tokio::select;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tokio::time::timeout;
 use url2::Url2;
 
 use tokio_stream::StreamExt;
 
+pub mod conductor_startup;
+pub(crate) mod dispatch;
 pub mod holochain_service_extension;
 pub(crate) mod interface;
 
 pub(crate) use interface::{
-    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
-    HolochainServiceRequest, HolochainServiceResponse,
+    get_holochain_service, holochain_service_once_started, maybe_get_holochain_service,
+    ConductorStarting, Envelope, HolochainServiceInterface, HolochainServiceResponse, SERVICE_WAIT,
 };
 
+use self::dispatch::{run_dispatch_loop, ConductorDispatch};
 use self::interface::set_holochain_service;
 
 // Store the config globally so we can restart with the same configuration
@@ -114,7 +117,7 @@ impl HolochainService {
             *config_lock = Some(local_config.clone());
         }
 
-        let (sender, mut receiver) = mpsc::unbounded_channel::<HolochainServiceRequest>();
+        let (sender, receiver) = mpsc::unbounded_channel::<Envelope>();
         let (stream_sender, stream_receiver) = mpsc::unbounded_channel::<Signal>();
         let (new_app_ids_sender, mut new_app_ids_receiver) = mpsc::unbounded_channel::<AppInfo>();
 
@@ -135,7 +138,7 @@ impl HolochainService {
 
             tokio::task::block_in_place(|| {
                 rt.block_on(async move {
-                    let mut service = HolochainService::new(local_config).await.unwrap();
+                    let service = HolochainService::new(local_config).await.unwrap();
                     let conductor_clone = service.conductor.clone();
 
                     // Spawn a new task to forward items from the stream to the receiver
@@ -173,265 +176,13 @@ impl HolochainService {
                         }
                     });
 
-                    let spawned_receiver = tokio::spawn(async move {
-                        while let Some(message) = receiver.recv().await {
-                            match message {
-                                HolochainServiceRequest::InstallApp(payload, response) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(10),
-                                        service.install_app(payload)
-                                    ).await.map_err(|_| anyhow!("Timeout error; InstallApp call")) {
-                                        Ok(result) => {
-                                            if let Ok(app_info) = &result {
-                                                let _ = new_app_ids_sender.send(app_info.clone());
-                                            }
-                                            let _ = response.send(HolochainServiceResponse::InstallApp(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response.send(HolochainServiceResponse::InstallApp(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::CallZomeFunction {
-                                    app_id,
-                                    cell_name,
-                                    zome_name,
-                                    fn_name,
-                                    payload,
-                                    response,
-                                } => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(90),
-                                        service.call_zome_function(app_id, cell_name, zome_name, fn_name, payload)
-                                    ).await.map_err(|_| anyhow!("Timeout error; Call Zome Function")) {
-                                        Ok(result) => {
-                                            let _ = response.send(HolochainServiceResponse::CallZomeFunction(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response.send(HolochainServiceResponse::CallZomeFunction(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::RemoveApp(app_id, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(10),
-                                        service.remove_app(app_id)
-                                    ).await.map_err(|_| anyhow!("Timeout error; Remove App")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::RemoveApp(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::RemoveApp(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::EnableApp(app_id, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(10),
-                                        async {
-                                            service.conductor.clone().enable_app(app_id).await
-                                                .map(|_| ())
-                                                .map_err(|e| anyhow!("Could not enable app: {:?}", e))
-                                        }
-                                    ).await.map_err(|_| anyhow!("Timeout error; Enable App")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::EnableApp(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::AgentInfos(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(30),
-                                        service.agent_infos()
-                                    ).await.map_err(|_| anyhow!("Timeout error; AgentInfos")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::AgentInfos(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::AgentInfos(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(30),
-                                        service.add_agent_infos(agent_infos)
-                                    ).await.map_err(|_| anyhow!("Timeout error; AddAgentInfos")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::AddAgentInfos(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::Sign(data, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        service.sign(data)
-                                    ).await.map_err(|_| anyhow!("Timeout error; Sign")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::Sign(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::Sign(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::Shutdown(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        service.shutdown()
-                                    ).await.map_err(|_| anyhow!("Timeout error Shutdown")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::Shutdown(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::Shutdown(Err(err)));
-                                        },
-                                    }
-                                    break;
-                                }
-                                HolochainServiceRequest::GetAgentKey(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        service.get_agent_key()
-                                    ).await.map_err(|_| anyhow!("Timeout error; GetAgentKey")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::GetAgentKey(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::GetAppInfo(app_id, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        service.get_app_info(app_id)
-                                    ).await.map_err(|_| anyhow!("Timeout error; GetAppInfo")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::GetAppInfo(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::LogNetworkMetrics(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        service.log_network_metrics()
-                                    ).await.map_err(|_| anyhow!("Timeout error; LogNetworkMetrics")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::LogNetworkMetrics(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::LogNetworkMetrics(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::GetNetworkMetrics(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(30),
-                                        service.get_network_metrics()
-                                    ).await.map_err(|_| anyhow!("Timeout error; GetNetworkMetrics")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(result));
-                                        },
-                                        Err(err) => {
-                                            // KEEP AT warn (Nico + CodeRabbit, PR #942 round 2):
-                                            // this path is reachable from `runtime.networkMetrics`
-                                            // via WS-RPC, so a real user request just failed. Do not
-                                            // downgrade in future cleanups; if there's a caller-
-                                            // specific periodic path that wants debug, gate the
-                                            // downgrade behind that path only.
-                                            // See rust-executor/LOGGING.md.
-                                            log::warn!("⚠️ 🐝 GetNetworkMetrics timed out after 30s");
-                                            let _ = response_tx.send(HolochainServiceResponse::GetNetworkMetrics(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::PackDna(path, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        HolochainService::pack_dna(path)
-                                    ).await.map_err(|_| anyhow!("Timeout error; PackDna")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::PackDna(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::PackDna(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::UnPackDna(path, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        HolochainService::unpack_dna(path)
-                                    ).await.map_err(|_| anyhow!("Timeout error; UnpackDna")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::UnPackDna(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::PackHapp(path, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        HolochainService::pack_happ(path)
-                                    ).await.map_err(|_| anyhow!("Timeout error; PackHapp")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::PackHapp(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::UnPackHapp(path, response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(3),
-                                        HolochainService::unpack_happ(path)
-                                    ).await.map_err(|_| anyhow!("Timeout error; UnPackHapp")) {
-                                        Ok(result) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::UnPackHapp(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::NewSignKeypair(response_tx) => {
-                                    match timeout(
-                                        std::time::Duration::from_secs(10),
-                                        service.conductor.keystore().new_sign_keypair_random()
-                                    ).await.map_err(|_| anyhow!("Timeout error; NewSignKeypair")) {
-                                        Ok(result) => {
-                                            let result = result.map_err(|e| anyhow!("Failed to generate new signing keypair: {}", e));
-                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(result));
-                                        },
-                                        Err(err) => {
-                                            let _ = response_tx.send(HolochainServiceResponse::NewSignKeypair(Err(err)));
-                                        },
-                                    }
-                                }
-                                HolochainServiceRequest::SignWithKey(agent_key, data, response_tx) => {
-                                    let keystore = service.conductor.keystore();
-                                    let data_arc = Arc::from(data.into_boxed_slice());
-                                    let result = keystore.sign(agent_key, data_arc).await
-                                        .map_err(|e| anyhow!("Failed to sign with key: {}", e));
-                                    let _ = response_tx.send(HolochainServiceResponse::SignWithKey(result));
-                                }
-                            };
-                        };
-                        error!("Holochain service receiver closed");
+                    // Requests are answered by the dispatch loop (see `dispatch`); `init`
+                    // only owns the runtime, the signal fan-in above, and the wiring.
+                    let dispatcher = Arc::new(ConductorDispatch {
+                        service,
+                        new_app_ids: new_app_ids_sender,
                     });
+                    let spawned_receiver = tokio::spawn(run_dispatch_loop(receiver, dispatcher));
 
                     select! {
                         _ = spawned_sig => {},
@@ -611,25 +362,72 @@ impl HolochainService {
     }
 
     pub async fn install_app(
-        &mut self,
+        &self,
         install_app_payload: InstallAppPayload,
     ) -> Result<AppInfo, AnyError> {
         if install_app_payload.installed_app_id.is_none() {
             return Err(anyhow!("App id is required"));
         }
 
-        let app_id = install_app_payload.installed_app_id.clone().unwrap();
+        let mut app_id = install_app_payload.installed_app_id.clone().unwrap();
 
         //Check if app_id already exists
         let app_info = self.conductor.get_app_info(&app_id).await?;
 
         match app_info {
             None => {
-                self.conductor
+                if let Err(e) = self
+                    .conductor
                     .clone()
                     .install_app_bundle(install_app_payload)
                     .await
-                    .map_err(|e| anyhow!("Could not install app: {:?}", e))?;
+                {
+                    // Same DNA hash + same agent key = the same cell. The conductor
+                    // refuses to create a cell that an already-installed app owns
+                    // (CellAlreadyExists), which happens when a language is published
+                    // or templated without changing the network seed: the new language
+                    // address yields a new app_id, but its cell is identical to the one
+                    // backing the original language. The "new" app would be backed by
+                    // exactly that cell anyway, so reuse the owning app instead of
+                    // failing. All other install errors stay hard failures.
+                    let ConductorError::CellAlreadyExists(cell_id) = &e else {
+                        return Err(anyhow!("Could not install app: {:?}", e));
+                    };
+                    let owns_cell = |app: &AppInfo| {
+                        app.cell_info.values().flatten().any(|ci| match ci {
+                            CellInfo::Provisioned(c) => &c.cell_id == cell_id,
+                            CellInfo::Cloned(c) => &c.cell_id == cell_id,
+                            CellInfo::Stem(_) => false,
+                        })
+                    };
+                    let owner = self
+                        .conductor
+                        .list_apps(None)
+                        .await?
+                        .into_iter()
+                        .find(owns_cell);
+                    match owner {
+                        Some(owner) => {
+                            info!(
+                                "Could not install app '{}': cell {:?} already installed under app '{}'; reusing that app",
+                                app_id, cell_id, owner.installed_app_id
+                            );
+                            app_id = owner.installed_app_id;
+                        }
+                        None => {
+                            // The conductor's duplicate check compares against cells of
+                            // installed apps, so this should be unreachable — but if the
+                            // cell really has no owning app, there is nothing usable to
+                            // recover to.
+                            return Err(anyhow!(
+                                "Could not install app '{}': cell {:?} already exists but no installed app owns it: {:?}",
+                                app_id,
+                                cell_id,
+                                e
+                            ));
+                        }
+                    }
+                }
             }
             Some(_) => {
                 info!("App already installed with id: {:?}", app_id);

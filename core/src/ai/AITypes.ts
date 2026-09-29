@@ -5,6 +5,9 @@ export class ModelApi {
     apiKey: string;
     model: string;
     apiType: String;
+    /** Optional ceiling for the provider's context window (tokens).
+     *  Read by the Ollama provider to bound num_ctx / KV-cache VRAM. */
+    maxNumCtx?: number;
 }
 
 export class TokenizerSource {
@@ -35,6 +38,8 @@ export class ModelApiInput {
     apiKey: string;
     model: string;
     apiType: string;
+    /** Optional ceiling for the provider's context window (tokens). */
+    maxNumCtx?: number;
 }
 
 export class TokenizerSourceInput {

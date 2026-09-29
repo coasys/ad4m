@@ -14,7 +14,8 @@ AD4M includes a built-in [Model Context Protocol (MCP)](https://modelcontextprot
 While AD4M's WebSocket RPC API provides full programmatic access, MCP is purpose-built for AI agents:
 
 - **Tool discovery** — agents automatically discover available operations and their parameters
-- **Dynamic tools** — SHACL subject classes generate domain-specific tools at runtime (e.g., `channel_create`, `message_set_body`)
+- **Stable, model-agnostic tools** — `describe_perspective` returns any perspective's SHACL data model as data, and the generic `instance_*` tools create, query and update instances of *any* class by name. The tool list stays constant no matter which social DNA is loaded, so plugin manifests and agent configs can declare it statically
+- **Optional per-class tools** — with `dynamicClassTools` enabled, SHACL subject classes additionally generate typed tools at runtime (e.g., `channel_create`, `message_set_body`)
 - **Natural descriptions** — every tool includes LLM-optimised descriptions with examples
 - **Authentication built-in** — signup, login, and JWT management through MCP tools themselves
 
@@ -34,6 +35,18 @@ ad4m-executor run \
 
 The MCP server starts on **port 3001** by default, serving Streamable HTTP at `/mcp`.
 
+### Static vs. dynamic tool surface
+
+By default the MCP server exposes a **fixed tool list**: the core perspective / neighbourhood / auth tools plus the generic instance tools (`describe_perspective`, `instance_create`, `instance_query`, `instance_get`, `instance_update`, `instance_add_to_collection`, `instance_remove`). Registering a model or joining a neighbourhood never adds tools — the agent reads the new classes through `describe_perspective` and passes the class name as an argument.
+
+Per-class tools (`{class}_create`, `{class}_set_{property}`, …) are still generated for every SHACL class, but are only exposed over MCP when you opt in:
+
+```bash
+ad4m-executor run ... --enable-mcp true --dynamic-class-tools true
+```
+
+(`dynamicClassTools: true` in the config file.) With the flag on, both surfaces are available side by side. Calling a per-class tool while the flag is off returns an error naming the `instance_*` equivalent. The executor's built-in interpretation engine is unaffected by the flag — it always uses the typed per-class definitions in-process.
+
 ## Connecting an AI Agent
 
 ### OpenClaw
@@ -50,7 +63,7 @@ Add AD4M as an MCP server in your OpenClaw configuration:
 }
 ```
 
-Once connected, your agent can call any AD4M tool directly. An [OpenClaw skill](https://github.com/coasys/ad4m/tree/dev/skills/ad4m) is also available with setup guides and reference material.
+Once connected, your agent can call any AD4M tool directly. An [OpenClaw skill](https://github.com/coasys/ad4m/tree/dev/plugins/ad4m/skills/ad4m) is also available with setup guides and reference material.
 
 ### Other MCP Clients
 
@@ -65,11 +78,16 @@ AD4M's MCP server supports two authentication modes:
 When running a personal executor, use the admin credential:
 
 ```bash
-# The same credential passed to --admin-credential when starting the executor
-# Include as Authorization: <credential> header in MCP transport config
+# The same credential the executor was started with (AD4M_ADMIN_CREDENTIAL
+# or --admin-credential). Send it as an Authorization header on every call:
+#   Authorization: Bearer <credential>
 ```
 
 For local development, this is the simplest approach — no signup/login needed.
+The MCP session itself still starts with no token, and `auth_status()` only
+reports on the session token — so it answers `authenticated: false` until the
+first protected call arrives with a matching header. That is not a sign the
+credential is wrong.
 
 ### Multi-User Mode
 
@@ -91,48 +109,79 @@ For shared executors serving multiple users, AD4M provides a full auth flow thro
 After login, the JWT is stored in the MCP session and used automatically for all subsequent tool calls. Each user gets their own DID and isolated perspective space.
 
 <Callout type="warning">
-Unauthenticated connections can only access auth tools (signup, login, verify, auth_status). All other tools require a valid JWT or admin credential.
+Unauthenticated connections can only access the bootstrap tools: `get_documentation`, `auth_status`, `signup`, `login_email`, `request_login_verification`, `verify_email_code`, `request_capability` and `generate_jwt`. Everything else requires a valid JWT or the admin credential.
 </Callout>
 
 ## Available Tools
 
-Tools are organised by domain. Dynamic tools (generated from SHACL subject classes) appear alongside these core tools.
+Tools are organised by domain. Per-class dynamic tools (generated from SHACL subject classes) appear alongside these core tools only when `dynamicClassTools` is enabled.
 
 ### Perspective & Link Tools
 
 | Tool | Description |
 |------|-------------|
-| `perspective_create` | Create a new perspective (personal knowledge graph) |
-| `perspective_list` | List all perspectives with metadata |
+| `add_perspective` | Create a new perspective (personal knowledge graph) |
+| `list_perspectives` | List all perspectives with metadata |
+| `add_model` | Register a subject class in a perspective from SHACL JSON |
 | `add_link` | Add an RDF-like triple to a perspective |
-| `get_links` | Query links by source, predicate, or target |
-| `remove_link` | Remove a specific link |
+| `query_links` | Query links by source, predicate, or target |
+| `get_documentation` | The executor's own `overview` / `architecture` docs as markdown (no auth needed) |
 
-### Subject (Model) Tools
+Raw links are the escape hatch, not the normal path — there is no
+remove-link tool on the MCP surface. Use the instance tools below for
+anything a subject class models.
 
-| Tool | Description |
-|------|-------------|
-| `get_models` | Discover all SHACL-defined data models in a perspective |
-| `get_subject_data` | Get a subject instance by URI |
-| `create_subject` | Create a new subject instance |
-| `delete_subject` | Delete a subject instance |
-| `query_subjects` | Query subjects by class with optional filters |
+### Instance Tools (static, model-agnostic)
 
-### Dynamic SHACL Tools
+These tools are the default way to work with typed data. The subject class is an argument, and the schema an agent needs comes back from `describe_perspective` as data:
 
-AD4M's MCP server **introspects SHACL subject class definitions** in perspectives and **generates tools dynamically at runtime**. This means:
+| Tool | Signature (essentials) | Description |
+|------|------------------------|-------------|
+| `describe_perspective` | `(perspective_id)` | Every registered class with its properties (name, type, required, cardinality, interpretation hints), collections, and flows |
+| `instance_create` | `(perspective_id, class_name, properties{}, base_uri?, parent?)` | Create an instance; `properties` is a JSON object, validated against the class |
+| `instance_query` | `(perspective_id, class_name, filter?, parent?, limit?, offset?)` | List instances with typed property values; `filter` is a where clause (`{"status": "open"}`, `{"title": {"contains": "mcp"}}`, `OR` / `AND` / `NOT`) |
+| `instance_get` | `(perspective_id, class_name, base_uri)` | One instance with all properties and collections |
+| `instance_update` | `(perspective_id, class_name, base_uri, properties{})` | Set single-valued properties |
+| `instance_add_to_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Add an item to a collection property |
+| `instance_remove_from_collection` | `(perspective_id, class_name, base_uri, collection, item_uri)` | Remove the membership link only; the item itself is untouched |
+| `instance_remove` | `(perspective_id, class_name, base_uri)` | Delete an instance and every link touching it |
+| `instance_transcript` | `(perspective_id, class_name, parent, limit?, text_property?)` | The newest N instances of one class under a parent, as a readable chronological transcript — the way to read a channel |
+| `add_child` / `get_children` | `(perspective_id, parent, child)` / `(perspective_id, parent, limit?)` | The raw `ad4m://has_child` tree, class-agnostic: neither node has to be a subject-class instance |
+| `execute_commands` | `(perspective_id, expression_address, commands, parameters?)` | Escape hatch: raw SDNA `{action, source, predicate, target}` commands on one instance. **Not** SHACL-validated |
+
+Every write through the typed tools is validated against the class's SHACL shape before anything is stored (`execute_commands` is the documented exception). A rejected call returns all problems at once, each naming the property, the expected type and the cardinality:
+
+```json
+{
+  "error": "Validation failed for class 'Channel' (2 problems): name: missing required property (expected string, exactly one value (minCount 1, maxCount 1)); isPinned: expects true or false (expected boolean, at most one value (maxCount 1)), received string \"maybe\"",
+  "class_name": "Channel",
+  "validation_errors": [
+    { "property": "name", "problem": "missing required property", "expected_type": "string", "cardinality": "exactly one value (minCount 1, maxCount 1)" },
+    { "property": "isPinned", "problem": "expects true or false", "expected_type": "boolean", "cardinality": "at most one value (maxCount 1)", "received": "string \"maybe\"" }
+  ],
+  "hint": "Call describe_perspective for the full schema of this class."
+}
+```
+
+### Dynamic SHACL Tools (opt-in)
+
+With `--dynamic-class-tools true`, AD4M's MCP server additionally **introspects SHACL subject class definitions** in perspectives and **generates typed tools at runtime**. This means:
 
 1. Install or define SDNA (SHACL schemas) in a perspective
 2. MCP server discovers the classes and their properties/collections
 3. Tools appear automatically — no manual registration needed
-4. AI agents can call `get_models` to discover available tools
+4. AI agents can call `describe_perspective` to discover the classes behind the tools
+
+This is useful for a *fixed, known* DNA where per-property tool parameters give smaller models better guidance. The trade-off is a tool list that grows with every class (roughly five tools per class plus one per property) and changes at runtime, which static integrations cannot follow.
 
 **Tool generation rules:**
 
-- **Scalar properties** (`sh:maxCount 1`) → `{class}_set_{property}` (setter), `{class}_get_{property}` (getter)
-- **Collections** (`sh:maxCount > 1`) → `{class}_add_{collection}` (add item), `{class}_remove_{collection}` (remove item)
-- **Constructors** → `{class}_create` (required properties become parameters)
-- **Actions** (SHACL Flow) → `{class}_{action_name}` (state transitions, custom logic)
+- **Per class** → `{class}_create`, `{class}_query`, `{class}_list`, `{class}_get`, `{class}_delete`
+- **Scalar properties** (`sh:maxCount 1`) → `{class}_set_{property}` — a setter only; there is no per-scalar getter (read them with `{class}_get`)
+- **Collections** (`collection: true`, or no `max_count`) → `{class}_get_{collection}`, `{class}_add_{collection}`, `{class}_remove_{collection}`
+- `{class}_create` takes **every** non-collection property as a parameter, required or not; `min_count` only decides whether the description marks it with `*`, and `perspective_id` is the only entry in the schema's `required` list
+- Every instance-scoped tool identifies the instance by an **`expression_address`** parameter
+- SHACL Flow *actions* do **not** generate tools — flows are read and driven through the static `add_flow` / `get_flows` / `flow_state` / `flow_actions` tools
 
 **Example:** A `Channel` SDNA added via `add_model(class_name: "Channel", shacl_json: ...)`:
 ```json
@@ -175,14 +224,15 @@ AD4M's MCP server **introspects SHACL subject class definitions** in perspective
 ```
 
 Generates these MCP tools:
-- `channel_create(perspective_id, name, description?)` — name is required
-- `channel_set_name(perspective_id, uri, value)` — update name
-- `channel_set_description(perspective_id, uri, value)` — update description
-- `channel_add_members(perspective_id, uri, value)` — add an Agent to members
-- `channel_remove_members(perspective_id, uri, value)` — remove an Agent
-- `channel_add_messages(perspective_id, uri, value)` — add a Message
-- `channel_remove_messages(perspective_id, uri, value)` — remove a Message
-- `channel_get(perspective_id, uri)` — retrieve full Channel data
+- `channel_create(perspective_id, expression_address?, parent?, name, description)` — `name` is marked `*` in the description; only `perspective_id` is schema-required, and `expression_address` is generated when omitted
+- `channel_set_name(perspective_id, expression_address, value)` — update name
+- `channel_set_description(perspective_id, expression_address, value)` — update description
+- `channel_get_members(perspective_id, expression_address)` — list members
+- `channel_add_members(perspective_id, expression_address, value)` — add an Agent to members
+- `channel_remove_members(perspective_id, expression_address, value)` — remove an Agent
+- `channel_get_messages` / `channel_add_messages` / `channel_remove_messages` — same three for messages
+- `channel_get(perspective_id, expression_address)` — retrieve full Channel data
+- `channel_query` / `channel_list` / `channel_delete`
 
 All tools include LLM-optimized descriptions with examples, data types, and constraints.
 
@@ -190,23 +240,33 @@ All tools include LLM-optimized descriptions with examples, data types, and cons
 
 | Tool | Description |
 |------|-------------|
-| `join_neighbourhood` | Join a neighbourhood by URL |
-| `publish_neighbourhood` | Publish a perspective as a shared neighbourhood |
+| `neighbourhood_join_from_url` | Join a neighbourhood by URL |
+| `list_link_language_templates` | List the P2P sync engines you can publish with |
+| `neighbourhood_publish_from_perspective` | Publish a perspective as a shared neighbourhood (pass a template address as `link_language`) |
 
 ### Agent & Profile Tools
 
 | Tool | Description |
 |------|-------------|
-| `agent_me` | Get the current agent's DID and status |
-| `agent_unlock` | Unlock the agent keystore |
+| `get_my_did` | The current agent's DID |
+| `get_agent_profile` / `set_agent_profile` | Read and write your profile (name, bio, …) |
+| `set_agent_profile_picture` | Set your profile picture |
 | `get_agent_public_perspective` | Read any agent's public profile |
 | `set_agent_public_perspective` | Update your public profile links |
+
+Unlocking the keystore is **not** an MCP tool — it is the node operator's job,
+over the CLI or WS-RPC (`agent.unlock`). Until it happens, the JWT paths fail
+with a "key not found" error.
 
 ### Waker / Subscription Tools
 
 | Tool | Description |
 |------|-------------|
-| `subscribe_to_model` | Generate a reactive query configuration for monitoring model changes |
+| `generate_waker_query` | Build the SPARQL subscription that wakes you when a class changes under a parent |
+| `get_mention_waker_config` | The subscription config that wakes you on mentions of your DID |
+
+The subscription itself is registered by your client (e.g. the OpenClaw
+plugin's waker service), not by the executor.
 
 ## Example Workflow
 
@@ -214,28 +274,36 @@ Here's a typical AI agent workflow — discover models, create data, query it ba
 
 ```
 # 1. List perspectives
-→ perspective_list()
+→ list_perspectives()
 ← [{ uuid: "ab23...", name: "My Space", neighbourhood: null }]
 
-# 2. Discover available models
-→ get_models(perspective_id: "ab23...")
-← [{ name: "Task", properties: ["title", "status", "assignee"],
-      collections: ["tags"] }]
+# 2. Discover the data model (schema as data)
+→ describe_perspective(perspective_id: "ab23...")
+← { classes: [{ name: "Task",
+                properties: [{ name: "title", type: "string", required: true, cardinality: { min: 1, max: 1 } },
+                             { name: "status", type: "string", required: false, ... },
+                             { name: "assignee", type: "string", ... }],
+                collections: [{ name: "tags", type: "string", cardinality: { min: 0, max: null } }] }],
+    flows: [] }
 
 # 3. Create a task
-→ task_create(perspective_id: "ab23...", title: "Review MCP docs",
-              status: "open", assignee: "did:key:z6Mk...")
-← { uri: "ad4m://task_1234", success: true }
+→ instance_create(perspective_id: "ab23...", class_name: "Task",
+                  properties: { title: "Review MCP docs", status: "open",
+                                assignee: "did:key:z6Mk..." })
+← { created: true, class_name: "Task", base_uri: "ad4m://obj/k3f9qzhtvbnmlxwerdcv" }
 
-# 4. Add tags
-→ task_add_tags(perspective_id: "ab23...", uri: "ad4m://task_1234",
-                value: "documentation")
+# 4. Add a tag
+→ instance_add_to_collection(perspective_id: "ab23...", class_name: "Task",
+                             base_uri: "ad4m://obj/k3f9qzhtvbnmlxwerdcv",
+                             collection: "tags", item_uri: "documentation")
 ← { success: true }
 
 # 5. Query all open tasks
-→ query_subjects(perspective_id: "ab23...", class_name: "Task",
+→ instance_query(perspective_id: "ab23...", class_name: "Task",
                  filter: { status: "open" })
-← [{ uri: "ad4m://task_1234", title: "Review MCP docs", status: "open" }]
+← { count: 1, total_count: 1,
+    instances: [{ id: "ad4m://obj/k3f9qzhtvbnmlxwerdcv", title: "Review MCP docs",
+                  status: "open", tags: ["documentation"] }] }
 ```
 
 ## Joining a Neighbourhood
@@ -244,25 +312,27 @@ AI agents can join shared spaces and participate alongside humans. Neighbourhood
 
 ```
 # Join an existing neighbourhood
-→ join_neighbourhood(url: "neighbourhood://Qm...")
-← { perspective_id: "cd45...", state: "SYNCED" }
+→ neighbourhood_join_from_url(url: "neighbourhood://Qm...")
+← { success: true, perspective_uuid: "cd45..." }
 
 # Discover what models (SHACL subject classes) exist in this community
-→ get_models(perspective_id: "cd45...")
-← [{ name: "Message", properties: ["body", "author", "timestamp"],
-      collections: ["reactions"] }]
+→ describe_perspective(perspective_id: "cd45...")
+← { classes: [{ name: "Channel", collections: [{ name: "messages", ... }], ... },
+              { name: "Message", properties: [{ name: "body", type: "string", required: true, ... }], ... }] }
 
-# Send a message (uses the auto-generated message_create tool)
-→ message_create(perspective_id: "cd45...", body: "Hello from an AI agent! 🖖")
-← { uri: "ad4m://msg_5678", success: true }
+# Send a message into a channel — same tools, whatever the DNA
+→ instance_create(perspective_id: "cd45...", class_name: "Message",
+                  properties: { body: "Hello from an AI agent! 🖖" },
+                  parent: "<channel uri from instance_query>")
+← { created: true, base_uri: "ad4m://obj/8ac2mfrxlpwkdgtvzyqn", added_to_parent: true }
 ```
 
 **What just happened?**
 
 1. Your agent joined a Holochain-backed shared space
-2. The neighbourhood SDNA defined the data schema (Message class)
-3. MCP tools were generated from the schema automatically
-4. Your message was validated, signed with your DID, and synced to all members
+2. The neighbourhood SDNA defined the data schema (Channel and Message classes)
+3. `describe_perspective` handed that schema to the agent as data — no new tools needed
+4. Your message was validated against the schema, signed with your DID, and synced to all members
 5. Other agents (human and AI) see your message in real-time
 
 This is the spanning layer in action — your agent participates in a P2P network using SHACL-structured data, all through simple MCP tool calls.
@@ -272,12 +342,12 @@ This is the spanning layer in action — your agent participates in a P2P networ
 When you use AD4M's MCP tools, you're interacting with multiple layers:
 
 ### 1. Agent Layer (Identity)
-- `agent_me()` → your DID (e.g., `did:key:z6Mk...`)
+- `get_my_did()` → your DID (e.g., `did:key:z6Mk...`)
 - Every action is signed with your keys
 - Cryptographic provenance on all data
 
 ### 2. Perspective Layer (Knowledge Graph)
-- `perspective_create()`, `add_link()`, `get_links()`
+- `add_perspective()`, `add_link()`, `query_links()`
 - Your subjective view of data — links between expressions
 - Mix data from any protocol/language in one graph
 
@@ -288,7 +358,7 @@ When you use AD4M's MCP tools, you're interacting with multiple layers:
 
 ### 4. Subject Class Layer (Structured Data)
 - SHACL SDNA defines models (Channel, Message, Task, etc.)
-- Tools auto-generate from schemas
+- `describe_perspective` exposes those schemas as data; `instance_*` tools work with any of them
 - Validation rules enforced across the network
 
 ### 5. Neighbourhood Layer (Collaboration)

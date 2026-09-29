@@ -101,6 +101,7 @@ export async function startAgent(
     undefined,   // relayUrl
     false,       // enableMcp
     undefined,   // mcpPort
+    undefined,   // dynamicClassTools
     runHolochain,
   );
   _activeExecutors.add(executorProcess);

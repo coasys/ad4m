@@ -121,6 +121,7 @@ dependencies = [
  "portpicker",
  "rand 0.8.5",
  "rayon",
+ "rcgen",
  "regex",
  "reqwest 0.11.27",
  "rmcp",
@@ -182,7 +183,6 @@ dependencies = [
  "lazy_static",
  "lettre",
  "libc",
- "localtunnel-client",
  "log",
  "log4rs",
  "nix 0.23.2",
@@ -11946,19 +11946,6 @@ dependencies = [
  "cc",
  "doxygen-rs",
  "libc",
-]
-
-[[package]]
-name = "localtunnel-client"
-version = "0.0.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "50e27b8ea846da5a71f7513edc8de10adc9f8f6856631d255593b8c9a1e28b49"
-dependencies = [
- "anyhow",
- "log",
- "reqwest 0.11.27",
- "serde",
- "tokio",
 ]
 
 [[package]]

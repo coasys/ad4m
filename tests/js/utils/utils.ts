@@ -1,10 +1,11 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { configureSharedStores } from './sharedStores';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -217,7 +218,12 @@ export async function startExecutor(dataPath: string,
     relayUrl?: string,
     enableMcp: boolean = false,
     mcpPort?: number,
+    // Expose the dynamic per-class SHACL tools over MCP (`--dynamic-class-tools`).
+    // Off by default, matching the executor's default: only the static
+    // instance_* surface is advertised.
+    dynamicClassTools: boolean = false,
     runHolochain: boolean = true,
+    sharedStores: boolean = true,
 ): Promise<ChildProcess> {
     if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
@@ -244,18 +250,11 @@ export async function startExecutor(dataPath: string,
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
 
-    // Pre-populate published language bundles so the executor finds them on
-    // disk during bootstrap. In HC mode the language-language distributes
-    // bundles via the DHT; in local mode (local-language-store) there is no
-    // shared network, so we copy the bundles that publishTestLangs.ts placed
-    // in tst-tmp/published-languages/ into the executor's data directory.
-    const sharedLangsDir = path.join(__dirname, '..', 'tst-tmp', 'published-languages');
-    if (existsSync(sharedLangsDir)) {
-        const targetLangsDir = path.join(effectiveDataPath, 'ad4m', 'languages');
-        mkdirSync(targetLangsDir, { recursive: true });
-        cpSync(sharedLangsDir, targetLangsDir, { recursive: true });
-        const copied = readdirSync(sharedLangsDir).length;
-        console.log(`Pre-populated ${copied} published language(s) from shared directory`);
+    // Shared mode for the local language-language and neighbourhood store,
+    // so executors see each other's published languages and neighbourhoods
+    // (see sharedStores.ts). Off only for tests of the default KV mode.
+    if (sharedStores) {
+        configureSharedStores(effectiveDataPath, bootstrapSeedPath);
     }
 
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
@@ -280,21 +279,27 @@ export async function startExecutor(dataPath: string,
         'run',
         '--app-data-path', effectiveDataPath,
         '--port', String(apiPort),
-        '--hc-admin-port', String(hcAdminPort),
-        '--hc-app-port', String(hcAppPort),
-        '--hc-proxy-url', proxyUrl,
-        '--hc-bootstrap-url', bootstrapUrl,
-        '--hc-use-bootstrap', 'true',
-        '--hc-use-proxy', 'true',
-        '--hc-use-local-proxy', 'true',
-        '--hc-use-mdns', 'true',
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
-    if (!runHolochain) { args.push('--run-holochain', 'false'); }
+    if (runHolochain) {
+        args.push(
+            '--hc-admin-port', String(hcAdminPort),
+            '--hc-app-port', String(hcAppPort),
+            '--hc-proxy-url', proxyUrl!,
+            '--hc-bootstrap-url', bootstrapUrl!,
+            '--hc-use-bootstrap', 'true',
+            '--hc-use-proxy', 'true',
+            '--hc-use-local-proxy', 'true',
+            '--hc-use-mdns', 'true',
+        );
+    } else {
+        args.push('--run-holochain', 'false');
+    }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
+    if (dynamicClassTools) { args.push('--dynamic-class-tools', 'true'); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });

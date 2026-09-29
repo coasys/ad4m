@@ -902,7 +902,7 @@ mod tests {
             assert!(result.is_ok());
         }
 
-        signature[0] = 0;
+        signature[0] ^= 0x01;
         {
             let sig_bytes = signature.as_slice();
             let key_pair = PatchedKeyPair::try_from(did.as_str()).expect("Failed to get key pair");

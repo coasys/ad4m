@@ -25,9 +25,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
+use super::sparql_builder::{verified_link_exists, LinkGuard};
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
-use super::utils::{parse_literal_value, validate_iri};
+use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Decode a SPARQL getter row's raw string based on the property's
 /// declared `sh:datatype`. When the property declares a datatype it
@@ -101,7 +103,15 @@ pub fn evaluate_getters_batch(
         })
         .collect();
 
-    evaluate_getters(store, &mut instances, &filtered_shape, None, true)?;
+    evaluate_getters(
+        store,
+        &mut instances,
+        &filtered_shape,
+        None,
+        true,
+        None,
+        None,
+    )?;
 
     let mut result = Map::new();
     for inst in &instances {
@@ -143,14 +153,16 @@ pub(super) fn strip_trailing_limit(query: &str) -> String {
 /// Convert an `ASK` getter to a batched `SELECT` returning matching source IRIs.
 ///
 /// Replaces `<Base>` with `?source`, extracts the body between `{ }`, and
-/// wraps it in `SELECT ?source WHERE { VALUES ?source { ... } <body> }`.
-pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> String {
+/// wraps it in `SELECT ?source WHERE { <source_constraint> <body> }` where
+/// `source_constraint` is a complete `VALUES`/`FILTER` line (see
+/// [`super::utils::values_or_str_filter`]).
+pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) -> String {
     let normalized = ask.replace("<Base>", "?source");
     if let (Some(open), Some(close)) = (normalized.find('{'), normalized.rfind('}')) {
         let body = &normalized[open + 1..close];
         format!(
-            "SELECT ?source WHERE {{ VALUES ?source {{ {} }} {} }}",
-            values_clause,
+            "SELECT ?source WHERE {{ {} {} }}",
+            source_constraint,
             body.trim()
         )
     } else {
@@ -158,14 +170,83 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, values_clause: &str) -> S
     }
 }
 
-/// Inject a `VALUES ?source` clause into a `SELECT` getter for batching.
+/// Add the #1113 proof filter, and the #1116 `linkStatus` check when the query
+/// has one, to a relation getter that opens with the relation's own triple,
+/// `<Base> <predicate> ?target`. Both are checked on that triple's one link.
+///
+/// That is the form of the conformance getter the SDK generates for a typed
+/// relation (`buildConformanceFilter` in `core/src/model/decorators.ts`). A
+/// relation with a getter is filled here instead of by the filtered hydration
+/// read, so without this a forged link, or a Local link under
+/// `linkStatus: shared`, would add a target to it.
+///
+/// The triples after it, `?target <p> <v> .` for each flag and
+/// `?target <p> ?_vN .` for each required property, are the target class's
+/// conformance. When the getter is exactly that form, each of them gets the
+/// same check, so a forged flag does not make a linked node a target either
+/// (#1120).
+///
+/// Any other getter is the model author's own SPARQL and runs as written. A
+/// getter that opens with the relation's triple but goes on differently gets
+/// the check on that first triple only.
+/// Unchanged as well when the query opts in with `includeUnverified` and sets
+/// no `linkStatus`.
+pub(super) fn verify_relation_getter(
+    getter: &str,
+    predicate: &str,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> String {
+    let filter = match validate_iri(predicate) {
+        Ok(pred) => {
+            verified_link_exists("<Base>", pred, "?target", link_status, include_unverified)
+        }
+        Err(_) => return getter.to_string(),
+    };
+    if filter.is_empty() {
+        return getter.to_string();
+    }
+    let own_triple = regex::Regex::new(&format!(
+        r"(?is)^\s*SELECT\s+\?target\s+WHERE\s*\{{\s*<Base>\s+<{}>\s+\?target\b",
+        regex::escape(predicate)
+    ))
+    .expect("escaped predicate");
+    let Some(m) = own_triple.find(getter) else {
+        return getter.to_string();
+    };
+    let rest = &getter[m.end()..];
+    let condition = r"\?target\s+<([^<>\s]+)>\s+(<[^<>\s]+>|\?_v\d+)\s*\.";
+    let generated = regex::Regex::new(&format!(r"(?s)^\s*\.(?:\s*{condition})*\s*\}}\s*$"))
+        .expect("static pattern");
+    let rest = if generated.is_match(rest) {
+        let guard = LinkGuard {
+            status: link_status,
+            include_unverified,
+        };
+        regex::Regex::new(condition)
+            .expect("static pattern")
+            .replace_all(rest, |c: &regex::Captures| {
+                let (pred, object) = (format!("<{}>", &c[1]), &c[2]);
+                format!(
+                    "?target {pred} {object} .{}",
+                    guard.exists("?target", &pred, object)
+                )
+            })
+            .into_owned()
+    } else {
+        rest.to_string()
+    };
+    format!("{}{filter}{rest}", &getter[..m.end()])
+}
+
+/// Inject a `?source` batching constraint into a `SELECT` getter.
 ///
 /// Performs three transformations:
 /// 1. Replaces `<Base>` with `?source`.
 /// 2. Strips any trailing `LIMIT N` (see [`strip_trailing_limit`]).
-/// 3. Ensures `?source` is in the projection and adds `VALUES ?source { ... }`
-///    inside the first `{`.
-pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> String {
+/// 3. Ensures `?source` is in the projection and adds `source_constraint` (a
+///    complete `VALUES`/`FILTER` line) inside the first `{`.
+pub(super) fn inject_values_into_select(select: &str, source_constraint: &str) -> String {
     let mut query = select.replace("<Base>", "?source");
 
     query = strip_trailing_limit(&query);
@@ -181,7 +262,7 @@ pub(super) fn inject_values_into_select(select: &str, values_clause: &str) -> St
     }
 
     if let Some(brace_pos) = query.find('{') {
-        let insert = format!(" VALUES ?source {{ {values_clause} }}");
+        let insert = format!(" {source_constraint}");
         query.insert_str(brace_pos + 1, &insert);
     }
 
@@ -203,6 +284,8 @@ pub(super) fn evaluate_getters(
     shape: &ModelShape,
     _include: Option<&HashMap<String, IncludeValue>>,
     deep_query: bool,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
@@ -225,14 +308,10 @@ pub(super) fn evaluate_getters(
         return Ok(());
     }
 
-    let values_clause = instance_iris
-        .iter()
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let source_constraint = values_or_str_filter("source", &instance_iris);
 
     log::debug!(
-        "evaluate_getters: {} getter props for {} instances (batched VALUES)",
+        "evaluate_getters: {} getter props for {} instances (batched)",
         getter_props.len(),
         instance_iris.len()
     );
@@ -242,7 +321,7 @@ pub(super) fn evaluate_getters(
         let upper = getter.trim().to_uppercase();
 
         if upper.starts_with("ASK") {
-            let batched = convert_ask_to_batched_select(getter, &values_clause);
+            let batched = convert_ask_to_batched_select(getter, &source_constraint);
             match store.query(&batched) {
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
@@ -270,7 +349,12 @@ pub(super) fn evaluate_getters(
                 }
             }
         } else if upper.starts_with("SELECT") {
-            let batched = inject_values_into_select(getter, &values_clause);
+            let getter = if prop.is_collection || prop.is_scalar_relation {
+                verify_relation_getter(getter, &prop.predicate, link_status, include_unverified)
+            } else {
+                getter.clone()
+            };
+            let batched = inject_values_into_select(&getter, &source_constraint);
 
             match store.query(&batched) {
                 Ok(result_json) => {
@@ -381,7 +465,15 @@ pub(super) fn evaluate_getters(
             (Some(wf), Some(wp)) => (wf, wp),
             _ => continue,
         };
-        apply_where_filter_to_relation(store, instances, &prop.name, wf, wp)?;
+        apply_where_filter_to_relation(
+            store,
+            instances,
+            &prop.name,
+            wf,
+            wp,
+            link_status,
+            include_unverified,
+        )?;
     }
 
     // Unconditional, and here rather than at the end of the pipeline: the stash
@@ -420,12 +512,18 @@ fn strip_stashed_entries(instances: &mut [Value]) {
 /// the target instances' property values (via batched `VALUES` queries) and
 /// filters out targets that don't match the where conditions.  The relation
 /// arrays on each parent instance are updated in-place.
+///
+/// The values are read through the query's `linkStatus` and #1113 proof
+/// filter, so a withheld link on a target neither admits it nor, as the last
+/// row read, drops it.
 pub(super) fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
     where_filter: &BTreeMap<String, super::types::WhereCondition>,
     where_predicates: &HashMap<String, String>,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let all_targets: Vec<String> = instances
         .iter()
@@ -454,16 +552,15 @@ pub(super) fn apply_where_filter_to_relation(
             .collect()
     };
 
-    let values_clause = unique_targets
+    let target_ids: Vec<String> = unique_targets
         .iter()
-        .filter_map(|id| validate_iri(id).ok())
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .filter_map(|id| validate_iri(id).ok().map(|s| s.to_string()))
+        .collect();
 
-    if values_clause.is_empty() {
+    if target_ids.is_empty() {
         return Ok(());
     }
+    let target_constraint = values_or_str_filter("source", &target_ids);
 
     let mut target_pass: HashMap<String, bool> = unique_targets
         .iter()
@@ -480,8 +577,16 @@ pub(super) fn apply_where_filter_to_relation(
         }
 
         let query = format!(
-            "SELECT ?source ?val WHERE {{ VALUES ?source {{ {} }} ?source <{}> ?val . }}",
-            values_clause, predicate
+            "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val .{} }}",
+            target_constraint,
+            predicate,
+            verified_link_exists(
+                "?source",
+                predicate,
+                "?val",
+                link_status,
+                include_unverified
+            )
         );
 
         let result_json = store.query(&query)?;
@@ -598,6 +703,95 @@ mod decode_getter_target_tests {
         assert_eq!(
             decode_getter_target("ad4m://Foo/instance/1", Some("xsd://string")),
             Value::String("ad4m://Foo/instance/1".into())
+        );
+    }
+}
+
+#[cfg(test)]
+mod verify_relation_getter_tests {
+    use super::*;
+
+    /// The exact getter `buildConformanceFilter` (`core/src/model/decorators.ts`)
+    /// emits for `FlaggedTarget` in `core/src/model/relation-filtering.test.ts`,
+    /// which asserts the same string. `verify_relation_getter` only filters a
+    /// getter of this form and passes any other through, so an SDK change to
+    /// the form would silently drop the #1113 filter from typed relations.
+    const SDK_GETTER: &str = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }";
+
+    /// `SDK_GETTER` with `check(subject, predicate, object)` after each of its
+    /// four triples' objects.
+    fn guarded_sdk_getter(check: impl Fn(&str, &str, &str) -> String) -> String {
+        format!(
+            "SELECT ?target WHERE {{ <Base> <test://has_flagged> ?target{} . \
+             ?target <test://type> <test://flagged_type> .{} \
+             ?target <test://name> ?_v0 .{} }}",
+            check("<Base>", "test://has_flagged", "?target"),
+            check("?target", "test://type", "<test://flagged_type>"),
+            check("?target", "test://name", "?_v0"),
+        )
+    }
+
+    #[test]
+    fn verify_relation_getter_rewrites_the_sdk_conformance_getter() {
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
+        assert!(!filter.is_empty());
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, None),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(s, p, o, None, None)),
+            "the relation's triple and the target's conformance triples"
+        );
+        assert_eq!(
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, Some(true)),
+            SDK_GETTER,
+            "the opt-in leaves the getter as written"
+        );
+        let shared = verified_link_exists(
+            "<Base>",
+            "test://has_flagged",
+            "?target",
+            Some(&LinkStatus::Shared),
+            Some(true),
+        );
+        assert!(shared.contains("<ad4m://ontology/status> \"Shared\""));
+        assert_eq!(
+            verify_relation_getter(
+                SDK_GETTER,
+                "test://has_flagged",
+                Some(&LinkStatus::Shared),
+                Some(true)
+            ),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(
+                s,
+                p,
+                o,
+                Some(&LinkStatus::Shared),
+                Some(true)
+            )),
+            "a status still applies under the opt-in"
+        );
+    }
+
+    #[test]
+    fn verify_relation_getter_guards_only_the_first_triple_of_another_form() {
+        let getter = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . \
+                      OPTIONAL { ?target <test://type> <test://flagged_type> . } }";
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
+        assert_eq!(
+            verify_relation_getter(getter, "test://has_flagged", None, None),
+            getter.replacen(
+                "<Base> <test://has_flagged> ?target",
+                &format!("<Base> <test://has_flagged> ?target{filter}"),
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn verify_relation_getter_leaves_a_hand_written_getter_alone() {
+        let getter = "SELECT ?target WHERE { ?target <test://custom> <Base> . }";
+        assert_eq!(
+            verify_relation_getter(getter, "test://custom", None, None),
+            getter
         );
     }
 }

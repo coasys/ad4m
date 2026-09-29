@@ -15,6 +15,7 @@ import { Literal } from "../Literal";
 import { resolveParentPredicate } from "./query-common";
 import type { RelationMetadataEntry } from "./decorators";
 import type { Where, Query, ModelMetadata, PropertyMetadata } from "./types";
+import { isTraverseScope } from "./types";
 
 /**
  * Check whether a `where` clause contains filters that cannot be pushed down
@@ -78,6 +79,67 @@ export function hasJsOnlyWhereFilters(
   }
 
   return false;
+}
+
+/**
+ * Prepare a `where` for this client-side SPARQL builder: unwrap `{ eq: X }`
+ * to the bare `X`, and refuse a per-link `author`.
+ *
+ * A per-link `author` (nested, `{ agent: { eq: X, author: A } }`, or a
+ * top-level `author` beside link-backed property or relation conditions) is
+ * answered by the executor, which joins each matched link's reifier (#1114). This builder
+ * has no such join, and treating the author as instance-level here would
+ * answer a different, wider question. `findAll()`/`count()` answer it.
+ */
+export function normalizeWhereForSparql(metadata: ModelMetadata, where?: Where): Where | undefined {
+  if (!where) return where;
+  assertNoPerLinkAuthor(metadata, where);
+  const out: Where = {};
+  for (const [key, condition] of Object.entries(where)) {
+    out[key] = unwrapEq(key, condition);
+  }
+  return out;
+}
+
+function isOpsObject(condition: unknown): condition is Record<string, unknown> {
+  return typeof condition === "object" && condition !== null && !Array.isArray(condition);
+}
+
+function unwrapEq(key: string, condition: any): any {
+  if (key === "OR" || key === "AND" || key === "NOT" || !isOpsObject(condition) || condition.eq === undefined) {
+    return condition;
+  }
+  if (Object.keys(condition).some((k) => k !== "eq")) {
+    throw new Error(`where.${key}: \`eq\` cannot be combined with another operator`);
+  }
+  return condition.eq;
+}
+
+function assertNoPerLinkAuthor(metadata: ModelMetadata, where: Where): void {
+  const refuse = (what: string) => {
+    throw new Error(
+      `buildSPARQLQuery: ${what} is a per-link \`author\`, which the executor answers by ` +
+        "checking who wrote each matched link. This client-side SPARQL builder cannot express " +
+        "it. Use the model query path (findAll/count).",
+    );
+  };
+  // A property or a relation with a predicate, as the executor's `is_link_leaf`.
+  const linkBacked = (key: string) => {
+    const field = metadata.properties[key] ?? metadata.relations?.[key];
+    return !!field && !!field.predicate && !field.getter;
+  };
+  for (const [key, condition] of Object.entries(where)) {
+    if (key === "OR" || key === "AND") {
+      for (const branch of (condition as Where[]) ?? []) assertNoPerLinkAuthor(metadata, branch);
+    } else if (key === "NOT") {
+      if (condition) assertNoPerLinkAuthor(metadata, condition as Where);
+    } else if (key === "author") {
+      const sibling = Object.keys(where).find((k) => k !== "author" && linkBacked(k));
+      if (sibling) refuse(`\`author\` beside \`${sibling}\``);
+    } else if (isOpsObject(condition) && (condition as Record<string, unknown>).author !== undefined) {
+      refuse(`\`${key}.author\``);
+    }
+  }
 }
 
 /**
@@ -268,12 +330,46 @@ export function buildSPARQLQuery(
 ): string {
   const joinPatterns: string[] = [];
   const filterExpressions: string[] = [];
+  query = { ...query, where: normalizeWhereForSparql(metadata, query.where) };
 
   // Parent filter — direct triple pattern
   if (query.parent) {
     const parentPredicate = resolveParentPredicate(query.parent, modelClass);
-    joinPatterns.push(`
+    if (isTraverseScope(query.parent)) {
+      const { ids, transitive, direction, limitPerAnchor, levels } = query.parent;
+      // `limitPerAnchor` and `levels` are applied by the executor between
+      // selecting ids and hydrating them, which is a shape this path does not
+      // have — it builds one query and reads the rows. Refused rather than
+      // ignored: quietly returning every reply where five per parent were
+      // asked for — or one unbounded level where a walk was asked for — is a
+      // wrong answer that looks like a right one.
+      if (limitPerAnchor !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: limitPerAnchor is applied by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for per-anchor limits.',
+        );
+      }
+      if (levels !== undefined) {
+        throw new Error(
+          'buildSPARQLQuery: levels is walked by the executor between query phases and ' +
+            'has no equivalent here. Use the model query path for level walks.',
+        );
+      }
+      const anchors = (Array.isArray(ids) ? ids : [ids]).map(iri).join(' ');
+      const path = transitive ? '+' : '';
+      joinPatterns.push(`
+      VALUES ?_anchor { ${anchors} }`);
+      joinPatterns.push(
+        direction === 'in'
+          ? `
+      ?source ${iri(parentPredicate)}${path} ?_anchor .`
+          : `
+      ?_anchor ${iri(parentPredicate)}${path} ?source .`,
+      );
+    } else {
+      joinPatterns.push(`
       ${iri(query.parent.id)} ${iri(parentPredicate)} ?source .`);
+    }
   }
 
   // Required property JOIN patterns — direct triple patterns

@@ -5,8 +5,11 @@
  * local bootstrap languages and --run-holochain false. No kitsune bootstrap
  * server, no HC conductor — much faster and zero network overhead.
  *
- * The Alice+Bob tests (Agent Language, Language, Neighbourhood) that exercise
- * Holochain cross-peer sync remain in integration.test.ts.
+ * Alice and Bob share languages, neighbourhoods and agent profiles through the
+ * shared mode of the local stores (utils/sharedStores.ts): Shared stores,
+ * Agent Language and Language run here. The suites that need links to sync
+ * between executors run in integration-server-link.test.ts (server-link-
+ * language + link-server) and integration.test.ts (p-diff-sync over Holochain).
  */
 import fs from 'fs-extra'
 import path from 'path'
@@ -21,7 +24,11 @@ import agentTests from "./agent";
 import aiTests from "./ai";
 import expressionTests from "./expression";
 import runtimeTests from "./runtime";
+import shaclRpcTests from "./shacl-rpc";
 import flatLanguageTests from "./flat-language.test";
+import languageTests from "./language";
+import sharedLanguageStoreTests from "./shared-language-store";
+import agentLanguageTests from "./agent-language";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,12 +36,12 @@ const __dirname = path.dirname(__filename);
 const TEST_DIR = `${__dirname}/../tst-tmp`
 
 let testContext: TestContext = new TestContext()
+testContext.holochain = false
 
 describe("Local integration tests (no Holochain)", function () {
     //@ts-ignore
     this.timeout(200000)
     const appDataPath = path.join(TEST_DIR, 'agents', 'alice-local')
-    const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
     let apiPort: number;
     let hcAdminPort: number;
     let hcAppPort: number;
@@ -53,22 +60,7 @@ describe("Local integration tests (no Holochain)", function () {
             fs.mkdirSync(appDataPath)
 
         // No HC local services — executor runs with --run-holochain false.
-        // Published language bundles are pre-populated by startExecutor() from
-        // tst-tmp/published-languages/ (see utils.ts).
-        // HC proxy/bootstrap URLs are ignored but we pass defaults since the
-        // params are positional.
-        executorProcess = await startExecutor(
-            appDataPath, bootstrapSeedPath,
-            apiPort, hcAdminPort, hcAppPort,
-            false,                                              // languageLanguageOnly
-            undefined,                                          // adminCredential
-            "wss://dev-test-bootstrap2.holochain.org",          // proxyUrl (ignored)
-            "https://dev-test-bootstrap2.holochain.org",        // bootstrapUrl (ignored)
-            undefined,                                          // relayUrl
-            false,                                              // enableMcp
-            undefined,                                          // mcpPort
-            false,                                              // runHolochain
-        );
+        executorProcess = await startLocalExecutor(appDataPath, apiPort, hcAdminPort, hcAppPort);
 
         testContext.alice = new Ad4mClient(baseUrl(apiPort))
         testContext.aliceCore = executorProcess
@@ -86,5 +78,49 @@ describe("Local integration tests (no Holochain)", function () {
     describe('Runtime', runtimeTests(testContext, { hasHolochain: false }))
     describe('Expression', expressionTests(testContext))
     describe('Perspective', perspectiveTests(testContext))
+    describe('SHACL RPC', shaclRpcTests(testContext))
     describe('Flat Language (new flat export pattern)', flatLanguageTests(testContext))
+
+    describe('with Alice and Bob', () => {
+        const bobAppDataPath = path.join(TEST_DIR, 'agents', 'bob-local')
+        let bobExecutorProcess: ChildProcess | null = null
+        let bobPorts: number[] = []
+
+        before(async () => {
+            bobPorts = await getFreePorts(3);
+            registerPorts(bobPorts);
+            const [bobApiPort, bobHcAdminPort, bobHcAppPort] = bobPorts;
+            bobExecutorProcess = await startLocalExecutor(bobAppDataPath, bobApiPort, bobHcAdminPort, bobHcAppPort);
+            testContext.bob = new Ad4mClient(baseUrl(bobApiPort))
+            testContext.bobCore = bobExecutorProcess
+            await testContext.bob.agent.generate("passphrase")
+        })
+
+        after(async () => {
+            if (bobExecutorProcess) {
+                await quitExecutor(bobExecutorProcess, bobPorts[0]);
+            }
+            deregisterPorts(bobPorts);
+        })
+
+        describe('Shared stores', sharedLanguageStoreTests(testContext))
+        describe('Agent Language', agentLanguageTests(testContext, true))
+        describe('Language', languageTests(testContext))
+    })
 })
+
+function startLocalExecutor(appDataPath: string, apiPort: number, hcAdminPort: number, hcAppPort: number) {
+    return startExecutor(
+        appDataPath, path.join(`${__dirname}/../bootstrapSeed.json`),
+        apiPort, hcAdminPort, hcAppPort,
+        false,          // languageLanguageOnly
+        undefined,      // adminCredential
+        undefined,      // proxyUrl
+        undefined,      // bootstrapUrl
+        undefined,      // relayUrl
+        false,          // enableMcp
+        undefined,      // mcpPort
+        undefined,      // dynamicClassTools
+        false,          // runHolochain
+    );
+}

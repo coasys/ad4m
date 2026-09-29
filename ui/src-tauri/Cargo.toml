@@ -30,7 +30,6 @@ open = "2.0.1"
 sysinfo = "0.29.7"
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 uuid = { version = "0.8", features = ["v4"] }
-localtunnel-client = "0.0.12"
 tokio = { version = "1.19.2", features = ["full"] }
 tauri-plugin-positioner = { version = "2", features = ["tray-icon"] }
 remove_dir_all = "0.7.0"

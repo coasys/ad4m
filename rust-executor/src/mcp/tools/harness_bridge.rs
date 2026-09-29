@@ -76,7 +76,7 @@ impl Ad4mMcpHandler {
     /// harness wiring. Additional static tools land here one arm at a time;
     /// the pattern is mechanical.
     pub(crate) async fn call_tool_by_name(&self, name: &str, args: Value) -> Result<String> {
-        // The seven static-tool arms below all deserialize into a distinct
+        // The static-tool arms below all deserialize into a distinct
         // `Parameters<T>` where T is the argument struct on the
         // `#[tool]`-annotated method. That's why they can't collapse into
         // a `match` value + a shared closure — each T's turbofish is
@@ -103,15 +103,30 @@ impl Ad4mMcpHandler {
         }
 
         match name {
+            // ── docs.rs ─────────────────────────────────────────────────
+            "get_documentation" => dispatch_static_tool!(get_documentation),
             // ── perspectives.rs ─────────────────────────────────────────
             "list_perspectives" => dispatch_static_tool!(list_perspectives),
-            "get_models" => dispatch_static_tool!(get_models),
             "query_links" => dispatch_static_tool!(query_links),
-            "infer" => dispatch_static_tool!(infer),
-            // ── subjects.rs ─────────────────────────────────────────────
-            "query_subjects" => dispatch_static_tool!(query_subjects),
-            "get_subject_data" => dispatch_static_tool!(get_subject_data),
-            "get_subject_children" => dispatch_static_tool!(get_subject_children),
+            // ── instances/ ──────────────────────────────────────────────
+            // The static class-agnostic surface is on the router, so
+            // `list_tool_schemas` advertises it to the harness LLM; these
+            // arms make it callable there too (otherwise a call would fall
+            // through to the dynamic parser and fail on class "instance").
+            "describe_perspective" => dispatch_static_tool!(describe_perspective),
+            "instance_create" => dispatch_static_tool!(instance_create),
+            "instance_query" => dispatch_static_tool!(instance_query),
+            "instance_get" => dispatch_static_tool!(instance_get),
+            "instance_update" => dispatch_static_tool!(instance_update),
+            "instance_add_to_collection" => dispatch_static_tool!(instance_add_to_collection),
+            "instance_remove_from_collection" => {
+                dispatch_static_tool!(instance_remove_from_collection)
+            }
+            "instance_remove" => dispatch_static_tool!(instance_remove),
+            "instance_transcript" => dispatch_static_tool!(instance_transcript),
+            "add_child" => dispatch_static_tool!(add_child),
+            "get_children" => dispatch_static_tool!(get_children),
+            "execute_commands" => dispatch_static_tool!(execute_commands),
             // ── fallback: per-class dynamic tools ───────────────────────
             _ => {
                 // `handle_dynamic_tool` expects the args as a

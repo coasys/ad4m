@@ -88,6 +88,7 @@ impl LanguageRuntimeHandle {
             .send(LanguageRuntimeRequest {
                 operation,
                 response_tx,
+                queued_at: std::time::Instant::now(),
             })
             .map_err(|e| format!("Language runtime channel closed: {}", e))?;
 

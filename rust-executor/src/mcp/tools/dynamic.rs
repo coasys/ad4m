@@ -416,20 +416,7 @@ impl Ad4mMcpHandler {
         // expression_address is optional - generate random if not provided
         let expression_address = match args.get("expression_address").and_then(|v| v.as_str()) {
             Some(addr) if !addr.is_empty() => addr.to_string(),
-            _ => {
-                // Generate random 24-character alphanumeric string
-                let random_id: String = (0..24)
-                    .map(|_| {
-                        let idx = rand::random::<u8>() % 36;
-                        if idx < 10 {
-                            (b'0' + idx) as char
-                        } else {
-                            (b'a' + idx - 10) as char
-                        }
-                    })
-                    .collect();
-                format!("literal://string:{}", random_id)
-            }
+            _ => super::instances::generate_instance_uri(),
         };
 
         // Check for optional parent parameter
@@ -491,18 +478,8 @@ impl Ad4mMcpHandler {
             Ok(_) => {
                 // If parent is provided, add as child
                 if let Some(parent_addr) = parent {
-                    // Only encode if not already a URI — avoids double-encoding
-                    // values like "literal://string:abc" into "literal://string:literal%3A..."
-                    let parent_encoded = if parent_addr.contains("://") {
-                        parent_addr.clone()
-                    } else {
-                        Self::encode_literal(&parent_addr)
-                    };
-                    let child_encoded = if expression_address.contains("://") {
-                        expression_address.clone()
-                    } else {
-                        Self::encode_literal(&expression_address)
-                    };
+                    let parent_encoded = Self::wrap_bare_as_literal(&parent_addr);
+                    let child_encoded = Self::wrap_bare_as_literal(&expression_address);
 
                     let link = Link {
                         source: parent_encoded,
@@ -677,11 +654,7 @@ impl Ad4mMcpHandler {
         };
 
         // First get all children of the parent via ad4m://has_child
-        let parent_encoded = if parent.contains("://") {
-            parent.clone()
-        } else {
-            Self::encode_literal(&parent)
-        };
+        let parent_encoded = Self::wrap_bare_as_literal(&parent);
         let child_links = match perspective
             .get_links(&LinkQuery {
                 source: Some(parent_encoded),
@@ -1044,13 +1017,14 @@ impl Ad4mMcpHandler {
                 target,
             };
 
+            // Written directly, not through the property's setter action, so
+            // `ad4m://local` has to be resolved from the shape here.
+            let status =
+                crate::mcp::shacl::resolve_property_link_status(&perspective, class_name, key)
+                    .await;
+
             if let Err(e) = perspective
-                .add_link(
-                    link,
-                    LinkStatus::Shared,
-                    Some(batch_id.clone()),
-                    &agent_context,
-                )
+                .add_link(link, status, Some(batch_id.clone()), &agent_context)
                 .await
             {
                 return format!("Error adding '{}' link (batch abandoned): {}", key, e);
@@ -1208,13 +1182,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            property_name,
+        )
+        .await;
+
         if let Err(e) = perspective
-            .add_link(
-                link,
-                LinkStatus::Shared,
-                Some(batch_id.clone()),
-                &agent_context,
-            )
+            .add_link(link, status, Some(batch_id.clone()), &agent_context)
             .await
         {
             return format!(
@@ -1335,8 +1311,15 @@ impl Ad4mMcpHandler {
             target,
         };
 
+        let status = crate::mcp::shacl::resolve_property_link_status(
+            &perspective,
+            class_name,
+            collection_name,
+        )
+        .await;
+
         match perspective
-            .add_link(link, LinkStatus::Shared, None, &agent_context)
+            .add_link(link, status, None, &agent_context)
             .await
         {
             Ok(_) => serde_json::to_string_pretty(&json!({
@@ -1383,13 +1366,7 @@ impl Ad4mMcpHandler {
         };
 
         // Find and remove the link with matching target
-        let target = if (value.starts_with("literal://") || value.starts_with("literal:"))
-            || value.contains("://")
-        {
-            value.clone()
-        } else {
-            Self::encode_literal(&value)
-        };
+        let target = Self::wrap_bare_as_literal(&value);
 
         match perspective
             .get_links(&LinkQuery {
@@ -1449,20 +1426,10 @@ mod tests {
         }
     }
 
-    // Test the auth_status logic directly without needing full MCP handler
-    #[tokio::test]
-    async fn test_auth_status_unauthenticated() {
-        let ctx = TestAuthContext::new(None);
-        let token = ctx.get_auth_token().await;
-
-        // Simulate auth_status logic
-        let result = match token {
-            Some(t) if !t.is_empty() => "authenticated",
-            _ => "not_authenticated",
-        };
-
-        assert_eq!(result, "not_authenticated");
-    }
+    // `test_auth_status_unauthenticated` used to live here. It re-implemented the
+    // match inside the test body and asserted against its own copy, so no change to
+    // the real tool could ever fail it. The real answer function is now tested
+    // directly in `mcp::tools::auth::auth_status_tests`.
 
     #[tokio::test]
     async fn test_auth_token_stores_value() {

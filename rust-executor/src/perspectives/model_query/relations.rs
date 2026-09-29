@@ -19,11 +19,13 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
+use super::sparql_builder::verified_link_exists;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
-use super::utils::validate_iri;
+use super::utils::{validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Resolve reverse relations (`@BelongsTo`) for all instances in a batch.
 ///
@@ -31,10 +33,17 @@ use crate::perspectives::sparql_store::SparqlStore;
 /// batched SPARQL query: `?source <pred> ?target` with `VALUES ?target { ... }`
 /// containing all instance IDs.  The results are attached to each instance
 /// as either a scalar (for `belongsToOne`) or an array (for `belongsToMany`).
+///
+/// With a `link_status` (#1116), only links of that status are read, and a
+/// link whose signature did not verify is not read unless the query opted in
+/// with `include_unverified` (#1113). Both are checked on one reifier
+/// ([`verified_link_exists`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -50,11 +59,7 @@ pub fn resolve_reverse_relations(
         return Ok(());
     }
 
-    let values_clause = instance_iris
-        .iter()
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let target_constraint = values_or_str_filter("target", &instance_iris);
 
     for (rel_name, predicate, is_single) in relations {
         let safe_pred = match validate_iri(predicate) {
@@ -62,9 +67,16 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
+        let filter = verified_link_exists(
+            "?source",
+            safe_pred,
+            "?target",
+            link_status,
+            include_unverified,
+        );
         let sparql = format!(
-            "SELECT ?source ?target WHERE {{ VALUES ?target {{ {} }} ?source <{safe_pred}> ?target . }}",
-            values_clause
+            "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
+            target_constraint
         );
         let result_json = store.query(&sparql)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
@@ -112,6 +124,12 @@ pub fn resolve_reverse_relations(
 /// metadata in the shape, delegates to either [`resolve_forward_include`]
 /// or [`resolve_reverse_include`].  Sub-queries within `IncludeValue::SubQuery`
 /// are passed through to the recursive call.
+///
+/// `link_status` and `include_unverified` are the parent query's. A sub-query
+/// that does not set its own inherits each of them, so a Shared-only read stays
+/// Shared-only on the included instances, and a caller that asked to see
+/// unverified rows sees them there too. A sub-query's own setting wins,
+/// including an explicit `includeUnverified: false`.
 pub(super) async fn resolve_includes_recursive(
     store: &SparqlStore,
     instances: &mut [Value],
@@ -119,6 +137,8 @@ pub(super) async fn resolve_includes_recursive(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -131,11 +151,17 @@ pub(super) async fn resolve_includes_recursive(
             None => continue,
         };
 
-        let sub_query = match include_val {
+        let mut sub_query = match include_val {
             IncludeValue::Bool(true) => ModelQueryInput::default(),
             IncludeValue::SubQuery(sq) => *sq.clone(),
             _ => continue,
         };
+        if sub_query.link_status.is_none() {
+            sub_query.link_status = link_status.cloned();
+        }
+        if sub_query.include_unverified.is_none() {
+            sub_query.include_unverified = include_unverified;
+        }
 
         // Checked here, where the include is recognised, rather than down in
         // hydration: both resolvers return early when the relation holds no
@@ -544,21 +570,28 @@ async fn resolve_reverse_include(
         return Ok(());
     }
 
-    let id_list = all_ids
+    let safe_ids: Vec<String> = all_ids
         .iter()
         .filter(|id| validate_iri(id).is_ok())
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    if id_list.is_empty() {
+        .map(|id| id.to_string())
+        .collect();
+    if safe_ids.is_empty() {
         return Ok(());
     }
     let safe_pred = match validate_iri(&rel.predicate) {
         Ok(p) => p,
         Err(_) => return Ok(()),
     };
+    let target_constraint = values_or_str_filter("target", &safe_ids);
+    let filter = verified_link_exists(
+        "?source",
+        safe_pred,
+        "?target",
+        sub_query.link_status.as_ref(),
+        sub_query.include_unverified,
+    );
     let sparql = format!(
-        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . FILTER(?target IN ({id_list})) }}"
+        "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{filter} }}"
     );
     let result_json = store.query(&sparql)?;
     let rows: Vec<Value> = serde_json::from_str(&result_json)?;

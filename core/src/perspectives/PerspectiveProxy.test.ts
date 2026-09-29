@@ -1,4 +1,5 @@
 import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
+import { Link, LinkExpression } from '../links/Links';
 
 function createMockPerspectiveClient(): any {
   return {
@@ -589,5 +590,214 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     const proxy = createProxy(mockClient);
 
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+  });
+});
+
+describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
+  const overlayA = [{ base: 'a', kind: 'create', inferred: [] }];
+  const overlayB = [{ base: 'b', kind: 'update', inferred: [] }];
+
+  it('coalesces concurrent reads into one RPC', async () => {
+    let resolveFetch: (v: any) => void;
+    let fetchCount = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => {
+        fetchCount++;
+        return new Promise(r => { resolveFetch = r; });
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    resolveFetch!(overlayA);
+    expect(await a).toEqual(overlayA);
+    expect(await b).toEqual(overlayA);
+    expect(fetchCount).toBe(1);
+  });
+
+  it('gives each caller its own copy of the array', async () => {
+    let resolveFetch: (v: any) => void;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolveFetch = r; })),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    resolveFetch!(overlayA);
+    const first = await a;
+    const second = await b;
+    expect(second).not.toBe(first);
+    first.length = 0;
+    expect(second).toEqual(overlayA);
+    expect(overlayA).toHaveLength(1);
+  });
+
+  it('does not cache: a call after the previous one resolved sends a new RPC', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
+    expect(await proxy.interpretationOverlays()).toEqual(overlayB);
+    expect(calls).toBe(2);
+  });
+
+  it('shares a failed RPC with concurrent callers and does not keep it', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => {
+        calls++;
+        if (calls === 1) throw new Error('boom');
+        return overlayA;
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    await expect(a).rejects.toThrow('boom');
+    await expect(b).rejects.toThrow('boom');
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
+    expect(calls).toBe(2);
+  });
+
+  it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      acceptInterpretation: jest.fn(async () => true),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    await proxy.acceptInterpretation('a');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[0](overlayA);
+    resolvers[1]([]);
+    expect(await before).toEqual(overlayA);
+    expect(await after).toEqual([]);
+  });
+
+  it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    // Detaches even when the write throws: it may have landed before the error.
+    await expect(proxy.rejectInterpretation('a')).rejects.toThrow('reject failed');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    // The detached RPC settling first must not clear the newer one.
+    resolvers[0](overlayA);
+    expect(await before).toEqual(overlayA);
+    const joiner = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[1]([]);
+    expect(await after).toEqual([]);
+    expect(await joiner).toEqual([]);
+  });
+});
+
+// ── fix #1008: PerspectiveProxy.remove accepts bare Link ────────────────────
+//
+// PerspectiveClient.removeLink does `delete link.data.__typename` which throws
+// when a bare Link (no .data) is passed. The fix resolves the Link to its stored
+// LinkExpression first, so remove(new Link({...})) must work without error.
+describe('PerspectiveProxy.remove with bare Link', () => {
+  function makeStoredExpression(source: string, predicate: string, target: string): LinkExpression {
+    const expr = new LinkExpression();
+    expr.author = 'did:test:agent';
+    expr.timestamp = '2026-01-01T00:00:00Z';
+    expr.data = new Link({ source, predicate, target });
+    expr.proof = { valid: true, invalid: false, signature: 'sig', key: 'key' } as any;
+    return expr;
+  }
+
+  it('resolves a bare Link to the stored expression and removes it', async () => {
+    const storedExpr = makeStoredExpression('s://a', 'p://b', 't://c');
+    const removeLink = jest.fn().mockResolvedValue(true);
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      // queryLinks is what PerspectiveProxy.get calls
+      queryLinks: jest.fn().mockResolvedValue([storedExpr]),
+      removeLink,
+    };
+    const proxy = createProxy(mockClient);
+
+    const result = await proxy.remove(new Link({ source: 's://a', predicate: 'p://b', target: 't://c' }));
+
+    expect(result).toBe(true);
+    // removeLink must have been called with the resolved expression, not the bare Link
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', storedExpr, undefined);
+  });
+
+  it('throws a descriptive error when no stored expression matches the bare Link', async () => {
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      queryLinks: jest.fn().mockResolvedValue([]),
+    };
+    const proxy = createProxy(mockClient);
+
+    await expect(
+      proxy.remove(new Link({ source: 'missing://src', predicate: 'p://pred', target: 'missing://tgt' }))
+    ).rejects.toThrow('PerspectiveProxy.remove: no stored LinkExpression matches');
+  });
+
+  // Lal's #1011 review: the bare-Link resolution used `bare.predicate ||
+  // undefined`, and the Link constructor coerces a missing predicate to "" —
+  // so the predicate filter was silently dropped and matches[0] removed an
+  // arbitrary source→target link under a different predicate.
+  it('matches only predicate-less stored links when the bare Link has no predicate', async () => {
+    const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
+    const withoutPredicate = makeStoredExpression('s://a', '', 't://c');
+    // the store reports a missing predicate as null, not ''
+    (withoutPredicate.data as any).predicate = null;
+    const removeLink = jest.fn().mockResolvedValue(true);
+    // the wrong candidate first: matches[0] of the unfiltered result
+    const queryLinks = jest.fn().mockResolvedValue([withPredicate, withoutPredicate]);
+    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks, removeLink };
+    const proxy = createProxy(mockClient);
+
+    await proxy.remove(new Link({ source: 's://a', target: 't://c' }));
+
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', withoutPredicate, undefined);
+  });
+
+  it('throws instead of removing a predicated link when the bare Link has no predicate', async () => {
+    const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
+    const queryLinks = jest.fn().mockResolvedValue([withPredicate]);
+    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks };
+    const proxy = createProxy(mockClient);
+
+    await expect(
+      proxy.remove(new Link({ source: 's://a', target: 't://c' }))
+    ).rejects.toThrow('no stored LinkExpression matches');
+  });
+
+  it('passes a full LinkExpressionInput through unchanged', async () => {
+    const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
+    const removeLink = jest.fn().mockResolvedValue(true);
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      removeLink,
+    };
+    const proxy = createProxy(mockClient);
+
+    await proxy.remove(storedExpr as any);
+    // Should NOT have called queryLinks — no bare Link resolution needed
+    expect(removeLink).toHaveBeenCalledWith('test-uuid', storedExpr, undefined);
   });
 });

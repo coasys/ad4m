@@ -1,4 +1,8 @@
 import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 import { CallOptions } from "../apiClient";
 import { Link, LinkExpression, LinkExpressionInput, LinkExpressionMutations, LinkMutations } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
@@ -584,6 +588,8 @@ export class PerspectiveProxy {
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #ensuredSubjectClasses = new Set<string>()
+    /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
+    #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
 
     /**
      * Creates a new PerspectiveProxy instance.
@@ -845,9 +851,27 @@ export class PerspectiveProxy {
     /**
      * Pending interpretation overlays on this perspective — LLM suggestions the
      * §4 divergence gate staged rather than applied, awaiting human accept/reject.
+     *
+     * Concurrent callers share one in-flight RPC. Nothing is kept after it
+     * settles, so every call made after that fetches from the executor again.
+     * {@link acceptInterpretation} and {@link rejectInterpretation} detach the
+     * in-flight RPC, so a read issued after they resolve never joins a read
+     * that started before the write.
+     * Each caller gets its own copy of the array.
      */
     async interpretationOverlays(): Promise<InterpretationOverlayInfo[]> {
-        return await this.#client.interpretationOverlays(this.#handle.uuid)
+        if (this.#overlaysInFlight) {
+            return [...(await this.#overlaysInFlight)]
+        }
+        const pending = this.#client.interpretationOverlays(this.#handle.uuid)
+        this.#overlaysInFlight = pending
+        try {
+            return [...(await pending)]
+        } finally {
+            if (this.#overlaysInFlight === pending) {
+                this.#overlaysInFlight = null
+            }
+        }
     }
 
     /**
@@ -856,7 +880,12 @@ export class PerspectiveProxy {
      * `property` to accept a single predicate; omit it for the whole base.
      */
     async acceptInterpretation(base: string, property?: string): Promise<boolean> {
-        return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        try {
+            return await this.#client.acceptInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            // A read already in flight may predate this write; later callers must not join it.
+            this.#overlaysInFlight = null
+        }
     }
 
     /**
@@ -865,7 +894,64 @@ export class PerspectiveProxy {
      * rejected `update` drops the overlay and keeps the real value.
      */
     async rejectInterpretation(base: string, property?: string): Promise<boolean> {
-        return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        try {
+            return await this.#client.rejectInterpretation(this.#handle.uuid, base, property)
+        } finally {
+            // A read already in flight may predate this write; later callers must not join it.
+            this.#overlaysInFlight = null
+        }
+    }
+
+    /**
+     * `outputs` names the instances a run produces, as `{ className, id }`
+     * pairs, for a transition into a terminal state. The proposal signs a
+     * hash over their content, and a receipt for the run can only speak for
+     * exactly these instances, as they stood at completion. Naming outputs
+     * for a non-terminal state is refused.
+     */
+    async proposeFlowTransition(instanceUri: string, toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
+        return await this.#client.proposeFlowTransition(this.#handle.uuid, instanceUri, toState, rationale, outputs)
+    }
+
+    async acceptFlowProposal(proposalUri: string): Promise<FlowFireOutcome[]> {
+        return await this.#client.acceptFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /** Withdraw our own links from a proposal; resolves to how many went. */
+    async rejectFlowProposal(proposalUri: string): Promise<number> {
+        return await this.#client.rejectFlowProposal(this.#handle.uuid, proposalUri)
+    }
+
+    /**
+     * Re-decide a flow receipt under this perspective's own flow catalogue.
+     * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
+     * `outcome`, never on a boolean you derive from it.
+     */
+    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+        return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
+    }
+
+    /**
+     * Which instances are, as they stand, valid outputs of `flow`?
+     *
+     * Backed by receipt verification executor-side (see
+     * {@link FlowValidOutput}); an instance without a verifying receipt, or
+     * edited since its run completed, is not listed. The same predicate is
+     * available as a model-query filter:
+     * `where: { producedByFlow: { flow, state? } }`.
+     *
+     * Rejects — never resolves to `[]` — when the flow is not on this
+     * perspective, or when it carries more receipt candidates than the
+     * executor's per-flow budget (256): "could not read every receipt" is not
+     * "no valid outputs". The filter rejects the same way.
+     */
+    async flowValidOutputs(flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return await this.#client.flowValidOutputs(this.#handle.uuid, flow, state)
+    }
+
+    /** Mint and store the receipt for a completed flow run. */
+    async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
+        return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
     /** Subscribe to this perspective's auto-processor step signals. */
@@ -1131,12 +1217,50 @@ export class PerspectiveProxy {
 
     /**
      * Removes a link from the perspective.
-     * 
-     * @param link - The link to remove
+     *
+     * Accepts either a full `LinkExpressionInput` (as returned by `add`) or a bare
+     * `Link` (source/predicate/target only).  When a bare Link is passed the method
+     * resolves it to the first stored `LinkExpression` whose source, predicate, and
+     * target match, then removes that expression.  A bare Link without a predicate
+     * (or with the constructor's `""` stand-in) matches only stored links that
+     * themselves have no predicate.  If no match is found an error is thrown
+     * naming the link so the caller knows what was expected.
+     *
+     * @param link - The link to remove (LinkExpressionInput or bare Link)
      * @param batchId - Optional batch ID to group this operation with others
      */
-    async remove(link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        const result = await this.#client.removeLink(this.#handle.uuid, link, batchId)
+    async remove(link: LinkExpressionInput | Link, batchId?: string): Promise<boolean> {
+        let resolvedLink: LinkExpressionInput;
+        if (!('data' in link) || (link as any).data === undefined) {
+            // bare Link — resolve to stored expression
+            const bare = link as Link;
+            // The Link constructor coerces an absent predicate to "" and the
+            // store reports predicate-less links as predicate null — so ""
+            // and undefined both mean "no predicate" here, and neither may
+            // widen the query: dropping the filter would resolve (and
+            // remove!) an arbitrary source→target link under a *different*
+            // predicate. LinkQuery cannot express "predicate is absent", so
+            // in that case we query on source/target only and require the
+            // absence ourselves.
+            const predicateGiven = bare.predicate !== undefined && bare.predicate !== '';
+            const candidates = await this.get(new LinkQuery({
+                source: bare.source || undefined,
+                predicate: predicateGiven ? bare.predicate : undefined,
+                target: bare.target || undefined,
+            }));
+            const matches = predicateGiven
+                ? candidates
+                : candidates.filter(m => !m.data.predicate);
+            if (matches.length === 0) {
+                throw new Error(
+                    `PerspectiveProxy.remove: no stored LinkExpression matches Link { source: "${bare.source}", predicate: "${bare.predicate}", target: "${bare.target}" }`
+                );
+            }
+            resolvedLink = matches[0] as unknown as LinkExpressionInput;
+        } else {
+            resolvedLink = link as LinkExpressionInput;
+        }
+        const result = await this.#client.removeLink(this.#handle.uuid, resolvedLink, batchId)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }
