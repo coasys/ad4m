@@ -240,6 +240,17 @@ describe('Ad4mConnect', () => {
       expect(conn.token).toBe('kept-token');
       expect(auth).toEqual([]);
     });
+
+    it('throws the health error without waiting for an auth read that never settles', async () => {
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      // An unreachable socket: the auth read hangs.
+      mockAgent.status.mockImplementationOnce(() => new Promise(() => {}));
+      const conn = new Ad4mConnect(defaultOptions);
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(conn.connectionState).toBe('error');
+    });
   });
 
   describe('checkAuth()', () => {

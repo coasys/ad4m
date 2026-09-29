@@ -161,18 +161,22 @@ export default class Ad4mConnect extends EventTarget {
     // The health check and the first authenticated call run together. The health check exists to
     // turn a wrong URL into a readable error, and awaiting it before opening the socket cost every
     // successful connect an extra round trip. Its answer still decides: when it fails, its error is
-    // the one thrown, and the auth answer is dropped unapplied.
+    // thrown at once, without waiting for the auth read (which can hang on an unreachable socket).
     const client = new Ad4mClient(this.baseUrl, this.token, false);
-    const [health, auth] = await Promise.allSettled([checkConnection(this.baseUrl), this.readAuth(client)]);
-    if (health.status === 'rejected') {
+    const authRead: Promise<AuthReading> = this.readAuth(client)
+      .catch((error) => ({ state: 'unauthenticated' as const, error }));
+    try {
+      await checkConnection(this.baseUrl);
+    } catch (error) {
       client.close();
-      console.error('[Ad4m Connect] Connection failed:', health.reason);
+      console.error('[Ad4m Connect] Connection failed:', error);
       this.notifyConnectionChange("error");
-      throw health.reason;
+      throw error;
     }
+    const auth = await authRead;
     setLocal("ad4m-url", this.url);
     this.adoptClient(client);
-    this.applyAuth(auth.status === 'fulfilled' ? auth.value : { state: 'unauthenticated', error: auth.reason });
+    this.applyAuth(auth);
     return this.ad4mClient;
   }
 
