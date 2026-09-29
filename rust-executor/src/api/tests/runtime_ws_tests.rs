@@ -46,6 +46,7 @@ fn validate_host_rates_keeps_valid_rates_and_refuses_bad_ones() {
         rate("a", -0.1),
         rate("a", f64::NAN),
         rate("a", f64::INFINITY),
+        rate("ok", 2.0),
     ] {
         let err = validate_host_rates(vec![rate("ok", 1.0), bad.clone()]).unwrap_err();
         assert_eq!(err.code, 400, "{:?}", bad);
@@ -82,6 +83,17 @@ async fn host_rate_and_membrane_proof_setters_refuse_invalid_params() {
         ),
         ("runtime.setUnytMembraneProof", json!({})),
         ("runtime.setUnytMembraneProof", json!({ "proof": "" })),
+        (
+            "runtime.setUnytMembraneProof",
+            json!({ "proof": "not base64!" }),
+        ),
+        (
+            "runtime.setHostRates",
+            json!({ "rates": [
+                { "description": "a", "priceInHOT": 1 },
+                { "description": "a", "priceInHOT": 2 },
+            ] }),
+        ),
     ] {
         assert_eq!(
             error_code(method, params.clone(), true).await,

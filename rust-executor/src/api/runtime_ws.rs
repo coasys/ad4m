@@ -1,5 +1,6 @@
 //! Runtime WS-native handlers.
 
+use base64::Engine;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -574,6 +575,7 @@ async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub(crate) fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
+    let mut seen = std::collections::HashSet::new();
     rates
         .into_iter()
         .enumerate()
@@ -582,6 +584,13 @@ pub(crate) fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f
                 return Err(WsRpcError::bad_request(format!(
                     "Rate {} needs a description and a non-negative priceInHOT",
                     i
+                )));
+            }
+            // `description` is the table's primary key.
+            if !seen.insert(r.description.clone()) {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} repeats description '{}'",
+                    i, r.description
                 )));
             }
             Ok((r.description, r.price_in_hot))
@@ -618,6 +627,13 @@ async fn set_unyt_membrane_proof(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
     if body.proof.is_empty() {
         return Err(WsRpcError::bad_request("'proof' must not be empty"));
+    }
+    // The install decodes it later and, if that fails, installs without a proof.
+    if let Err(e) = base64::engine::general_purpose::STANDARD.decode(&body.proof) {
+        return Err(WsRpcError::bad_request(format!(
+            "'proof' is not valid base64: {}",
+            e
+        )));
     }
 
     crate::unyt_service::set_membrane_proof(&body.proof)
