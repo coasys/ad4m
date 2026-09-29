@@ -37,9 +37,8 @@ pub async fn embeddings(
     let model_id_response = req.model.clone();
     let inputs = req.input.into_vec();
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
+    if let Some(email) = auth.user_email.as_deref() {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -54,7 +53,7 @@ pub async fn embeddings(
 
     for (index, text) in inputs.into_iter().enumerate() {
         let result = service
-            .embed(model_id.clone(), text, Some(auth.auth_token.clone()))
+            .embed(model_id.clone(), text, auth.user_email.clone())
             .await
             .map_err(|e| OpenAIError::internal(e.to_string()))?;
         total_tokens += result.token_count as u64;

@@ -31,17 +31,18 @@ use uuid::Uuid;
 /// Held as a plain field, not an `Arc<AIService>`, because `AIService` is
 /// a global singleton reached via `AIService::global_instance()` — the
 /// bridge just remembers a handle for the duration of the interpretation
-/// pass. `auth_token` is per-pass (billing context follows the pass owner).
+/// pass. `user_email` is per-pass: the user the pass's completions are billed
+/// to, `None` for a pass nobody pays for (see `AIService::prompt_messages`).
 pub struct OpenAiCompatBridge {
     service: Arc<AIService>,
-    auth_token: Option<String>,
+    user_email: Option<String>,
 }
 
 impl OpenAiCompatBridge {
-    pub fn new(service: Arc<AIService>, auth_token: Option<String>) -> Self {
+    pub fn new(service: Arc<AIService>, user_email: Option<String>) -> Self {
         Self {
             service,
-            auth_token,
+            user_email,
         }
     }
 }
@@ -100,7 +101,7 @@ impl CompletionSource for OpenAiCompatBridge {
             .prompt_messages(
                 model_id.to_string(),
                 flat,
-                self.auth_token.clone(),
+                self.user_email.clone(),
                 constraint,
             )
             .await?;
@@ -189,7 +190,7 @@ impl OpenAiCompatBridge {
 
         let reply = self
             .service
-            .prompt_with_tools(model_id.to_string(), turns, specs, self.auth_token.clone())
+            .prompt_with_tools(model_id.to_string(), turns, specs, self.user_email.clone())
             .await?;
 
         Ok(HarnessCompletion {
