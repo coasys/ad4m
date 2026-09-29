@@ -52,16 +52,15 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     PerspectiveState.Synced,
                 ]).to.include(perspective?.state);
                 
-                // Wait for the perspective to transition to Synced state
-                let tries = 0;
-                const maxTries = 10;
-                let currentPerspective = perspective;
-                while (currentPerspective?.state !== PerspectiveState.Synced && tries < maxTries) {
-                    await sleep(1000);
-                    currentPerspective = await ad4mClient.perspective.byUUID(create.uuid);
-                    tries++;
-                }
-                expect(currentPerspective?.state).to.be.equal(PerspectiveState.Synced);
+                // Wait for the perspective to reach Synced. Holochain link-language
+                // startup can take well over 10 s on a loaded CI runner, so the deadline
+                // is 60 s and every attempt is logged: a timeout shows how far it got.
+                let attempt = 0;
+                await pollUntil(async () => {
+                    const state = (await ad4mClient.perspective.byUUID(create.uuid))?.state;
+                    console.log(`[publish-and-join-locally] attempt ${++attempt}: state=${state}`);
+                    return state === PerspectiveState.Synced;
+                }, { timeoutMs: 60000, intervalMs: 1000, label: "locally published perspective reaches Synced" });
             })
 
             it('can be created by Alice and joined by Bob', async () => {
