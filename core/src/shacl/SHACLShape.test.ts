@@ -344,6 +344,12 @@ describe('SHACLShape', () => {
       expect(turtle).not.toMatch(/sh:hasValue (number|boolean):/);
     });
 
+    it('writes an untyped literal sh:hasValue as a string instead of throwing', () => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'u', path: 'test://u', hasValue: 'literal:foo' });
+      expect(shape.toTurtle()).toContain('sh:hasValue "literal:foo"\n');
+    });
+
     it('terminates a shape without properties', () => {
       const turtle = new SHACLShape('test://Empty').toTurtle();
       expect(turtle.trimEnd().endsWith('.')).toBe(true);

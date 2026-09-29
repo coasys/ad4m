@@ -7,7 +7,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 
 ### Changed
 - **Breaking: SHACL shapes and flows have one writer and one transition URI scheme** [#1188](https://github.com/coasys/ad4m/pull/1188)
-  - `addShacl(name, shape)` sends `shape.toJSON()` to the executor's shape writer (`addSdna`), like `@Model` classes. The shape keeps its `nodeShapeUri`, which must end with `{name}Shape`; a shape without `targetClass`, or with a reserved property name, is refused; re-adding a name replaces the shape.
+  - `addShacl(name, shape)` sends `shape.toJSON()` to the executor's shape writer (`addSdna`), like `@Model` classes. The shape keeps its `nodeShapeUri`, which must end with `{name}Shape`; a shape without a `scheme://` `targetClass` (a colon form such as `recipe:Recipe` included), or with a reserved property name, is refused; re-adding a name replaces the shape.
   - The executor always stores `ad4m://constructor` and `ad4m://destructor`, as `[]` when empty, so a class whose properties are all optional can be instantiated with `createSubject`. `Ad4mModel.save()` always calls `createSubject`.
   - `SHACLFlow.transitionUri(from, to)` is now `transitionUri(from, to, action)`, giving `{ns}{flow}.transition/{from}/{to}/{action}` in the SDK and the executor. `addFlow` replaces the flow's stored transitions, whatever their URI scheme, so re-adding a flow no longer duplicates them.
   - `PerspectiveProxy.addSubjectClass` is removed; use `addShacl(name, SHACLShape.fromJSON(json))`. `SHACLShape.fromJSON` no longer reads camelCase `resolveLanguage`.

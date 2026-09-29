@@ -206,9 +206,8 @@ export function valueToLiteralIri(value: any): string {
   // `"[object Object]"` and arrays into `"1,2"` — silently storing the
   // wrong shape and breaking equality filters (`findAll({ where:
   // { config: {...} } })` would match against `"[object Object]"`).
-  // The `value !== null` guard preserves the historical fallthrough for
-  // `null` (→ `literal:string:null`), since `Literal.from(null).toUrl()`
-  // throws on the empty-literal check.
+  // The `value !== null` guard keeps the historical encoding of `null`,
+  // `literal:string:null`, rather than `literal:json:null`.
   if (value !== null && typeof value === 'object') {
     return Literal.from(value).toUrl();
   }
