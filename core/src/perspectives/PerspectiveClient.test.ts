@@ -17,7 +17,6 @@ jest.mock('../apiClient', () => {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
             subscribe: mockSubscribe,
-            waitForSubscription: jest.fn().mockResolvedValue(undefined),
         })),
         RpcError: class RpcError extends Error {
             readonly status: number

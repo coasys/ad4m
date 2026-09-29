@@ -285,11 +285,11 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.state).to.equal(PerspectiveState.Private)
 
                 const linkAdded = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
+                ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
                 const linkRemoved = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
+                ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
                 const linkUpdated = sinon.fake()
-                await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
+                ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'ad4m://root', target: 'lang://123'})
                 await sleep(1000)

@@ -130,8 +130,8 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // One merged stream: each executor reports its own passes, tagged with
         // the DID that ran them, so "who did what" is readable from one list.
         const events: AutoProcessorEvent[] = [];
-        await aliceP.addAutoProcessorEventListener((e) => events.push(e));
-        await bobP.addAutoProcessorEventListener((e) => events.push(e));
+        aliceP.addAutoProcessorEventListener((e) => events.push(e));
+        bobP.addAutoProcessorEventListener((e) => events.push(e));
 
         await aliceP.addAutoProcessor({
           processorId,

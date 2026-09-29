@@ -5,10 +5,6 @@ import { SHACLShape } from '../shacl/SHACLShape';
 
 function createMockClient(overrides: Record<string, jest.Mock> = {}): any {
   return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
     getShaclNames: jest.fn().mockResolvedValue([]),
     // Client contract (post r3897752023): getShaclTargetClass returns
     // `undefined` on "not found", not `null`. Mock the same shape.

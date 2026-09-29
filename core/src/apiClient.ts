@@ -446,11 +446,6 @@ export class ApiClient {
         }
     }
 
-    /** Wait until the WebSocket connection is established. */
-    async waitForSubscription(): Promise<void> {
-        await this._ready()
-    }
-
     // ── Explicit connection ─────────────────────────────────────────────────
 
     /** Explicitly connect the WebSocket (optional — connection is lazy). */

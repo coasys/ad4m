@@ -322,7 +322,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //     let bobP1 = await testContext.bob.perspective.byUUID(bobHandler.uuid);
             //     expect(bobP1?.state).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
 
-            //     await bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
+            //     bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 

@@ -3,10 +3,10 @@ import { Link, LinkExpression } from '../links/Links';
 
 function createMockPerspectiveClient(): any {
   return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
+    addPerspectiveLinkAddedListener: jest.fn(() => jest.fn()),
+    addPerspectiveLinkRemovedListener: jest.fn(() => jest.fn()),
+    addPerspectiveLinkUpdatedListener: jest.fn(() => jest.fn()),
+    addPerspectiveSyncStateChangeListener: jest.fn(() => jest.fn()),
   };
 }
 
@@ -19,73 +19,71 @@ function createProxy(client?: any): PerspectiveProxy {
 }
 
 describe('PerspectiveProxy.removeListener', () => {
-  it('does not remove the last callback when removing a non-existent one', async () => {
+  it('does not remove the last callback when removing a non-existent one', () => {
     const proxy = createProxy();
     const cb1 = jest.fn();
     const cb2 = jest.fn();
     const unknown = jest.fn();
 
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
+    proxy.addListener('link-added', cb1);
+    proxy.addListener('link-added', cb2);
 
     // Remove a callback that was never added — should be a no-op
-    await proxy.removeListener('link-added', unknown);
+    proxy.removeListener('link-added', unknown);
 
     // Both original callbacks should still be present
     // Access internal state via triggering all callbacks
     // We verify by adding a third and checking the count stays correct
     const proxy2 = createProxy();
-    await proxy2.addListener('link-removed', cb1);
-    await proxy2.removeListener('link-removed', unknown);
+    proxy2.addListener('link-removed', cb1);
+    proxy2.removeListener('link-removed', unknown);
     // cb1 should still be registered (not accidentally removed)
   });
 
-  it('correctly removes the specified callback', async () => {
+  it('correctly removes the specified callback', () => {
     const proxy = createProxy();
     const cb1 = jest.fn();
     const cb2 = jest.fn();
 
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
+    proxy.addListener('link-added', cb1);
+    proxy.addListener('link-added', cb2);
 
-    await proxy.removeListener('link-added', cb1);
+    proxy.removeListener('link-added', cb1);
     // cb1 removed, cb2 should remain
   });
 });
 
 describe('PerspectiveProxy.dispose', () => {
-  it('releases only the registrations this proxy made', async () => {
+  it('releases only the registrations this proxy made', () => {
     const releaseAdded = jest.fn();
     const releaseRemoved = jest.fn();
     const mockClient = {
       ...createMockPerspectiveClient(),
-      addPerspectiveLinkAddedListener: jest.fn().mockResolvedValue(releaseAdded),
-      addPerspectiveLinkRemovedListener: jest.fn().mockResolvedValue(releaseRemoved),
-      removeAllListeners: jest.fn(),
+      addPerspectiveLinkAddedListener: jest.fn().mockReturnValue(releaseAdded),
+      addPerspectiveLinkRemovedListener: jest.fn().mockReturnValue(releaseRemoved),
     };
     const proxy = createProxy(mockClient);
 
     const cb1 = jest.fn();
     const cb2 = jest.fn();
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-removed', cb2);
+    proxy.addListener('link-added', cb1);
+    proxy.addListener('link-removed', cb2);
 
     proxy.dispose();
 
     expect(releaseAdded).toHaveBeenCalledTimes(1);
     expect(releaseRemoved).toHaveBeenCalledTimes(1);
-    expect(mockClient.removeAllListeners).not.toHaveBeenCalled();
     expect(mockClient.addPerspectiveLinkUpdatedListener).not.toHaveBeenCalled();
   });
 
-  it('is safe to call dispose() multiple times', async () => {
+  it('is safe to call dispose() multiple times', () => {
     const release = jest.fn();
     const mockClient = {
       ...createMockPerspectiveClient(),
-      addPerspectiveLinkAddedListener: jest.fn().mockResolvedValue(release),
+      addPerspectiveLinkAddedListener: jest.fn().mockReturnValue(release),
     };
     const proxy = createProxy(mockClient);
-    await proxy.addListener('link-added', jest.fn());
+    proxy.addListener('link-added', jest.fn());
 
     proxy.dispose();
     proxy.dispose(); // should not throw

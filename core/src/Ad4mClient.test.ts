@@ -635,9 +635,9 @@ describe('PerspectiveClient', () => {
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
 
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
-        await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
-        await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
+        freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
+        freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
