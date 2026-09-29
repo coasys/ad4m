@@ -324,3 +324,62 @@ async fn expression_get_many_aligns_with_input() {
     .unwrap();
     assert_eq!(many, json!([single, null, single]));
 }
+
+// ── X3: perspective.keepAliveLease ──────────────────────────────────────────
+
+async fn subscribe(uuid: &str) -> String {
+    let reply = call(
+        "perspective.subscribeQuery",
+        json!({ "uuid": uuid, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    reply["subscriptionId"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn keep_alive_lease_renews_the_callers_subscriptions_in_one_perspective() {
+    let p = registered_perspective(&[]).await;
+    subscribe(&p.0).await;
+    let reply = call(
+        "perspective.keepAliveLease",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply, json!({ "renewed": 1 }));
+}
+
+#[tokio::test]
+async fn keep_alive_lease_without_uuid_covers_every_perspective() {
+    let a = registered_perspective(&[]).await;
+    let b = registered_perspective(&[]).await;
+    subscribe(&a.0).await;
+    subscribe(&b.0).await;
+    let reply = call("perspective.keepAliveLease", json!({}), admin_ctx())
+        .await
+        .unwrap();
+    // Other tests may hold main-agent subscriptions in parallel: at least ours.
+    assert!(reply["renewed"].as_u64().unwrap() >= 2, "{reply}");
+}
+
+#[tokio::test]
+async fn keep_alive_lease_checks_the_query_capability() {
+    let p = registered_perspective(&[]).await;
+    subscribe(&p.0).await;
+    let err = call(
+        "perspective.keepAliveLease",
+        json!({ "uuid": p.0 }),
+        no_cap_ctx(),
+    )
+    .await
+    .expect_err("no capability");
+    assert_eq!(err.code, 403);
+    // Without a uuid, perspectives the caller may not query are skipped.
+    let reply = call("perspective.keepAliveLease", json!({}), no_cap_ctx())
+        .await
+        .unwrap();
+    assert_eq!(reply, json!({ "renewed": 0 }));
+}

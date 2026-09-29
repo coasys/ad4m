@@ -857,6 +857,14 @@ pub struct KeepAliveQueryRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub struct KeepAliveLeaseRequest {
+    #[ts(optional)]
+    pub uuid: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct DisposeQueryRequest {
     pub subscription_id: String,
 }

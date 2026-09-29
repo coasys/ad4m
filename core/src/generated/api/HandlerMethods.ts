@@ -93,6 +93,7 @@ export const HANDLER_METHODS = [
   "perspective.getShaclTargetClass",
   "perspective.getSubjectData",
   "perspective.interpretationOverlays",
+  "perspective.keepAliveLease",
   "perspective.keepAliveQuery",
   "perspective.keepAliveSparql",
   "perspective.linkMutations",

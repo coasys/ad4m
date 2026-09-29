@@ -62,6 +62,10 @@ enum ChangedPredicates {
 use uuid;
 use uuid::Uuid;
 
+// Protocol v2 subscription features, split out per the planned
+// `perspective_instance/` layout (see perspectives/AGENTS.md).
+mod subscriptions_v2;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;

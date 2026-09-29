@@ -994,6 +994,50 @@ async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     Ok(Value::Bool(true))
 }
 
+/// `perspective.keepAliveLease { uuid? }` → `{ renewed }`. One call renews
+/// every query and model subscription the caller owns, instead of one
+/// `keepAliveQuery` per subscription. Ownership is the caller's user
+/// (`ctx.user_email`; `None` = main agent), which is how subscriptions are
+/// keyed. With `uuid`, only that perspective; without, every loaded
+/// perspective the caller may query (others are skipped, not an error).
+async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let body: KeepAliveLeaseRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let renewed = match body.uuid {
+        Some(uuid) => {
+            check_capability(
+                &ctx.capabilities,
+                &perspective_query_capability(vec![uuid.clone()]),
+            )
+            .map_err(|e| WsRpcError::forbidden(e))?;
+            get_perspective_with_access(&uuid, &ctx)
+                .await?
+                .renew_subscriptions_of(&ctx.user_email)
+                .await
+        }
+        None => {
+            let mut renewed = 0;
+            for perspective in crate::perspectives::all_perspectives() {
+                let handle = perspective.persisted.lock().await.clone();
+                let may_query = check_capability(
+                    &ctx.capabilities,
+                    &perspective_query_capability(vec![handle.uuid.clone()]),
+                )
+                .is_ok()
+                    && (ctx.is_admin_credential
+                        || can_access_perspective_with_did(&ctx.user_did, &handle));
+                if may_query {
+                    renewed += perspective.renew_subscriptions_of(&ctx.user_email).await;
+                }
+            }
+            renewed
+        }
+    };
+
+    Ok(serde_json::json!({ "renewed": renewed }))
+}
+
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -2647,6 +2691,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.discardBatch", discard_batch);
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
+    map.register("perspective.keepAliveLease", keep_alive_lease);
     map.register("perspective.disposeQuery", dispose_query);
     map.register("perspective.subscribeSparql", subscribe_sparql_query);
     map.register("perspective.keepAliveSparql", keep_alive_query);

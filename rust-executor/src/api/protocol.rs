@@ -25,6 +25,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "agent.byDIDs",
     // Registered before v2; listed so v2 clients need not probe for it.
     "expression.getMany",
+    "perspective.keepAliveLease",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.
