@@ -277,7 +277,7 @@ The one way to end such a link is a signed tombstone from its **author**:
 
 Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing. `rejectProposal` writes these for you. A tombstone cannot itself be retracted, and neither can a role revocation (`ad4m://flow/role_grant_revoked`), so role history is kept. Readers see a retracted link gone, exactly as after a removal: `model_query`, raw SPARQL and the flow derivation all read the links present now.
 
-An executor from before this rule still applies removals and stores tombstones as ordinary links. Until every member upgrades, the two versions can disagree about these links, always in the same direction: the newer one keeps the link.
+An executor from before this rule still applies removals and stores tombstones as ordinary links. Until every member upgrades, the two versions can disagree about these links, in a direction that depends on the operation: after an ordinary removal the older executor drops the link and the newer one keeps it; after a valid tombstone the newer executor ends the link and refuses later copies, while the older one keeps the link and stores the tombstone as an ordinary link.
 
 ### Contention
 

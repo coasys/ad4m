@@ -46,8 +46,10 @@
 //! An executor without this module still applies and sends removals, and
 //! stores tombstones as ordinary links. This one drops removals from it, and
 //! never sends one. Until everyone upgrades the two disagree about exactly
-//! these links, always in one direction: the new node keeps the link. There
-//! is no compatibility switch, since accepting tombstone-less removals is the
+//! these links, in a direction set by the operation: after a removal the old
+//! node drops the link and the new node keeps it; after a valid tombstone the
+//! new node ends the link while the old node keeps it (and stores the
+//! tombstone as an ordinary link). There is no compatibility switch, since accepting tombstone-less removals is the
 //! hole this closes. Pending diffs from before an upgrade go through the same
 //! ingest.
 //!
