@@ -130,6 +130,41 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(linksPostMutation.length).to.equal(2);
             })
 
+            // #1176: flow links are monotonic only when Shared. The executor
+            // reads the stored status, not the one a call names, so the
+            // engine's Local cache stays replaceable: by a batched update whose
+            // old link carries no status, and by a linkMutations removal
+            // labelled 'shared' (the default).
+            it('can replace a Local ad4m://flow/ link by batched update and by linkMutations', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+                const p = await ad4mClient.perspective.add("test-local-flow-cache");
+                const query = new LinkQuery({source: 'ad4m://proposal-1176', predicate: 'ad4m://flow/current_state'})
+                const cache = await p.add(new Link({
+                    source: 'ad4m://proposal-1176',
+                    predicate: 'ad4m://flow/current_state',
+                    target: 'literal:string:done'
+                }), 'local')
+
+                const { status: _status, ...oldWithoutStatus } = cache as any
+                const batchId = await p.createBatch()
+                await p.update(oldWithoutStatus, new Link({
+                    source: 'ad4m://proposal-1176',
+                    predicate: 'ad4m://flow/current_state',
+                    target: 'literal:string:next'
+                }), batchId)
+                const committed = await p.commitBatch(batchId)
+                expect(committed.removals.length).to.equal(1)
+                let links = await p.get(query)
+                expect(links.map(l => l.data.target)).to.deep.equal(['literal:string:next'])
+
+                const removed = await p.linkMutations({additions: [], removals: links})
+                expect(removed.removals.length).to.equal(1)
+                links = await p.get(query)
+                expect(links.length, "the Local cache link is gone").to.equal(0)
+
+                await ad4mClient.perspective.remove(p.uuid)
+            })
+
             it(`doesn't error when duplicate entries passed to removeLinks`, async () => {
                 const ad4mClient = testContext.ad4mClient!;
                 const perspective = await ad4mClient.perspective.add('test-duplicate-link-removal');
