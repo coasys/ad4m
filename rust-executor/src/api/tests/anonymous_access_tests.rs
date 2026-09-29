@@ -9,7 +9,7 @@
 //! so a test reaches a `0.0.0.0` listener through `127.0.0.1` and it still counts as network.
 
 use crate::api::auth::AppState;
-use crate::api::{api_router, listener_router};
+use crate::api::{api_router, bind_api_listeners, listener_router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use futures::{SinkExt, StreamExt};
@@ -35,9 +35,15 @@ async fn serve_without_credential(bind: &str) -> SocketAddr {
     let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
     let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
     let bound = listener.local_addr().unwrap();
-    let app = listener_router(no_credential(), &bound);
+    let app = listener_router(no_credential(), &listener).unwrap();
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     SocketAddr::from(([127, 0, 0, 1], bound.port()))
+}
+
+/// The API router with no admin credential, marked from a listener bound on `bind`.
+async fn router_bound_on(bind: &str) -> axum::Router {
+    let listener = tokio::net::TcpListener::bind(bind).await.unwrap();
+    listener_router(no_credential(), &listener).unwrap()
 }
 
 /// Opens a socket with no token, sends one call and returns its reply.
@@ -123,16 +129,14 @@ async fn list_models_status(app: axum::Router) -> StatusCode {
 
 #[tokio::test]
 async fn the_http_extractor_follows_the_listener_too() {
-    let network: SocketAddr = "0.0.0.0:12000".parse().unwrap();
-    let loopback: SocketAddr = "127.0.0.1:12000".parse().unwrap();
     assert_eq!(
-        list_models_status(listener_router(no_credential(), &network)).await,
+        list_models_status(router_bound_on("0.0.0.0:0").await).await,
         StatusCode::FORBIDDEN
     );
     // On loopback the capability check passes; what the handler answers after it is not
     // this test's concern.
     assert_ne!(
-        list_models_status(listener_router(no_credential(), &loopback)).await,
+        list_models_status(router_bound_on("127.0.0.1:0").await).await,
         StatusCode::FORBIDDEN
     );
 }
@@ -144,4 +148,57 @@ async fn an_unmarked_router_treats_a_caller_without_a_token_as_anonymous() {
         list_models_status(api_router(no_credential())).await,
         StatusCode::FORBIDDEN
     );
+}
+
+/// Whether a caller with no token is the operator on this router: `/v1/models` checks
+/// AI_READ, which only the operator has without a token.
+async fn is_operator_without_token(app: axum::Router) -> bool {
+    list_models_status(app).await != StatusCode::FORBIDDEN
+}
+
+// The tests below go through `bind_api_listeners`, which `start_server` uses: each router
+// must be marked from the socket it is served on, not from an address a call site supplies.
+
+#[tokio::test]
+async fn the_default_api_listener_is_loopback() {
+    let listeners = bind_api_listeners(no_credential(), 0, true, None)
+        .await
+        .unwrap();
+    let (listener, app) = listeners.http;
+    assert!(listener.local_addr().unwrap().ip().is_loopback());
+    assert!(is_operator_without_token(app).await);
+    assert!(listeners.https.is_none());
+}
+
+#[tokio::test]
+async fn with_localhost_false_the_api_listener_is_on_the_network() {
+    let listeners = bind_api_listeners(no_credential(), 0, false, None)
+        .await
+        .unwrap();
+    let (listener, app) = listeners.http;
+    assert!(listener.local_addr().unwrap().ip().is_unspecified());
+    assert!(!is_operator_without_token(app).await);
+}
+
+// With TLS, `localhost` does not matter: cleartext stays on loopback, TLS is on the network.
+#[tokio::test]
+async fn with_tls_the_https_listener_is_on_the_network() {
+    for localhost in [true, false] {
+        let listeners = bind_api_listeners(no_credential(), 0, localhost, Some(0))
+            .await
+            .unwrap();
+        let (listener, app) = listeners.http;
+        assert!(
+            listener.local_addr().unwrap().ip().is_loopback(),
+            "{localhost}"
+        );
+        assert!(is_operator_without_token(app).await, "{localhost}");
+
+        let (tls_listener, tls_app) = listeners.https.expect("the TLS port binds");
+        assert!(
+            tls_listener.local_addr().unwrap().ip().is_unspecified(),
+            "{localhost}"
+        );
+        assert!(!is_operator_without_token(tls_app).await, "{localhost}");
+    }
 }
