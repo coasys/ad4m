@@ -876,6 +876,52 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
     assert_eq!(total, 1);
 }
 
+/// A body over `MAX_RECEIPT_BYTES` is not a receipt (Marvin on #1201).
+/// `mint` refuses to write one, so no honest receipt is over the cap and the
+/// loader loses nothing by dismissing one — and it must, because a copy of
+/// an honest receipt with `outputs` swapped for a huge list keeps the real
+/// signatures, hashes to its own URI and names F: it passes all three
+/// candidate checks, costs a full fold on every read, and comes back as
+/// `OutputsNotCommitted { claimed: <the whole list> }`.
+///
+/// Red without the size check in `load_flow_receipts`: the bulky copy loads.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_body_over_the_receipt_size_cap_is_skipped_and_the_honest_receipt_beside_it_counts() {
+    use crate::perspectives::flow_instance::produced::{flow_valid_outputs, load_flow_receipts};
+    use crate::perspectives::flow_instance::receipt::MAX_RECEIPT_BYTES;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let flow = f.flow_uri.clone();
+
+    let mut bulky = honest.clone();
+    bulky.outputs[0].content = "x".repeat(MAX_RECEIPT_BYTES + 1);
+    let size = bulky.body().expect("body").len();
+    assert!(
+        size > MAX_RECEIPT_BYTES,
+        "fixture: {size} bytes must be over the cap"
+    );
+    plant_receipt(&mut f, &bulky).await;
+
+    let receipts = load_flow_receipts(&f.perspective, &flow)
+        .await
+        .expect("an oversize body is skipped, never refused");
+    assert_eq!(
+        receipts,
+        vec![honest.clone()],
+        "exactly the honest receipt loads: {} candidates came back",
+        receipts.len()
+    );
+
+    let outputs = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("the enumeration answers");
+    assert_eq!(
+        outputs.iter().map(|o| o.output.clone()).collect::<Vec<_>>(),
+        vec![task_ref(TASK)]
+    );
+}
+
 /// The perspective's own memo, end to end (#1177): the first enumeration
 /// verifies the honest receipt, the second re-verifies nothing, and a DNA
 /// edit written to the graph — a consensus rule on a state — misses the

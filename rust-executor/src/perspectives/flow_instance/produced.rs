@@ -107,7 +107,8 @@
 use super::atom::OutputRef;
 use super::receipt::{
     is_canonical_receipt_uri, is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE,
-    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, RECEIPT_URI_PREFIX,
+    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES,
+    RECEIPT_URI_PREFIX,
 };
 use super::verify::memo::VerdictMemo;
 use super::verify::{verify_receipt, ReceiptVerdict};
@@ -363,10 +364,19 @@ pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
 ///    ([`is_canonical_receipt_uri`]: the prefix plus exactly 64 lowercase
 ///    hex characters — one spelling, so two index links cannot alias one
 ///    receipt, and a non-hash target is dismissed before any store read);
-/// 2. a body under it parses as a [`FlowReceipt`] whose own
-///    [`uri()`](FlowReceipt::uri) **is** the target — the body is the
-///    material the URI names, not something hung under a name it borrowed;
-/// 3. that receipt names `flow_uri` — a receipt of another flow may
+/// 2. a body under it parses as a [`FlowReceipt`] that serialises to at
+///    most [`MAX_RECEIPT_BYTES`] — the same measure
+///    [`mint`](FlowReceipt::mint) refuses over, so no genuine receipt is
+///    over it, and the reader owes an oversize body nothing. Not a
+///    tidiness check: a copy of an honest receipt with `outputs` swapped
+///    for a huge list keeps the real signatures, hashes to its own URI and
+///    names F, so it passes every other check, costs a full fold per read,
+///    and comes back as `OutputsNotCommitted { claimed: <the list> }`
+///    (Marvin on #1201);
+/// 3. that receipt's own [`uri()`](FlowReceipt::uri) **is** the target —
+///    the body is the material the URI names, not something hung under a
+///    name it borrowed;
+/// 4. that receipt names `flow_uri` — a receipt of another flow may
 ///    verify, and must still not be a candidate for this one.
 ///
 /// Everything else is skipped with a warning at parse cost, never an error:
@@ -379,7 +389,7 @@ pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
 /// completion of any flow tripped it for good.
 ///
 /// Deterministic: entries and bodies are read in sorted order. Under one
-/// entry the first body that satisfies (2) and (3) is the receipt; any other
+/// entry the first body that satisfies (2) to (4) is the receipt; any other
 /// body that satisfied them would be the same content.
 pub async fn load_flow_receipts(
     perspective: &PerspectiveInstance,
@@ -432,6 +442,22 @@ pub async fn load_flow_receipts(
                     continue;
                 }
             };
+            match receipt.body().map(|body| body.len()) {
+                Ok(size) if size <= MAX_RECEIPT_BYTES => {}
+                Ok(size) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` serialises to {size} bytes, \
+                         over the {MAX_RECEIPT_BYTES} byte cap no receipt is minted over; skipped"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` does not serialise: {e:#}"
+                    );
+                    continue;
+                }
+            }
             match receipt.uri() {
                 Ok(hashed) if hashed == uri => {}
                 Ok(hashed) => {

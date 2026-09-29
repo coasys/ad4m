@@ -540,7 +540,7 @@ Each of these maps to a row in [Errors and limits](/flows#errors-and-limits) on 
 - **You wrote `grantedByFlow`, or misspelt the key.** Silently plain `fromRole`, and the hole is back. See [#1144](https://github.com/coasys/ad4m/issues/1144).
 - **You omitted `state` from `producedByFlow`.** The rule does not decode and the edge is refused for everyone.
 - **The replica does not hold `ReviewerRoleGrant`.** Error, never an empty result. Sync the Social DNA first.
-- **Someone flooded the grant flow's receipt index with junk.** No error. Entries that are not a receipt URI, have no body, or whose body does not hash to the URI or names another flow are skipped with a warning, and the honest receipt keeps granting. The reader pays a parse per junk body; there is no cap that honest runs could hit ([#1177](https://github.com/coasys/ad4m/issues/1177)).
+- **Someone flooded the grant flow's receipt index with junk.** No error. Entries that are not a receipt URI, have no body, or whose body is over the 256 KiB receipt cap, does not hash to the URI or names another flow are skipped with a warning, and the honest receipt keeps granting. The reader pays a parse per junk body; there is no cap that honest runs could hit ([#1177](https://github.com/coasys/ad4m/issues/1177)).
 - **You gated with `count: { max: 0 }`.** Refused outright. That would make every failed verification a reason to grant.
 
 <Callout type="info" emoji="📄">
