@@ -319,19 +319,23 @@ mod tests {
         assert_eq!(hash.len(), 64, "precondition: a SHA-256 in hex");
         assert!(is_canonical_receipt_uri(&uri), "the minted URI: {uri}");
 
+        // The near misses are built from a fixed hash, not the minted one:
+        // fixture keys are generated per process, so the minted hash varies
+        // between runs, and uppercasing one of its characters is no change
+        // when that character happens to be a digit.
+        const LOWER: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        assert!(is_canonical_receipt_uri(&format!(
+            "{RECEIPT_URI_PREFIX}{LOWER}"
+        )));
         let rejected = [
-            format!("{RECEIPT_URI_PREFIX}{}", hash.to_uppercase()),
-            format!(
-                "{RECEIPT_URI_PREFIX}{}{}",
-                &hash[..63],
-                hash[63..].to_uppercase()
-            ),
-            format!("{RECEIPT_URI_PREFIX}{}", &hash[..63]),
-            format!("{RECEIPT_URI_PREFIX}{hash}0"),
-            format!("{RECEIPT_URI_PREFIX}{}g", &hash[..63]),
+            format!("{RECEIPT_URI_PREFIX}{}", LOWER.to_uppercase()),
+            format!("{RECEIPT_URI_PREFIX}{}A{}", &LOWER[..10], &LOWER[11..]),
+            format!("{RECEIPT_URI_PREFIX}{}", &LOWER[..63]),
+            format!("{RECEIPT_URI_PREFIX}{LOWER}0"),
+            format!("{RECEIPT_URI_PREFIX}{}g", &LOWER[..63]),
             format!("{RECEIPT_URI_PREFIX}-junk-0000"),
-            format!("ad4m://flow/receipts/{hash}"),
-            hash.to_string(),
+            format!("ad4m://flow/receipts/{LOWER}"),
+            LOWER.to_string(),
             String::new(),
         ];
         for uri in rejected {
