@@ -510,21 +510,25 @@ export async function languageGetSource(address) {{
 }
 
 /// The in-memory language language, installed as the node's language language for one
-/// test. The languages directory is process-wide and set once, so this points it into a
-/// temp dir before anything saves a bundle, and no bundle lands under the home directory.
+/// test. The languages directory is process-wide and set once, so every test that installs
+/// this shares one temp dir, set before anything saves a bundle; no bundle lands under the
+/// home directory. Bundles save under their hash, so the tests do not collide.
 struct TestLanguageLanguage {
     controller: LanguageController,
     address: String,
     template_address: String,
     previous: Option<String>,
-    _dir: tempfile::TempDir,
 }
 
 impl TestLanguageLanguage {
     async fn install() -> Self {
         crate::test_utils::init_v8_platform();
-        let dir = tempfile::tempdir().unwrap();
-        crate::utils::set_languages_directory(dir.path().to_str().unwrap());
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = DIR.get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            crate::utils::set_languages_directory(dir.path().to_str().unwrap());
+            dir
+        });
         assert!(
             crate::utils::languages_directory().starts_with(dir.path()),
             "the languages directory was set before this test, to {:?}",
@@ -553,7 +557,6 @@ impl TestLanguageLanguage {
             address,
             template_address,
             previous,
-            _dir: dir,
         }
     }
 
@@ -639,4 +642,51 @@ async fn apply_template_publishes_as_the_calling_session() {
             operators_copy["address"].as_str().unwrap(),
         ])
         .await;
+}
+
+/// The MCP neighbourhood tool clones its link language itself; a user's clone must carry
+/// the user's DID as author, as `language.applyTemplate` does.
+#[tokio::test]
+async fn mcp_clones_a_link_language_as_the_calling_agent() {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let user = TestUser::new("mcp.template.user");
+    let languages = TestLanguageLanguage::install().await;
+
+    let users_copy = crate::mcp::tools::neighbourhoods::clone_link_language(
+        &languages.template_address,
+        "the user's space",
+        &AgentContext::for_user_email(user.email.clone()),
+    )
+    .await
+    .expect("a user clones a link language");
+    let operators_copy = crate::mcp::tools::neighbourhoods::clone_link_language(
+        &languages.template_address,
+        "the operator's space",
+        &AgentContext::main_agent(),
+    )
+    .await
+    .expect("the operator clones a link language");
+
+    let author = |address: &str| {
+        let address = address.to_string();
+        async move {
+            call(
+                "language.meta",
+                json!({ "address": address }),
+                operator_session(),
+            )
+            .await
+            .expect("the copy was published")["author"]
+                .clone()
+        }
+    };
+    assert_eq!(
+        author(&users_copy).await,
+        json!(user.did()),
+        "a user's MCP neighbourhood must publish its link language as the user"
+    );
+    assert_eq!(author(&operators_copy).await, json!(crate::agent::did()));
+
+    languages.uninstall(&[&users_copy, &operators_copy]).await;
 }
