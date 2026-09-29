@@ -512,11 +512,8 @@ export function buildSHACL(
         });
     }
 
-    // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal:string:[]`
-    // which the Rust executor parses as a valid (no-op) command list,
-    // avoiding "No SHACL constructor found" errors for models whose
-    // properties are all optional and have no @Flag.
+    // Empty lists are valid: the executor stores them as `literal:string:[]`,
+    // so `createSubject` works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

@@ -413,23 +413,16 @@ export class SHACLShape {
       });
     }
 
-    // Constructor actions — always emit, even for an empty array.
-    // An empty `[]` tells the executor the shape is valid but has no
-    // required initial links (all-optional model with no @Flag).
-    if (this.constructor_actions) {
+    // Constructor and destructor actions, always, as the executor writes
+    // them: an empty `[]` still tells `createSubject` the class exists.
+    for (const [predicate, actions] of [
+      ["ad4m://constructor", this.constructor_actions],
+      ["ad4m://destructor", this.destructor_actions],
+    ] as const) {
       links.push({
         source: this.nodeShapeUri,
-        predicate: "ad4m://constructor",
-        target: `literal:string:${JSON.stringify(this.constructor_actions)}`
-      });
-    }
-
-    // Destructor actions — same rationale as constructor.
-    if (this.destructor_actions) {
-      links.push({
-        source: this.nodeShapeUri,
-        predicate: "ad4m://destructor",
-        target: `literal:string:${JSON.stringify(this.destructor_actions)}`
+        predicate,
+        target: `literal:string:${JSON.stringify(actions ?? [])}`
       });
     }
 

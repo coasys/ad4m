@@ -4,9 +4,11 @@ import { readFileSync } from 'fs';
 import { join } from 'path';
 
 // Links the executor's parse_shacl_to_links writes for a shape that uses every
-// field; its test `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
-const golden = JSON.parse(readFileSync(
+// field (golden[0]) and one with empty action lists (golden[1]); its test
+// `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
+const goldenCases = JSON.parse(readFileSync(
   join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
+const golden = goldenCases[0];
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
@@ -838,12 +840,12 @@ describe('SHACLShape', () => {
   describe('executor golden links', () => {
     const json = (shape: SHACLShape) => JSON.parse(JSON.stringify(shape.toJSON()));
 
-    it("decodes the executor's golden links back to the shape it sent", () => {
-      expect(json(SHACLShape.fromLinks(golden.links, 'zoo://DogShape'))).toEqual(golden.shape);
+    it.each(goldenCases.map((c: any) => [c.name, c]))("decodes the executor's golden links back to the shape it sent (%s)", (_, c: any) => {
+      expect(json(SHACLShape.fromLinks(c.links, c.shape.node_shape_uri))).toEqual(c.shape);
     });
 
-    it('sends the executor the shape fromJSON read', () => {
-      expect(json(SHACLShape.fromJSON(golden.shape))).toEqual(golden.shape);
+    it.each(goldenCases.map((c: any) => [c.name, c]))('sends the executor the shape fromJSON read (%s)', (_, c: any) => {
+      expect(json(SHACLShape.fromJSON(c.shape))).toEqual(c.shape);
     });
   });
 });

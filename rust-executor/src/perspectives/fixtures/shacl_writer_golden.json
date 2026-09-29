@@ -1,3 +1,4 @@
+[
 {
   "name": "Dog",
   "shape": {
@@ -122,4 +123,37 @@
     {"source": "zoo://Dog.toys", "predicate": "ad4m://wherePredicates", "target": "literal:string:{\"colour\":\"zoo://colour\"}"},
     {"source": "zoo://Dog.toys", "predicate": "ad4m://filter", "target": "literal:false"}
   ]
+},
+{
+  "name": "Note",
+  "shape": {
+    "node_shape_uri": "memo://NoteShape",
+    "target_class": "memo://Note",
+    "constructor_actions": [],
+    "destructor_actions": [],
+    "properties": [
+      {
+        "path": "memo://body",
+        "name": "body",
+        "max_count": 1,
+        "setter": [{ "action": "setSingleTarget", "source": "this", "predicate": "memo://body", "target": "value" }]
+      }
+    ]
+  },
+  "links": [
+    {"source": "ad4m://self", "predicate": "ad4m://has_shacl", "target": "literal:string:shacl://Note"},
+    {"source": "literal:string:shacl://Note", "predicate": "ad4m://shacl_shape_uri", "target": "memo://NoteShape"},
+    {"source": "memo://Note", "predicate": "rdf://type", "target": "ad4m://SubjectClass"},
+    {"source": "memo://Note", "predicate": "ad4m://shape", "target": "memo://NoteShape"},
+    {"source": "memo://NoteShape", "predicate": "rdf://type", "target": "sh://NodeShape"},
+    {"source": "memo://NoteShape", "predicate": "sh://targetClass", "target": "memo://Note"},
+    {"source": "memo://NoteShape", "predicate": "ad4m://constructor", "target": "literal:string:[]"},
+    {"source": "memo://NoteShape", "predicate": "ad4m://destructor", "target": "literal:string:[]"},
+    {"source": "memo://NoteShape", "predicate": "sh://property", "target": "memo://Note.body"},
+    {"source": "memo://Note.body", "predicate": "rdf://type", "target": "sh://PropertyShape"},
+    {"source": "memo://Note.body", "predicate": "sh://path", "target": "memo://body"},
+    {"source": "memo://Note.body", "predicate": "sh://maxCount", "target": "literal:1^^xsd:integer"},
+    {"source": "memo://Note.body", "predicate": "ad4m://setter", "target": "literal:string:[{\"action\":\"setSingleTarget\",\"source\":\"this\",\"predicate\":\"memo://body\",\"target\":\"value\"}]"}
+  ]
 }
+]

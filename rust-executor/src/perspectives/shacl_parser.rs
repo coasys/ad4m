@@ -1512,25 +1512,18 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         });
     }
 
-    // Constructor actions (stored as JSON in literal)
-    if !shape.constructor_actions.is_empty() {
-        let constructor_json =
-            serde_json::to_string(&shape.constructor_actions).unwrap_or_else(|_| "[]".to_string());
+    // Constructor and destructor actions (JSON in a literal). Written even
+    // when empty: `create_subject` needs the constructor link to know the
+    // class exists, and an empty list is a valid no-op.
+    for (predicate, actions) in [
+        ("ad4m://constructor", &shape.constructor_actions),
+        ("ad4m://destructor", &shape.destructor_actions),
+    ] {
+        let json = serde_json::to_string(actions).unwrap_or_else(|_| "[]".to_string());
         links.push(Link {
             source: shape_uri.clone(),
-            predicate: Some("ad4m://constructor".to_string()),
-            target: format!("literal:string:{}", constructor_json),
-        });
-    }
-
-    // Destructor actions (stored as JSON in literal)
-    if !shape.destructor_actions.is_empty() {
-        let destructor_json =
-            serde_json::to_string(&shape.destructor_actions).unwrap_or_else(|_| "[]".to_string());
-        links.push(Link {
-            source: shape_uri.clone(),
-            predicate: Some("ad4m://destructor".to_string()),
-            target: format!("literal:string:{}", destructor_json),
+            predicate: Some(predicate.to_string()),
+            target: format!("literal:string:{}", json),
         });
     }
 
@@ -2199,31 +2192,37 @@ mod tests {
             .any(|l| l.predicate.as_deref() == Some("sh://node")));
     }
 
-    /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds a
-    /// shape using every field `SHACLShape.toJSON()` sends and the exact links
-    /// this writer stores for it. The SDK test "decodes the executor's golden
-    /// links back to the shape it sent" reads the same file through
-    /// `SHACLShape.fromLinks`, so a field this writer drops fails one side.
+    /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds
+    /// shapes (one using every field `SHACLShape.toJSON()` sends, one with
+    /// empty action lists) and the exact links this writer stores for each.
+    /// The SDK test "decodes the executor's golden links back to the shape it
+    /// sent" reads the same file through `SHACLShape.fromLinks`, so a field
+    /// this writer drops fails one side.
     #[test]
     fn parse_shacl_to_links_matches_the_golden_fixture() {
-        let fixture: serde_json::Value =
+        let fixture: Vec<serde_json::Value> =
             serde_json::from_str(include_str!("fixtures/shacl_writer_golden.json")).unwrap();
-        let links = parse_shacl_to_links(
-            &fixture["shape"].to_string(),
-            fixture["name"].as_str().unwrap(),
-        )
-        .unwrap();
-        let actual: Vec<serde_json::Value> = links
-            .iter()
-            .map(|l| {
-                serde_json::json!({
-                    "source": l.source,
-                    "predicate": l.predicate,
-                    "target": l.target,
+        for case in fixture {
+            let links =
+                parse_shacl_to_links(&case["shape"].to_string(), case["name"].as_str().unwrap())
+                    .unwrap();
+            let actual: Vec<serde_json::Value> = links
+                .iter()
+                .map(|l| {
+                    serde_json::json!({
+                        "source": l.source,
+                        "predicate": l.predicate,
+                        "target": l.target,
+                    })
                 })
-            })
-            .collect();
-        assert_eq!(serde_json::Value::from(actual), fixture["links"]);
+                .collect();
+            assert_eq!(
+                serde_json::Value::from(actual),
+                case["links"],
+                "{}",
+                case["name"]
+            );
+        }
     }
 
     #[test]
