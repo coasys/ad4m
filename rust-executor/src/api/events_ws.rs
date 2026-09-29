@@ -556,18 +556,8 @@ async fn handle_events_ws(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&*text) {
-                            let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                            if msg_type == "ping" {
-                                let _ = socket.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
-                            } else if let Some(reply) = super::event_interest::handle_control(
-                                msg_type,
-                                parsed.get("id").unwrap_or(&serde_json::Value::Null),
-                                parsed.get("params").unwrap_or(&serde_json::json!({})),
-                                &interest,
-                            ) {
-                                let _ = socket.send(Message::Text(reply.into())).await;
-                            }
+                        if let Some(reply) = client_message_reply(&text, &interest) {
+                            let _ = socket.send(Message::Text(reply.into())).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
@@ -582,6 +572,25 @@ async fn handle_events_ws(
             }
         }
     }
+}
+
+/// The reply to a client message on the events socket: `pong` for `ping`,
+/// the `events.watch` / `events.unwatch` reply, or `None` (ignored).
+fn client_message_reply(
+    text: &str,
+    interest: &super::event_interest::SharedInterest,
+) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(text).ok()?;
+    let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if msg_type == "ping" {
+        return Some(r#"{"type":"pong"}"#.to_string());
+    }
+    super::event_interest::handle_control(
+        msg_type,
+        parsed.get("id").unwrap_or(&serde_json::Value::Null),
+        parsed.get("params").unwrap_or(&serde_json::json!({})),
+        interest,
+    )
 }
 
 // ── Event helper functions ──────────────────────────────────────────────────
@@ -1195,6 +1204,29 @@ mod event_interest_stream_tests {
         })
         .await;
         seen
+    }
+
+    #[test]
+    fn events_socket_watch_round_trip_carries_the_request_id() {
+        let interest: SharedInterest = Default::default();
+        let reply = |text: &str| -> serde_json::Value {
+            serde_json::from_str(&super::client_message_reply(text, &interest).unwrap()).unwrap()
+        };
+        assert_eq!(
+            reply(r#"{"id":"w1","type":"events.watch","params":{"types":["agent-updated"]}}"#),
+            json!({ "id": "w1", "result": { "watching": { "types": ["agent-updated"], "perspectives": null } } })
+        );
+        assert!(!crate::api::event_interest::wants(
+            &interest,
+            r#"{"type":"link-added","perspectiveUuid":"A"}"#
+        ));
+        assert_eq!(
+            reply(r#"{"id":"u1","type":"events.unwatch"}"#),
+            json!({ "id": "u1", "result": { "watching": null } })
+        );
+        assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
+        assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
+        assert!(super::client_message_reply("not json", &interest).is_none());
     }
 
     #[tokio::test]

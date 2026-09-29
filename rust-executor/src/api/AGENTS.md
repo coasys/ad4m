@@ -46,6 +46,9 @@ anything that signs, bills or writes.
   append to it for every new opt-in RPC or parameter. Clients fall back to v1 when a feature is absent.
 - `event_interest.rs`: `events.watch` / `events.unwatch`, handled inline on both sockets (per-connection
   state, like `request.cancel`). No watch = every event.
+- `ws_rpc::serve` runs one RPC connection over any text stream: `Connection::handle_text` answers
+  each client message, and the event task is aborted when the stream ends. `tests/connection_tests.rs`
+  drives it through channels in place of a WebSocket.
 - `operations.rs`: `{ async: true }` on `ASYNC_METHODS` → `{ operationId }` now, `operation-completed` event
   on the same socket later. `ws_rpc::run_call` is the shared dispatch body.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`

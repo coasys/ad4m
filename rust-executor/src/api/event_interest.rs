@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
+use super::ws_handler::ParamExt;
+
 pub const WATCH: &str = "events.watch";
 pub const UNWATCH: &str = "events.unwatch";
 
@@ -31,22 +33,6 @@ pub struct EventInterest {
 
 /// Per-connection interest; `None` = every event.
 pub type SharedInterest = Arc<RwLock<Option<EventInterest>>>;
-
-fn string_set(params: &Value, key: &str) -> Result<Option<HashSet<String>>, String> {
-    match params.get(key) {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| format!("`{}` must be an array of strings", key))
-            })
-            .collect::<Result<_, _>>()
-            .map(Some),
-        Some(_) => Err(format!("`{}` must be an array of strings", key)),
-    }
-}
 
 fn sorted(set: &Option<HashSet<String>>) -> Value {
     match set {
@@ -83,8 +69,8 @@ fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> 
 impl EventInterest {
     pub fn from_params(params: &Value) -> Result<Self, String> {
         Ok(Self {
-            types: string_set(params, "types")?,
-            perspectives: string_set(params, "perspectives")?,
+            types: params.opt_str_set("types").map_err(|e| e.message)?,
+            perspectives: params.opt_str_set("perspectives").map_err(|e| e.message)?,
         })
     }
 
