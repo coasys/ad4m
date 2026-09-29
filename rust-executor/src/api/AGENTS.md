@@ -45,8 +45,9 @@ anything that signs, bills or writes.
 - Every v2 feature is opt-in per call (a new method, or a new parameter such as `delta: true`), so
   a client that does not use it sees v1 behaviour. There is no feature discovery: clients are built
   against the executor they talk to.
-- `event_interest.rs`: `events.watch` / `events.unwatch`, handled inline on both sockets (per-connection
-  state, like `request.cancel`). No watch = every event.
+- `event_interest.rs`: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
+  uuids] }` (replaces the last watch; `events.unwatch` clears it). Handled inline on both sockets
+  (per-connection state, like `request.cancel`). Live query updates bypass it.
 - `ws_rpc::serve` runs one RPC connection over any text stream: `Connection::handle_text` answers
   each client message, and the event task is aborted when the stream ends. `tests/connection_tests.rs`
   drives it through channels in place of a WebSocket.

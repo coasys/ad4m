@@ -90,12 +90,14 @@ export class NeighbourhoodClient {
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#apiClient.subscribe(
             (data) => {
-                if (data.type === 'signal') {
+                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
                     this.dispatchSignal(perspectiveUUID, data.signal)
                 }
-            }
+            },
+            { types: ['signal'], perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
+        await this.#apiClient.waitForSubscription()
     }
 
     async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {

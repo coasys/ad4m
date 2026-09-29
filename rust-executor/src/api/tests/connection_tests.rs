@@ -134,34 +134,29 @@ async fn publish_both(a: &str, b: &str, run: &str) {
 }
 
 #[tokio::test]
-async fn watch_limits_link_events_and_unwatch_restores_them() {
+async fn a_socket_gets_only_the_events_it_watches() {
     let run = uuid::Uuid::new_v4().to_string();
     let (a, b) = (format!("A-{run}"), format!("B-{run}"));
     let mut socket = Socket::open().await;
 
     publish_both(&a, &b, &run).await;
-    assert_eq!(
-        socket.link_events(&run).await,
-        vec![a.clone(), b.clone()],
-        "no watch: every event"
+    assert!(
+        socket.link_events(&run).await.is_empty(),
+        "no watch: no events"
     );
 
-    socket.send(json!({ "id": "w", "type": "events.watch", "params": { "perspectives": [a] } }));
-    let reply = socket.reply("w").await;
+    socket.send(json!({ "id": "w", "type": "events.watch", "params": { "link-added": [a] } }));
     assert_eq!(
-        reply["result"]["watching"],
-        json!({ "types": null, "perspectives": [a] })
+        socket.reply("w").await,
+        json!({ "id": "w", "result": true })
     );
     publish_both(&a, &b, &run).await;
     assert_eq!(socket.link_events(&run).await, vec![a.clone()]);
 
     socket.send(json!({ "id": "u", "type": "events.unwatch" }));
-    assert_eq!(
-        socket.reply("u").await,
-        json!({ "id": "u", "result": { "watching": null } })
-    );
+    socket.reply("u").await;
     publish_both(&a, &b, &run).await;
-    assert_eq!(socket.link_events(&run).await, vec![a, b]);
+    assert!(socket.link_events(&run).await.is_empty(), "unwatched");
 }
 
 #[tokio::test]
@@ -170,9 +165,9 @@ async fn malformed_watch_replies_400_and_keeps_the_old_interest() {
     let (a, b) = (format!("A-{run}"), format!("B-{run}"));
     let mut socket = Socket::open().await;
 
-    socket.send(json!({ "id": "w1", "type": "events.watch", "params": { "perspectives": [a] } }));
+    socket.send(json!({ "id": "w1", "type": "events.watch", "params": { "link-added": [a] } }));
     socket.reply("w1").await;
-    socket.send(json!({ "id": "w2", "type": "events.watch", "params": { "perspectives": "B" } }));
+    socket.send(json!({ "id": "w2", "type": "events.watch", "params": { "link-added": "B" } }));
     let reply = socket.reply("w2").await;
     assert_eq!(reply["error"]["code"], json!(400));
     assert!(reply.get("result").is_none());

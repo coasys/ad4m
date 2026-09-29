@@ -287,7 +287,7 @@ export class AgentClient {
 
         this.#updatedCallbacks.forEach((cb) => cb(agent));
       }
-    });
+    }, { types: ['agent-updated'] });
     this.#unsubscribers.push(unsub);
   }
 
@@ -296,7 +296,7 @@ export class AgentClient {
       if (data.type === 'apps-changed') {
         this.#appsChangedCallback.forEach((cb) => cb());
       }
-    });
+    }, { types: ['apps-changed'] });
     this.#unsubscribers.push(unsub);
   }
 
@@ -309,7 +309,7 @@ export class AgentClient {
       if (data.type === 'agent-status-changed') {
         this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
-    });
+    }, { types: ['agent-status-changed'] });
     this.#unsubscribers.push(unsub);
   }
 
@@ -322,7 +322,7 @@ export class AgentClient {
       if (data.type === 'hosting-user-info-changed') {
         this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
       }
-    });
+    }, { types: ['hosting-user-info-changed'] });
     this.#unsubscribers.push(unsub);
   }
 
@@ -335,7 +335,7 @@ export class AgentClient {
       if (data.type === 'compute-log-updated') {
         this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
       }
-    });
+    }, { types: ['compute-log-updated'] });
     this.#unsubscribers.push(unsub);
   }
 

@@ -422,7 +422,8 @@ export class PerspectiveClient {
                 if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorEvent)
                 }
-            }
+            },
+            { types: ['auto-processor-event'], perspective: uuid as string },
         )
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
@@ -447,7 +448,8 @@ export class PerspectiveClient {
                 if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
                 }
-            }
+            },
+            { types: ['auto-processor-neighbourhood-state'], perspective: uuid as string },
         )
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
@@ -576,7 +578,7 @@ export class PerspectiveClient {
             if (data.type === 'perspective-added') {
                 this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
-        })
+        }, { types: ['perspective-added'] })
         this.#unsubscribers.push(unsub)
     }
 
@@ -589,7 +591,7 @@ export class PerspectiveClient {
             if (data.type === 'perspective-updated') {
                 this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
-        })
+        }, { types: ['perspective-updated'] })
         this.#unsubscribers.push(unsub)
     }
 
@@ -600,13 +602,14 @@ export class PerspectiveClient {
     async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
         const unsub = this.#apiClient.subscribe(
             (data) => {
-                if (data.type === 'sync-state-change' && data.uuid === uuid) {
+                if (data.type === 'sync-state-change' && (data.perspective as { uuid?: string } | undefined)?.uuid === uuid) {
                     cb.forEach(c => c(data.state as PerspectiveState))
                 }
-            }
+            },
+            { types: ['sync-state-change'], perspective: uuid as string },
         )
         this.#unsubscribers.push(unsub)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        await this.#apiClient.waitForSubscription()
     }
 
     addPerspectiveRemovedListener(cb: UuidCallback) {
@@ -618,7 +621,7 @@ export class PerspectiveClient {
             if (data.type === 'perspective-removed') {
                 this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid as string))
             }
-        })
+        }, { types: ['perspective-removed'] })
         this.#unsubscribers.push(unsub)
     }
 
@@ -628,7 +631,8 @@ export class PerspectiveClient {
                 if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
                     cb.forEach(c => c(data.link as LinkExpression))
                 }
-            }
+            },
+            { types: ['link-added'], perspective: uuid as string },
         )
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
@@ -646,7 +650,8 @@ export class PerspectiveClient {
                     }
                     cb.forEach(c => c(link))
                 }
-            }
+            },
+            { types: ['link-removed'], perspective: uuid as string },
         )
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)
@@ -668,7 +673,8 @@ export class PerspectiveClient {
                     }
                     cb.forEach(c => c(data as unknown as LinkExpression))
                 }
-            }
+            },
+            { types: ['link-updated'], perspective: uuid as string },
         )
         let existing = this.#linkUnsubscribers.get(uuid as string) || []
         existing.push(unsub)

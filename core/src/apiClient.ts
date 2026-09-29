@@ -44,6 +44,13 @@ export interface CallOptions {
     timeoutMs?: number
 }
 
+/** The events a subscriber needs: these types, about `perspective` only if
+ *  given. */
+export interface EventInterest {
+    types: string[]
+    perspective?: string
+}
+
 /** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
@@ -104,6 +111,12 @@ export class ApiClient {
     private _wsClosed = false
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     private _ignoredResponseIds = new Set<string>()
+    // The executor sends a socket only the events it asked for (`events.watch`).
+    private _eventInterests = new Map<(data: unknown) => void, EventInterest>()
+    // What the executor has for this socket, as sent; a new socket has `{}`.
+    private _watching: string | null = '{}'
+    private _watchScheduled = false
+    private _watchDone: Promise<void> = Promise.resolve()
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -152,6 +165,8 @@ export class ApiClient {
                 this._wsReadyResolve = null
             }
             this._startPing()
+            this._watching = '{}'
+            this._scheduleWatch()
 
             // Fire reconnect callbacks only on reconnect (not first connect)
             if (this._hasConnectedOnce) {
@@ -209,6 +224,7 @@ export class ApiClient {
         ws.onclose = () => {
             this._stopPing()
             this._ws = null
+            this._watching = '{}'
             // Reset the readiness promise so future calls reconnect
             this._wsReady = null
 
@@ -406,23 +422,74 @@ export class ApiClient {
         })
     }
 
-    // ── Event subscriptions (same interface as before) ──────────────────────
+    // ── Event subscriptions ─────────────────────────────────────────────────
 
-    subscribe<T = WsEvent>(callback: (data: T) => void): () => void {
-        this._wsCallbacks.add(callback as (data: unknown) => void)
+    /**
+     * Call `callback` with every message the executor pushes. `interest`
+     * names the events it needs; the client asks the executor for the union
+     * of all subscribers' interests. Without `interest` the callback asks for
+     * nothing and sees only what arrives anyway (live query updates).
+     */
+    subscribe<T = WsEvent>(callback: (data: T) => void, interest?: EventInterest): () => void {
+        const cb = callback as (data: unknown) => void
+        this._wsCallbacks.add(cb)
+        if (interest) {
+            this._eventInterests.set(cb, interest)
+            this._scheduleWatch()
+        }
         this._ensureWs()
 
         return () => {
-            this._wsCallbacks.delete(callback as (data: unknown) => void)
+            this._wsCallbacks.delete(cb)
+            if (this._eventInterests.delete(cb)) this._scheduleWatch()
             if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
                 this._closeWs()
             }
         }
     }
 
-    /** Wait until the WebSocket connection is established. */
+    /** Wait until the WebSocket is open and the executor has the current
+     *  event interest. */
     async waitForSubscription(): Promise<void> {
         await this._ready()
+        await this._watchDone
+    }
+
+    /** Event type → perspectives wanted (`null`: all), from every subscriber. */
+    watchedEvents(): Record<string, string[] | null> {
+        const events = new Map<string, Set<string> | null>()
+        for (const { types, perspective } of this._eventInterests.values()) {
+            for (const type of types) {
+                if (perspective === undefined) events.set(type, null)
+                else if (events.get(type) !== null) events.set(type, (events.get(type) ?? new Set()).add(perspective))
+            }
+        }
+        return Object.fromEntries([...events.keys()].sort().map(t => [t, events.get(t) ? [...events.get(t)!].sort() : null]))
+    }
+
+    /** Send `events.watch` once per microtask, if the interest changed. */
+    private _scheduleWatch(): void {
+        if (this._watchScheduled) return
+        this._watchScheduled = true
+        this._watchDone = new Promise<void>(resolve => queueMicrotask(() => {
+            this._watchScheduled = false
+            this._sendWatch().then(resolve, resolve)
+        }))
+    }
+
+    private async _sendWatch(): Promise<void> {
+        if (this._wsCallbacks.size === 0) return
+        await this._ready()
+        const events = this.watchedEvents()
+        const key = JSON.stringify(events)
+        if (key === this._watching) return
+        this._watching = key
+        try {
+            await this.call('events.watch', events)
+        } catch (e) {
+            if (this._watching === key) this._watching = null
+            console.error('events.watch failed:', e)
+        }
     }
 
     // ── Explicit connection ─────────────────────────────────────────────────
@@ -464,6 +531,7 @@ export class ApiClient {
         this._pendingCalls.clear()
         this._closeWs()
         this._wsCallbacks.clear()
+        this._eventInterests.clear()
         this._reconnectCallbacks.clear()
         // Reset the first-connect gate so a reused client (closeAll() →
         // later call()/subscribe() reopening via _ensureWs) does not fire

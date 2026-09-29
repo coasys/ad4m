@@ -290,7 +290,7 @@ export class RuntimeClient {
             if (data.type === 'notification-triggered') {
                 this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification as TriggeredNotification))
             }
-        })
+        }, { types: ['notification-triggered'] })
         this.#unsubscribers.push(unsub)
     }
 
@@ -303,7 +303,7 @@ export class RuntimeClient {
             if (data.type === 'message-received') {
                 this.#messageReceivedCallbacks.forEach(cb => cb(data.message as PerspectiveExpression))
             }
-        })
+        }, { types: ['message-received'] })
         this.#unsubscribers.push(unsub)
     }
 
@@ -321,7 +321,7 @@ export class RuntimeClient {
                 }
                 this.#exceptionOccurredCallbacks.forEach(cb => cb(normalizedException))
             }
-        })
+        }, { types: ['exception-occurred'] })
         this.#unsubscribers.push(unsub)
     }
 }

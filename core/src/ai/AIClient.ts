@@ -127,7 +127,8 @@ export class AIClient {
                 if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
                     streamCallback(data.text as string);
                 }
-            }
+            },
+            { types: ['transcription-text'] },
         );
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);

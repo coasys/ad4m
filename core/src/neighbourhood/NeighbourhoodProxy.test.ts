@@ -10,6 +10,7 @@ jest.mock('../apiClient', () => {
       put: jest.fn(),
       delete: jest.fn(),
       subscribe: jest.fn().mockReturnValue(() => {}),
+      waitForSubscription: jest.fn().mockResolvedValue(undefined),
     }))
   };
 });
@@ -58,6 +59,7 @@ describe("NeighbourhoodProxy", () => {
         subscribeCallCount++;
         return () => {};
       }),
+      waitForSubscription: jest.fn().mockResolvedValue(undefined),
     }));
 
     const neighbourhoodClient = new NeighbourhoodClient("http://localhost:0", "test-token");

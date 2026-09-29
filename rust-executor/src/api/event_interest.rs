@@ -1,23 +1,20 @@
-//! Event interest registration: `events.watch` / `events.unwatch`.
+//! Event interest: `events.watch` / `events.unwatch`, on both the RPC socket
+//! and the events socket. A socket gets no events until it calls
+//! `events.watch`.
 //!
-//! Per-socket filter over the (already per-user) event stream, on both the
-//! events socket and the RPC socket. A socket that never sends `events.watch`
-//! receives every event, as before.
+//! Request: `{ "id": "...", "type": "events.watch", "params": { "<event type>": null | ["<perspective uuid>", ...] } }`
+//! Reply:   `{ "id": "...", "result": true }`
 //!
-//! Request: `{ "id"?: "...", "type": "events.watch", "params": { "types"?: [..], "perspectives"?: [..] } }`
-//! Reply:   `{ "id": "...", "result": { "watching": { "types": [..] | null, "perspectives": [..] | null } } }`
-//! (`events.unwatch` replies `{ "watching": null }`). A reply has no `type` key,
-//! so clients never mistake it for an event.
-//!
-//! Rules:
-//! - Each `events.watch` replaces the previous interest; `events.unwatch` clears it.
-//! - An omitted (or `null`) dimension does not restrict; an empty array matches nothing.
-//! - `perspectives` restricts only events that name a perspective. Agent,
-//!   runtime and AI events carry none and pass on `types` alone.
+//! - Each `events.watch` replaces the previous interest; `events.unwatch`
+//!   clears it.
+//! - `null` takes every event of that type; a list takes only events about
+//!   those perspectives.
+//! - Live query updates (`query-subscription-update`) are not filtered: they
+//!   only ever reach the connection that opened the subscription.
 
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
 use super::ws_handler::ParamExt;
@@ -25,25 +22,11 @@ use super::ws_handler::ParamExt;
 pub const WATCH: &str = "events.watch";
 pub const UNWATCH: &str = "events.unwatch";
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct EventInterest {
-    types: Option<HashSet<String>>,
-    perspectives: Option<HashSet<String>>,
-}
+/// Event type → the perspectives wanted (`None`: all).
+pub type EventInterest = HashMap<String, Option<HashSet<String>>>;
 
-/// Per-connection interest; `None` = every event.
-pub type SharedInterest = Arc<RwLock<Option<EventInterest>>>;
-
-fn sorted(set: &Option<HashSet<String>>) -> Value {
-    match set {
-        None => Value::Null,
-        Some(s) => {
-            let mut v: Vec<&String> = s.iter().collect();
-            v.sort();
-            json!(v)
-        }
-    }
-}
+/// Per-connection interest; empty = no events.
+pub type SharedInterest = Arc<RwLock<EventInterest>>;
 
 /// The perspective an event is about, by event type. `None` for events that
 /// are not perspective-scoped.
@@ -57,7 +40,7 @@ fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> 
         "perspective-added" | "perspective-updated" | "sync-state-change" | "signal" => {
             event.get("perspective").and_then(|p| p.get("uuid"))
         }
-        "perspective-removed" | "query-subscription-update" => event.get("uuid"),
+        "perspective-removed" => event.get("uuid"),
         "notification-triggered" => event
             .get("notification")
             .and_then(|n| n.get("perspectiveId").or_else(|| n.get("perspective_id"))),
@@ -66,45 +49,39 @@ fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> 
     v.and_then(Value::as_str)
 }
 
-impl EventInterest {
-    pub fn from_params(params: &Value) -> Result<Self, String> {
-        Ok(Self {
-            types: params.opt_str_set("types").map_err(|e| e.message)?,
-            perspectives: params.opt_str_set("perspectives").map_err(|e| e.message)?,
-        })
-    }
-
-    pub fn to_json(&self) -> Value {
-        json!({ "types": sorted(&self.types), "perspectives": sorted(&self.perspectives) })
-    }
-
-    /// Does this serialized event (`{ "type": ..., ...payload }`) match?
-    pub fn matches(&self, event_json: &str) -> bool {
-        let Ok(event) = serde_json::from_str::<Value>(event_json) else {
-            return true;
-        };
-        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
-        if let Some(types) = &self.types {
-            if !types.contains(event_type) {
-                return false;
-            }
-        }
-        match (&self.perspectives, event_perspective(event_type, &event)) {
-            (Some(wanted), Some(uuid)) => wanted.contains(uuid),
-            _ => true,
-        }
-    }
+fn parse(params: &Value) -> Result<EventInterest, String> {
+    let types = params
+        .as_object()
+        .ok_or("`events.watch` params must map event types to perspectives or null")?;
+    types
+        .keys()
+        .map(|t| Ok((t.clone(), params.opt_str_set(t).map_err(|e| e.message)?)))
+        .collect()
 }
 
 /// Should this socket forward `event_json`?
 pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
-    match &*interest.read().unwrap_or_else(|e| e.into_inner()) {
-        None => true,
-        Some(i) => i.matches(event_json),
+    let Ok(event) = serde_json::from_str::<Value>(event_json) else {
+        return false;
+    };
+    let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+    if event_type == "query-subscription-update" {
+        return true;
+    }
+    match interest
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(event_type)
+    {
+        None => false,
+        Some(None) => true,
+        Some(Some(wanted)) => {
+            event_perspective(event_type, &event).is_some_and(|p| wanted.contains(p))
+        }
     }
 }
 
-/// `stream` minus the events this socket's interest excludes.
+/// `stream` minus the events this socket did not ask for.
 pub fn filter_stream<S>(stream: S, interest: SharedInterest) -> impl Stream<Item = String>
 where
     S: Stream<Item = String>,
@@ -113,28 +90,25 @@ where
 }
 
 /// Handle `events.watch` / `events.unwatch`. Returns `None` for any other
-/// message type, otherwise the reply to send.
+/// message type, otherwise the reply to send. A malformed watch keeps the
+/// previous interest.
 pub fn handle_control(
     msg_type: &str,
     id: &Value,
     params: &Value,
     interest: &SharedInterest,
 ) -> Option<String> {
-    let result = match msg_type {
-        WATCH => EventInterest::from_params(params).map(|i| {
-            let watching = i.to_json();
-            *interest.write().unwrap_or_else(|e| e.into_inner()) = Some(i);
-            json!({ "watching": watching })
-        }),
-        UNWATCH => {
-            *interest.write().unwrap_or_else(|e| e.into_inner()) = None;
-            Ok(json!({ "watching": null }))
-        }
+    let new_interest = match msg_type {
+        WATCH => parse(params),
+        UNWATCH => Ok(EventInterest::new()),
         _ => return None,
     };
     Some(
-        match result {
-            Ok(r) => json!({ "id": id, "result": r }),
+        match new_interest {
+            Ok(i) => {
+                *interest.write().unwrap_or_else(|e| e.into_inner()) = i;
+                json!({ "id": id, "result": true })
+            }
             Err(e) => json!({ "id": id, "error": { "code": 400, "message": e } }),
         }
         .to_string(),
@@ -145,103 +119,76 @@ pub fn handle_control(
 mod tests {
     use super::*;
 
-    fn shared() -> SharedInterest {
-        Arc::new(RwLock::new(None))
-    }
-
     const LINK_A: &str = r#"{"type":"link-added","perspectiveUuid":"A","owner":"did:x","link":{}}"#;
     const LINK_B: &str = r#"{"type":"link-added","perspectiveUuid":"B","owner":"did:x","link":{}}"#;
     const UPDATED_B: &str =
         r#"{"type":"perspective-updated","perspective":{"uuid":"B"},"owner":"did:x"}"#;
     const QUERY_A: &str =
-        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","result":"[]"}"#;
+        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","revision":1}"#;
     const AGENT: &str = r#"{"type":"agent-updated","agent":{"did":"did:x"}}"#;
 
+    fn watch(i: &SharedInterest, params: Value) -> Value {
+        serde_json::from_str(&handle_control(WATCH, &json!("1"), &params, i).unwrap()).unwrap()
+    }
+
     #[test]
-    fn without_watch_every_event_passes() {
-        let i = shared();
-        for e in [LINK_A, LINK_B, UPDATED_B, QUERY_A, AGENT] {
-            assert!(wants(&i, e));
+    fn without_watch_no_event_passes_but_query_updates_do() {
+        let i = SharedInterest::default();
+        for e in [LINK_A, LINK_B, UPDATED_B, AGENT] {
+            assert!(!wants(&i, e), "{e}");
         }
-    }
-
-    #[test]
-    fn perspectives_filter_scoped_events_only() {
-        let i = shared();
-        handle_control(WATCH, &json!("1"), &json!({ "perspectives": ["A"] }), &i).unwrap();
-        assert!(wants(&i, LINK_A));
-        assert!(!wants(&i, LINK_B));
-        assert!(!wants(&i, UPDATED_B));
         assert!(wants(&i, QUERY_A));
-        assert!(wants(&i, AGENT), "not perspective-scoped: passes");
     }
 
     #[test]
-    fn types_and_perspectives_combine() {
-        let i = shared();
-        handle_control(
-            WATCH,
-            &json!("1"),
-            &json!({ "types": ["link-added"], "perspectives": ["B"] }),
+    fn watch_narrows_by_type_and_perspective() {
+        let i = SharedInterest::default();
+        let reply = watch(
             &i,
-        )
-        .unwrap();
-        assert!(!wants(&i, LINK_A));
-        assert!(wants(&i, LINK_B));
-        assert!(!wants(&i, UPDATED_B));
-        assert!(!wants(&i, AGENT));
+            json!({ "link-added": ["A"], "perspective-updated": null, "agent-updated": ["A"] }),
+        );
+        assert_eq!(reply, json!({ "id": "1", "result": true }));
+        assert!(wants(&i, LINK_A));
+        assert!(!wants(&i, LINK_B), "other perspective");
+        assert!(wants(&i, UPDATED_B), "null: every perspective");
+        assert!(
+            !wants(&i, AGENT),
+            "a list excludes events without a perspective"
+        );
     }
 
     #[test]
-    fn empty_types_match_nothing_and_unwatch_restores_everything() {
-        let i = shared();
-        handle_control(WATCH, &json!("1"), &json!({ "types": [] }), &i).unwrap();
+    fn each_watch_replaces_the_last_and_unwatch_clears_it() {
+        let i = SharedInterest::default();
+        watch(&i, json!({ "agent-updated": null }));
+        watch(&i, json!({ "link-added": null }));
         assert!(!wants(&i, AGENT));
+        assert!(wants(&i, LINK_B));
         let reply = handle_control(UNWATCH, &json!("2"), &json!({}), &i).unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&reply).unwrap(),
-            json!({ "id": "2", "result": { "watching": null } })
+            json!({ "id": "2", "result": true })
         );
-        assert!(wants(&i, AGENT));
-    }
-
-    #[test]
-    fn watch_replaces_and_echoes_the_interest() {
-        let i = shared();
-        handle_control(
-            WATCH,
-            &json!("1"),
-            &json!({ "types": ["agent-updated"] }),
-            &i,
-        )
-        .unwrap();
-        let reply = handle_control(
-            WATCH,
-            &json!("2"),
-            &json!({ "perspectives": ["B", "A"] }),
-            &i,
-        )
-        .unwrap();
-        assert_eq!(
-            serde_json::from_str::<Value>(&reply).unwrap(),
-            json!({ "id": "2", "result": { "watching": { "types": null, "perspectives": ["A", "B"] } } })
-        );
-        assert!(wants(&i, AGENT), "the earlier types filter was replaced");
+        assert!(!wants(&i, LINK_B));
     }
 
     #[test]
     fn malformed_watch_is_rejected_and_keeps_the_old_interest() {
-        let i = shared();
-        let reply =
-            handle_control(WATCH, &json!("1"), &json!({ "types": "link-added" }), &i).unwrap();
-        let reply: Value = serde_json::from_str(&reply).unwrap();
-        assert_eq!(reply["error"]["code"], 400);
+        let i = SharedInterest::default();
+        watch(&i, json!({ "agent-updated": null }));
+        for bad in [
+            json!({ "link-added": "A" }),
+            json!({ "link-added": [1] }),
+            json!([]),
+        ] {
+            assert_eq!(watch(&i, bad)["error"]["code"], 400);
+        }
         assert!(wants(&i, AGENT));
     }
 
     #[test]
     fn other_messages_are_not_handled() {
-        assert!(handle_control("ping", &Value::Null, &json!({}), &shared()).is_none());
+        assert!(handle_control("ping", &Value::Null, &json!({}), &Default::default()).is_none());
     }
 
     #[test]

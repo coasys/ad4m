@@ -106,6 +106,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.commitBatch': { additions: [], removals: [] },
     'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
     'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
+    'events.watch': true,
     'perspective.disposeQuery': true,
 
     // ── Languages ──
@@ -261,6 +262,8 @@ class MockWebSocket {
     readyState: number = MockWebSocket.CONNECTING;
     closed = false;
     url: string;
+    /** RPC calls sent on this socket. */
+    rpc: { type: string; params: Record<string, unknown> }[] = [];
 
     close() {
         this.closed = true;
@@ -288,6 +291,7 @@ class MockWebSocket {
 
             // Track for assertions
             lastRpcCall = { type: msgType, params };
+            this.rpc.push(lastRpcCall);
 
             const handler = MOCK_RESPONSES[msgType];
             if (handler === undefined) {
@@ -711,6 +715,57 @@ describe('PerspectiveClient', () => {
             type: 'CAPABILITY_REQUESTED',
             addon: '{}',
         });
+    });
+
+    test('a client asks the executor for exactly the events its listeners need', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const first = MockWebSocket.instances.length;
+        const watches = () => MockWebSocket.instances.slice(first).flatMap(ws => ws.rpc)
+            .filter(c => c.type === 'events.watch').map(c => c.params);
+
+        await freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+        expect(watches()).toEqual([{ 'link-added': ['A'] }]);
+
+        // Two listeners added in the same tick make one events.watch.
+        freshClient.perspective.addPerspectiveLinkAddedListener('B', [jest.fn()]);
+        freshClient.runtime.addExceptionCallback(jest.fn(() => null));
+        freshClient.runtime.subscribeExceptionOccurred();
+        await freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
+        expect(watches()).toHaveLength(2);
+        expect(lastOf(watches())).toEqual({
+            'exception-occurred': null, 'link-added': ['A', 'B'], 'link-removed': ['A'],
+        });
+
+        freshClient.perspective.removeAllListeners('A');
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'link-added': ['B'] });
+
+        // A new socket starts with no interest: the client registers again.
+        const before = watches().length;
+        lastOf(MockWebSocket.instances).close();
+        await new Promise(r => setTimeout(r, 700));
+        expect(watches()).toHaveLength(before + 1);
+        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'link-added': ['B'] });
+    });
+
+    test('sync-state and signal listeners only fire for their perspective', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const syncState = jest.fn(() => null);
+        await freshClient.perspective.addPerspectiveSyncStateChangeListener('A', [syncState]);
+        const signal = jest.fn();
+        await freshClient.neighbourhood.addSignalHandler('A', signal);
+        const ws = lastOf(MockWebSocket.instances);
+        expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
+            .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });
+
+        ws.emit({ type: 'sync-state-change', state: 'Synced', perspective: { uuid: 'B' } });
+        ws.emit({ type: 'sync-state-change', state: 'Synced', perspective: { uuid: 'A' } });
+        expect(syncState.mock.calls).toEqual([['Synced']]);
+
+        const payload = { author: 'did:x', timestamp: 't', data: { links: [] }, proof: {} };
+        ws.emit({ type: 'signal', signal: payload, perspective: { uuid: 'B' } });
+        ws.emit({ type: 'signal', signal: payload, perspective: { uuid: 'A' } });
+        expect(signal).toHaveBeenCalledTimes(1);
     });
 
     test('a live query applies updates and resyncs on a revision gap', async () => {

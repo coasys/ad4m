@@ -2,7 +2,8 @@
 //!
 //! Single WebSocket endpoint serving ALL event types.
 //! Each message is a JSON object `{ "type": "<event-type>", ...payload }`.
-//! Events are filtered per-user in multi-user mode.
+//! Events are filtered per-user in multi-user mode, then to what the socket
+//! asked for with `events.watch` (nothing until it does).
 //!
 //! ## Event types
 //!
@@ -34,7 +35,7 @@
 //! | Type     | Description                          |
 //! |----------|--------------------------------------|
 //! | `ping`   | Server responds with `{"type":"pong"}`|
-//! | `events.watch` / `events.unwatch` | Per-socket event filter, see `event_interest.rs` (also on `/api/v1/ws`) |
+//! | `events.watch` / `events.unwatch` | Choose the events this socket gets (none until the first watch); see `event_interest.rs`. Same on `/api/v1/ws` |
 //!
 //! Other messages are silently ignored (future extensibility).
 
@@ -1178,12 +1179,10 @@ mod lazy_did_tests {
 
 #[cfg(test)]
 mod event_interest_stream_tests {
-    //! X4 through the real event stream and global pubsub: the filter both
-    //! sockets wrap around `build_event_stream`.
+    //! The interest filter through the real event stream and global pubsub,
+    //! as both sockets wrap it around `build_event_stream`.
     use super::build_event_stream_for;
-    use crate::api::event_interest::{
-        filter_stream, handle_control, SharedInterest, UNWATCH, WATCH,
-    };
+    use crate::api::event_interest::{filter_stream, handle_control, SharedInterest, WATCH};
     use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
     use futures::StreamExt;
     use serde_json::json;
@@ -1223,8 +1222,8 @@ mod event_interest_stream_tests {
             serde_json::from_str(&super::client_message_reply(text, &interest).unwrap()).unwrap()
         };
         assert_eq!(
-            reply(r#"{"id":"w1","type":"events.watch","params":{"types":["agent-updated"]}}"#),
-            json!({ "id": "w1", "result": { "watching": { "types": ["agent-updated"], "perspectives": null } } })
+            reply(r#"{"id":"w1","type":"events.watch","params":{"agent-updated":null}}"#),
+            json!({ "id": "w1", "result": true })
         );
         assert!(!crate::api::event_interest::wants(
             &interest,
@@ -1232,7 +1231,7 @@ mod event_interest_stream_tests {
         ));
         assert_eq!(
             reply(r#"{"id":"u1","type":"events.unwatch"}"#),
-            json!({ "id": "u1", "result": { "watching": null } })
+            json!({ "id": "u1", "result": true })
         );
         assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
         assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
@@ -1240,7 +1239,7 @@ mod event_interest_stream_tests {
     }
 
     #[tokio::test]
-    async fn watch_limits_and_unwatch_restores_the_stream() {
+    async fn the_events_socket_stream_carries_only_watched_events() {
         let run = uuid::Uuid::new_v4().to_string();
         let (a, b) = (format!("A-{run}"), format!("B-{run}"));
         let interest: SharedInterest = Default::default();
@@ -1254,27 +1253,17 @@ mod event_interest_stream_tests {
         .await;
         let mut stream = Box::pin(filter_stream(stream, interest.clone()));
 
-        // Never watched: everything, as today.
         publish_link(&a, &run).await;
-        publish_link(&b, &run).await;
-        assert_eq!(drain(&mut stream, &run).await.len(), 2);
+        assert!(
+            drain(&mut stream, &run).await.is_empty(),
+            "no watch: nothing"
+        );
 
-        handle_control(
-            WATCH,
-            &json!("w"),
-            &json!({ "perspectives": [a] }),
-            &interest,
-        )
-        .unwrap();
+        handle_control(WATCH, &json!("w"), &json!({ "link-added": [a] }), &interest).unwrap();
         publish_link(&a, &run).await;
         publish_link(&b, &run).await;
         let got = drain(&mut stream, &run).await;
         assert_eq!(got.len(), 1);
         assert!(got[0].contains(&a));
-
-        handle_control(UNWATCH, &json!("u"), &json!({}), &interest).unwrap();
-        publish_link(&a, &run).await;
-        publish_link(&b, &run).await;
-        assert_eq!(drain(&mut stream, &run).await.len(), 2);
     }
 }

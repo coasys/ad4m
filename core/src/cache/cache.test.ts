@@ -15,6 +15,7 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'events.watch': true,
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
     'expression.get': (p: Record<string, unknown>) => ({
