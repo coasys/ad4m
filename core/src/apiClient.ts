@@ -58,10 +58,29 @@ function nextId(): string {
     return String(++_idCounter)
 }
 
+/**
+ * Idempotent reads. One of these that was sent when the socket dropped goes
+ * out again, once, on the next socket. Other calls reject with 503: the
+ * executor may already have applied them.
+ */
+const RETRYABLE_READS = new Set([
+    'agent.get',
+    'agent.status',
+    'expression.get',
+    'language.get',
+    'perspective.all',
+    'perspective.get',
+    'perspective.queryLinks',
+    'perspective.snapshot',
+    'runtime.info',
+])
+
 interface PendingCall {
     message: string
     /** True once the message went out on the current socket. */
     sent: boolean
+    /** True while a retryable read has its one retry left. */
+    retry: boolean
     resolve: (value: unknown) => void
     reject: (reason: unknown) => void
 }
@@ -178,8 +197,15 @@ export class ApiClient {
         this._stopPing()
         this._ws = null
         this._wsOpen = null
-        for (const pending of this._pendingCalls.values()) pending.reject(closedError())
-        if (this._wsCallbacks.size > 0) this._scheduleReconnect()
+        for (const pending of this._pendingCalls.values()) {
+            if (pending.sent && pending.retry) {
+                pending.sent = false
+                pending.retry = false
+            } else {
+                pending.reject(closedError())
+            }
+        }
+        if (this._wsCallbacks.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
     }
 
     private _startPing(): void {
@@ -248,6 +274,7 @@ export class ApiClient {
             const pending: PendingCall = {
                 message,
                 sent: false,
+                retry: RETRYABLE_READS.has(type),
                 resolve: (value) => settle(() => resolve(value as T)),
                 reject: (reason) => settle(() => reject(reason)),
             }

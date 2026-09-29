@@ -321,3 +321,76 @@ describe('ApiClient with a socket that closes asynchronously', () => {
         client.closeAll()
     })
 })
+
+describe('ApiClient retries idempotent reads once after a reconnect', () => {
+    class DropWebSocket {
+        static instances: DropWebSocket[] = []
+        readyState = 0
+        sent: AnyMsg[] = []
+        onopen: ((ev?: unknown) => void) | null = null
+        onmessage: ((ev: { data: string }) => void) | null = null
+        onerror: ((ev: unknown) => void) | null = null
+        onclose: ((ev?: unknown) => void) | null = null
+        constructor(public url: string) { DropWebSocket.instances.push(this) }
+        send(data: string) { this.sent.push(JSON.parse(data) as AnyMsg) }
+        close() { this.drop() }
+        open() { this.readyState = 1; this.onopen?.() }
+        drop() { this.readyState = 3; this.onclose?.() }
+        reply(msg: AnyMsg) { this.onmessage?.({ data: JSON.stringify(msg) }) }
+    }
+    const socket = (i: number) => DropWebSocket.instances[i]
+
+    let client: ApiClient
+    beforeEach(() => {
+        jest.useFakeTimers()
+        DropWebSocket.instances = []
+        client = new ApiClient('http://localhost:1234', undefined, DropWebSocket as unknown as new (url: string) => WebSocket)
+    })
+    afterEach(() => {
+        client.closeAll()
+        jest.useRealTimers()
+    })
+
+    /** A call whose rejection is handled until the test awaits it. */
+    function call(type: string, params?: Record<string, unknown>) {
+        const promise = client.call(type, params)
+        promise.catch(() => {})
+        return promise
+    }
+
+    /** Drop the open socket and let the reconnect timer open the next one. */
+    function reconnect(from: number) {
+        socket(from).drop()
+        jest.advanceTimersByTime(500)
+        socket(from + 1).open()
+    }
+
+    it('resends a read that was in flight and resolves it', async () => {
+        const read = call('perspective.all')
+        socket(0).open()
+        reconnect(0)
+
+        const resent = socket(1).sent[0]
+        expect(resent).toEqual(socket(0).sent[0])
+        socket(1).reply({ id: resent.id, result: ['p'] })
+        await expect(read).resolves.toEqual(['p'])
+    })
+
+    it('rejects a write that was in flight with 503', async () => {
+        const write = call('perspective.addLink', { uuid: 'u' })
+        socket(0).open()
+        socket(0).drop()
+
+        await expect(write).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        expect(DropWebSocket.instances).toHaveLength(1)
+    })
+
+    it('rejects a read that drops again after its retry', async () => {
+        const read = call('agent.get')
+        socket(0).open()
+        reconnect(0)
+        socket(1).drop()
+
+        await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+})
