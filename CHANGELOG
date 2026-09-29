@@ -6,14 +6,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
-- **Breaking: SDK transport and runtime hosting calls** [#1186](https://github.com/coasys/ad4m/pull/1186)
-  - `ApiClient.setToken()` and `ApiClient.connect()` are removed. Build a new `Ad4mClient` to change the token; the socket opens on the first call.
-  - The deprecated `RestError` alias is removed. Use `RpcError`.
-  - The `require('ws')` fallback is removed. The SDK uses the global `WebSocket`, so it needs Node ≥ 22 (`engines` in the root and `core` package.json).
-  - `ai.prompt`, `ai.embed`, `ai.addModel`, `agent.generate`, `agent.unlock`, `language.publish`, `language.applyTemplateAndPublish`, `neighbourhood.publishFromPerspective`, `neighbourhood.joinFromUrl`, `runtime.restartHolochain` and `perspective.runInterpretation` / `runInterpretationWithHarness` (client and `PerspectiveProxy`) take `CallOptions` (`signal`, `timeoutMs`) and wait `LONG_TIMEOUT_MS` (20 min) by default. Other calls keep the 30 s default.
-  - `runtime.getHostRates()` is now `hostRates(): Promise<HostRate[]>`. `setHostRates(ratesJson: string)` is now `setHostRates(rates: HostRate[])`, needs the admin credential, and refuses with 400 a rate with an empty or repeated `description` or a `priceInHOT` that is negative or not finite.
-  - `runtime.unytSetMembraneProof()` → `{ success, message }` is now `setUnytMembraneProof()` (RPC `runtime.setUnytMembraneProof`). It needs the admin credential, refuses a proof that is not base64 with 400, returns `true` once the proof is stored and installs the Unyt DNA in the background.
-  - `runtime.unytVersionInfo()` returns `UnytVersionInfo { installed, bundled, installError }` instead of a JSON string. `installError` says why the last background install failed; the Hosting page shows it.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
   - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.
@@ -42,13 +34,6 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
-- **A client call no longer hangs when the WebSocket does not connect** [#1186](https://github.com/coasys/ad4m/pull/1186)
-  - A call's timeout now covers the connect. A call that was not sent yet waits for the next socket, up to three closed sockets (about 1.5 s with the reconnect backoff), then rejects with `RpcError` 503. A call that was sent when the socket closed rejects with 503, except the nine idempotent reads (`agent.get`, `agent.status`, `expression.get`, `language.get`, `perspective.all`, `perspective.get`, `perspective.queryLinks`, `perspective.snapshot`, `runtime.info`), which go out once more on the next socket.
-  - A socket that stays in CONNECTING (a black-holed port) is closed when the last call waiting on it times out, so the next call dials again.
-  - `closeAll()` during a connect rejects the waiting calls with 503 and leaves no timer.
-  - The executor logs `API server starting on …` after the API port is bound, not before, and also when TLS is configured. The `tests/js` harness connects on this line, so a first connect was sometimes refused.
-- Host rates and the Unyt membrane proof work again over the WebSocket API [#1186](https://github.com/coasys/ad4m/pull/1186)
-  - `runtime.hostRates`, `runtime.setHostRates`, `runtime.setUnytMembraneProof` and `runtime.unytVersionInfo` were 501 stubs since the GraphQL removal, and the SDK called names the executor did not register.
 - Holochain zome calls no longer queue behind each other node-wide [#1133](https://github.com/coasys/ad4m/issues/1133)
   - The Holochain service loop awaited every request to completion, so a cheap telepresence `send_broadcast` waited behind every other space's `sync()`/`pull`, and presence, call signalling and cursors stalled for 10–30 s. Requests are now dispatched concurrently (bounded at 32 in flight); only `InstallApp`/`RemoveApp`/`EnableApp`/`Shutdown` serialize, and they wait for in-flight calls and hold back new ones for their duration only.
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).
