@@ -587,8 +587,10 @@ export class PerspectiveProxy {
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
     #perspectiveLinkUpdatedCallbacks: LinkCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
-    /** Release functions of the socket listeners this proxy registered. */
-    #releases = new Map<unknown, () => void>()
+    /** Release of the one socket listener per type that feeds a callback array. */
+    #typeReleases = new Map<PerspectiveListenerTypes | 'sync-state-change', () => void>()
+    /** Releases of the auto-processor listeners; each call adds one. */
+    #autoProcessorReleases: (() => void)[] = []
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -615,9 +617,9 @@ export class PerspectiveProxy {
     /** Registers the socket listener that feeds one callback array on first use,
      *  so a proxy with no listeners holds no socket callbacks. */
     #register(type: PerspectiveListenerTypes | 'sync-state-change'): void {
-        if (this.#releases.has(type)) return
+        if (this.#typeReleases.has(type)) return
         const uuid = this.#handle.uuid
-        this.#releases.set(type,
+        this.#typeReleases.set(type,
             type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#perspectiveLinkAddedCallbacks)
             : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#perspectiveLinkRemovedCallbacks)
             : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#perspectiveLinkUpdatedCallbacks)
@@ -967,7 +969,7 @@ export class PerspectiveProxy {
 
     /** Subscribe to this perspective's auto-processor step signals until `dispose()`. */
     addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): void {
-        this.#releases.set(Symbol(), this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -980,7 +982,7 @@ export class PerspectiveProxy {
     addAutoProcessorNeighbourhoodStateListener(
         cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
     ): void {
-        this.#releases.set(Symbol(), this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -1379,8 +1381,10 @@ export class PerspectiveProxy {
     /** Removes every listener this proxy registered. Other proxies for the same
      *  perspective keep theirs. */
     dispose(): void {
-        this.#releases.forEach(release => release())
-        this.#releases.clear()
+        this.#typeReleases.forEach(release => release())
+        this.#typeReleases.clear()
+        this.#autoProcessorReleases.forEach(release => release())
+        this.#autoProcessorReleases = []
         this.#perspectiveLinkAddedCallbacks.length = 0
         this.#perspectiveLinkRemovedCallbacks.length = 0
         this.#perspectiveLinkUpdatedCallbacks.length = 0

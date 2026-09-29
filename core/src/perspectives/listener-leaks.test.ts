@@ -125,6 +125,26 @@ describe('PerspectiveProxy listener registration (L1–L3)', () => {
     api.closeAll();
   });
 
+  it('every auto-processor listener registers its own socket callback; dispose releases them all', () => {
+    const { callbackCount, proxy, ws, api } = setup();
+    const p = proxy();
+    const first = jest.fn();
+    const second = jest.fn();
+    p.addListener('link-added', jest.fn());
+    p.addListener('link-added', jest.fn());
+    p.addAutoProcessorEventListener(first);
+    p.addAutoProcessorEventListener(second);
+    ws().open();
+    expect(callbackCount()).toBe(3);
+    ws().push({ type: 'auto-processor-event', perspectiveUuid: 'uuid-1' });
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+
+    p.dispose();
+    expect(callbackCount()).toBe(0);
+    api.closeAll();
+  });
+
   it('a disposed proxy used again registers again, and dispose releases that too', () => {
     const { callbackCount, proxy, ws, api } = setup();
     const p = proxy();
