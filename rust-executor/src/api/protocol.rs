@@ -20,6 +20,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 /// remove one (clients rely on its presence to choose a code path).
 pub const PROTOCOL_FEATURES: &[&str] = &[
     "runtime.protocol",
+    "perspective.discardBatch",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

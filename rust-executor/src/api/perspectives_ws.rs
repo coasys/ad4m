@@ -916,6 +916,23 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     })?)
 }
 
+/// `perspective.discardBatch` → `true` if the batch was open and is now
+/// dropped, `false` if it was already committed, discarded or timed out.
+async fn discard_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: DiscardBatchRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    Ok(Value::Bool(perspective.discard_batch(&body.batch_id).await))
+}
+
 async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -2598,6 +2615,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.getSubjectData", get_subject_data);
     map.register("perspective.createBatch", create_batch);
     map.register("perspective.commitBatch", commit_batch);
+    map.register("perspective.discardBatch", discard_batch);
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
     map.register("perspective.disposeQuery", dispose_query);

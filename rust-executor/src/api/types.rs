@@ -821,6 +821,13 @@ pub struct CommitBatchRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub struct DiscardBatchRequest {
+    pub batch_id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct SubscribeQueryRequest {
     pub query: String,
 }

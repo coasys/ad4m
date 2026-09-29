@@ -76,3 +76,89 @@ fn protocol_features_are_unique() {
     }
 }
 
+// ── Perspective fixture ─────────────────────────────────────────────────────
+
+/// Unregisters the fixture perspective when the test ends (also on panic).
+pub(crate) struct Registered(pub String);
+impl Drop for Registered {
+    fn drop(&mut self) {
+        crate::perspectives::unregister_perspective(&self.0);
+    }
+}
+
+/// A perspective with `classes` registered in the global registry, so the
+/// handlers find it by uuid.
+pub(crate) async fn registered_perspective(classes: &[(&str, &str)]) -> Registered {
+    let (perspective, _shapes, _ctx) =
+        crate::perspectives::interpretation_test_support::setup_perspective_no_llm(classes).await;
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    crate::perspectives::register_perspective(uuid.clone(), perspective);
+    Registered(uuid)
+}
+
+// ── X9: perspective.discardBatch ────────────────────────────────────────────
+
+#[tokio::test]
+async fn discard_batch_drops_an_open_batch_once() {
+    let p = registered_perspective(&[]).await;
+    let batch_id = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    let params = json!({ "uuid": p.0, "batchId": batch_id });
+
+    assert_eq!(
+        call("perspective.discardBatch", params.clone(), admin_ctx())
+            .await
+            .unwrap(),
+        json!(true)
+    );
+    assert_eq!(
+        call("perspective.discardBatch", params.clone(), admin_ctx())
+            .await
+            .unwrap(),
+        json!(false),
+        "a second discard is a no-op"
+    );
+    let err = call("perspective.commitBatch", params, admin_ctx())
+        .await
+        .expect_err("a discarded batch cannot be committed");
+    assert!(err.message.contains("No batch found"), "{}", err.message);
+}
+
+#[tokio::test]
+async fn discard_batch_leaves_other_batches_committable() {
+    let p = registered_perspective(&[]).await;
+    let a = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    let b = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    call(
+        "perspective.discardBatch",
+        json!({ "uuid": p.0, "batchId": a }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    call(
+        "perspective.commitBatch",
+        json!({ "uuid": p.0, "batchId": b }),
+        admin_ctx(),
+    )
+    .await
+    .expect("the other batch stays open");
+}
+
+#[tokio::test]
+async fn discard_batch_checks_the_update_capability() {
+    let p = registered_perspective(&[]).await;
+    let err = call(
+        "perspective.discardBatch",
+        json!({ "uuid": p.0, "batchId": "x" }),
+        no_cap_ctx(),
+    )
+    .await
+    .expect_err("no capability");
+    assert_eq!(err.code, 403);
+}
