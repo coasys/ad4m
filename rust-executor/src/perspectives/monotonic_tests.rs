@@ -20,6 +20,7 @@ const ACCEPTED_BY: &str = "ad4m://acceptedBy";
 const TO_STATE: &str = "ad4m://flow/to_state";
 const CURRENT_STATE: &str = "ad4m://flow/current_state";
 const RETRACTED: &str = "ad4m://flow/retracted";
+const ROLE_GRANT_REVOKED: &str = "ad4m://flow/role_grant_revoked";
 const PLAIN: &str = "test://likes";
 
 async fn fixture() -> (PerspectiveInstance, AgentContext) {
@@ -482,4 +483,49 @@ async fn t3_a_retraction_that_arrives_first_still_ends_the_link() {
     )
     .await;
     assert!(!present(&p, &other), "both in one diff");
+}
+
+/// Tombstones are not retractable: a self-retraction of a revocation would
+/// reopen the grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_revocation_cannot_be_retracted() {
+    let (p, _) = fixture().await;
+    let alice = TestSigner::generate();
+    let revoked = signed(
+        &alice,
+        "ad4m://role/grant1",
+        ROLE_GRANT_REVOKED,
+        "did:key:zBob",
+    );
+    sync_in(&p, vec![revoked.clone()], vec![]).await;
+
+    sync_in(&p, vec![retraction_of(&alice, &revoked)], vec![]).await;
+
+    assert!(present(&p, &revoked), "a revocation stays");
+}
+
+/// Only a Shared tombstone counts: a Local one is private to this replica and
+/// never reaches the peers that hold the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_local_tombstone_ends_nothing() {
+    let (mut p, ctx) = fixture().await;
+    let vote = own_shared(&mut p, &ctx, ACCEPTED_BY, "did:key:me").await;
+    let target = Literal::from_string(vote.proof.signature.clone())
+        .to_url()
+        .expect("encode signature");
+
+    p.add_link(
+        Link {
+            source: PROPOSAL.to_string(),
+            predicate: Some(RETRACTED.to_string()),
+            target,
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("add the Local tombstone");
+
+    assert!(present(&p, &vote), "a Local tombstone ends nothing");
 }
