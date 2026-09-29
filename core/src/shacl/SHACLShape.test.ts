@@ -432,20 +432,17 @@ describe('SHACLShape', () => {
       expect(reconstructed.toJSON()).toEqual(json);
     });
 
-    it('reads collection back from the ad4m://CollectionShape type link', () => {
+    it('keeps collection through toLinks() -> fromLinks() and toTurtle()', () => {
       const shape = new SHACLShape('todo://TodoShape', 'todo://Todo');
       shape.addProperty({ name: 'tags', path: 'todo://tag', collection: true });
       shape.addProperty({ name: 'title', path: 'todo://title' });
-      const links = shape.toLinks();
-      // addShacl and the executor type each property shape.
-      for (const l of links.filter(l => l.predicate === 'sh://property')) {
-        const target = l.target.endsWith('.tags') ? 'ad4m://CollectionShape' : 'sh://PropertyShape';
-        links.push({ source: l.target, predicate: 'rdf://type', target });
-      }
-
-      const read = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      const read = SHACLShape.fromLinks(shape.toLinks(), shape.nodeShapeUri);
       expect(read.properties.find(p => p.name === 'tags')?.collection).toBe(true);
       expect(read.properties.find(p => p.name === 'title')?.collection).toBeUndefined();
+
+      const turtle = shape.toTurtle();
+      expect(turtle).toContain('a <ad4m://CollectionShape>');
+      expect(turtle).toContain('a sh:PropertyShape');
     });
 
     it('preserves nodeShapeUri in round-trip', () => {
@@ -858,6 +855,14 @@ describe('SHACLShape', () => {
 
     it.each(goldenCases.map((c: any) => [c.name, c]))('sends the executor the shape fromJSON read (%s)', (_, c: any) => {
       expect(json(SHACLShape.fromJSON(c.shape))).toEqual(c.shape);
+    });
+
+    it.each(goldenCases.map((c: any) => [c.name, c]))("toLinks() writes the executor's shape graph (%s)", (_, c: any) => {
+      // The executor adds the name-mapping and class links, which need the name.
+      const key = (l: any) => `${l.source} ${l.predicate} ${l.target}`;
+      const shapeLinks = c.links.filter((l: any) =>
+        l.source !== 'ad4m://self' && !l.source.startsWith('literal:') && l.source !== c.shape.target_class);
+      expect(SHACLShape.fromJSON(c.shape).toLinks().map(key).sort()).toEqual(shapeLinks.map(key).sort());
     });
   });
 });

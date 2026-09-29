@@ -66,6 +66,11 @@ function parseTransform(json: string, propShapeId: string): NodeExpression {
   return parsed;
 }
 
+/** Whether the executor stores a property as a collection (`ad4m://CollectionShape`). */
+function isCollection(p: SHACLPropertyShape): boolean {
+  return p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany');
+}
+
 /**
  * Extract local name from a URI
  * Examples:
@@ -457,11 +462,16 @@ export class SHACLShape {
         propShapeId = `_:propShape${i}`;
       }
       
-      // Link shape to property shape
+      // Link shape to property shape, typed as the executor types it
       links.push({
         source: this.nodeShapeUri,
         predicate: "sh://property",
         target: propShapeId
+      });
+      links.push({
+        source: propShapeId,
+        predicate: "rdf://type",
+        target: isCollection(prop) ? "ad4m://CollectionShape" : "sh://PropertyShape"
       });
       
       // Property path
@@ -818,7 +828,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
-        collection: p.collection ?? ((p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany') || undefined),
+        collection: p.collection ?? (isCollection(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
         where_predicates: p.wherePredicates,
