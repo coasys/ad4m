@@ -6,7 +6,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
-- **Breaking: a language signs only as the user it runs for** [#PRNUM](https://github.com/coasys/ad4m/pull/PRNUM)
+- **Breaking: a language signs only as the user it runs for** [#1182](https://github.com/coasys/ad4m/pull/1182)
   - `createSignedExpressionForUser(email, data)` now throws unless the current call runs for that user. Before, any language could sign any data as any managed user on a multi-user node. `createSignedExpression` already signs as the current user, so it covers the legitimate use.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
