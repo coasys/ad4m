@@ -30,13 +30,19 @@ export interface QueryLagged {
     lagged: true
 }
 
-/** Apply one update to the last result. Query rows are a multiset: added rows are appended. */
+/** Apply one update to the last result. Query rows are a multiset: added rows are appended.
+ *  Throws when the update names an instance that neither the last result nor
+ *  the update holds: the last result was wrong, and the caller must resync. */
 export function applyUpdate(result: any, update: QueryUpdate): any {
     if ('result' in update) return update.result
     if (update.ids) {
         const byId = new Map<string, any>(result.instances.map((i: any) => [i.id, i]))
         for (const instance of update.upsert!) byId.set(instance.id, instance)
-        return { ...result, instances: update.ids.map(id => byId.get(id)), totalCount: update.totalCount }
+        const instances = update.ids.map(id => {
+            if (!byId.has(id)) throw new Error(`Live query update names unknown instance ${id}`)
+            return byId.get(id)
+        })
+        return { ...result, instances, totalCount: update.totalCount }
     }
     const toRemove = new Map<string, number>()
     for (const row of update.removed!) {
@@ -149,8 +155,15 @@ export class LiveQuery {
             this.#resync()
             return
         }
+        let result: any
+        try {
+            result = applyUpdate(this.#result, update)
+        } catch {
+            this.#resync()
+            return
+        }
         this.#revision = update.revision
-        this.#result = applyUpdate(this.#result, update)
+        this.#result = result
         this.#onResult(this.#result)
     }
 

@@ -18,6 +18,12 @@ describe('applyUpdate', () => {
         expect(next).toEqual([{ s: 'x' }, { s: 'z' }]);
     });
 
+    it('throws on an id that neither the last result nor the update holds', () => {
+        const old = { instances: [{ id: 'a' }], totalCount: 1 };
+        expect(() => applyUpdate(old, { subscriptionId: 's', revision: 1, ids: ['a', 'x'], upsert: [], totalCount: 2 }))
+            .toThrow('unknown instance x');
+    });
+
     it('replaces a result that could not be diffed', () => {
         expect(applyUpdate(true, { subscriptionId: 's', revision: 1, result: false })).toBe(false);
     });
@@ -35,7 +41,7 @@ function fakeClient() {
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
         listener!({ subscriptionId, revision, added, removed });
-    return { client, update, lagged: () => listener!({ lagged: true }), reconnect: () => reconnect!() };
+    return { client, update, send: (u: QueryUpdate | QueryLagged) => listener!(u), reconnect: () => reconnect!() };
 }
 
 function deferred<T>() {
@@ -92,19 +98,32 @@ describe('LiveQuery', () => {
     });
 
     it('resyncs when the executor reports dropped updates', async () => {
-        const { client, update, lagged } = fakeClient();
+        const { client, update, send } = fakeClient();
         client.resyncSubscription.mockResolvedValue({ revision: 7, result: ['a', 'b'] });
         const onResult = jest.fn();
         const live = new LiveQuery(client as any, 'p', async () => ({ subscriptionId: 's1', result: ['a'], revision: 0 }), onResult);
         await live.start();
 
-        lagged();
+        send({ lagged: true });
         expect(client.resyncSubscription).toHaveBeenCalledWith('p', 's1');
         await tick();
         expect(live.result).toEqual(['a', 'b']);
         expect(onResult).toHaveBeenLastCalledWith(['a', 'b']);
         update('s1', 8, ['c']);
         expect(live.result).toEqual(['a', 'b', 'c']);
+    });
+
+    it('resyncs instead of applying an update it cannot resolve', async () => {
+        const { client, send } = fakeClient();
+        client.resyncSubscription.mockResolvedValue({ revision: 1, result: { instances: [{ id: 'x' }], totalCount: 1 } });
+        const onResult = jest.fn();
+        const live = new LiveQuery(client as any, 'p', async () => ({ subscriptionId: 's1', result: { instances: [], totalCount: 0 }, revision: 0 }), onResult);
+        await live.start();
+
+        send({ subscriptionId: 's1', revision: 1, ids: ['x'], upsert: [], totalCount: 1 });
+        expect(client.resyncSubscription).toHaveBeenCalledWith('p', 's1');
+        await tick();
+        expect(onResult.mock.calls).toEqual([[{ instances: [{ id: 'x' }], totalCount: 1 }]]);
     });
 
     it('opens a new subscription when a resync fails', async () => {
