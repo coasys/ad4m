@@ -253,7 +253,7 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember: when no admin credential is configured, an empty token resolves to full access on a loopback-bound API only (local/test setups). On a network-bound API (`--localhost false`, or TLS) a caller with no token can only request a capability, so set an admin credential on any node you administer over the network.
+Remember: when no admin credential is configured, an empty token resolves to full access on a loopback-bound API only (local/test setups). On a network-bound API (`--localhost false`, or TLS) a caller with no token can only request a capability, check whether multi-user mode is on, and sign up and log in when it is, so set an admin credential on any node you administer over the network.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`; remote/external mode: your `executorUrl` host and port, not localhost)
 
 ## Appendix: running an executor by hand (node operators only)

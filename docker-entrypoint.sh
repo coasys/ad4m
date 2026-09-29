@@ -80,7 +80,10 @@ if [ -d /opt/ad4m/models ] && [ "$(ls -A /opt/ad4m/models 2>/dev/null)" ]; then
 fi
 
 # ── Build executor args ─────────────────────────────────────────────────────
-EXTRA_ARGS=(--admin-credential "$ADMIN_CREDENTIAL")
+# The executor reads the credential from the environment: a flag value would stay
+# visible in its process arguments (`ps`) for as long as it runs.
+export AD4M_ADMIN_CREDENTIAL="$ADMIN_CREDENTIAL"
+EXTRA_ARGS=()
 
 if [ "${ENABLE_MULTI_USER:-}" = "true" ]; then
     EXTRA_ARGS+=(--enable-multi-user true)

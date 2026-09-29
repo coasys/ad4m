@@ -130,8 +130,8 @@ pub fn listener_router(state: AppState, addr: &SocketAddr) -> Router {
     if reach == ListenerReach::Network && state.admin_credential.is_none() {
         log::warn!(
             "API on {addr} is reachable from the network and no --admin-credential is set. \
-             Callers there without a token can only request a capability (or sign up and log \
-             in, in multi-user mode); they are not the operator. Set an admin credential to \
+             Callers there without a token can only request a capability, check whether \
+             multi-user mode is on and sign up and log in when it is; they are not the operator. Set an admin credential to \
              administer this node remotely."
         );
     }
