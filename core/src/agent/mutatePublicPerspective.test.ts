@@ -24,14 +24,9 @@ class Executor {
   #created = 0;
   #signed = 3;
 
-  #sameLink = (a: any, b: any) =>
-    a.author === b.author && a.timestamp === b.timestamp &&
-    a.data.source === b.data.source && (a.data.predicate ?? null) === (b.data.predicate ?? null) &&
-    a.data.target === b.data.target;
-
   handle(type: string, p: any): any {
     this.calls.push(type);
-    const links = this.perspectives.get(p.uuid);
+    const links = this.perspectives.get(p?.uuid);
     switch (type) {
       case 'agent.get':
         return { did: DID, perspective: this.profile, directMessageLanguage: 'lang://dm' };
@@ -45,29 +40,11 @@ class Executor {
       }
       case 'perspective.remove':
         return this.perspectives.delete(p.uuid);
-      case 'perspective.addLinkExpression':
-        links!.push(p.link);
-        return p.link;
-      case 'perspective.addLink': {
-        const link = signed(p.link, this.#signed++);
-        links!.push(link);
-        return link;
+      case 'perspective.addLinks': {
+        const added = p.links.map((l: any) => signed(l, this.#signed++));
+        links!.push(...added);
+        return added;
       }
-      case 'perspective.removeLink': {
-        const i = links!.findIndex(l => this.#sameLink(l, p.link));
-        if (i < 0) throw new Error('Link not found');
-        links!.splice(i, 1);
-        return true;
-      }
-      case 'perspective.linkMutations': {
-        const removed = links!.filter(l => p.mutations.removals.some((r: any) => this.#sameLink(l, r)));
-        this.perspectives.set(p.uuid, links!.filter(l => !removed.includes(l)));
-        const added = p.mutations.additions.map((a: any) => signed(a, this.#signed++));
-        this.perspectives.get(p.uuid)!.push(...added);
-        return { additions: added, removals: removed };
-      }
-      case 'perspective.snapshot':
-        return { links: links!.map(l => JSON.parse(JSON.stringify(l))) };
       default:
         throw new Error(`Unknown RPC type: ${type}`);
     }
@@ -136,7 +113,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     client.close();
   });
 
-  it('returns the same Agent as the per-link implementation', async () => {
+  it('returns the profile without the removals, plus the signed additions', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
     const client = new Ad4mClient('http://localhost:12000', 'token', false);
@@ -152,7 +129,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     client.close();
   });
 
-  it('applies all mutations with one linkMutations call', async () => {
+  it('signs all additions with one addLinks call and copies no links one by one', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
     const client = new Ad4mClient('http://localhost:12000', 'token', false);
@@ -165,8 +142,22 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
       removals: [L1 as any, L2 as any],
     });
 
-    expect(executor.calls.filter(c => c === 'perspective.linkMutations')).toHaveLength(1);
-    expect(executor.calls.filter(c => c === 'perspective.addLink' || c === 'perspective.removeLink')).toHaveLength(0);
+    expect(executor.calls).toEqual([
+      'perspective.create', 'perspective.addLinks', 'perspective.remove', 'agent.get', 'agent.updateProfile',
+    ]);
+    expect(executor.profile.links.map((l: any) => l.data.target)).toEqual(['literal://a', 'literal://b']);
+    client.close();
+  });
+
+  it('creates no temporary perspective when there is nothing to add', async () => {
+    const executor = new Executor();
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
+    const client = new Ad4mClient('http://localhost:12000', 'token', false);
+
+    const agent = await client.agent.mutatePublicPerspective({ additions: [], removals: [L1 as any] });
+
+    expect(executor.calls).toEqual(['agent.get', 'agent.updateProfile']);
+    expect(agent.perspective!.links).toEqual([L2] as unknown as LinkExpression[]);
     client.close();
   });
 
@@ -183,17 +174,17 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     client.close();
   });
 
-  it('removes the temporary perspective when a step fails', async () => {
+  it('removes the temporary perspective when signing fails', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
     const client = new Ad4mClient('http://localhost:12000', 'token', false);
     const original = executor.handle.bind(executor);
     executor.handle = (type, p) => {
-      if (type === 'agent.updateProfile') throw new Error('update failed');
+      if (type === 'perspective.addLinks') throw new Error('sign failed');
       return original(type, p);
     };
 
-    await expect(client.agent.mutatePublicPerspective(mutations())).rejects.toThrow('update failed');
+    await expect(client.agent.mutatePublicPerspective(mutations())).rejects.toThrow('sign failed');
     expect(executor.perspectives.size).toBe(0);
     client.close();
   });

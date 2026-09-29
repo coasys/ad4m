@@ -11,8 +11,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
-import { LinkMutations, LinkExpression } from "../links/Links";
-import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type {
@@ -40,8 +39,6 @@ export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
 export class AgentClient {
   #apiClient: ApiClient;
-  #baseUrl: string;
-  #token?: string;
   #appsChangedCallback: AgentAppsUpdatedCallback[];
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
@@ -64,8 +61,6 @@ export class AgentClient {
   static REMOTE_AGENT_TTL_L2_MS = 5 * 60_000; // 5 minutes
 
   constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
-    this.#baseUrl = baseUrl;
-    this.#token = token;
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
@@ -209,33 +204,21 @@ export class AgentClient {
     return agent;
   }
 
-  async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    // Share this client's transport: no second socket, and injected (embedded-mode)
-    // transports keep working. subscribe=false registers no event listeners.
-    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token, false, this.#apiClient);
+  async mutatePublicPerspective({ additions, removals }: LinkMutations): Promise<Agent> {
+    const added = additions.length > 0 ? await this.#signLinks(additions) : [];
+    const { perspective } = await this.me();
+    const kept = (perspective?.links ?? []).filter(link => !removals.some(r => linkEqual(link, r as LinkExpression)));
+    return this.updatePublicPerspective({ links: [...kept, ...added] } as PerspectiveInput);
+  }
 
-    const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
-    let agent: Agent;
+  /** Has the executor sign `links` as this agent, in a throwaway perspective. */
+  async #signLinks(links: LinkInput[]): Promise<LinkExpression[]> {
+    const { uuid } = await this.#apiClient.call<{ uuid: string }>('perspective.create', { name: 'Agent Perspective Proxy' });
     try {
-      const agentMe = await this.me();
-
-      if (agentMe.perspective) {
-        await proxyPerspective.loadSnapshot(agentMe.perspective);
-      }
-
-      if (mutations.additions.length > 0 || mutations.removals.length > 0) {
-        await perspectiveClient.linkMutations(proxyPerspective.uuid, mutations);
-      }
-
-      const snapshot = await proxyPerspective.snapshot();
-      agent = await this.updatePublicPerspective(snapshot);
-    } catch (e) {
-      // Remove the temporary perspective, but report the original failure.
-      await perspectiveClient.remove(proxyPerspective.uuid).catch(() => {});
-      throw e;
+      return await this.#apiClient.call<LinkExpression[]>('perspective.addLinks', { uuid, links, status: 'shared' });
+    } finally {
+      await this.#apiClient.call('perspective.remove', { uuid });
     }
-    await perspectiveClient.remove(proxyPerspective.uuid);
-    return agent;
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
