@@ -79,6 +79,7 @@ pub async fn ws_rpc(
         user_email: user_email.clone(),
         user_did,
         cancel_token: None,
+        connection_id: Some(uuid::Uuid::new_v4().to_string()),
     });
 
     ws.on_upgrade(move |socket| handle_ws(socket, handler_map, ctx, token))

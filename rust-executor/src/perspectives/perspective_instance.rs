@@ -402,6 +402,10 @@ struct SubscribedQuery {
     /// `perspective_instance/subscriptions_v2.rs`); `None` sends the whole
     /// result string on every change, as before.
     delta: Option<u64>,
+    /// RPC connections (`RequestContext::connection_id`) that subscribed to or
+    /// joined this subscription. `perspective.keepAliveLease` from any of
+    /// them renews it.
+    connections: HashSet<String>,
 }
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
@@ -5709,6 +5713,7 @@ impl PerspectiveInstance {
         &self,
         query: String,
         user_email: Option<String>,
+        connection_id: Option<String>,
         delta: bool,
     ) -> Result<(String, String), AnyError> {
         // Check if we already have a subscription with the same query and user.
@@ -5726,8 +5731,11 @@ impl PerspectiveInstance {
         // Return existing subscription if found
         if let Some(existing_id) = existing_subscription {
             let existing_result = {
-                let queries = self.subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
+                let mut queries = self.subscribed_queries.lock().await;
+                queries.get_mut(&existing_id).map(|q| {
+                    q.connections.extend(connection_id.clone());
+                    q.last_result.clone()
+                })
             };
 
             if let Some(last_result) = existing_result {
@@ -5766,6 +5774,7 @@ impl PerspectiveInstance {
             predicates,
             model_query_params: None,
             delta: delta.then_some(0),
+            connections: connection_id.into_iter().collect(),
         };
 
         // Now insert the subscription
@@ -5786,6 +5795,7 @@ impl PerspectiveInstance {
         class_name: String,
         query_json: String,
         user_email: Option<String>,
+        connection_id: Option<String>,
         delta: bool,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
@@ -5842,6 +5852,7 @@ impl PerspectiveInstance {
                     q.predicates = predicate_set.clone();
                     q.last_result = initial_result.clone();
                     q.last_keepalive = Instant::now();
+                    q.connections.extend(connection_id);
                 }
             }
             return Ok((existing_id, initial_result));
@@ -5860,6 +5871,7 @@ impl PerspectiveInstance {
                 query_json,
             }),
             delta: delta.then_some(0),
+            connections: connection_id.into_iter().collect(),
         };
 
         self.subscribed_queries

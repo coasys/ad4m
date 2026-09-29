@@ -19,7 +19,15 @@ pub(crate) fn admin_ctx() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
+}
+
+/// `admin_ctx()` on the WS RPC connection `connection_id`.
+pub(crate) fn admin_conn_ctx(connection_id: &str) -> Arc<RequestContext> {
+    let mut ctx = (*admin_ctx()).clone();
+    ctx.connection_id = Some(connection_id.to_string());
+    Arc::new(ctx)
 }
 
 /// A context that holds no capability at all.
@@ -32,6 +40,7 @@ pub(crate) fn no_cap_ctx() -> Arc<RequestContext> {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     })
 }
 
@@ -370,11 +379,11 @@ async fn expression_get_many_aligns_with_input() {
 
 // ── X3: perspective.keepAliveLease ──────────────────────────────────────────
 
-async fn subscribe(uuid: &str) -> String {
+async fn subscribe(uuid: &str, connection_id: &str) -> String {
     let reply = call(
         "perspective.subscribeQuery",
         json!({ "uuid": uuid, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
-        admin_ctx(),
+        admin_conn_ctx(connection_id),
     )
     .await
     .unwrap();
@@ -384,34 +393,47 @@ async fn subscribe(uuid: &str) -> String {
 #[tokio::test]
 async fn keep_alive_lease_renews_the_callers_subscriptions_in_one_perspective() {
     let p = registered_perspective(&[]).await;
-    subscribe(&p.0).await;
+    subscribe(&p.0, "conn-1").await;
     let reply = call(
         "perspective.keepAliveLease",
         json!({ "uuid": p.0 }),
-        admin_ctx(),
+        admin_conn_ctx("conn-1"),
     )
     .await
     .unwrap();
     assert_eq!(reply, json!({ "renewed": 1 }));
+    // Another connection of the same user renews nothing here.
+    let reply = call(
+        "perspective.keepAliveLease",
+        json!({ "uuid": p.0 }),
+        admin_conn_ctx("conn-2"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply, json!({ "renewed": 0 }));
 }
 
 #[tokio::test]
 async fn keep_alive_lease_without_uuid_covers_every_perspective() {
     let a = registered_perspective(&[]).await;
     let b = registered_perspective(&[]).await;
-    subscribe(&a.0).await;
-    subscribe(&b.0).await;
-    let reply = call("perspective.keepAliveLease", json!({}), admin_ctx())
-        .await
-        .unwrap();
-    // Other tests may hold main-agent subscriptions in parallel: at least ours.
-    assert!(reply["renewed"].as_u64().unwrap() >= 2, "{reply}");
+    let conn = uuid::Uuid::new_v4().to_string();
+    subscribe(&a.0, &conn).await;
+    subscribe(&b.0, &conn).await;
+    let reply = call(
+        "perspective.keepAliveLease",
+        json!({}),
+        admin_conn_ctx(&conn),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply, json!({ "renewed": 2 }));
 }
 
 #[tokio::test]
 async fn keep_alive_lease_checks_the_query_capability() {
     let p = registered_perspective(&[]).await;
-    subscribe(&p.0).await;
+    subscribe(&p.0, "conn-1").await;
     let err = call(
         "perspective.keepAliveLease",
         json!({ "uuid": p.0 }),

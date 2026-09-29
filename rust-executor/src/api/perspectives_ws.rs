@@ -949,7 +949,12 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
-        .subscribe_and_query_mode(body.query, ctx.user_email.clone(), delta)
+        .subscribe_and_query_mode(
+            body.query,
+            ctx.user_email.clone(),
+            ctx.connection_id.clone(),
+            delta,
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -1015,14 +1020,19 @@ async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 }
 
 /// `perspective.keepAliveLease { uuid? }` → `{ renewed }`. One call renews
-/// every query and model subscription the caller owns, instead of one
-/// `keepAliveQuery` per subscription. Ownership is the caller's user
-/// (`ctx.user_email`; `None` = main agent), which is how subscriptions are
-/// keyed. With `uuid`, only that perspective; without, every loaded
-/// perspective the caller may query (others are skipped, not an error).
+/// every query and model subscription this connection subscribed to, instead
+/// of one `keepAliveQuery` per subscription. Only subscriptions of the
+/// caller's user (`ctx.user_email`; `None` = main agent) made on this
+/// connection (`ctx.connection_id`) are renewed, so the user's closed
+/// connections still time out. With `uuid`, only that perspective; without,
+/// every loaded perspective the caller may query (others are skipped, not an
+/// error). A caller without a connection id has nothing to renew.
 async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let body: KeepAliveLeaseRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let user_email = ctx.user_email.as_deref();
+    // No subscription records an empty id, so without one nothing is renewed.
+    let connection_id = ctx.connection_id.as_deref().unwrap_or_default();
 
     let renewed = match body.uuid {
         Some(uuid) => {
@@ -1033,7 +1043,7 @@ async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Val
             .map_err(WsRpcError::forbidden)?;
             get_perspective_with_access(&uuid, &ctx)
                 .await?
-                .renew_subscriptions_of(&ctx.user_email)
+                .renew_subscriptions_of(user_email, connection_id)
                 .await
         }
         None => {
@@ -1048,7 +1058,9 @@ async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Val
                     && (ctx.is_admin_credential
                         || can_access_perspective_with_did(&ctx.user_did, &handle));
                 if may_query {
-                    renewed += perspective.renew_subscriptions_of(&ctx.user_email).await;
+                    renewed += perspective
+                        .renew_subscriptions_of(user_email, connection_id)
+                        .await;
                 }
             }
             renewed
@@ -1336,7 +1348,13 @@ async fn model_subscribe_handler(
 
     let user_email = ctx.user_email.clone();
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query_mode(class_name, query_json, user_email, delta)
+        .model_subscribe_and_query_mode(
+            class_name,
+            query_json,
+            user_email,
+            ctx.connection_id.clone(),
+            delta,
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 

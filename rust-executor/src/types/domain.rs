@@ -32,6 +32,11 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Id of the WS RPC connection the request arrived on, generated once
+    /// per socket. Subscriptions record it so `perspective.keepAliveLease`
+    /// renews only the calling connection's subscriptions. `None` outside
+    /// the WS RPC socket.
+    pub connection_id: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]

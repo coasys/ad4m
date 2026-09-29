@@ -19,7 +19,7 @@ impl PerspectiveInstance {
         query: String,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
-        self.subscribe_and_query_mode(query, user_email, false)
+        self.subscribe_and_query_mode(query, user_email, None, false)
             .await
     }
 
@@ -31,7 +31,7 @@ impl PerspectiveInstance {
         query_json: String,
         user_email: Option<String>,
     ) -> Result<(String, String), AnyError> {
-        self.model_subscribe_and_query_mode(class_name, query_json, user_email, false)
+        self.model_subscribe_and_query_mode(class_name, query_json, user_email, None, false)
             .await
     }
 
@@ -62,18 +62,23 @@ impl PerspectiveInstance {
     }
 
     /// Lease renewal (`perspective.keepAliveLease`): reset the keepalive of
-    /// every query and model subscription in this perspective owned by
-    /// `user_email` (`None` = the main agent). Returns how many it renewed.
+    /// every query and model subscription in this perspective that
+    /// `connection_id` subscribed to or joined, owned by `user_email`
+    /// (`None` = the main agent). Returns how many it renewed.
     ///
-    /// Subscriptions are keyed by id and owner, not by socket, so this
-    /// renews every subscription of that owner in this perspective,
-    /// including those opened by the owner's other sockets.
-    pub async fn renew_subscriptions_of(&self, user_email: &Option<String>) -> usize {
+    /// Subscriptions of the owner's other connections are left alone, so a
+    /// closed tab's subscriptions still time out.
+    pub async fn renew_subscriptions_of(
+        &self,
+        user_email: Option<&str>,
+        connection_id: &str,
+    ) -> usize {
         let now = Instant::now();
         let mut queries = self.subscribed_queries.lock().await;
         let mut renewed = 0;
         for query in queries.values_mut() {
-            if &query.user_email == user_email {
+            if query.user_email.as_deref() == user_email && query.connections.contains(connection_id)
+            {
                 query.last_keepalive = now;
                 renewed += 1;
             }
@@ -211,18 +216,33 @@ mod tests {
             .last_keepalive = past;
     }
 
+    /// Subscribe `QUERY` as `user_email` from connection `conn`.
+    async fn subscribe_from(
+        p: &super::PerspectiveInstance,
+        query: &str,
+        user_email: Option<&str>,
+        conn: &str,
+    ) -> String {
+        p.subscribe_and_query_mode(
+            query.into(),
+            user_email.map(str::to_string),
+            Some(conn.into()),
+            false,
+        )
+        .await
+        .unwrap()
+        .0
+    }
+
     #[tokio::test]
     async fn lease_renews_only_the_owners_subscriptions() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (mine, _) = p.subscribe_and_query(QUERY.into(), None).await.unwrap();
-        let (theirs, _) = p
-            .subscribe_and_query(QUERY.into(), Some("other@example.com".into()))
-            .await
-            .unwrap();
+        let mine = subscribe_from(&p, QUERY, None, "c1").await;
+        let theirs = subscribe_from(&p, QUERY, Some("other@example.com"), "c1").await;
         expire(&p, &mine).await;
         expire(&p, &theirs).await;
 
-        assert_eq!(p.renew_subscriptions_of(&None).await, 1);
+        assert_eq!(p.renew_subscriptions_of(None, "c1").await, 1);
 
         // The renewed one survives the timeout sweep; the other owner's does not.
         p.check_subscribed_queries(ChangedPredicates::CheckAll)
@@ -236,9 +256,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lease_renews_only_the_calling_connections_subscriptions() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let live_tab = subscribe_from(&p, QUERY, None, "live").await;
+        let dead_tab =
+            subscribe_from(&p, "SELECT ?o WHERE { ?s ?p ?o }", None, "dead").await;
+        expire(&p, &live_tab).await;
+        expire(&p, &dead_tab).await;
+
+        assert_eq!(p.renew_subscriptions_of(None, "live").await, 1);
+
+        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
+        let subs = p.subscribed_queries.lock().await;
+        assert!(subs.contains_key(&live_tab), "leased connection kept");
+        assert!(
+            !subs.contains_key(&dead_tab),
+            "the same user's other connection was not renewed and timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shared_legacy_subscription_is_renewed_from_any_sharing_connection() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let first = subscribe_from(&p, QUERY, None, "a").await;
+        let second = subscribe_from(&p, QUERY, None, "b").await;
+        assert_eq!(first, second, "legacy dedup shares the subscription");
+        expire(&p, &first).await;
+        assert_eq!(p.renew_subscriptions_of(None, "b").await, 1);
+        assert_eq!(p.renew_subscriptions_of(None, "c").await, 0);
+    }
+
+    #[tokio::test]
     async fn lease_renews_model_subscriptions_too() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (query_sub, _) = p.subscribe_and_query(QUERY.into(), None).await.unwrap();
+        let query_sub = subscribe_from(&p, QUERY, None, "c1").await;
         // A model subscription is the same registry entry with model params.
         let model_sub = "model-sub".to_string();
         {
@@ -252,7 +304,7 @@ mod tests {
         }
         expire(&p, &query_sub).await;
         expire(&p, &model_sub).await;
-        assert_eq!(p.renew_subscriptions_of(&None).await, 2);
+        assert_eq!(p.renew_subscriptions_of(None, "c1").await, 2);
     }
 
     #[tokio::test]
@@ -364,7 +416,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, initial) = p
-            .model_subscribe_and_query_mode("Todo".into(), query.clone(), None, true)
+            .model_subscribe_and_query_mode("Todo".into(), query.clone(), None, None, true)
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -399,7 +451,7 @@ mod tests {
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (legacy, _) = p.subscribe_and_query(q.clone(), None).await.unwrap();
         let (delta, _) = p
-            .subscribe_and_query_mode(q.clone(), None, true)
+            .subscribe_and_query_mode(q.clone(), None, None, true)
             .await
             .unwrap();
         assert_ne!(legacy, delta, "a delta subscription is never shared");
