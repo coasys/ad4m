@@ -1001,7 +1001,7 @@ export class SHACLShape {
         hasValue: p.has_value,
         local: p.local,
         writable: p.writable,
-        resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
+        resolveLanguage: p.resolve_language,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,

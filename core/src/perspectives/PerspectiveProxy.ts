@@ -1650,14 +1650,6 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Adds a subject class to the perspective.
-     * Alias for addSdna() with sdnaType='subject_class'.
-     */
-    async addSubjectClass(name: string, shaclJson: string) {
-        return this.addSdna(name, '', 'subject_class', shaclJson);
-    }
-
-    /**
      * **Recommended way to add SDNA schemas.**
      * 
      * Store a SHACL shape in this Perspective. The executor writes it as links, as it

@@ -70,7 +70,7 @@ describe("Literal", () => {
             expect(() => Literal.from(undefined).get()).toThrow("Can't render empty Literal")
         })
 
-        it("leaves the output for non-falsy values unchanged", () => {
+        it("round-trips strings, numbers, booleans and objects", () => {
             const cases: [any, string][] = [
                 ["test string", "literal:string:test%20string"],
                 [42, "literal:number:42"],
