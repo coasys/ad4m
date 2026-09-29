@@ -5709,6 +5709,17 @@ impl PerspectiveInstance {
         });
     }
 
+    /// Subscribe to a SPARQL/Prolog query; updates carry the whole result
+    /// string (the v1 behaviour).
+    pub async fn subscribe_and_query(
+        &self,
+        query: String,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        self.subscribe_and_query_mode(query, user_email, None, false)
+            .await
+    }
+
     pub(crate) async fn subscribe_and_query_mode(
         &self,
         query: String,
@@ -5784,6 +5795,18 @@ impl PerspectiveInstance {
             .insert(subscription_id.clone(), subscribed_query);
 
         Ok((subscription_id, result_string))
+    }
+
+    /// Subscribe to a model query; updates carry the whole result string
+    /// (the v1 behaviour).
+    pub async fn model_subscribe_and_query(
+        &self,
+        class_name: String,
+        query_json: String,
+        user_email: Option<String>,
+    ) -> Result<(String, String), AnyError> {
+        self.model_subscribe_and_query_mode(class_name, query_json, user_email, None, false)
+            .await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
@@ -6095,9 +6118,9 @@ impl PerspectiveInstance {
                 let (id, result_string) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
                     let changed = result_string != stored_query.last_result;
-                    if changed && stored_query.delta.is_some() {
-                        let revision = stored_query.delta.map_or(1, |r| r + 1);
-                        stored_query.delta = Some(revision);
+                    if let (true, Some(rev)) = (changed, stored_query.delta.as_mut()) {
+                        *rev += 1;
+                        let revision = *rev;
                         let old =
                             std::mem::replace(&mut stored_query.last_result, result_string.clone());
                         let is_model = stored_query.model_query_params.is_some();

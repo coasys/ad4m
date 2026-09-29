@@ -510,6 +510,54 @@ async fn model_subscribe_with_delta_returns_json() {
 }
 
 #[tokio::test]
+async fn resync_subscription_returns_revision_and_result() {
+    let p = registered_perspective(&[]).await;
+    let query = "SELECT ?s WHERE { ?s <test://none> ?o }";
+    let sub = call(
+        "perspective.subscribeQuery",
+        json!({ "uuid": p.0, "query": query, "delta": true }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    let id = sub["subscriptionId"].clone();
+    let reply = call(
+        "perspective.resyncSubscription",
+        json!({ "uuid": p.0, "subscriptionId": id }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(reply, json!({ "revision": 0, "result": [] }));
+
+    let legacy = call(
+        "perspective.subscribeQuery",
+        json!({ "uuid": p.0, "query": query }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    for bad in [legacy["subscriptionId"].clone(), json!("unknown")] {
+        let err = call(
+            "perspective.resyncSubscription",
+            json!({ "uuid": p.0, "subscriptionId": bad }),
+            admin_ctx(),
+        )
+        .await
+        .expect_err("not a delta subscription");
+        assert_eq!(err.code, 404);
+    }
+    let err = call(
+        "perspective.resyncSubscription",
+        json!({ "uuid": p.0, "subscriptionId": id }),
+        no_cap_ctx(),
+    )
+    .await
+    .expect_err("no capability");
+    assert_eq!(err.code, 403);
+}
+
+#[tokio::test]
 async fn delta_must_be_a_boolean() {
     let p = registered_perspective(&[]).await;
     let err = call(

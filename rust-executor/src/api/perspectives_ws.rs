@@ -975,10 +975,39 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 /// Optional `delta` param of `subscribeQuery` / `modelSubscribe` (protocol
 /// feature `subscriptions.delta`): absent or `false` = whole-result updates.
 fn delta_param(params: &Value) -> Result<bool, WsRpcError> {
-    match params.get("delta") {
-        None | Some(Value::Null) => Ok(false),
-        Some(Value::Bool(b)) => Ok(*b),
-        Some(_) => Err(WsRpcError::bad_request("`delta` must be a boolean")),
+    Ok(params.opt_bool("delta")?.unwrap_or(false))
+}
+
+/// `perspective.resyncSubscription { uuid, subscriptionId }` →
+/// `{ revision, result }`: the current state of one of the caller's delta
+/// subscriptions. A client that sees a revision gap (an update whose
+/// `revision` is not the previous one + 1) replaces its copy with `result`
+/// and applies the updates after `revision`. 404 when the id is unknown,
+/// names a whole-result subscription, or belongs to another user.
+async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_query_capability(vec![uuid.clone()]),
+    )
+    .map_err(WsRpcError::forbidden)?;
+
+    let body: ResyncSubscriptionRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    match perspective
+        .delta_subscription_state(&body.subscription_id, ctx.user_email.as_deref())
+        .await
+    {
+        Some((revision, result)) => Ok(serde_json::json!({
+            "revision": revision,
+            "result": result_json(&result),
+        })),
+        None => Err(WsRpcError::not_found(format!(
+            "No delta subscription {} on this perspective",
+            body.subscription_id
+        ))),
     }
 }
 
@@ -2717,6 +2746,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
     map.register("perspective.keepAliveLease", keep_alive_lease);
+    map.register("perspective.resyncSubscription", resync_subscription);
     map.register("perspective.disposeQuery", dispose_query);
     map.register("perspective.subscribeSparql", subscribe_sparql_query);
     map.register("perspective.keepAliveSparql", keep_alive_query);

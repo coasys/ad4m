@@ -111,6 +111,7 @@ export const HANDLER_METHODS = [
   "perspective.removeAutoProcessor",
   "perspective.removeLink",
   "perspective.removeLinks",
+  "perspective.resyncSubscription",
   "perspective.runInterpretation",
   "perspective.runInterpretationWithHarness",
   "perspective.snapshot",

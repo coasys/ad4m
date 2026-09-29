@@ -30,6 +30,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "modelQuery.cursor",
     "subscriptions.delta",
     "operations.async",
+    "perspective.resyncSubscription",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

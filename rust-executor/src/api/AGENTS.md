@@ -49,6 +49,10 @@ anything that signs, bills or writes.
 - `ws_rpc::serve` runs one RPC connection over any text stream: `Connection::handle_text` answers
   each client message, and the event task is aborted when the stream ends. `tests/connection_tests.rs`
   drives it through channels in place of a WebSocket.
+- Delta subscriptions (`subscribeQuery` / `modelSubscribe` with `delta: true`): each update carries
+  `revision` (+1 per update, 0 = the subscribe reply). On a revision gap, call
+  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }` and apply only
+  the updates after that revision.
 - `operations.rs`: `{ async: true }` on `ASYNC_METHODS` → `{ operationId }` now, `operation-completed` event
   on the same socket later. `ws_rpc::run_call` is the shared dispatch body.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`

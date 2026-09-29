@@ -3,7 +3,6 @@
 //! A child module of `perspective_instance` so it can reach the private
 //! subscription registry without widening its visibility.
 
-use deno_core::error::AnyError;
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use tokio::time::Instant;
@@ -12,27 +11,22 @@ use super::PerspectiveInstance;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
 impl PerspectiveInstance {
-    /// Subscribe to a SPARQL/Prolog query; updates carry the whole result
-    /// string (the v1 behaviour).
-    pub async fn subscribe_and_query(
+    /// Resync after a revision gap (`perspective.resyncSubscription`): the
+    /// delta subscription's current revision and the result it describes,
+    /// read together under the registry lock. `None` when `subscription_id`
+    /// is unknown, is not a delta subscription, or belongs to another owner
+    /// than `user_email` (`None` = the main agent).
+    pub async fn delta_subscription_state(
         &self,
-        query: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        self.subscribe_and_query_mode(query, user_email, None, false)
-            .await
-    }
-
-    /// Subscribe to a model query; updates carry the whole result string
-    /// (the v1 behaviour).
-    pub async fn model_subscribe_and_query(
-        &self,
-        class_name: String,
-        query_json: String,
-        user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        self.model_subscribe_and_query_mode(class_name, query_json, user_email, None, false)
-            .await
+        subscription_id: &str,
+        user_email: Option<&str>,
+    ) -> Option<(u64, String)> {
+        let queries = self.subscribed_queries.lock().await;
+        let query = queries.get(subscription_id)?;
+        if query.user_email.as_deref() != user_email {
+            return None;
+        }
+        Some((query.delta?, query.last_result.clone()))
     }
 
     /// Publish one delta update (protocol feature `subscriptions.delta`) on
@@ -443,6 +437,40 @@ mod tests {
         assert_eq!(u["revision"], json!(2));
         assert_eq!(u["added"][0]["id"], json!("test://t2"));
         assert_eq!(u["totalCount"], json!(2));
+    }
+
+    #[tokio::test]
+    async fn resync_state_matches_the_last_delta_update() {
+        let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
+        let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
+        let (id, _) = p
+            .subscribe_and_query_mode(q.clone(), None, None, true)
+            .await
+            .unwrap();
+        let (revision, result) = p.delta_subscription_state(&id, None).await.unwrap();
+        assert_eq!((revision, super::result_json(&result)), (0, json!([])));
+
+        add(&mut p, "test://a", "test://p", "test://b").await;
+        let updates = updates_after_check(&p, &id).await;
+        assert_eq!(updates[0]["revision"], json!(1));
+        let (revision, result) = p.delta_subscription_state(&id, None).await.unwrap();
+        assert_eq!(revision, 1, "the revision of the last update sent");
+        let rows = super::result_json(&result);
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(json!(updates[0]["added"]), rows, "the result the update led to");
+
+        assert!(
+            p.delta_subscription_state(&id, Some("other@example.com"))
+                .await
+                .is_none(),
+            "another owner cannot read it"
+        );
+        let (legacy, _) = p.subscribe_and_query(q, None).await.unwrap();
+        assert!(
+            p.delta_subscription_state(&legacy, None).await.is_none(),
+            "whole-result subscriptions have no revision"
+        );
+        assert!(p.delta_subscription_state("nope", None).await.is_none());
     }
 
     #[tokio::test]
