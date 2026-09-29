@@ -6,6 +6,12 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: links from a Neighbourhood are stored only if their signature verifies, and a verified proof is never replaced by a later copy** [#1146](https://github.com/coasys/ad4m/issues/1146)
+  - A link language diff's additions are checked against each link's own `author` before they are stored. One that does not verify is dropped and logged, so neither model queries (even with `includeUnverified`) nor Prolog, raw SPARQL, `queryLinks` or flows see it. Before, it was stored with `proof.valid: false`, and a copy of a genuine link with a bad signature flipped the genuine link to `false`.
+  - A diff no longer adds, relabels or removes a link this agent stores as Local.
+  - In the store, a link's proof (key, signature, verdict and the signed target bytes) is written only when none is stored, or when the stored one did not verify and the new one does. A second copy of a verified link keeps the first proof, on every write path (`addLinkExpression` included). The one exception heals links stored before [#1141](https://github.com/coasys/ad4m/pull/1141): the same signature re-sent writes back the missing signed target bytes.
+  - Links stored before #1141 with a non-SDK literal encoding: joiners now drop the copy the signing node publishes, instead of storing it unverified.
+  - Removals of Shared links are not yet checked for authorship.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
   - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.
