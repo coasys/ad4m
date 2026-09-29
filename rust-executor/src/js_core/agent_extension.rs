@@ -61,11 +61,24 @@ fn agent_create_signed_expression_for_user(
     #[string] user_email: String,
     #[serde] data: serde_json::Value,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    let sorted_json = sort_json_value(&data);
-    let agent_context = AgentContext::for_user_email(user_email);
-    let signed_expression =
-        create_signed_expression(sorted_json, &agent_context).map_err(AnyhowWrapperError::from)?;
-    serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
+    create_signed_expression_for_user(&user_email, &data).map_err(AnyhowWrapperError::from)
+}
+
+/// Signs `data` as `user_email`, but only while the language runs for that user. Language
+/// code comes from third parties: without this check, any language on a multi-user node
+/// signs anything as any managed user.
+fn create_signed_expression_for_user(
+    user_email: &str,
+    data: &serde_json::Value,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let ctx = get_runtime_agent_context();
+    if ctx.user_email.as_deref() != Some(user_email) {
+        return Err(anyhow::anyhow!(
+            "A language signs only as the user it runs for"
+        ));
+    }
+    let signed_expression = create_signed_expression(sort_json_value(data), &ctx)?;
+    Ok(serde_json::to_value(signed_expression)?)
 }
 
 #[op2]
@@ -202,3 +215,39 @@ deno_core::extension!(
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );
+
+#[cfg(test)]
+mod tests {
+    use super::create_signed_expression_for_user;
+    use crate::agent::{AgentContext, AgentService};
+    use crate::languages::language_runtime::set_runtime_agent_context;
+    use serde_json::json;
+
+    #[test]
+    fn a_language_signs_only_as_the_user_it_runs_for() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+        let bob = format!("bob.{}@example.org", uuid::Uuid::new_v4());
+        AgentService::ensure_user_key_exists(&alice).unwrap();
+        AgentService::ensure_user_key_exists(&bob).unwrap();
+        let data = json!({ "claim": "x" });
+
+        set_runtime_agent_context(&AgentContext::for_user_email(alice.clone()));
+        let own = create_signed_expression_for_user(&alice, &data);
+        let other = create_signed_expression_for_user(&bob, &data);
+        set_runtime_agent_context(&AgentContext::main_agent());
+        let from_the_node = create_signed_expression_for_user(&alice, &data);
+
+        let own = own.expect("a language signs as the user it runs for");
+        assert_eq!(
+            own["author"],
+            json!(AgentService::get_user_did_by_email(&alice).unwrap())
+        );
+        assert!(other.is_err(), "a language signed as another user");
+        assert!(
+            from_the_node.is_err(),
+            "a language that runs for the node signed as a user"
+        );
+    }
+}
