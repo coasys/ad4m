@@ -81,11 +81,9 @@
 //! | [`projection`] | Computing projection aggregations (counts and filtered lists) |
 //! | [`links`] | Per-link rows on request (`links` → `__links`), including undeclared predicates |
 //! | [`query`] | Top-level orchestrator that wires the whole pipeline together |
-//! | [`cursor`] | Keyset cursors (`after` / `nextCursor`) for the timestamp order |
 
 #[cfg(test)]
 mod collection_provenance_tests;
-mod cursor;
 mod eval_transform;
 mod filtering;
 mod getters;

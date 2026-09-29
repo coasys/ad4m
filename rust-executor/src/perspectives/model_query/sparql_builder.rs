@@ -197,9 +197,6 @@ pub(super) fn build_instance_sparql(
     let pagination_suffix = if let Some(pg) = sparql_pagination {
         let mut suffix = String::new();
         match &pg.sort_key {
-            SortKey::Timestamp if pg.keyset.is_some() => {
-                suffix.push_str(&keyset_suffix(pg.direction, pg.keyset.as_ref().unwrap()));
-            }
             SortKey::Timestamp => match pg.direction {
                 OrderDirection::DESC => suffix.push_str("\n    ORDER BY DESC(?_first_ts)"),
                 OrderDirection::ASC => suffix.push_str("\n    ORDER BY ASC(?_first_ts)"),
@@ -335,27 +332,6 @@ pub(super) fn build_instance_sparql(
 {link_status}{proof_valid}{local_status}}}"#
         ))
     }
-}
-
-/// Cursor mode for the timestamp order: `HAVING` keeps rows strictly after
-/// the cursor's `(first timestamp, id)`, and `?source` breaks timestamp ties
-/// so the order is total and pages neither repeat nor skip rows.
-fn keyset_suffix(direction: OrderDirection, after: &Option<super::cursor::KeysetCursor>) -> String {
-    let (dir, cmp) = match direction {
-        OrderDirection::ASC => ("ASC", ">"),
-        OrderDirection::DESC => ("DESC", "<"),
-    };
-    let having = match after {
-        None => String::new(),
-        Some(c) => {
-            let ts = escape_sparql_string(&c.ts);
-            let id = escape_sparql_string(&c.id);
-            format!(
-                "\n    HAVING (MIN(?_first_ts_v) {cmp} \"{ts}\" || (MIN(?_first_ts_v) = \"{ts}\" && STR(?source) {cmp} \"{id}\"))"
-            )
-        }
-    };
-    format!("{having}\n    ORDER BY {dir}(?_first_ts) {dir}(?source)")
 }
 
 /// The link an order key reads, `subject <predicate> object`, as the pattern
@@ -1885,7 +1861,6 @@ mod tests {
             direction,
             offset: None,
             limit: Some(10),
-            keyset: None,
         }
     }
 
@@ -3162,7 +3137,6 @@ mod traverse_scope_tests {
             direction,
             offset: None,
             limit: Some(10),
-            keyset: None,
         }
     }
     // --- Scope::Traverse ----------------------------------------------------

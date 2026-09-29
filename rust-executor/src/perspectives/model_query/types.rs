@@ -498,11 +498,6 @@ pub struct ModelQueryInput {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Keyset cursor: `""` for the first page, then the previous reply's
-    /// `nextCursor`. Top-level queries
-    /// only; see [`super::cursor`] for which orders support it.
-    #[serde(default)]
-    pub after: Option<String>,
     #[serde(default)]
     pub count: Option<bool>,
     /// When true, evaluate **property** getters (@Property with `getter`) during
@@ -589,10 +584,6 @@ pub struct ModelQueryInput {
 pub struct ModelQueryResult {
     pub instances: Vec<Value>,
     pub total_count: usize,
-    /// Only in cursor mode (`after` sent), and only while a full page came
-    /// back.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
 }
 
 /// The `where: { producedByFlow: { flow, state? } }` filter, extracted from
@@ -783,9 +774,6 @@ pub(super) struct SparqlPagination {
     pub(super) direction: OrderDirection,
     pub(super) offset: Option<usize>,
     pub(super) limit: Option<usize>,
-    /// Cursor mode: order ties by `?source` too, and when set, keep only rows
-    /// after this position. Timestamp sort key only.
-    pub(super) keyset: Option<Option<super::cursor::KeysetCursor>>,
 }
 
 /// What to sort by when pagination is pushed to SPARQL.
