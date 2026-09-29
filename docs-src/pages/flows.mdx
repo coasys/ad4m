@@ -337,7 +337,7 @@ class HandoverReviewerRole extends Ad4mModel {
 }
 ```
 
-A Shared link under a declared predicate is then handled like a flow link (see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone)): a peer's removal is dropped on arrival, and your own `removeLink`, `updateLink`, setter or instance delete that would remove it fails with `<predicate> is monotonic`. Membership ends only through `ad4m://flow/role_grant_revoked`. The generic `ad4m://flow/retracted` tombstone does not apply to declared predicates, not even from the grant's author, because the role history is what every replica's vote gating reads.
+A Shared link under a declared predicate is then handled like a flow link (see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone)): a peer's removal is dropped on arrival, and your own `removeLink`, `updateLink`, setter or instance delete that would remove it fails with `<predicate> is monotonic`. Membership ends only through `ad4m://flow/role_grant_revoked`. The generic `ad4m://flow/retracted` tombstone does not apply to declared predicates, not even from the grant's author, because the role history is what every replica's vote gating reads. A Local link under a declared predicate stays removable, by the same rule as a Local flow link: the executor goes by the stored status, not the one a call names, and never sends that removal to peers.
 
 The rules for the declaration:
 
