@@ -13,6 +13,7 @@ import type {
     ImportRequest,
     SetMultiUserRequest,
     SetFreeHostingEnabledRequest,
+    HostRate,
 } from "../generated/api"
 
 export type MessageCallback = (message: PerspectiveExpression) => null
@@ -248,8 +249,9 @@ export class RuntimeClient {
         return this.#apiClient.call<string>('runtime.unytVersionInfo')
     }
 
-    async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
-        return this.#apiClient.call<{ success: boolean; message: string }>('runtime.unytMembraneProof', { proof })
+    /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the background. */
+    async setUnytMembraneProof(proof: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>('runtime.setUnytMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
@@ -268,17 +270,12 @@ export class RuntimeClient {
         return this.#apiClient.call<boolean>('user.freeAccess', { email, enabled })
     }
 
-    async setHostRates(ratesJson: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('runtime.setHostRates', { ratesJson })
+    async setHostRates(rates: HostRate[]): Promise<boolean> {
+        return this.#apiClient.call<boolean>('runtime.setHostRates', { rates })
     }
 
-    async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
-        const result = await this.#apiClient.call<string>('runtime.hostRates')
-        try {
-            return JSON.parse(result)
-        } catch {
-            return []
-        }
+    async hostRates(): Promise<HostRate[]> {
+        return this.#apiClient.call<HostRate[]>('runtime.hostRates')
     }
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {

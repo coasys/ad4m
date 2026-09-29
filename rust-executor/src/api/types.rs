@@ -912,6 +912,32 @@ pub struct SetFreeHostingEnabledRequest {
     pub enabled: bool,
 }
 
+// ── Host rates ──
+
+/// Price in HOT the host charges for one metered operation.
+#[derive(Serialize, Deserialize, TS, Debug, Clone, PartialEq)]
+#[ts(export)]
+pub struct HostRate {
+    pub description: String,
+    #[serde(rename = "priceInHOT")]
+    pub price_in_hot: f64,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetHostRatesRequest {
+    pub rates: Vec<HostRate>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SetUnytMembraneProofRequest {
+    /// Base64-encoded membrane proof from the hosting joining service.
+    pub proof: String,
+}
+
 // ── Hosting wallet ──
 
 #[derive(Deserialize, TS)]

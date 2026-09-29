@@ -140,27 +140,31 @@ export default function runtimeTests(testContext: TestContext) {
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).to.be.true;
         })
 
-        it("getHostRates() calls a method the server registers", async () => {
+        it("can set and read host rates", async () => {
             const ad4mClient = testContext.ad4mClient!
-            // runtime.hostRates is registered but not implemented yet (501).
-            // An unregistered name fails with 404 "Unknown type".
+            const before = await ad4mClient.runtime.hostRates()
+            const rates = [
+                { description: "link write", priceInHOT: 0.25 },
+                { description: "prompt", priceInHOT: 0 },
+            ]
             try {
-                const rates = await ad4mClient.runtime.getHostRates()
-                expect(rates).to.be.an('array')
-            } catch (e: any) {
-                expect(e.status, e.message).to.equal(501)
+                expect(await ad4mClient.runtime.setHostRates(rates)).to.be.true
+                expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
+
+                const bad = await ad4mClient.runtime.setHostRates([{ description: "x", priceInHOT: -1 }]).catch(e => e)
+                expect(bad.status, bad.message).to.equal(400)
+                expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
+            } finally {
+                await ad4mClient.runtime.setHostRates(before)
             }
         })
 
-        it("unytSetMembraneProof() calls a method the server registers", async () => {
+        it("setUnytMembraneProof() refuses an empty proof", async () => {
             const ad4mClient = testContext.ad4mClient!
-            // runtime.unytMembraneProof is registered but not implemented yet (501).
-            try {
-                const result = await ad4mClient.runtime.unytSetMembraneProof("proof")
-                expect(result).to.have.property('success')
-            } catch (e: any) {
-                expect(e.status, e.message).to.equal(501)
-            }
+            // A non-empty proof starts the Unyt DNA install, so only the
+            // validation path runs here.
+            const error = await ad4mClient.runtime.setUnytMembraneProof("").catch(e => e)
+            expect(error.status, error.message).to.equal(400)
         })
 
         it("can get runtimeInfo", async () => {

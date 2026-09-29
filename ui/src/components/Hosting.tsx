@@ -369,11 +369,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
         "length:",
         proof.length,
       );
-      const result = await client.runtime.unytSetMembraneProof(proof);
-
-      if (!result.success) {
-        throw new Error(result.message || "Failed to store membrane proof");
-      }
+      await client.runtime.setUnytMembraneProof(proof);
 
       console.log(
         "Membrane proof stored, Unyt DNA will be installed automatically",
@@ -649,7 +645,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
         setHostData(data);
         // Also persist rates to executor DB for credit deduction
         try {
-          if (client) await client.runtime.setHostRates(hostReg.rates);
+          if (client) await client.runtime.setHostRates(JSON.parse(hostReg.rates));
           setHostRegStatus({
             type: "success",
             message: "Host updated successfully.",
@@ -1049,7 +1045,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     // Load saved rates from executor DB
     const fetchHostRates = async () => {
       try {
-        const rates = await client.runtime.getHostRates();
+        const rates = await client.runtime.hostRates();
         if (rates.length > 0) {
           setHostReg((prev) => ({
             ...prev,
