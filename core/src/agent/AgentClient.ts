@@ -282,6 +282,8 @@ export class AgentClient {
     this.#apiClient.subscribe(this.#onEvent);
   }
 
+  // Payload shapes follow the event table in rust-executor/src/api/events_ws.rs:
+  // the agent events nest under `agent`, hosting-user-info-changed is inline.
   #onEvent = (data: WsEvent): void => {
     switch (data.type) {
       case 'agent-updated': {
