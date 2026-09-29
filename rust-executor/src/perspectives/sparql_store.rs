@@ -3003,36 +3003,35 @@ mod tests {
         );
     }
 
-    /// Re-inserting a link whose signature changed must overwrite the stored verdict.
+    /// Re-inserting a link whose proof now verifies must overwrite the stored
+    /// verdict, not add a second one.
     ///
     /// `make_reifier_iri` hashes author, source, predicate, target and
     /// timestamp — not the proof — so the second insert lands on the same
     /// reifier. Before the delete-before-insert fix the old `proofValid` quad
-    /// stayed: a link once stored "true" kept reading back verified, and
-    /// `query_links` returned it twice because its `OPTIONAL` matched both
-    /// quads.
+    /// stayed beside the new one, and `query_links` returned the link twice
+    /// because its `OPTIONAL` matched both quads.
     ///
     /// Turns red on: removing the stale collect-and-remove loop from
-    /// `insert_link_triples`. Both assertions fail — two quads, and
-    /// `get_all_links` yields the stale `Some(true)`.
+    /// `insert_link_triples`. Both assertions fail — two quads, and the link
+    /// comes back twice.
     #[test]
     fn reinserting_a_link_overwrites_a_stale_verdict() {
         let svc = new_service();
         let signer = TestSigner::generate();
-        let mut link = make_link(&signer, "ad4m://restale", "ad4m://pred", "ad4m://tgt");
+        let link = make_link(&signer, "ad4m://restale", "ad4m://pred", "ad4m://tgt");
 
-        // First insert: real signature → proofValid "true"
-        svc.add_link(&link).unwrap();
+        // First insert: corrupted signature → proofValid "false".
+        let mut broken = link.clone();
+        broken.proof.signature = "deadbeef".to_string();
+        svc.add_link(&broken).unwrap();
 
-        // Corrupt the signature so the second insert computes "false".
-        // make_reifier_iri hashes author/source/predicate/target/timestamp, NOT
-        // the signature, so both inserts land on the same reifier.
-        link.proof.signature = "deadbeef".to_string();
+        // Second insert: the real signature → proofValid "true", same reifier.
         svc.add_link(&link).unwrap();
 
         assert_eq!(
             proof_valid_quads(&svc, &link),
-            vec!["false".to_string()],
+            vec!["true".to_string()],
             "a re-insert must replace the verdict quad, not add a second one"
         );
 
@@ -3045,7 +3044,7 @@ mod tests {
         );
         assert_eq!(
             links[0].proof.valid,
-            Some(false),
+            Some(true),
             "the re-inserted verdict must win over the stored one"
         );
     }

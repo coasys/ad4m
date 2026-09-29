@@ -21,6 +21,8 @@ mod interpretation_harness_e2e;
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
 // so it never reaches a release build.
 #[cfg(test)]
+mod ingest_proof_tests;
+#[cfg(test)]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
 pub mod migration;
