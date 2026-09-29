@@ -1237,37 +1237,75 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // `state_uris[i]`, and before any consumer can resolve a name.
     refuse_shadowed_state_names(&mut flow.states, &state_uris, flow_uri);
 
-    // Sort states by `value`, matching TS `SHACLFlow.fromLinks`
-    // (`core/src/shacl/SHACLFlow.ts`) and for the same reason: link order is
-    // not preserved on the graph, so the only stable ordering is the declared
-    // `value`. Parity holds for *finite* values only: TS sorts with
-    // `(a, b) => a.value - b.value`, whose NaN comparisons are engine-defined
-    // rather than NaN-last, so the runtimes can diverge on exactly the
-    // undecodable-value input the guard below handles. Mirroring the guard in
-    // TS is a three-line comparator — until then, don't lean on `states[0]`
-    // agreeing cross-runtime when a state value is NaN. The convention that rests on it — "the initial state is
-    // `states[0]`", which `FlowInstance.start` consumes on the TS side — would
-    // otherwise resolve differently in the two runtimes whenever
-    // link-discovery order differs from value order, and a Rust-side spawn
-    // would mint instances in the wrong starting state. Ties keep discovery
-    // order (`sort_by` is stable), which is as arbitrary as the declaration
-    // that produced them.
+    // Sort states by `value`, then by state name, matching TS
+    // `SHACLFlow.fromLinks` (`core/src/shacl/SHACLFlow.ts`) and for the same
+    // reason: link order is not preserved on the graph and differs between
+    // replicas, so the only stable ordering is one computed from the
+    // declaration itself. The convention that rests on it — "the initial
+    // state is `states[0]`", which `flow_spawn::initial_state_of` consumes
+    // here and `FlowInstance.start` on the TS side — would otherwise resolve
+    // differently in the two runtimes, or on two nodes running the same one,
+    // whenever link-discovery order differs from value order, and a
+    // Rust-side spawn would mint instances in the wrong starting state. The
+    // comparator is the same in both runtimes, NaN rule included; a change
+    // to one is a change to both.
+    //
+    // Ties on `value` break on state name (#1202). `sort_by` is stable, so
+    // without the tie-break equal values kept discovery order — exactly the
+    // per-replica arbitrariness the sort exists to remove: two members
+    // loading the same definition could mint different genesis states, and
+    // `derive_state` / `verify_receipt` then disagreed on the same signed
+    // links while `flow_dna_hash` (which sorts states itself) still matched.
+    // The name is the key because it is the only one both runtimes carry on
+    // a state (`FlowState` has no URI on either side), and
+    // `refuse_shadowed_state_names` above has already made duplicate names
+    // unresolvable — two states that still compare equal here share a name,
+    // so `initial_state_of` returns the same string whichever comes first.
+    // `String::cmp` is byte order, which for UTF-8 is code-point order; TS
+    // matches it with `compareCodePoints` rather than `<`, whose UTF-16
+    // code-unit order differs above the BMP.
+    //
+    // Finite values compare with `partial_cmp`, not `total_cmp`: `total_cmp`
+    // puts `-0.0` before `0.0`, while TS `===` treats them as one value and
+    // moves on to the name. Both arms are non-NaN, so `partial_cmp` is
+    // always `Some`; the `unwrap_or` is unreachable.
     //
     // `NaN` sorts last rather than comparing equal to everything. The value
     // arrives from `decode_literal_number`, which is `str::parse::<f64>` — so
     // a literal of `NaN` on the graph decodes to one, and
-    // `partial_cmp(…).unwrap_or(Equal)` would then break the total order
-    // `sort_by` requires, leaving the *finite* states in arbitrary relative
-    // order too. Since `states[0]` is the initial state, that would pick the
-    // wrong one. A state whose ordering value is undecodable has no claim to
-    // being first.
+    // `partial_cmp(…).unwrap_or(Equal)` on its own would then break the total
+    // order `sort_by` requires, leaving the *finite* states in arbitrary
+    // relative order too. Since `states[0]` is the initial state, that would
+    // pick the wrong one. A state whose ordering value is undecodable has no
+    // claim to being first. Two NaN states still order by name, so the sort
+    // stays total.
     flow.states
         .sort_by(|a, b| match (a.value.is_nan(), b.value.is_nan()) {
-            (false, false) => a.value.total_cmp(&b.value),
-            (true, true) => std::cmp::Ordering::Equal,
+            (false, false) => a
+                .value
+                .partial_cmp(&b.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name)),
+            (true, true) => a.name.cmp(&b.name),
             (true, false) => std::cmp::Ordering::Greater,
             (false, true) => std::cmp::Ordering::Less,
         });
+
+    // A tie on the lowest value is legal but almost never what the author
+    // meant: the initial state is now decided by name order, not by the
+    // declaration. Say so once per parse, naming the winner.
+    if let [first, second, ..] = flow.states.as_slice() {
+        if !first.value.is_nan() && first.value == second.value {
+            log::warn!(
+                "flow `{flow_uri}`: states `{}` and `{}` tie on the lowest value {}; \
+                 `{}` is the initial state by name order (#1202)",
+                excerpt(&first.name),
+                excerpt(&second.name),
+                first.value,
+                excerpt(&first.name)
+            );
+        }
+    }
 
     // Transitions — walk every `hasTransition` edge, resolve endpoints
     // via the state-name index.
@@ -3931,6 +3969,65 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["identified", "scoped", "done"],
             "states must come back ordered by declared value, not link order"
+        );
+    }
+
+    /// #1202 — two states tied on the lowest `value` must yield the same
+    /// initial state no matter which `hasState` link the graph hands back
+    /// first. Before the tie-break, the sort was stable and equal values
+    /// kept link-discovery order, so two replicas loading the same
+    /// definition could mint instances in different genesis states — and
+    /// `derive_state` / `verify_receipt` then disagreed on the same links.
+    ///
+    /// The tie-break key is the state **name** (ascending, byte order).
+    /// TS `SHACLFlow.fromLinks` breaks ties on the same key, so the
+    /// concrete winner is pinned here too, not just "some fixed state":
+    /// that is the only way a single-runtime test can hold the two
+    /// runtimes to the same answer.
+    #[test]
+    fn parse_flow_from_links_breaks_lowest_value_tie_by_name_regardless_of_link_order() {
+        use crate::perspectives::flow_spawn::initial_state_of;
+
+        fn flow_with_states_in_order(order: &[(&str, f64)]) -> SHACLFlow {
+            let flow_uri = "tie://TieFlow";
+            let mut links = vec![
+                mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+                mk_link(flow_uri, "ad4m://flowName", &lit_str("Tie")),
+                mk_link(flow_uri, "ad4m://namespace", &lit_str("tie://")),
+            ];
+            for (name, value) in order {
+                let state_uri = format!("tie://Tie.{name}");
+                links.push(mk_link(flow_uri, "ad4m://hasState", &state_uri));
+                links.push(mk_link(&state_uri, "ad4m://stateName", &lit_str(name)));
+                links.push(mk_link(&state_uri, "ad4m://stateValue", &lit_num(*value)));
+            }
+            parse_flow_from_links(&links, flow_uri).expect("reader")
+        }
+
+        // `review` and `draft` tie at the lowest value; `done` is above both.
+        let review_first =
+            flow_with_states_in_order(&[("review", 0.0), ("draft", 0.0), ("done", 1.0)]);
+        let draft_first =
+            flow_with_states_in_order(&[("draft", 0.0), ("review", 0.0), ("done", 1.0)]);
+
+        assert_eq!(
+            initial_state_of(&review_first),
+            initial_state_of(&draft_first),
+            "the initial state must not depend on hasState link order"
+        );
+        assert_eq!(
+            initial_state_of(&review_first).as_deref(),
+            Some("draft"),
+            "ties on `value` break on state name ascending — the key TS `fromLinks` uses"
+        );
+        assert_eq!(
+            review_first
+                .states
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["draft", "review", "done"],
+            "full order: value first, name second"
         );
     }
 
