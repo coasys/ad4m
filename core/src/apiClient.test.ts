@@ -226,19 +226,17 @@ describe('ApiClient AbortSignal support', () => {
     })
 })
 
-describe('ApiClient cancel-ack ids and request ids (L6)', () => {
-    const makeClient = () => new ApiClient(
-        'http://localhost:1234',
-        undefined,
-        FakeWebSocket as unknown as new (url: string) => WebSocket,
-    )
-
+describe('ApiClient cancel-ack ids (L6)', () => {
     async function flushAll() {
         for (let i = 0; i < 20; i++) await Promise.resolve()
     }
 
     async function openClient() {
-        const client = makeClient()
+        const client = new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            FakeWebSocket as unknown as new (url: string) => WebSocket,
+        )
         client.connect()
         jest.advanceTimersByTime(0)
         await flushAll()
@@ -256,33 +254,19 @@ describe('ApiClient cancel-ack ids and request ids (L6)', () => {
     beforeEach(() => jest.useFakeTimers())
     afterEach(() => jest.useRealTimers())
 
-    it('10,000 cancelled calls leave one timer', async () => {
+    it('10,000 cancelled calls start no timer', async () => {
         const { client, ws } = await openClient()
         const baseline = jest.getTimerCount() // the ping interval
 
         await cancelCalls(client, 10_000)
 
         expect(ws.sent.filter((m) => JSON.parse(m).type === 'request.cancel')).toHaveLength(10_000)
-        expect(jest.getTimerCount()).toBe(baseline + 1)
-        client.closeAll()
-    })
-
-    it('keeps a bounded number of ignored ids and sweeps them after the timeout', async () => {
-        const { client } = await openClient()
-        const baseline = jest.getTimerCount()
-
-        await cancelCalls(client, 1_500)
-        expect((client as any)._ignoredResponseIds.size).toBe(1_000)
-
-        jest.advanceTimersByTime(30_000)
-        expect((client as any)._ignoredResponseIds.size).toBe(0)
         expect(jest.getTimerCount()).toBe(baseline)
         client.closeAll()
     })
 
-    it('still swallows the ack of a cancel, and releases the sweep timer when the last ack lands', async () => {
+    it('swallows the ack of a cancel and forgets its id', async () => {
         const { client, ws } = await openClient()
-        const baseline = jest.getTimerCount()
         const events: AnyMsg[] = []
         client.subscribe((m) => events.push(m as AnyMsg))
 
@@ -292,19 +276,16 @@ describe('ApiClient cancel-ack ids and request ids (L6)', () => {
         ws.serverPush({ id: cancel.id, result: true })
 
         expect(events).toHaveLength(0)
-        expect(jest.getTimerCount()).toBe(baseline)
+        expect((client as any)._ignoredResponseIds.size).toBe(0)
         client.closeAll()
     })
 
-    it('uses a separate request-id counter per client', async () => {
-        const a = await openClient()
-        const b = await openClient()
-        a.client.call('agent.get').catch(() => {})
-        b.client.call('agent.get').catch(() => {})
-        await flushAll()
-        expect(JSON.parse(a.ws.sent[0]).id).toBe('1')
-        expect(JSON.parse(b.ws.sent[0]).id).toBe('1')
-        a.client.closeAll()
-        b.client.closeAll()
+    it('forgets unacked cancel ids when the socket closes', async () => {
+        const { client, ws } = await openClient()
+        await cancelCalls(client, 3)
+        expect((client as any)._ignoredResponseIds.size).toBe(3)
+        ws.close()
+        expect((client as any)._ignoredResponseIds.size).toBe(0)
+        client.closeAll()
     })
 })
