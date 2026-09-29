@@ -33,8 +33,8 @@ function addListeners(p: PerspectiveProxy) {
     });
   });
 
-  p.removeListener("link-removed", (link) => {
-    onAddedLinkCbs.value.forEach((cb) => {
+  p.addListener("link-removed", (link) => {
+    onRemovedLinkCbs.value.forEach((cb) => {
       cb(p, link);
     });
   });
