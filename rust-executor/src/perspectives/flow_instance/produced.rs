@@ -107,10 +107,9 @@
 use super::atom::OutputRef;
 use super::receipt::{
     is_canonical_receipt_uri, is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE,
-    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES,
-    RECEIPT_URI_PREFIX,
+    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES, RECEIPT_URI_PREFIX,
 };
-use super::verify::memo::VerdictMemo;
+use super::verify::memo::{settle, SettledRun, VerdictMemo};
 use super::verify::{verify_receipt, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -158,7 +157,8 @@ pub struct ValidOutput {
 /// receipts enumerate the same list.
 ///
 /// `memo`, when given, answers a receipt already verified under the same
-/// DNA from memory ([`VerdictMemo`]); the answer is the same without it.
+/// held definition from memory ([`VerdictMemo`]); the answer is the same
+/// without it.
 pub fn valid_outputs(
     catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
@@ -204,20 +204,18 @@ fn verified_outputs(
         if receipt.flow_uri != flow_uri {
             continue;
         }
-        let verdict = match memo {
-            Some(memo) => memo.verify(catalogue, receipt),
-            None => verify_receipt(catalogue, receipt),
+        // Only what a `Verified` verdict says is used here, and only that is
+        // memoised; a non-verified receipt speaks for nothing, whatever the
+        // reason (logged where it is computed, in `settle`).
+        let settled = match memo {
+            Some(memo) => memo.settled(catalogue, receipt),
+            None => settle(catalogue, receipt),
         };
-        let ReceiptVerdict::Verified {
+        let Some(SettledRun {
             terminal_state,
             settled_at,
-            ..
-        } = &verdict
+        }) = settled
         else {
-            log::debug!(
-                "valid_outputs: a receipt for `{flow_uri}` does not verify and speaks for \
-                 nothing here — {verdict}"
-            );
             continue;
         };
         if let Some(state) = state {
@@ -1111,7 +1109,7 @@ mod tests {
         );
         let other_dna = catalogue(vec![edited]);
 
-        assert!(memo.verify(&same_dna, &receipt).is_verified());
+        assert!(memo.settled(&same_dna, &receipt).is_some());
         assert_eq!(
             valid_outputs(
                 &same_dna,
@@ -1125,11 +1123,15 @@ mod tests {
             "precondition: the receipt answers under its own DNA"
         );
 
-        let verdict = memo.verify(&other_dna, &receipt);
+        assert_eq!(
+            memo.settled(&other_dna, &receipt),
+            None,
+            "after the DNA changed the same receipt is not verified through the memo either"
+        );
+        let verdict = verify_receipt(&other_dna, &receipt);
         assert!(
             matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
-            "after the DNA changed the same receipt reads DnaChanged, not the memoised \
-             verdict — got: {verdict}"
+            "and a fresh verify names why: DnaChanged, got: {verdict}"
         );
         assert!(
             valid_outputs(
@@ -1144,7 +1146,7 @@ mod tests {
         );
         // And back under the original DNA the memo is still exact — the
         // first verdict, not the second.
-        assert!(memo.verify(&same_dna, &receipt).is_verified());
+        assert!(memo.settled(&same_dna, &receipt).is_some());
     }
 
     /// A second read of an unchanged set re-verifies nothing: three receipts
@@ -1233,14 +1235,130 @@ mod tests {
         );
         let receipt = mint(&first_load[FLOW], &[OUTPUT]);
         let memo = VerdictMemo::default();
-        assert!(memo.verify(&first_load, &receipt).is_verified());
+        assert!(memo.settled(&first_load, &receipt).is_some());
 
         let fresh = verify_receipt(&second_load, &receipt);
-        let hit = memo.verify(&second_load, &receipt);
+        let hit = memo.settled(&second_load, &receipt);
         assert_eq!(
-            hit, fresh,
-            "a memo hit must equal a fresh verify — fresh: {fresh}; memo: {hit}"
+            hit,
+            SettledRun::of(&fresh),
+            "a memo hit must equal a fresh verify — fresh: {fresh}; memo: {hit:?}"
         );
+    }
+
+    /// The memo holds a projection, never a verdict. A rejected verdict
+    /// carries data the receipt's writer sized — `OutputsNotCommitted.claimed`
+    /// is the whole outputs list — and memoising it bounded the memo by
+    /// 4096 × body size (Marvin on #1201). Every surface answers the same
+    /// with the memo as without, on the first read and on the hits, while a
+    /// forgery naming a thousand outputs leaves nothing of its list behind:
+    /// the memo weighs its keys plus one small `Verified` projection.
+    ///
+    /// Red if the projection drops `terminal_state` or `settled_at`, or if a
+    /// hit is answered with anything but the stored projection.
+    #[test]
+    fn the_memo_answers_like_a_fresh_verify_and_keeps_nothing_of_a_rejection() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let thousand: Vec<String> = (0..1000)
+            .map(|i| format!("ad4m://attacker/node-{i:04}"))
+            .collect();
+        let mut forged = mint(&flow, &[OUTPUT]);
+        forged.outputs = out_items(&thousand.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut edited = mint(&flow, &["ad4m://deliverable/d2"]);
+        edited.outputs[0].content = serde_json::json!({ "title": "edited" }).to_string();
+        let receipts = [mint(&flow, &[OUTPUT]), forged, edited];
+        let memo = VerdictMemo::default();
+
+        let plain = valid_outputs(&cat, FLOW, None, &receipts, None);
+        let plain_at = first_produced_at(&cat, FLOW, None, &receipts, None);
+        assert_eq!(
+            plain.len(),
+            1,
+            "precondition: only the honest receipt verifies"
+        );
+        assert_eq!(
+            plain_at.get(&out_ref(OUTPUT)).map(String::as_str),
+            Some(T1),
+            "precondition: the quorum time reaches the role gate through the projection"
+        );
+        for read in ["first read", "second read"] {
+            assert_eq!(
+                valid_outputs(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain,
+                "{read}"
+            );
+            assert_eq!(
+                first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain_at,
+                "{read}"
+            );
+        }
+        assert_eq!(
+            memo.verifications(),
+            3,
+            "each receipt is verified once, then every surface answers from the memo"
+        );
+
+        let keys: usize = receipts
+            .iter()
+            .map(|r| r.uri().expect("uri").len() + 64)
+            .sum();
+        let held = memo.bytes_held();
+        assert!(
+            held <= keys + MEMO_ENTRY_MAX_BYTES,
+            "the memo holds three keys and one small projection, not the forgery's \
+             thousand-output list: {held} bytes held, {keys} of them keys"
+        );
+    }
+
+    /// Even a `Verified` projection can be writer-sized. A link signature
+    /// covers the parsed instant, not the timestamp string
+    /// (`agent::signatures::verify` re-parses it), chrono reads the first
+    /// nine fractional digits and skips the rest, and the fold carries the
+    /// string verbatim into `settled_at`. So a self-quorate proposer
+    /// (`{ n: 1 }`) can stamp the vote that settles the run with a kilobyte
+    /// of fractional zeros and still sign it validly. Over
+    /// [`MEMO_ENTRY_MAX_BYTES`] the projection is answered but not stored,
+    /// so the next read re-verifies — the same answer, as without a memo.
+    ///
+    /// Red without the weight check before `put`.
+    #[test]
+    fn a_verified_run_with_a_padded_timestamp_is_answered_but_not_memoised() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        // The same instant as `T1`, spelled with `MEMO_ENTRY_MAX_BYTES`
+        // fractional zeros, so the fixture's real signatures still verify.
+        let padded = format!("2026-01-01T00:00:00.{}Z", "0".repeat(MEMO_ENTRY_MAX_BYTES));
+        let mut read_set = completed(&[OUTPUT]);
+        for link in read_set
+            .proposals
+            .iter_mut()
+            .flat_map(|p| p.links.iter_mut())
+        {
+            link.timestamp = padded.clone();
+        }
+        let flow = flow_named("Delivery");
+        let receipt = FlowReceipt::mint(&flow, read_set, out_items(&[OUTPUT]), Vec::new())
+            .expect("the re-spelled timestamps parse to the signed instant, so the run mints");
+        let cat = catalogue(vec![flow]);
+        let memo = VerdictMemo::default();
+
+        let fresh = settle(&cat, &receipt);
+        assert!(
+            fresh.as_ref().is_some_and(|s| s.settled_at == padded),
+            "precondition: the padded timestamp is the quorum time, got {fresh:?}"
+        );
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(
+            memo.verifications(),
+            2,
+            "a projection over the entry cap is not stored, so the second read re-verifies"
+        );
+        assert_eq!(memo.bytes_held(), 0, "and nothing of it is held");
     }
 
     // ---- determinism -------------------------------------------------------

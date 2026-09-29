@@ -1,5 +1,5 @@
 //! A per-replica memo of receipt verdicts, keyed by what the verdict is a
-//! function of and nothing else.
+//! function of and nothing else, holding only what a read path uses of it.
 //!
 //! [`verify_receipt`] is pure: its verdict depends only on the receipt's
 //! own contents and on the reader's copy of the flow the receipt names —
@@ -21,20 +21,38 @@
 //! - **A reload in another link order is a different key as well.** The
 //!   key is deliberately *not*
 //!   [`flow_dna_hash`](crate::perspectives::flow_instance::receipt::flow_dna_hash),
-//!   which sorts `states` and
-//!   `transitions` so that two replicas name the same DNA alike whatever
-//!   order their links arrive in. The verifier reads that order:
-//!   `initial_state_of` is `states.first()`, and the fold refuses a genesis
-//!   other than it. The parser keeps equal-`value` states in link order, so
-//!   the same DNA can load as `[open, done]` on one read and `[done, open]`
-//!   on the next, verify differently, and hash the same under
-//!   `flow_dna_hash` — a memo keyed on it would serve the first load's
-//!   verdict on the second (CodeRabbit on #1201). Keyed on the held
+//!   which sorts `states` and `transitions` so that two replicas name the
+//!   same DNA alike whatever order their links arrive in. The verifier
+//!   reads that order: `initial_state_of` is `states.first()`, and the fold
+//!   refuses a genesis other than it. The parser keeps equal-`value` states
+//!   in link order, so the same DNA can load as `[open, done]` on one read
+//!   and `[done, open]` on the next, verify differently, and hash the same
+//!   under `flow_dna_hash` — a memo keyed on it would serve the first
+//!   load's verdict on the second (CodeRabbit on #1201). Keyed on the held
 //!   definition, it misses and re-verifies, as an un-memoised read would.
 //!
-//! What is not memoised: a receipt for a flow the catalogue does not hold
-//! (`FlowUnknown` costs nothing and the catalogue may fill in), and material
-//! that does not hash at all. Those fall through to a plain verification.
+//! # What is kept: a [`SettledRun`] or nothing
+//!
+//! A read path (`valid_outputs`, the `producedByFlow` filter, the role
+//! gate) uses two things of a verdict: that it is `Verified`, and then the
+//! run's `terminal_state` and `settled_at`. It uses nothing of a verdict
+//! that is not `Verified` — rejected and undecidable exclude alike — and
+//! that is why the memo keeps nothing of one. A rejected verdict's payload
+//! is sized by whoever wrote the receipt: `OutputsNotCommitted.claimed` is
+//! the receipt's whole outputs list, `Unfoldable.reason` an error string.
+//! Memoising it made 4096 entries cost up to 4096 × a receipt body (Marvin
+//! on #1201). So the memo stores the projection [`SettledRun::of`], and a
+//! caller that wants the reason (the `verifyFlowReceipt` API) calls
+//! [`verify_receipt`] itself. The reason is logged at debug level on the
+//! one verification that computes it.
+//!
+//! **Every entry is bounded by a constant.** The key is two hashes. The
+//! value is `None`, or a state name of the reader's own definition and one
+//! vote timestamp the fold parsed as RFC 3339 — a few dozen bytes in any
+//! honest run. A self-quorate writer (`{ n: 1 }`) can still sign a vote
+//! whose timestamp carries a kilobyte of fractional digits, so a value over
+//! [`MEMO_ENTRY_MAX_BYTES`] is returned but not stored; the next read
+//! re-verifies it, as an un-memoised read would.
 //!
 //! # Why it exists (#1177)
 //!
@@ -61,15 +79,72 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
-/// Verdicts one perspective's memo holds before the least recently used is
-/// evicted. A `Verified` verdict is a few hundred bytes (its output refs
-/// and voter DIDs), so this is well under a megabyte per perspective.
+/// Entries one perspective's memo holds before the least recently used is
+/// evicted. Each is a key of two hashes and a value under
+/// [`MEMO_ENTRY_MAX_BYTES`], so the memo is under a megabyte per
+/// perspective whatever the receipts carried.
 pub const VERDICT_MEMO_CAPACITY: usize = 4096;
 
-/// `(receipt URI, held definition hash) → verdict` for one perspective. See
-/// the module header for why this key is exact.
+/// The most a memoised value may weigh. A [`SettledRun`] is a state name
+/// and one RFC 3339 timestamp — under a hundred bytes in any honest run —
+/// and a value over this is returned but not stored. See the module
+/// header, § *What is kept*.
+pub const MEMO_ENTRY_MAX_BYTES: usize = 256;
+
+/// What a read path uses of a `Verified` verdict, and all the memo keeps
+/// of any verdict: the state the run settled into and when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledRun {
+    /// [`ReceiptVerdict::Verified::terminal_state`] — the state the
+    /// reader's own fold reached.
+    pub terminal_state: String,
+    /// [`ReceiptVerdict::Verified::settled_at`] — the quorum-fixed time.
+    pub settled_at: String,
+}
+
+impl SettledRun {
+    /// The projection: `Some` for exactly a `Verified` verdict, `None` for
+    /// every other kind, rejected and undecidable alike. What every read
+    /// path branches on; a caller that needs the reason has the verdict.
+    pub fn of(verdict: &ReceiptVerdict) -> Option<Self> {
+        match verdict {
+            ReceiptVerdict::Verified {
+                terminal_state,
+                settled_at,
+                ..
+            } => Some(Self {
+                terminal_state: terminal_state.clone(),
+                settled_at: settled_at.clone(),
+            }),
+            _ => None,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        self.terminal_state.len() + self.settled_at.len()
+    }
+}
+
+/// [`verify_receipt`], projected to what a read path uses. The one place
+/// a non-verified verdict's reason is still in hand, so it is logged here
+/// at debug level before the projection drops it.
+pub fn settle(catalogue: &HashMap<String, SHACLFlow>, receipt: &FlowReceipt) -> Option<SettledRun> {
+    let verdict = verify_receipt(catalogue, receipt);
+    let settled = SettledRun::of(&verdict);
+    if settled.is_none() {
+        log::debug!(
+            "a receipt for `{}` does not verify and speaks for nothing here — {verdict}",
+            receipt.flow_uri
+        );
+    }
+    settled
+}
+
+/// `(receipt URI, held definition hash) → Option<SettledRun>` for one
+/// perspective. See the module header for why this key is exact and why
+/// the value is a projection.
 pub struct VerdictMemo {
-    verdicts: Mutex<LruCache<(String, String), ReceiptVerdict>>,
+    settled: Mutex<LruCache<(String, String), Option<SettledRun>>>,
     /// Test-only: how many times this memo has actually run
     /// [`verify_receipt`]. What the counting test reads to prove a second
     /// read of an unchanged set re-verifies nothing.
@@ -87,34 +162,34 @@ impl VerdictMemo {
     pub fn with_capacity(capacity: usize) -> Self {
         let capacity = NonZeroUsize::new(capacity).unwrap_or(NonZeroUsize::MIN);
         Self {
-            verdicts: Mutex::new(LruCache::new(capacity)),
+            settled: Mutex::new(LruCache::new(capacity)),
             #[cfg(test)]
             verifications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
-    /// [`verify_receipt`], answered from the memo when the same receipt was
-    /// already verified under the same held definition. Same verdict either
-    /// way.
-    pub fn verify(
+    /// [`settle`], answered from the memo when the same receipt was already
+    /// verified under the same held definition. Same answer either way.
+    pub fn settled(
         &self,
         catalogue: &HashMap<String, SHACLFlow>,
         receipt: &FlowReceipt,
-    ) -> ReceiptVerdict {
+    ) -> Option<SettledRun> {
         let key = memo_key(catalogue, receipt);
         if let Some(key) = &key {
-            if let Some(verdict) = self.lock().get(key) {
-                return verdict.clone();
+            if let Some(settled) = self.lock().get(key) {
+                return settled.clone();
             }
         }
         #[cfg(test)]
         self.verifications
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let verdict = verify_receipt(catalogue, receipt);
-        if let Some(key) = key {
-            self.lock().put(key, verdict.clone());
+        let settled = settle(catalogue, receipt);
+        let weight = settled.as_ref().map_or(0, SettledRun::bytes);
+        if let Some(key) = key.filter(|_| weight <= MEMO_ENTRY_MAX_BYTES) {
+            self.lock().put(key, settled.clone());
         }
-        verdict
+        settled
     }
 
     /// How many verifications this memo has actually run.
@@ -123,10 +198,22 @@ impl VerdictMemo {
         self.verifications.load(std::sync::atomic::Ordering::SeqCst)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<(String, String), ReceiptVerdict>> {
+    /// Test-only: what the memo holds, in bytes of key and value strings —
+    /// the number the bound in the module header is about.
+    #[cfg(test)]
+    pub fn bytes_held(&self) -> usize {
+        self.lock()
+            .iter()
+            .map(|((uri, held), settled)| {
+                uri.len() + held.len() + settled.as_ref().map_or(0, SettledRun::bytes)
+            })
+            .sum()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LruCache<(String, String), Option<SettledRun>>> {
         // A panic while holding the lock leaves a cache, not an invariant, so
         // a poisoned memo is still safe to read.
-        self.verdicts
+        self.settled
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -151,9 +238,8 @@ fn memo_key(
 /// not, and that is the difference from
 /// [`flow_dna_hash`](crate::perspectives::flow_instance::receipt::flow_dna_hash),
 /// which sorts `states` and `transitions` because it names the DNA across
-/// replicas.
-/// This hash names one reader's copy, and one reader's copy is what the
-/// verdict is a function of — see the module header.
+/// replicas. This hash names one reader's copy, and one reader's copy is
+/// what the verdict is a function of — see the module header.
 fn held_definition_hash(flow: &SHACLFlow) -> anyhow::Result<String> {
     let value = serde_json::to_value(flow)?;
     Ok(hex::encode(Sha256::digest(
