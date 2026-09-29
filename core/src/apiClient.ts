@@ -117,6 +117,8 @@ export class ApiClient {
     private _watching: string | null = '{}'
     private _watchScheduled = false
     private _watchDone: Promise<void> = Promise.resolve()
+    // The last `events.watch` sent, settled once the executor replied.
+    private _watchSent: Promise<void> = Promise.resolve()
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -333,7 +335,16 @@ export class ApiClient {
         }
 
         await this._readyOrAbort(signal)
+        // A listener added before this call needs its `events.watch` on the
+        // wire first. The executor applies a watch as it reads it, so the
+        // event this call causes reaches the listener.
+        this._flushWatch()
+        return this._send<T>(type, params, options)
+    }
 
+    /** Put one call frame on the wire now, and settle with its reply. */
+    private _send<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
+        const signal = options?.signal
         const id = nextId()
         // Put params under a "params" key to avoid collision with
         // protocol fields "id" and "type" (e.g. params might contain
@@ -480,16 +491,22 @@ export class ApiClient {
     private async _sendWatch(): Promise<void> {
         if (this._wsCallbacks.size === 0) return
         await this._ready()
+        this._flushWatch()
+        await this._watchSent
+    }
+
+    /** Send `events.watch` now if the socket is open and the executor lacks
+     *  the current interest. `_watchSent` settles with its reply. */
+    private _flushWatch(): void {
+        if (this._wsCallbacks.size === 0 || this._ws?.readyState !== 1 /* OPEN */) return
         const events = this.watchedEvents()
         const key = JSON.stringify(events)
         if (key === this._watching) return
         this._watching = key
-        try {
-            await this.call('events.watch', events)
-        } catch (e) {
+        this._watchSent = this._send('events.watch', events).then(() => {}, (e) => {
             if (this._watching === key) this._watching = null
             console.error('events.watch failed:', e)
-        }
+        })
     }
 
     // ── Explicit connection ─────────────────────────────────────────────────
