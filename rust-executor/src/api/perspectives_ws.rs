@@ -948,11 +948,11 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let (subscription_id, result) = perspective
+    let reply = perspective
         .subscribe_and_query(body.query, ctx.user_email.clone(), connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(subscribed(subscription_id, &result))
+    Ok(subscribed(reply))
 }
 
 /// The RPC connection a subscription belongs to; a call without one (REST)
@@ -963,12 +963,13 @@ fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
     })
 }
 
-/// Reply to a subscribe call: the initial result as JSON, at revision 0.
-fn subscribed(subscription_id: String, result: &str) -> Value {
+/// Reply to a subscribe call: the result as JSON at its revision (0 unless
+/// a change was published while the first result was computed).
+fn subscribed((subscription_id, revision, result): (String, u64, String)) -> Value {
     serde_json::json!({
         "subscriptionId": subscription_id,
-        "result": result_json(result),
-        "revision": 0,
+        "result": result_json(&result),
+        "revision": revision,
     })
 }
 
@@ -1298,7 +1299,7 @@ async fn model_subscribe_handler(
     let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let (subscription_id, result) = perspective
+    let reply = perspective
         .model_subscribe_and_query(
             class_name,
             query_json,
@@ -1307,7 +1308,7 @@ async fn model_subscribe_handler(
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(subscribed(subscription_id, &result))
+    Ok(subscribed(reply))
 }
 
 async fn run_interpretation_handler(

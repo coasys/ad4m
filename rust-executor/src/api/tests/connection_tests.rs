@@ -263,7 +263,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
         let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
         async move {
             l.notified().await;
-            let (id, _) = crate::perspectives::get_perspective(&uuid)
+            let (id, _, _) = crate::perspectives::get_perspective(&uuid)
                 .unwrap()
                 .subscribe_and_query(QUERY.into(), None, ctx.connection_id.clone().unwrap())
                 .await

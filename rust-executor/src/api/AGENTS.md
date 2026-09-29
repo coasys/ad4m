@@ -47,7 +47,9 @@ anything that signs, bills or writes.
 - Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
   inline on both sockets (per-connection state, like `request.cancel`).
-- Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision: 0 }`;
+- Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
+  (revision 0, or later if a write landed while the first result was computed: the subscription is
+  registered first);
   each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
   `removed` rows, or the whole `result` when the rows would lose their order; see
   `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,

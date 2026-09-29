@@ -4,6 +4,7 @@
 //! A child module of `perspective_instance` so it can reach the private
 //! subscription registry without widening its visibility.
 
+use deno_core::error::AnyError;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
@@ -26,6 +27,41 @@ impl PerspectiveInstance {
             .get(subscription_id)
             .filter(|q| q.connection == connection_id)?;
         Some((query.revision, query.last_result.clone()))
+    }
+
+    /// Register `query` under a new id, then compute its first result with
+    /// `first_result`. Registering first means a write that lands meanwhile
+    /// is still checked, and reported. Until the first result is stored,
+    /// `last_result` is empty, so an update published before then carries
+    /// the whole `result`. Returns the id, and the revision and result the
+    /// subscribe reply carries: revision 0 and the first result, or the
+    /// newer revision a check already published.
+    pub(super) async fn open_subscription(
+        &self,
+        query: SubscribedQuery,
+        first_result: impl std::future::Future<Output = Result<String, AnyError>>,
+    ) -> Result<(String, u64, String), AnyError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.subscribed_queries
+            .lock()
+            .await
+            .insert(id.clone(), query);
+        let result = match first_result.await {
+            Ok(result) => result,
+            Err(e) => {
+                self.subscribed_queries.lock().await.remove(&id);
+                return Err(e);
+            }
+        };
+        let mut queries = self.subscribed_queries.lock().await;
+        Ok(match queries.get_mut(&id) {
+            Some(q) if q.revision > 0 => (id, q.revision, q.last_result.clone()),
+            Some(q) => {
+                q.last_result = result.clone();
+                (id, 0, result)
+            }
+            None => (id, 0, result),
+        })
     }
 
     /// Publish one update on the `query-subscription-update` topic:
@@ -200,15 +236,15 @@ mod tests {
     #[tokio::test]
     async fn closing_a_connection_ends_only_its_subscriptions() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (a1, _) = p
+        let (a1, _, _) = p
             .subscribe_and_query(QUERY.into(), None, "a".into())
             .await
             .unwrap();
-        let (a2, _) = p
+        let (a2, _, _) = p
             .subscribe_and_query(QUERY.into(), None, "a".into())
             .await
             .unwrap();
-        let (b, _) = p
+        let (b, _, _) = p
             .subscribe_and_query(QUERY.into(), None, "b".into())
             .await
             .unwrap();
@@ -225,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn only_the_owning_connection_disposes_or_reads_a_subscription() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (id, _) = p
+        let (id, _, _) = p
             .subscribe_and_query(QUERY.into(), None, "a".into())
             .await
             .unwrap();
@@ -346,7 +382,7 @@ mod tests {
     async fn model_subscription_sends_keyed_changes_with_revisions() {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
-        let (id, initial) = p
+        let (id, _, initial) = p
             .model_subscribe_and_query("Todo".into(), query.clone(), None, "c".into())
             .await
             .unwrap();
@@ -384,7 +420,7 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _) = p
+        let (id, _, _) = p
             .subscribe_and_query(q.clone(), None, "c".into())
             .await
             .unwrap();
@@ -412,10 +448,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_write_while_the_first_result_is_computed_is_reported() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
+        let query = super::SubscribedQuery {
+            query: q.clone(),
+            last_result: String::new(),
+            user_email: None,
+            predicates: Default::default(),
+            model_query_params: None,
+            revision: 0,
+            connection: "c".into(),
+        };
+        // The first result is read, then a write and its check land before
+        // the subscribe completes.
+        let stale = p.sparql_query(q).unwrap();
+        let mut writer = p.clone();
+        let first_result = async move {
+            add(&mut writer, "test://a", "test://p", "test://b").await;
+            writer
+                .check_subscribed_queries(ChangedPredicates::CheckAll)
+                .await;
+            Ok(stale)
+        };
+        let (id, revision, result) = p.open_subscription(query, first_result).await.unwrap();
+        assert_eq!(revision, 1, "the reply carries the write");
+        assert_eq!(super::result_json(&result).as_array().unwrap().len(), 1);
+        assert_eq!(p.subscription_state(&id, "c").await.unwrap().0, 1);
+    }
+
+    #[tokio::test]
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _) = p
+        let (first, _, _) = p
             .subscribe_and_query(q.clone(), None, "c".into())
             .await
             .unwrap();
@@ -425,7 +491,7 @@ mod tests {
             json!(1)
         );
 
-        let (second, _) = p.subscribe_and_query(q, None, "c".into()).await.unwrap();
+        let (second, _, _) = p.subscribe_and_query(q, None, "c".into()).await.unwrap();
         assert_ne!(first, second, "not shared");
         assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
     }

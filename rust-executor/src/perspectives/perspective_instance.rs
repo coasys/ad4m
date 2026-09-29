@@ -5679,73 +5679,61 @@ impl PerspectiveInstance {
     }
 
     /// Subscribe to a SPARQL/Prolog query. Returns the subscription id and
-    /// the initial result (revision 0); every change after that is published
-    /// as a delta update (`send_delta_update`). Each call makes a new
-    /// subscription, so every subscriber counts revisions from 0.
+    /// the revision and result the reply carries (see `open_subscription`);
+    /// every change after that is published as a delta update
+    /// (`send_delta_update`). Each call makes a new subscription, so every
+    /// subscriber counts revisions from 0.
     pub async fn subscribe_and_query(
         &self,
         query: String,
         user_email: Option<String>,
         connection_id: String,
-    ) -> Result<(String, String), AnyError> {
-        let subscription_id = uuid::Uuid::new_v4().to_string();
-
-        // Execute prolog query with user context
+    ) -> Result<(String, u64, String), AnyError> {
         let agent_context = if let Some(email) = user_email.as_ref() {
             crate::agent::AgentContext::for_user_email(email.clone())
         } else {
             crate::agent::AgentContext::main_agent()
         };
-        let result_string = if is_sparql_query(&query) {
-            self.sparql_query(query.clone())?
-        } else {
-            let initial_result = self
-                .prolog_query_subscription_with_context(query.clone(), &agent_context)
-                .await?;
-            prolog_resolution_to_string(initial_result)
-        };
-
         let predicates = if is_sparql_query(&query) {
             extract_predicates_from_sparql(&query)
         } else {
             HashSet::new() // Prolog queries: always re-check
         };
-
         let subscribed_query = SubscribedQuery {
-            query,
-            last_result: result_string.clone(),
+            query: query.clone(),
+            last_result: String::new(),
             user_email,
             predicates,
             model_query_params: None,
             revision: 0,
             connection: connection_id,
         };
-
-        // Now insert the subscription
-        self.subscribed_queries
-            .lock()
-            .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        Ok((subscription_id, result_string))
+        let first_result = async {
+            if is_sparql_query(&query) {
+                self.sparql_query(query.clone())
+            } else {
+                let resolution = self
+                    .prolog_query_subscription_with_context(query.clone(), &agent_context)
+                    .await?;
+                Ok(prolog_resolution_to_string(resolution))
+            }
+        };
+        self.open_subscription(subscribed_query, first_result).await
     }
 
     /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
     /// registers a subscription, and runs the initial model query — all in one call.
     /// When link changes match the trigger predicates, `execute_model_query` is
     /// re-run in Rust and the change is pushed to the client as a delta
-    /// update. Each call makes a new subscription (revision 0).
+    /// update. Each call makes a new subscription (see `open_subscription`).
     pub async fn model_subscribe_and_query(
         &self,
         class_name: String,
         query_json: String,
         user_email: Option<String>,
         connection_id: String,
-    ) -> Result<(String, String), AnyError> {
-        // 1. Run the initial model query
-        let initial_result = self.model_query(&class_name, &query_json).await?;
-
-        // 2. Build trigger SPARQL from shape predicates resolved through the cache.
+    ) -> Result<(String, u64, String), AnyError> {
+        // Build trigger SPARQL from shape predicates resolved through the cache.
         let trigger_predicates =
             self.build_model_trigger_predicates(&class_name, Some(&query_json));
 
@@ -5766,27 +5754,20 @@ impl PerspectiveInstance {
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
 
-        // 3. Register the subscription
-        let subscription_id = uuid::Uuid::new_v4().to_string();
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
-            last_result: initial_result.clone(),
+            last_result: String::new(),
             user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
-                class_name,
-                query_json,
+                class_name: class_name.clone(),
+                query_json: query_json.clone(),
             }),
             revision: 0,
             connection: connection_id,
         };
-
-        self.subscribed_queries
-            .lock()
+        self.open_subscription(subscribed_query, self.model_query(&class_name, &query_json))
             .await
-            .insert(subscription_id.clone(), subscribed_query);
-
-        Ok((subscription_id, initial_result))
     }
 
     /// Extract predicates from a model shape for subscription trigger matching.
