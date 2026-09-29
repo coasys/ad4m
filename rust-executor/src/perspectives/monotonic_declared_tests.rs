@@ -597,3 +597,156 @@ async fn t5_an_authority_change_rebuilds_the_declared_set() {
         "Alice is the authority now and declared nothing: a peer's removal applies"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review of #1183, round 2: the wire form, the commit call site, and the
+// author's flag and removal in one call
+// ---------------------------------------------------------------------------
+
+/// Links pulled from a link language usually carry no status. The author's
+/// flag still protects a removal in the same diff: it counts as Shared, like
+/// everything arriving by sync.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_status_less_flag_protects_a_removal_in_the_same_diff() {
+    let alice = TestSigner::generate();
+    let mut p = neighbourhood_of(&alice).await;
+    let member = grant(&alice, ROLE, MEMBER);
+    sync_in(&mut p, vec![member.clone()], vec![]).await;
+
+    let wire = |mut l: LinkExpression| {
+        l.status = None;
+        l
+    };
+    let class = class_links(&alice, "Role", MEMBER, true)
+        .into_iter()
+        .map(wire)
+        .collect();
+    sync_in(&mut p, class, vec![wire(member.clone())]).await;
+
+    assert!(present(&p, &member), "a status-less flag in the same diff");
+}
+
+/// `link_mutations` sends only the committable part of its diff: a
+/// Shared-labelled removal of a Local declared link is applied here and never
+/// reaches the link language. With a neighbourhood and no link language, a
+/// commit lands in `Ad4mDb`'s pending diffs; the marker addition shows it ran.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_link_mutations_does_not_commit_a_local_declared_removal() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let me = crate::agent::did_for_context(&ctx).expect("did");
+    let uuid = p.persisted.lock().await.uuid.clone();
+    p.persisted.lock().await.neighbourhood = Some(DecoratedNeighbourhoodExpression {
+        author: me,
+        ..Default::default()
+    });
+    let local = local_grant_under_declared(&mut p, &ctx).await;
+
+    let mut m = removal_of(&local);
+    m.additions = vec![crate::types::LinkInput {
+        source: "app://marker".to_string(),
+        predicate: Some("app://marks".to_string()),
+        target: "app://x".to_string(),
+    }];
+    p.link_mutations(m, LinkStatus::Shared, &ctx)
+        .await
+        .expect("a Shared-labelled removal of a Local declared link goes");
+    assert!(!present(&p, &local));
+
+    let mut pending = PerspectiveDiff::empty();
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        pending = crate::db::Ad4mDb::with_global_instance(|db| db.get_pending_diffs(&uuid, None))
+            .expect("pending diffs")
+            .0;
+        if pending
+            .additions
+            .iter()
+            .any(|l| l.data.source == "app://marker")
+        {
+            break;
+        }
+    }
+    assert!(
+        pending
+            .additions
+            .iter()
+            .any(|l| l.data.source == "app://marker"),
+        "control: the commit ran"
+    );
+    assert!(
+        !pending
+            .removals
+            .iter()
+            .any(|l| l.data.predicate.as_deref() == Some(MEMBER)),
+        "a Local declared removal was committed"
+    );
+}
+
+/// The authority's flag link as the class registration would write it.
+fn member_flag() -> crate::types::LinkInput {
+    let flag = parse_shacl_to_links(&class_json("Role", MEMBER, true), "Role")
+        .expect("shacl")
+        .into_iter()
+        .find(|l| l.predicate.as_deref() == Some(FLAG))
+        .expect("flag");
+    crate::types::LinkInput {
+        source: flag.source,
+        predicate: flag.predicate,
+        target: flag.target,
+    }
+}
+
+/// The authority writes a flag and removes a Shared link under its predicate
+/// in one call. Peers receive both in one diff and drop the removal, so this
+/// replica must refuse it too, or the two diverge.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_link_mutations_sees_a_flag_written_in_the_same_call() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let mut m = removal_of(&link);
+    m.additions = vec![member_flag()];
+    refused(
+        p.link_mutations(m, LinkStatus::Shared, &ctx).await,
+        "link_mutations with the flag in the same call",
+    );
+    assert!(present(&p, &link));
+    assert!(links_under(&p, FLAG).is_empty(), "nothing was written");
+}
+
+/// The same through a batch: the commit backstop counts the batch's own flag.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_commit_batch_sees_a_flag_queued_in_the_same_batch() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let batch = p.create_batch().await;
+    p.add_link(
+        Link::from(member_flag()),
+        LinkStatus::Shared,
+        Some(batch.clone()),
+        &ctx,
+    )
+    .await
+    .expect("queue the flag");
+    p.remove_link(link.clone(), Some(batch.clone()))
+        .await
+        .expect("queue the removal");
+    refused(
+        p.commit_batch(batch, &ctx).await,
+        "commit_batch with the flag in the same batch",
+    );
+    assert!(present(&p, &link));
+}
+
+/// Control for the two above: a Local flag declares nothing, so writing one
+/// beside the removal does not refuse it.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_local_flag_in_the_same_call_declares_nothing() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let mut m = removal_of(&link);
+    m.additions = vec![member_flag()];
+    p.link_mutations(m, LinkStatus::Local, &ctx)
+        .await
+        .expect("a Local flag does not declare");
+    assert!(!present(&p, &link));
+}
