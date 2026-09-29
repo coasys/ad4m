@@ -6409,10 +6409,15 @@ impl PerspectiveInstance {
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
     ///
-    /// Returns whether turns were pending after recording, i.e. whether the
-    /// loop must keep polling at the base rate (#1072). `false` when no
-    /// processor is declared, when loading them failed, or when every gathered
-    /// turn was already processed or deferred.
+    /// Returns whether a declared processor had turns pending after recording,
+    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
+    /// sampled before draining, so a drained batch that is retried (stand-down,
+    /// awaiting author, missing shapes, pass error) keeps the base rate: the
+    /// next tick re-records it. `false` when no processor is declared or every
+    /// gathered turn was already processed or deferred. If loading the
+    /// processors fails, any queued turn counts. A per-config query failure
+    /// records nothing for that config, so a failing scope query backs off
+    /// instead of logging a warning twice a second.
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
@@ -6434,7 +6439,7 @@ impl PerspectiveInstance {
                     "auto_processor_tick [{}]: load_processors failed: {e:#}",
                     uuid
                 );
-                return false;
+                return watcher.has_pending();
             }
         };
         if configs.is_empty() {
@@ -6493,7 +6498,7 @@ impl PerspectiveInstance {
             }
         }
 
-        let had_pending = watcher.has_pending();
+        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
 
         // 2. Drain + run a pass per config.
         for cfg in &configs {

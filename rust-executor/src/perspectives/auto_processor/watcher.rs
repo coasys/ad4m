@@ -349,11 +349,24 @@ impl WatcherState {
             .is_some_and(|until| *until > now_ms)
     }
 
-    /// Whether any processor has turns waiting to be batched. While this
-    /// holds the watch loop polls at [`AUTO_PROCESSOR_TICK_MS`], so
-    /// `debounce_ms` and `max_wait_ms` keep their resolution.
+    /// Whether any processor has turns waiting to be batched, declared or
+    /// not. Used only when the declared processors could not be loaded.
     pub fn has_pending(&self) -> bool {
         self.per_processor.values().any(|p| !p.items.is_empty())
+    }
+
+    /// Whether any of the declared `processor_ids` has turns waiting to be
+    /// batched. While this holds the watch loop polls at
+    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
+    /// their resolution. Scoped to declared processors because a removed
+    /// processor's queue is never drained again and must not pin the loop at
+    /// the base rate.
+    pub fn has_pending_for<'a>(&self, processor_ids: impl IntoIterator<Item = &'a str>) -> bool {
+        processor_ids.into_iter().any(|id| {
+            self.per_processor
+                .get(id)
+                .is_some_and(|p| !p.items.is_empty())
+        })
     }
 }
 
@@ -1422,6 +1435,17 @@ mod tests {
         assert!(w.has_pending());
         assert!(w.drain_ready_batch(&c, 1_100).is_some());
         assert!(!w.has_pending());
+    }
+
+    /// A queue left behind by a processor that is no longer declared is never
+    /// drained, so it must not count as pending for the declared ones.
+    #[test]
+    fn has_pending_for_ignores_undeclared_processors() {
+        let mut w = WatcherState::new();
+        rec(&mut w, "removed", "a", 1_000);
+        assert!(w.has_pending());
+        assert!(!w.has_pending_for(["kept"]));
+        assert!(w.has_pending_for(["kept", "removed"]));
     }
 
     /// Nothing recorded → `drain_ready_batch` returns None regardless of the

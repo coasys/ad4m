@@ -432,6 +432,107 @@ mod tests {
         );
     }
 
+    /// A drained batch whose pass does not retire it (here `ShapesMissing`: no
+    /// class shape is registered, so no LLM is reached) is retried, so the
+    /// loop must stay at the base rate on the draining tick and on the tick
+    /// that re-records it (#1072).
+    #[tokio::test]
+    async fn tick_stays_pending_across_a_drained_retry_batch() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_message(
+            &mut p,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let cfg = AutoProcessorConfig {
+            processor_id: "retry-pending".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "recording tick"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 51, &ctx)
+                .await,
+            "the draining tick of a batch that will be retried must not report idle"
+        );
+        assert!(
+            watcher
+                .pending_for("retry-pending")
+                .is_none_or(|e| e.items.is_empty()),
+            "precondition: the batch was drained"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 102, &ctx)
+                .await,
+            "the unretired turn is re-recorded on the next tick"
+        );
+    }
+
+    /// A queue left behind by a processor that is no longer declared must not
+    /// pin the loop at the base rate (#1072): a declared processor with
+    /// nothing to do reports idle even while a stale queue exists.
+    #[tokio::test]
+    async fn tick_ignores_the_queue_of_an_undeclared_processor() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = AutoProcessorConfig {
+            processor_id: "declared".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        watcher.record_item(
+            "removed",
+            PendingTurn {
+                id: "stale".into(),
+                speaker: "did:key:alice".into(),
+                text: "left behind".into(),
+                timestamp: "1".into(),
+            },
+            now_ms,
+        );
+        assert!(
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "a removed processor's queue must not keep the loop at the base rate"
+        );
+    }
+
     /// The cursor's headline promise, end to end: a pass over a *grown*
     /// transcript enqueues only what is new. `m1`/`m2` are already on a prior
     /// run's `sources`, so a tick that re-gathers all three turns queues `m3`
