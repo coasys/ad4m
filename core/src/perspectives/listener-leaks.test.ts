@@ -214,38 +214,21 @@ describe('PerspectiveProxy.dispose scope (L3)', () => {
   });
 });
 
-describe('Query-subscription unsubscribe map (L5)', () => {
-  /** Captures PerspectiveClient's private `#querySubscriptionUnsubscribers` map the first time it stores a key. */
-  function captureMap(keyPrefix: string) {
-    const originalSet = Map.prototype.set;
-    const captured: { map?: Map<unknown, unknown> } = {};
-    const spy = jest.spyOn(Map.prototype, 'set').mockImplementation(function (this: Map<unknown, unknown>, key: unknown, value: unknown) {
-      if (!captured.map && typeof key === 'string' && key.startsWith(keyPrefix)) captured.map = this;
-      return originalSet.call(this, key, value);
-    });
-    return { captured, restore: () => spy.mockRestore() };
-  }
-
-  it('after 50 simulated reconnect swaps the map holds only the live subscriptions', () => {
+describe('Query-subscription listeners (L5)', () => {
+  it('after 50 simulated reconnect swaps only the live subscriptions hold socket callbacks', () => {
     const { client, callbackCount, api } = setup();
-    const { captured, restore } = captureMap('qsub-');
-    try {
-      // Two live subscriptions, each swapped 50 times the way QuerySubscriptionProxy does on reconnect:
-      // subscribe the new id first, then call the old unsubscribe.
-      const unsubs = [client.subscribeToQueryUpdates('qsub-a-0', jest.fn()), client.subscribeToQueryUpdates('qsub-b-0', jest.fn())];
-      for (let i = 1; i <= 50; i++) {
-        for (const [slot, name] of ['a', 'b'].entries()) {
-          const next = client.subscribeToQueryUpdates(`qsub-${name}-${i}`, jest.fn());
-          unsubs[slot]();
-          unsubs[slot] = next;
-        }
+    // Two live subscriptions, each swapped 50 times the way QuerySubscriptionProxy does on reconnect:
+    // subscribe the new id first, then call the old unsubscribe.
+    const unsubs = [client.subscribeToQueryUpdates('qsub-a-0', jest.fn()), client.subscribeToQueryUpdates('qsub-b-0', jest.fn())];
+    for (let i = 1; i <= 50; i++) {
+      for (const [slot, name] of ['a', 'b'].entries()) {
+        const next = client.subscribeToQueryUpdates(`qsub-${name}-${i}`, jest.fn());
+        unsubs[slot]();
+        unsubs[slot] = next;
       }
-      expect(captured.map!.size).toBe(2);
-      expect(callbackCount()).toBe(2);
-    } finally {
-      restore();
-      api.closeAll();
     }
+    expect(callbackCount()).toBe(2);
+    api.closeAll();
   });
 
   it('disposeQuerySubscription after the returned unsubscribe ran does not unsubscribe twice', async () => {
@@ -260,16 +243,6 @@ describe('Query-subscription unsubscribe map (L5)', () => {
     expect(call).toHaveBeenCalledWith('perspective.disposeQuery', { uuid: 'uuid-1', subscriptionId: 'qsub-x' });
     subscribe.mockRestore();
     call.mockRestore();
-    api.closeAll();
-  });
-
-  it('disposeQuerySubscription still releases a live subscription', async () => {
-    const { client, callbackCount, api } = setup();
-    jest.spyOn(api, 'call').mockResolvedValue(true as any);
-    client.subscribeToQueryUpdates('qsub-y', jest.fn());
-    expect(callbackCount()).toBe(1);
-    await client.disposeQuerySubscription('uuid-1', 'qsub-y');
-    expect(callbackCount()).toBe(0);
     api.closeAll();
   });
 });

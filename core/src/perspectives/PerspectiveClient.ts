@@ -50,7 +50,6 @@ export class PerspectiveClient {
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
     #unsubscribers: (() => void)[]
-    #querySubscriptionUnsubscribers: Map<string, () => void>
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -59,7 +58,6 @@ export class PerspectiveClient {
         this.#perspectiveRemovedCallbacks = []
         this.#perspectiveSyncStateChangeCallbacks = []
         this.#unsubscribers = []
-        this.#querySubscriptionUnsubscribers = new Map()
 
         if(subscribe) {
             this.subscribePerspectiveAdded()
@@ -151,7 +149,7 @@ export class PerspectiveClient {
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        const unsub = this.#apiClient.subscribe(
+        return this.#apiClient.subscribe(
             (data) => {
                 const event = data as Record<string, unknown>
                 if (event.type !== 'query-subscription-update') return
@@ -163,17 +161,6 @@ export class PerspectiveClient {
                 onData(parsed)
             }
         )
-        // The returned function also drops its map entry, so callers that swap
-        // subscriptions (reconnect) and never call disposeQuerySubscription for
-        // the old id do not grow the map.
-        const release = () => {
-            if (this.#querySubscriptionUnsubscribers.get(subscriptionId) === release) {
-                this.#querySubscriptionUnsubscribers.delete(subscriptionId)
-            }
-            unsub()
-        }
-        this.#querySubscriptionUnsubscribers.set(subscriptionId, release)
-        return release
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -182,8 +169,9 @@ export class PerspectiveClient {
         )
     }
 
+    /** Ends the subscription on the executor. The caller releases its local listener
+     *  with the function `subscribeToQueryUpdates` returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        this.#querySubscriptionUnsubscribers.get(subscriptionId)?.()
         return this.#apiClient.call<boolean>(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
