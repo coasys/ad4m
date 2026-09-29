@@ -76,7 +76,7 @@ describe('ApiClient AbortSignal support', () => {
         }
         expect(caught).toBeInstanceOf(DOMException)
         expect((caught as DOMException).name).toBe('AbortError')
-        // No socket should have been opened — the fast-path bailed before _ready.
+        // No socket should have been opened.
         expect(FakeWebSocket.last).toBeNull()
 
         client.closeAll()
@@ -119,7 +119,7 @@ describe('ApiClient AbortSignal support', () => {
         client.closeAll()
     })
 
-    it('late server reply after abort does not resolve or reject the original promise twice', async () => {
+    it('drops a late server reply to an aborted call', async () => {
         const client = new ApiClient(
             'http://localhost:1234',
             undefined,
@@ -133,27 +133,15 @@ describe('ApiClient AbortSignal support', () => {
 
         await flushMicrotasks()
         const ws = FakeWebSocket.last!
-        const sentReq = JSON.parse(ws.sent[0]) as AnyMsg
-        const origId = sentReq.id as string
+        const origId = (JSON.parse(ws.sent[0]) as AnyMsg).id as string
 
         controller.abort()
-        let caught: unknown
-        try { await promise } catch (e) { caught = e }
-        expect((caught as DOMException).name).toBe('AbortError')
+        await expect(promise).rejects.toMatchObject({ name: 'AbortError' })
 
-        // Now the server (oblivious to cancellation) ships a late reply.
-        // It must NOT trigger a double-settle (no unhandled rejection from
-        // the test, no resolve thrown — the promise is already settled).
-        // Because we delete the entry from _pendingCalls on abort, the
-        // late reply with the same id will be routed to subscribers
-        // instead.
+        // Neither the late reply nor the cancel ack reaches subscribers.
         ws.serverPush({ id: origId, result: '[]' })
-
-        // Subscribers should have received the late reply (it's routed
-        // because the id is no longer in _pendingCalls).
-        const lateReply = events.find((e) => e.id === origId)
-        expect(lateReply).toBeDefined()
-        expect(lateReply!.result).toBe('[]')
+        ws.serverPush({ id: 'cancel-ack', result: { cancelled: true } })
+        expect(events).toEqual([])
 
         client.closeAll()
     })
@@ -193,11 +181,7 @@ describe('ApiClient AbortSignal support', () => {
         // Give microtasks a chance.
         await flushMicrotasks()
         expect(ws.sent.length).toBe(sendCountBefore)
-        // Two listeners were registered in total: one in _readyOrAbort
-        // (connection phase) and one in call() (in-flight phase). Both
-        // were removed via cleanup — the "no extra send" check above
-        // confirms no stale handler remains.
-        expect(listenerCount).toBe(2)
+        expect(listenerCount).toBe(1)
 
         client.closeAll()
     })
@@ -334,123 +318,6 @@ describe('ApiClient with a socket that closes asynchronously', () => {
         ws.onmessage?.({ data: JSON.stringify({ id: ws.sent[0].id, result: 1 }) })
 
         await expect(promise).resolves.toBe(1)
-        client.closeAll()
-    })
-})
-
-describe('ApiClient.setToken', () => {
-    class TokenWebSocket {
-        static instances: TokenWebSocket[] = []
-        readyState = 0
-        sent: AnyMsg[] = []
-        onopen: ((ev?: unknown) => void) | null = null
-        onmessage: ((ev: { data: string }) => void) | null = null
-        onerror: ((ev: unknown) => void) | null = null
-        onclose: ((ev?: unknown) => void) | null = null
-        constructor(public url: string) { TokenWebSocket.instances.push(this) }
-        send(data: string) { this.sent.push(JSON.parse(data) as AnyMsg) }
-        // Asynchronous, like browsers and `ws`.
-        close() { this.readyState = 2; setTimeout(() => { this.readyState = 3; this.onclose?.() }, 0) }
-        open() { this.readyState = 1; this.onopen?.() }
-        reply(msg: AnyMsg) { this.onmessage?.({ data: JSON.stringify(msg) }) }
-    }
-
-    beforeEach(() => { TokenWebSocket.instances = [] })
-
-    function makeClient(token?: string) {
-        return new ApiClient(
-            'http://localhost:1234',
-            token,
-            TokenWebSocket as unknown as new (url: string) => WebSocket,
-        )
-    }
-
-    it('reconnects an open socket so the next call carries the new token', async () => {
-        const client = makeClient('old')
-        const reconnectCb = jest.fn()
-        client.onReconnect(reconnectCb)
-        client.connect()
-        TokenWebSocket.instances[0].open()
-
-        client.setToken('new')
-        expect(TokenWebSocket.instances).toHaveLength(2)
-        expect(TokenWebSocket.instances[0].readyState).toBeGreaterThanOrEqual(2) // closing or closed
-        expect(TokenWebSocket.instances[1].url).toBe('ws://localhost:1234/api/v1/ws?token=new')
-
-        const promise = client.call('agent.get')
-        TokenWebSocket.instances[1].open()
-        await flushMicrotasks()
-        const req = TokenWebSocket.instances[1].sent[0]
-        expect(req.type).toBe('agent.get')
-        TokenWebSocket.instances[1].reply({ id: req.id, result: { did: 'd' } })
-        await expect(promise).resolves.toEqual({ did: 'd' })
-        expect(TokenWebSocket.instances[0].sent).toHaveLength(0)
-        // Server-side subscriptions belong to the old socket; listeners re-subscribe.
-        expect(reconnectCb).toHaveBeenCalledTimes(1)
-
-        client.closeAll()
-    })
-
-    it('rejects calls in flight on the old socket with 503', async () => {
-        const client = makeClient('old')
-        const promise = client.call('agent.get')
-        TokenWebSocket.instances[0].open()
-        await flushMicrotasks()
-        expect(TokenWebSocket.instances[0].sent).toHaveLength(1)
-
-        client.setToken('new')
-        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
-
-        client.closeAll()
-    })
-
-    it('sends calls waiting on a connecting socket over the new socket', async () => {
-        const client = makeClient('old')
-        const promise = client.call('agent.get')
-        await flushMicrotasks()
-
-        client.setToken('new')
-        expect(TokenWebSocket.instances[1].url).toBe('ws://localhost:1234/api/v1/ws?token=new')
-        TokenWebSocket.instances[1].open()
-        await flushMicrotasks()
-        const req = TokenWebSocket.instances[1].sent[0]
-        expect(req.type).toBe('agent.get')
-        TokenWebSocket.instances[1].reply({ id: req.id, result: 'ok' })
-        await expect(promise).resolves.toBe('ok')
-
-        client.closeAll()
-    })
-
-    it('sends a call made just before setToken over the new socket', async () => {
-        const client = makeClient('old')
-        client.connect()
-        TokenWebSocket.instances[0].open()
-
-        // call() has not sent yet when setToken swaps the socket.
-        const promise = client.call('agent.get')
-        client.setToken('new')
-        await flushMicrotasks()
-        TokenWebSocket.instances[1].open()
-        await flushMicrotasks()
-        const req = TokenWebSocket.instances[1].sent[0]
-        expect(req.type).toBe('agent.get')
-        TokenWebSocket.instances[1].reply({ id: req.id, result: 'ok' })
-        await expect(promise).resolves.toBe('ok')
-        expect(TokenWebSocket.instances[0].sent).toHaveLength(0)
-
-        client.closeAll()
-    })
-
-    it('does not open a socket when none is open, or when the token is unchanged', () => {
-        const client = makeClient('old')
-        client.setToken('new')
-        expect(TokenWebSocket.instances).toHaveLength(0)
-
-        client.connect()
-        TokenWebSocket.instances[0].open()
-        client.setToken('new')
-        expect(TokenWebSocket.instances).toHaveLength(1)
-
         client.closeAll()
     })
 })

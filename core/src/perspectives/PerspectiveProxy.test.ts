@@ -121,13 +121,13 @@ describe('ApiClient.onReconnect', () => {
     client.onReconnect(reconnectCb);
 
     // First connection: onopen must NOT fire the reconnect callback
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[0].open();
     expect(reconnectCb).not.toHaveBeenCalled();
 
     // Drop and reconnect: the second onopen must fire it exactly once
     FakeWs.instances[0].drop();
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[1].open();
     expect(reconnectCb).toHaveBeenCalledTimes(1);
 
@@ -141,12 +141,12 @@ describe('ApiClient.onReconnect', () => {
     const reconnectCb = jest.fn();
     const unsub = client.onReconnect(reconnectCb);
 
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[0].open();
     unsub();
 
     FakeWs.instances[0].drop();
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[1].open();
     expect(reconnectCb).not.toHaveBeenCalled();
 
@@ -158,7 +158,7 @@ describe('ApiClient.onReconnect', () => {
     const FakeWs = makeFakeWebSocketImpl();
     const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
 
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[0].open();
     client.closeAll();
 
@@ -166,13 +166,13 @@ describe('ApiClient.onReconnect', () => {
     // initial connect again, not a reconnect.
     const reconnectCb = jest.fn();
     client.onReconnect(reconnectCb);
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[1].open();
     expect(reconnectCb).not.toHaveBeenCalled();
 
     // …but a genuine reconnect within the new lifecycle still fires.
     FakeWs.instances[1].drop();
-    client.connect();
+    client.waitForSubscription();
     FakeWs.instances[2].open();
     expect(reconnectCb).toHaveBeenCalledTimes(1);
 
