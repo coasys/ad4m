@@ -298,8 +298,11 @@ export class WakerSubscriptionManager {
           try {
             const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const rows: { source: string }[] = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            parents.push(...rows.map((row) => row.source));
+            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
+            if (Array.isArray(rows)) {
+              // A row omits a variable left unbound in its solution.
+              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
+            }
           } catch (err: any) {
             this.logger.warn(
               `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,

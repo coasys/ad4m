@@ -184,7 +184,8 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
+  /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
+  async function wakeWithParentRows(rows: unknown) {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
       return {
@@ -195,16 +196,17 @@ describe('WakerSubscriptionManager', () => {
       };
     };
     const queries: string[] = [];
+    const warnings: string[] = [];
     const client = {
       querySparql: (_uuid: string, query: string) => {
         queries.push(query);
-        return Promise.resolve([{ source: 'test://parent' }]);
+        return Promise.resolve(rows);
       },
     };
     const wakes: any[] = [];
     const manager = new WakerSubscriptionManager({
       perspectiveClient: client,
-      logger: noopLogger(),
+      logger: { ...noopLogger(), warn: (msg: string) => { warnings.push(msg); } },
       QuerySubscriptionProxy: ProxyClass,
       debounceMs: 10,
       retryPendingMs: 60_000,
@@ -214,11 +216,25 @@ describe('WakerSubscriptionManager', () => {
     await manager.subscribe({ ...sub, id: 'mention-parents' });
     await deliver!([{ source: 'test://message' }]);
     await waitUntil(() => wakes.length > 0);
+    manager.disposeAll();
+    return { wakes, queries, warnings };
+  }
 
+  it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
+    const { wakes, queries } = await wakeWithParentRows([{ source: 'test://parent' }]);
     expect(queries[0]).toContain('<ad4m://has_child> <test://message>');
     expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'] }]]);
+  });
 
-    manager.disposeAll();
+  it('keeps only string parents when a row leaves ?source unbound', async () => {
+    const { wakes } = await wakeWithParentRows([{ source: 'test://a' }, {}, { source: 'test://b' }]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://a', 'test://b'] }]]);
+  });
+
+  it('reports no parents, without a warning, when querySparql returns a non-array', async () => {
+    const { wakes, warnings } = await wakeWithParentRows(true);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [] }]]);
+    expect(warnings).toEqual([]);
   });
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {
