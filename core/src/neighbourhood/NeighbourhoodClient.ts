@@ -90,7 +90,8 @@ export class NeighbourhoodClient {
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#apiClient.subscribe(
             (data) => {
-                if (data.type === 'signal') {
+                // The executor sends `{perspective, signal, recipient}`; route by perspective uuid.
+                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
                     this.dispatchSignal(perspectiveUUID, data.signal)
                 }
             }
