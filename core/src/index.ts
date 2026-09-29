@@ -45,5 +45,3 @@ export * from './shacl/builders'
 export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError } from "./apiClient";
-/** @deprecated Use `RpcError` instead. */
-export { RpcError as RestError } from "./apiClient";
