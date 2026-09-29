@@ -20,17 +20,6 @@ export type MessageCallback = (message: PerspectiveExpression) => void
 export type ExceptionCallback = (info: ExceptionInfo) => void
 export type NotificationTriggeredCallback = (notification: TriggeredNotification) => void
 
-function normalizeExceptionType(type: ExceptionInfo['type'] | string): ExceptionInfo['type'] {
-    if (typeof type !== 'string' || type === type.toUpperCase()) {
-        return type as ExceptionInfo['type']
-    }
-
-    return type
-        .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-        .replace(/([A-Z])([A-Z][a-z])/g, '$1_$2')
-        .toUpperCase() as ExceptionInfo['type']
-}
-
 export class RuntimeClient {
     #apiClient: ApiClient
     #messageReceivedCallbacks: MessageCallback[]
@@ -299,16 +288,9 @@ export class RuntimeClient {
             case 'message-received':
                 notifyListeners(this.#messageReceivedCallbacks, 'message-received', data.message as PerspectiveExpression)
                 break
-            case 'exception-occurred': {
-                if (!data.exception) break
-                const exception = data.exception as ExceptionInfo
-                const normalizedException = {
-                    ...exception,
-                    type: normalizeExceptionType(exception.type),
-                }
-                notifyListeners(this.#exceptionOccurredCallbacks, 'exception-occurred', normalizedException)
+            case 'exception-occurred':
+                notifyListeners(this.#exceptionOccurredCallbacks, 'exception-occurred', data.exception as ExceptionInfo)
                 break
-            }
         }
     }
 }

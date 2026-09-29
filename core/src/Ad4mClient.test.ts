@@ -685,30 +685,6 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
     });
 
-    test('runtime exception subscriptions normalize PascalCase exception types', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
-        const callback = jest.fn();
-        freshClient.runtime.addExceptionCallback(callback);
-
-        const ws = lastOf(MockWebSocket.instances);
-        ws.emit({
-            type: 'exception-occurred',
-            exception: {
-                title: 'Request to authenticate application',
-                message: 'demo-app is waiting for authentication',
-                type: 'CapabilityRequested',
-                addon: '{}',
-            },
-        });
-
-        expect(callback).toHaveBeenCalledWith({
-            title: 'Request to authenticate application',
-            message: 'demo-app is waiting for authentication',
-            type: 'CAPABILITY_REQUESTED',
-            addon: '{}',
-        });
-    });
-
     test('subscribeToQueryUpdates() ignores unrelated events and accepts object results', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
@@ -1275,6 +1251,7 @@ describe('Ad4mClient', () => {
         }
         expect(listeners.added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
         expect(listeners.removed).toHaveBeenCalledWith('uuid-a');
+        expect(listeners.exception).toHaveBeenCalledWith({ title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' });
         freshClient.close();
     });
 
