@@ -342,179 +342,44 @@ export class SHACLShape {
    * Serialize shape to Turtle (RDF) format
    */
   toTurtle(): string {
-    let turtle = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n`;
-    turtle += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n`;
-    turtle += `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n`;
-    turtle += `@prefix ad4m: <ad4m://> .\n\n`;
-    
-    turtle += `<${this.nodeShapeUri}>\n`;
-    turtle += `  a sh:NodeShape ;\n`;
-    
-    if (this.targetClass) {
-      turtle += `  sh:targetClass <${this.targetClass}> ;\n`;
-    }
+    const links = this.toLinks();
+    const str = (v: string) => `"${escapeTurtleString(v)}"`;
+    const pred = (p: string) => p === 'rdf://type' ? 'a' : p.replace(/^(sh|ad4m):\/\//, '$1:');
+    const obj = ({ predicate, target: t }: Link): string => {
+      if (predicate === 'ad4m://identity') return 'true';
+      if (predicate === 'sh://pattern') return str(t.slice('literal:'.length));
+      if (t.startsWith('literal:string:')) {
+        return str(predicate === 'sh://hasValue' ? decodeURIComponent(t.slice(15)) : t.slice(15));
+      }
+      if (t.startsWith('literal:')) return t.slice(8).replace(/\^\^.*$/, ''); // numbers and booleans
+      if (t.startsWith('sh://')) return pred(t);
+      return `<${t}>`;
+    };
+    // One Turtle statement per link; sh:in becomes a standard RDF list, and
+    // ad4m:in keeps the JSON with labels.
+    const statements = (source: string) => links
+      .filter(l => l.source === source && l.predicate !== 'sh://property')
+      .flatMap(l => l.predicate === 'sh://in'
+        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: { value: string }) => str(v.value)).join(' ')} )`, `ad4m:in ${obj(l)}`]
+        : [`${pred(l.predicate!)} ${obj(l)}`]);
 
-    // Emit sh:node references for parent shapes (model inheritance)
-    for (const parentUri of this.parentShapes) {
-      turtle += `  sh:node <${parentUri}> ;\n`;
-    }
+    const properties = links
+      .filter(l => l.source === this.nodeShapeUri && l.predicate === 'sh://property')
+      .map((l, i) => {
+        const lines = statements(l.target);
+        // A blank node cannot carry the name the way the link URI does.
+        const name = this.properties[i].name;
+        if (name) lines.splice(1, 0, `sh:name ${str(name)}`);
+        return `sh:property [\n    ${lines.join(' ;\n    ')}\n  ]`;
+      });
 
-    // Values toLinks() stores as `literal:string:` are written as Turtle strings.
-    const str = (value: string) => `"${escapeTurtleString(value)}"`;
-
-    if (this.constructor_actions) {
-      turtle += `  ad4m:constructor ${str(JSON.stringify(this.constructor_actions))} ;\n`;
-    }
-
-    if (this.destructor_actions) {
-      turtle += `  ad4m:destructor ${str(JSON.stringify(this.destructor_actions))} ;\n`;
-    }
-
-    if (this.interpretationHint) {
-      turtle += `  ad4m:interpretation_hint ${str(this.interpretationHint)} ;\n`;
-    }
-
-    // A shape without properties ends its last statement here.
-    if (this.properties.length === 0) {
-      turtle = turtle.slice(0, -2) + '.\n';
-    }
-    
-    // Add property shapes
-    for (let i = 0; i < this.properties.length; i++) {
-      const prop = this.properties[i];
-      const isLast = i === this.properties.length - 1;
-      
-      turtle += `  sh:property [\n`;
-      turtle += `    sh:path <${prop.path}> ;\n`;
-
-      // toLinks() carries the name in the property shape URI; a blank node
-      // cannot, so Turtle states it with sh:name.
-      if (prop.name) {
-        turtle += `    sh:name ${str(prop.name)} ;\n`;
-      }
-
-      if (prop.ordering) {
-        turtle += `    ad4m:ordering ${str(prop.ordering)} ;\n`;
-      }
-      
-      if (prop.datatype) {
-        turtle += `    sh:datatype <${prop.datatype}> ;\n`;
-      }
-      
-      if (prop.nodeKind) {
-        turtle += `    sh:nodeKind sh:${prop.nodeKind} ;\n`;
-      }
-      
-      if (prop.minCount !== undefined) {
-        turtle += `    sh:minCount ${prop.minCount} ;\n`;
-      }
-      
-      if (prop.maxCount !== undefined) {
-        turtle += `    sh:maxCount ${prop.maxCount} ;\n`;
-      }
-      
-      if (prop.pattern) {
-        turtle += `    sh:pattern "${escapeTurtleString(prop.pattern)}" ;\n`;
-      }
-      
-      if (prop.minInclusive !== undefined) {
-        turtle += `    sh:minInclusive ${prop.minInclusive} ;\n`;
-      }
-      
-      if (prop.maxInclusive !== undefined) {
-        turtle += `    sh:maxInclusive ${prop.maxInclusive} ;\n`;
-      }
-      
-      if (prop.hasValue) {
-        turtle += `    sh:hasValue "${escapeTurtleString(prop.hasValue)}" ;\n`;
-      }
-      
-      // AD4M-specific metadata
-      if (prop.local !== undefined) {
-        turtle += `    ad4m:local ${prop.local} ;\n`;
-      }
-
-      if (prop.writable !== undefined) {
-        turtle += `    ad4m:writable ${prop.writable} ;\n`;
-      }
-
-      // Interpreter dedup key: `toLinks()` and `toJSON()` preserve
-      // `identity`; a Turtle export must too or the round-trip through
-      // Turtle silently drops the interpretation-dedup marker
-      // (CodeRabbit #881 review).
-      if (prop.identity !== undefined) {
-        turtle += `    ad4m:identity ${prop.identity} ;\n`;
-      }
-
-      if (prop.resolveLanguage != null) {
-        turtle += `    ad4m:resolveLanguage ${str(prop.resolveLanguage)} ;\n`;
-      }
-
-      if (prop.setter && prop.setter.length > 0) {
-        turtle += `    ad4m:setter ${str(JSON.stringify(prop.setter))} ;\n`;
-      }
-
-      if (prop.adder && prop.adder.length > 0) {
-        turtle += `    ad4m:adder ${str(JSON.stringify(prop.adder))} ;\n`;
-      }
-
-      if (prop.remover && prop.remover.length > 0) {
-        turtle += `    ad4m:remover ${str(JSON.stringify(prop.remover))} ;\n`;
-      }
-
-      if (prop.getter) {
-        turtle += `    ad4m:getter ${str(prop.getter)} ;\n`;
-      }
-
-      if (prop.conformanceConditions && prop.conformanceConditions.length > 0) {
-        turtle += `    ad4m:conformanceConditions ${str(JSON.stringify(prop.conformanceConditions))} ;\n`;
-      }
-
-      if (prop.class) {
-        turtle += `    sh:class <${prop.class}> ;\n`;
-      }
-
-      // Standard SHACL list of the values; ad4m:in keeps the sh://in link's JSON (with labels).
-      if (prop.in && prop.in.length > 0) {
-        turtle += `    sh:in ( ${prop.in.map(v => str(v.value)).join(' ')} ) ;\n`;
-        turtle += `    ad4m:in ${str(JSON.stringify(prop.in))} ;\n`;
-      }
-
-      if (prop.relationKind) {
-        turtle += `    ad4m:relationKind ${str(prop.relationKind)} ;\n`;
-      }
-
-      if (prop.targetClassName) {
-        turtle += `    ad4m:targetClassName ${str(prop.targetClassName)} ;\n`;
-      }
-
-      if (prop.whereFilter !== undefined && prop.whereFilter !== null) {
-        turtle += `    ad4m:whereFilter ${str(JSON.stringify(prop.whereFilter))} ;\n`;
-      }
-
-      if (prop.wherePredicates && Object.keys(prop.wherePredicates).length > 0) {
-        turtle += `    ad4m:wherePredicates ${str(JSON.stringify(prop.wherePredicates))} ;\n`;
-      }
-
-      if (prop.filter !== undefined) {
-        turtle += `    ad4m:filter ${prop.filter} ;\n`;
-      }
-
-      if (prop.transform && typeof prop.transform === 'object') {
-        turtle += `    ad4m:transform ${str(JSON.stringify(prop.transform))} ;\n`;
-      }
-
-      if (prop.interpretationHint) {
-        turtle += `    ad4m:interpretation_hint ${str(prop.interpretationHint)} ;\n`;
-      }
-
-      // Remove trailing semicolon and close bracket
-      turtle = turtle.slice(0, -2) + '\n';
-      turtle += isLast ? `  ] .\n` : `  ] ;\n`;
-    }
-    
-    return turtle;
+    return `@prefix sh: <http://www.w3.org/ns/shacl#> .\n` +
+      `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n` +
+      `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n` +
+      `@prefix ad4m: <ad4m://> .\n\n` +
+      `<${this.nodeShapeUri}>\n  ${[...statements(this.nodeShapeUri), ...properties].join(' ;\n  ')} .\n`;
   }
+
   
   /**
    * Serialize shape to AD4M Links (RDF triples)

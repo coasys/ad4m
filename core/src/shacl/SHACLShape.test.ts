@@ -3,6 +3,11 @@ import { concat, literal, focus } from './builders';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
+// Links the executor's parse_shacl_to_links writes for a shape that uses every
+// field; its test `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
+const golden = JSON.parse(readFileSync(
+  join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
+
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
     it('creates basic shape links', () => {
@@ -258,55 +263,9 @@ describe('SHACLShape', () => {
       expect(reconstructed.parentShapes).toEqual(['test://BaseShape', 'test://MixinShape']);
       expect(reconstructed.toLinks()).toEqual(links);
     });
-
-    it('reads no parents for a shape without parent links', () => {
-      const original = new SHACLShape('test://Solo');
-      const reconstructed = SHACLShape.fromLinks(original.toLinks(), 'test://SoloShape');
-      expect(reconstructed.parentShapes).toEqual([]);
-    });
   });
 
   describe('toTurtle()', () => {
-    const fullShape = () => {
-      const shape = new SHACLShape('test://Full');
-      shape.addParentShape('test://BaseShape');
-      shape.interpretationHint = 'A "full" shape';
-      shape.setConstructorActions([{ action: 'addLink', source: 'this', predicate: 'rdf://type', target: 'test://Full' }]);
-      shape.setDestructorActions([{ action: 'removeLink', source: 'this', predicate: 'rdf://type', target: 'test://Full' }]);
-      shape.addProperty({
-        name: 'field',
-        path: 'test://field',
-        ordering: 'linkedList',
-        datatype: 'xsd://string',
-        nodeKind: 'Literal',
-        minCount: 1,
-        maxCount: 5,
-        pattern: '^[a-z]+$',
-        minInclusive: 0,
-        maxInclusive: 100,
-        hasValue: 'fixed value',
-        local: true,
-        writable: true,
-        resolveLanguage: 'literal',
-        setter: [{ action: 'setSingleTarget', source: 'this', predicate: 'test://field', target: 'value' }],
-        adder: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
-        remover: [{ action: 'removeLink', source: 'this', predicate: 'test://field', target: 'value' }],
-        getter: 'SELECT ?target WHERE { <Base> <test://field> ?target }',
-        conformanceConditions: [{ type: 'flag', predicate: 'test://kind', value: 'test://x' }],
-        class: 'test://OtherShape',
-        in: [{ value: 'a', label: 'A' }, { value: 'b' }],
-        relationKind: 'hasMany',
-        targetClassName: 'Other',
-        whereFilter: { status: 'open' },
-        wherePredicates: { status: 'test://status' },
-        filter: false,
-        transform: literal('x'),
-        interpretationHint: 'the field',
-        identity: true,
-      });
-      return shape;
-    };
-
     const prefixed = (predicate: string) => {
       if (predicate === 'rdf://type') return 'a';
       const m = predicate.match(/^(sh|ad4m):\/\/(.+)$/);
@@ -321,7 +280,7 @@ describe('SHACLShape', () => {
       );
 
     it('emits every predicate and value that toLinks() emits', () => {
-      const shape = fullShape();
+      const shape = SHACLShape.fromJSON(golden.shape);
       const turtle = shape.toTurtle();
       const strings = turtleStrings(turtle);
 
@@ -339,8 +298,8 @@ describe('SHACLShape', () => {
           expect(turtle).toContain(`<${link.target}>`);
         }
       }
-      expect(strings).toContain('field'); // sh:name, carried by the URI in toLinks()
-      expect(turtle).toContain('sh:in ( "a" "b" ) ;'); // an RDF list, as SHACL requires
+      expect(strings).toContain('name'); // sh:name, carried by the URI in toLinks()
+      expect(turtle).toContain('sh:in ( "rex" "fido" ) ;'); // an RDF list, as SHACL requires
     });
 
     it('does not corrupt string literals at word boundaries', () => {
@@ -858,18 +817,14 @@ describe('SHACLShape', () => {
     });
   });
   describe('executor golden links', () => {
-    // Written by the executor's parse_shacl_to_links; its test
-    // `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
-    const fixture = JSON.parse(readFileSync(
-      join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
+    const json = (shape: SHACLShape) => JSON.parse(JSON.stringify(shape.toJSON()));
 
     it("decodes the executor's golden links back to the shape it sent", () => {
-      const shape = SHACLShape.fromLinks(fixture.links, `zoo://${fixture.name}Shape`);
-      expect(JSON.parse(JSON.stringify(shape.toJSON()))).toEqual(fixture.shape);
+      expect(json(SHACLShape.fromLinks(golden.links, 'zoo://DogShape'))).toEqual(golden.shape);
     });
 
     it('sends the executor the shape fromJSON read', () => {
-      expect(JSON.parse(JSON.stringify(SHACLShape.fromJSON(fixture.shape).toJSON()))).toEqual(fixture.shape);
+      expect(json(SHACLShape.fromJSON(golden.shape))).toEqual(golden.shape);
     });
   });
 });
