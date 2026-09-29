@@ -264,6 +264,56 @@ function compareCodePoints(a: string, b: string): number {
 }
 
 /**
+ * Decode a state's `stateValue` link target into the number the state sort
+ * keys on. **One grammar, shared verbatim with `decode_state_value` in
+ * `rust-executor/src/perspectives/shacl_parser.rs`; a change to one is a
+ * change to both**, and the `state value decoder matches rust` test here and
+ * `state_value_decoder_matches_ts` there hold the two to the same answers.
+ *
+ * Not `Literal.fromUrl(target).get()`: that is `parseFloat`, which reads
+ * `1abc` as 1 and `inf` as NaN, while Rust's `str::parse::<f64>` does the
+ * reverse — so before #1202 the two runtimes could decode the same links to
+ * different values and pick different initial states. The grammar:
+ *
+ * 1. The target must be a number literal (`literal:number:` or the legacy
+ *    `literal://number:` prefix). Anything else is NaN.
+ * 2. The payload is percent-decoded: `Literal.toUrl` writes `1e21` as
+ *    `1e%2B21`. A payload that does not decode is NaN.
+ * 3. A plain decimal — `[+-]?([0-9]+.?[0-9]*|.[0-9]+)([eE][+-]?[0-9]+)?`,
+ *    ASCII digits only — parses with `Number`; both runtimes' parsers agree
+ *    on this set. `-0` decodes to `-0`, which the sort treats as `0`.
+ * 4. `inf` / `infinity`, any ASCII case, optional sign, is ±Infinity.
+ *    Rust's `parse_flow_to_links` writes `-inf`, `Literal.toUrl` writes
+ *    `-Infinity`; both runtimes read both.
+ * 5. Everything else is NaN, which the sort puts last: `NaN`, an empty
+ *    payload, `1abc`, ` 1`, `0x10`, non-ASCII digits.
+ *
+ * A *missing* `stateValue` link is not this function's case: `fromLinks`
+ * reads it as `0`, as Rust does.
+ */
+const STATE_VALUE_DECIMAL = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
+const STATE_VALUE_INFINITE = /^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
+function decodeStateValue(target: string): number {
+  const payload = target.startsWith("literal://number:")
+    ? target.slice("literal://number:".length)
+    : target.startsWith("literal:number:")
+      ? target.slice("literal:number:".length)
+      : undefined;
+  if (payload === undefined) return NaN;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(payload);
+  } catch {
+    return NaN;
+  }
+  if (STATE_VALUE_DECIMAL.test(decoded)) return Number(decoded);
+  if (STATE_VALUE_INFINITE.test(decoded)) {
+    return decoded.startsWith("-") ? -Infinity : Infinity;
+  }
+  return NaN;
+}
+
+/**
  * Runtime shape check for a decoded `ModelQuery`. Deserialization paths use
  * this to guard against malformed guard arrays leaking into flow metadata
  * (an untyped `Array.isArray` would happily accept `[null]` or `[{}]`).
@@ -899,7 +949,9 @@ export class SHACLFlow {
       const valueLink = links.find(l =>
         l.source === stateUri && l.predicate === "ad4m://stateValue"
       );
-      const stateValue = valueLink ? Literal.fromUrl(valueLink.target).get() as number : 0;
+      // Missing link: 0, as in Rust. Present link: the shared strict grammar
+      // (`decodeStateValue`), NaN when it does not fit.
+      const stateValue = valueLink ? decodeStateValue(valueLink.target) : 0;
       
       // Get per-state interpretation hint (optional). Same non-empty-string
       // guard as the flow-level hint.
@@ -997,14 +1049,18 @@ export class SHACLFlow {
     // This comparator must stay identical to the one in rust-executor's
     // `parse_flow_from_links` (`rust-executor/src/perspectives/shacl_parser.rs`):
     // both runtimes read `states[0]` as the genesis state, and a Rust-side
-    // spawn, `derive_state` and `verify_receipt` all start from it.
+    // spawn, `derive_state` and `verify_receipt` all start from it. So must
+    // its input: `decodeStateValue` above and Rust `decode_state_value` read
+    // the `stateValue` literal with one grammar, so the same links decode to
+    // the same numbers before this sort ever runs.
     //
-    // - NaN sorts last. `Literal.fromUrl` decodes `number:NaN` with
-    //   `parseFloat`, so a NaN can arrive; `a.value - b.value` would then be
-    //   NaN, which `Array.prototype.sort` treats as "equal" in an
-    //   engine-defined way that also scrambles the finite states around it.
-    //   A state whose ordering value is undecodable has no claim to being
-    //   first.
+    // - NaN sorts last. `decodeStateValue` returns NaN for every payload
+    //   outside its grammar (a literal `NaN`, an empty payload, `1abc`, …),
+    //   so NaN is the common case for a malformed definition; `a.value -
+    //   b.value` would then be NaN, which `Array.prototype.sort` treats as
+    //   "equal" in an engine-defined way that also scrambles the finite
+    //   states around it. A state whose ordering value is undecodable has
+    //   no claim to being first.
     // - Equal values break on state name, ascending by Unicode code point
     //   (`compareCodePoints`), which is the order Rust's `String::cmp` gives
     //   over UTF-8 bytes (#1202). Without this, `sort` is stable and a tie

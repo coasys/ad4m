@@ -743,14 +743,66 @@ fn decode_literal_string(target: &str) -> Option<String> {
     urlencoding::decode(payload).ok().map(|c| c.into_owned())
 }
 
-/// Strip a `literal:number:` / `literal://number:` prefix and parse
-/// the tail as f64. Both prefix shapes are accepted so wire-format
-/// migration doesn't require reprocessing every flow node.
-fn decode_literal_number(target: &str) -> Option<f64> {
-    let payload = target
+/// Decode a state's `stateValue` target into the `f64` the state sort keys
+/// on. **One grammar, shared verbatim with `decodeStateValue` in
+/// `core/src/shacl/SHACLFlow.ts`; a change to one is a change to both**,
+/// and `state_value_decoder_matches_ts` / the same-named TS test hold the
+/// two to the same answers.
+///
+/// The grammar is deliberately narrower than either language's own float
+/// parser, because those disagree: `str::parse::<f64>` rejects `1abc` and
+/// accepts `inf`, JS `parseFloat` accepts `1abc` (as 1) and rejects `inf`
+/// (as NaN). Before #1202 an unparsable payload became `0.0` here and NaN
+/// in TS, so the two runtimes could pick different initial states from the
+/// same links. Now:
+///
+/// 1. The target must be a number literal (`literal:number:` or the legacy
+///    `literal://number:` prefix). Anything else is NaN.
+/// 2. The payload is percent-decoded: TS `Literal.toUrl` writes `1e21` as
+///    `1e%2B21`. A payload that does not decode is NaN.
+/// 3. A plain decimal — `[+-]?([0-9]+.?[0-9]*|.[0-9]+)([eE][+-]?[0-9]+)?`,
+///    ASCII digits only — parses; both runtimes' parsers agree on this set.
+///    `-0` decodes to `-0.0`, which the sort treats as `0.0` (see there).
+/// 4. `inf` / `infinity`, any ASCII case, optional sign, is ±∞. Rust's own
+///    `parse_flow_to_links` writes `-inf`, TS writes `-Infinity`; both read
+///    both.
+/// 5. Everything else is NaN, which the sort puts last: `NaN`, an empty
+///    payload, `1abc`, ` 1`, `0x10`, non-ASCII digits.
+///
+/// A *missing* `stateValue` link is not this function's case: the caller
+/// reads it as `0.0`, as TS does.
+fn decode_state_value(target: &str) -> f64 {
+    use regex::Regex;
+    use std::sync::LazyLock;
+    // ASCII digit classes on purpose: `\d` is Unicode-aware in the `regex`
+    // crate and ASCII-only in JS, and `str::parse` rejects non-ASCII digits.
+    static DECIMAL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$").expect("static")
+    });
+    static INFINITE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$").expect("static")
+    });
+
+    let Some(payload) = target
         .strip_prefix("literal://number:")
-        .or_else(|| target.strip_prefix("literal:number:"))?;
-    payload.parse().ok()
+        .or_else(|| target.strip_prefix("literal:number:"))
+    else {
+        return f64::NAN;
+    };
+    let Ok(payload) = urlencoding::decode(payload) else {
+        return f64::NAN;
+    };
+    if DECIMAL.is_match(&payload) {
+        return payload.parse().unwrap_or(f64::NAN);
+    }
+    if INFINITE.is_match(&payload) {
+        return if payload.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+    }
+    f64::NAN
 }
 
 /// How much of an offending literal a warning quotes. Flow literals are
@@ -1199,8 +1251,11 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
             .unwrap_or_default();
         state_uri_to_name.insert(state_uri.to_string(), state_name.clone());
 
+        // Missing link: `0.0`, as in TS. Present link: the shared strict
+        // grammar, NaN when it does not fit — never `0.0`, which would let
+        // an undecodable value win the initial-state sort (#1204 review).
         let value = find_link(links, state_uri, "ad4m://stateValue")
-            .and_then(|l| decode_literal_number(&l.target))
+            .map(|l| decode_state_value(&l.target))
             .unwrap_or(0.0);
 
         let interpretation_hint = find_link(links, state_uri, "ad4m://interpretationHint")
@@ -1247,8 +1302,11 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // differently in the two runtimes, or on two nodes running the same one,
     // whenever link-discovery order differs from value order, and a
     // Rust-side spawn would mint instances in the wrong starting state. The
-    // comparator is the same in both runtimes, NaN rule included; a change
-    // to one is a change to both.
+    // comparator is the same in both runtimes, NaN rule included, and so is
+    // its input: `decode_state_value` above and TS `decodeStateValue` read
+    // the `stateValue` literal with one grammar, so the same links decode
+    // to the same `f64`s before this sort ever runs. A change to one side
+    // of either is a change to both.
     //
     // Ties on `value` break on state name (#1202). `sort_by` is stable, so
     // without the tie-break equal values kept discovery order — exactly the
@@ -1271,8 +1329,9 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
     // always `Some`; the `unwrap_or` is unreachable.
     //
     // `NaN` sorts last rather than comparing equal to everything. The value
-    // arrives from `decode_literal_number`, which is `str::parse::<f64>` — so
-    // a literal of `NaN` on the graph decodes to one, and
+    // arrives from `decode_state_value`, which returns NaN for every payload
+    // outside its grammar (a literal `NaN`, an empty payload, `1abc`, …), so
+    // NaN is the common case for a malformed definition, and
     // `partial_cmp(…).unwrap_or(Equal)` on its own would then break the total
     // order `sort_by` requires, leaving the *finite* states in arbitrary
     // relative order too. Since `states[0]` is the initial state, that would
@@ -4033,8 +4092,8 @@ mod tests {
 
     #[test]
     fn parse_flow_from_links_sorts_nan_state_values_last() {
-        // `decode_literal_number` is `str::parse::<f64>`, so a literal of `NaN`
-        // on the graph decodes to one. Comparing it as "equal to everything"
+        // `decode_state_value` returns NaN for a literal `NaN` on the graph (and
+        // for every other undecodable payload). Comparing it as "equal to everything"
         // would break `sort_by`'s total-order contract and scramble the
         // *finite* states along with it — and `states[0]` is the initial state,
         // so the spawn would start in the wrong place. A state whose ordering
@@ -4070,5 +4129,187 @@ mod tests {
             vec!["identified", "done", "broken"],
             "finite states keep value order and the NaN one sorts last"
         );
+    }
+
+    /// The `stateValue` decoder, payload by payload. **Same rows, same
+    /// expectations as `state value decoder matches rust` in
+    /// `core/src/shacl/SHACLFlow.test.ts`**; a row added here is added
+    /// there. Each runtime's own float parser would answer differently on
+    /// most of the NaN rows (`str::parse` reads `inf` and rejects `1abc`;
+    /// `parseFloat` does the reverse), which is why the grammar is explicit.
+    ///
+    /// Compared by bit pattern so `-0` is pinned as `-0.0`, not `0.0`.
+    #[test]
+    fn state_value_decoder_matches_ts() {
+        let rows: &[(&str, f64)] = &[
+            // plain decimals, both parsers agree on the value
+            ("literal:number:0", 0.0),
+            ("literal:number:-0", -0.0),
+            ("literal:number:1", 1.0),
+            ("literal:number:1.0", 1.0),
+            ("literal:number:01", 1.0),
+            ("literal:number:1.", 1.0),
+            ("literal:number:.5", 0.5),
+            ("literal:number:+1", 1.0),
+            ("literal:number:-2.5", -2.5),
+            ("literal:number:1e5", 100000.0),
+            ("literal:number:1E5", 100000.0),
+            ("literal:number:1e-7", 1e-7),
+            ("literal:number:1e21", 1e21),
+            // what TS `Literal.toUrl` writes for 1e21, and what Rust writes
+            ("literal:number:1e%2B21", 1e21),
+            ("literal:number:1000000000000000000000", 1e21),
+            // legacy prefix
+            ("literal://number:2", 2.0),
+            // infinities: TS spelling, Rust spelling, any ASCII case
+            ("literal:number:Infinity", f64::INFINITY),
+            ("literal:number:-Infinity", f64::NEG_INFINITY),
+            ("literal:number:inf", f64::INFINITY),
+            ("literal:number:-inf", f64::NEG_INFINITY),
+            ("literal:number:INF", f64::INFINITY),
+            ("literal:number:+infinity", f64::INFINITY),
+            // outside the grammar: NaN, never 0.0
+            ("literal:number:NaN", f64::NAN),
+            ("literal:number:nan", f64::NAN),
+            ("literal:number:", f64::NAN),
+            ("literal:number:abc", f64::NAN),
+            ("literal:number:1abc", f64::NAN),
+            ("literal:number:%201", f64::NAN),
+            ("literal:number:1%20", f64::NAN),
+            ("literal:number:0x10", f64::NAN),
+            ("literal:number:1_000", f64::NAN),
+            ("literal:number:1e", f64::NAN),
+            ("literal:number:.", f64::NAN),
+            ("literal:number:\u{661}", f64::NAN), // ARABIC-INDIC DIGIT ONE
+            ("literal:number:%zz", f64::NAN),
+            ("literal:number:%E2%82", f64::NAN), // truncated UTF-8 sequence
+            // not a number literal at all
+            ("literal:string:1", f64::NAN),
+            ("ad4m://x", f64::NAN),
+        ];
+        for (target, want) in rows {
+            let got = decode_state_value(target);
+            if want.is_nan() {
+                assert!(got.is_nan(), "{target:?}: expected NaN, got {got}");
+            } else {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{target:?}: expected {want}, got {got}"
+                );
+            }
+        }
+    }
+
+    /// Cross-runtime initial-state table (lifted from Marvin's #1204 review
+    /// scratch and extended). **Same rows, same winners as `initial state
+    /// table matches rust` in `core/src/shacl/SHACLFlow.test.ts`**; a row
+    /// added here is added there. Each row is parsed with the `hasState`
+    /// links in both orders and must give the same initial state either way.
+    ///
+    /// The value column is the raw `stateValue` target; `None` is a state
+    /// with no `stateValue` link at all. Rows that exist to kill a specific
+    /// comparator mutation say so.
+    #[test]
+    fn initial_state_table_matches_ts() {
+        use crate::perspectives::flow_spawn::initial_state_of;
+
+        fn n(payload: &str) -> Option<String> {
+            Some(format!("literal:number:{payload}"))
+        }
+
+        let rows: Vec<(&str, Vec<(&str, Option<String>)>, &str)> = vec![
+            (
+                "tie",
+                vec![("review", n("0")), ("draft", n("0")), ("done", n("1"))],
+                "draft",
+            ),
+            // `total_cmp` orders -0.0 before 0.0 and would pick `b`.
+            ("negzero", vec![("b", n("-0")), ("a", n("0"))], "a"),
+            ("nan_nan", vec![("z", n("NaN")), ("y", n("NaN"))], "y"),
+            ("nan_finite", vec![("a", n("NaN")), ("b", n("5"))], "b"),
+            (
+                "neg_infinity_ts_spelling",
+                vec![("b", n("0")), ("a", n("-Infinity"))],
+                "a",
+            ),
+            (
+                "neg_infinity_rust_spelling",
+                vec![("start", n("0")), ("sink", n("-inf"))],
+                "sink",
+            ),
+            (
+                "pos_infinity",
+                vec![("a", n("Infinity")), ("b", n("0"))],
+                "b",
+            ),
+            (
+                "forms",
+                vec![("x", n("1")), ("w", n("1.0")), ("v", n("01"))],
+                "v",
+            ),
+            // U+1F600 is above the BMP; U+FFFD is in it but above U+D800. Code
+            // point order (Rust bytes, TS `compareCodePoints`) puts U+FFFD
+            // first; UTF-16 code-unit order (TS `<`) would pick the emoji.
+            (
+                "non_bmp",
+                vec![("\u{1F600}", n("0")), ("\u{FFFD}", n("0"))],
+                "\u{FFFD}",
+            ),
+            (
+                "non_numeric",
+                vec![("junk", n("abc")), ("start", n("1"))],
+                "start",
+            ),
+            (
+                "trailing_garbage",
+                vec![("start", n("0.5")), ("x", n("1abc"))],
+                "start",
+            ),
+            ("empty_payload", vec![("a", n("1")), ("b", n(""))], "a"),
+            ("missing_link", vec![("b", n("1")), ("a", None)], "a"),
+            // `1e%2B21` must decode to a finite 1e21 (not NaN) to beat NaN.
+            (
+                "encoded_exponent",
+                vec![("a", n("1e%2B21")), ("b", n("NaN"))],
+                "a",
+            ),
+            ("hex", vec![("a", n("0x10")), ("b", n("1"))], "b"),
+            (
+                "wrong_literal_type",
+                vec![("a", Some("literal:string:0".to_string())), ("b", n("1"))],
+                "b",
+            ),
+        ];
+
+        for (case, states, want) in &rows {
+            for rev in [false, true] {
+                let flow_uri = "xrt://XFlow";
+                let mut links = vec![
+                    mk_link(flow_uri, "rdf://type", "ad4m://Flow"),
+                    mk_link(flow_uri, "ad4m://flowName", &lit_str("X")),
+                    mk_link(flow_uri, "ad4m://namespace", &lit_str("xrt://")),
+                ];
+                let mut ordered: Vec<(usize, &(&str, Option<String>))> =
+                    states.iter().enumerate().collect();
+                if rev {
+                    ordered.reverse();
+                }
+                for (i, (name, target)) in ordered {
+                    let state_uri = format!("xrt://X.s{i}");
+                    links.push(mk_link(flow_uri, "ad4m://hasState", &state_uri));
+                    links.push(mk_link(&state_uri, "ad4m://stateName", &lit_str(name)));
+                    if let Some(target) = target {
+                        links.push(mk_link(&state_uri, "ad4m://stateValue", target));
+                    }
+                }
+                let flow = parse_flow_from_links(&links, flow_uri).expect("reader");
+                assert_eq!(
+                    initial_state_of(&flow).as_deref(),
+                    Some(*want),
+                    "case {case} rev={rev}"
+                );
+            }
+        }
     }
 }
