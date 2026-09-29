@@ -486,6 +486,16 @@ export interface FlagOptions {
      * The value of the property.
      */
     value: string;
+
+    /**
+     * Declares the flag's predicate monotonic, as `PropertyOptions.monotonic`
+     * does. Use it on a role class, whose instances a `fromRole` gate matches
+     * by their flag: otherwise a member can un-grant a role by removing the
+     * flag instead of the grant. The declaration is per predicate, so every
+     * class flagged through the same predicate can then no longer be
+     * deleted: give the role class a predicate of its own.
+     */
+    monotonic?: boolean;
 }
 
 /**
@@ -562,6 +572,7 @@ export function Flag(opts: FlagOptions) {
             flag: true,
             readOnly: true,
             writable: false,
+            ...(opts.monotonic && { monotonic: true }),
         };
 
         // Write to WeakMap registry

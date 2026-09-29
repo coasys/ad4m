@@ -158,7 +158,11 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Local-only property */
   local?: boolean;
 
-  /** AD4M-specific: Shared links under `path` end only by tombstone (#1176) */
+  /**
+   * AD4M-specific: Shared links under `path` end only by tombstone (#1176).
+   * `fromLinks` reports the flag naming `path`; whether it declares anything
+   * is the executor's call (author-gated), not this field's.
+   */
   monotonic?: boolean;
 
   /** AD4M-specific: Writable property */
@@ -894,8 +898,9 @@ export class SHACLShape {
         prop.local = val === 'true';
       }
 
-      const monotonicLink = links.find(l =>
+      const monotonicLink = prop.path && links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://monotonic"
+          && l.target === Literal.from(prop.path).toUrl()
       );
       if (monotonicLink) {
         prop.monotonic = true;
