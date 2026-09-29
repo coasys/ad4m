@@ -261,10 +261,15 @@ export class ApiClient {
                 signal?.removeEventListener('abort', onAbort)
                 fn()
             }
-            const timer = setTimeout(
-                () => settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`))),
-                timeoutMs,
-            )
+            const timer = setTimeout(() => {
+                settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`)))
+                // A connect that never completes (a black-holed port) would hold every later
+                // call. Drop it once no call waits on it, so the next call dials again.
+                if (this._ws?.readyState === 0 /* CONNECTING */ && this._pendingCalls.size === 0) {
+                    this._closeWs()
+                    if (this._wsCallbacks.size > 0) this._ensureWs()
+                }
+            }, timeoutMs)
             const onAbort = () => {
                 if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
                     this._ws.send(JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))

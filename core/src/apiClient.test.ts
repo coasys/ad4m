@@ -199,6 +199,36 @@ describe('ApiClient connect-phase failures', () => {
         expect(Date.now() - started).toBeLessThan(1_000)
     })
 
+    it('closes a socket stuck connecting when a call times out, so the next call dials again', async () => {
+        await expect(call('agent.get', {}, { timeoutMs: 20 })).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(3)
+
+        const next = call<number>('agent.get')
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        socket(1).reply({ id: socket(1).sent[0].id, result: 1 })
+        await expect(next).resolves.toBe(1)
+    })
+
+    it('keeps a socket stuck connecting while another call still waits on it', async () => {
+        const first = call('agent.get', {}, { timeoutMs: 20 })
+        const second = call<number>('agent.get', {}, { timeoutMs: 1_000 })
+        await expect(first).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(0)
+        socket(0).open()
+        socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+        await expect(second).resolves.toBe(1)
+    })
+
+    it('redials for subscribers when a stuck connect is dropped', async () => {
+        client.subscribe(() => {})
+        await expect(call('agent.get', {}, { timeoutMs: 20 })).rejects.toMatchObject({ status: 408 })
+        expect(socket(0).readyState).toBe(3)
+        expect(TestSocket.instances).toHaveLength(2)
+        socket(1).open()
+        await expect(client.waitForSubscription()).resolves.toBeUndefined()
+    })
+
     it('rejects callers waiting to connect when the client is closed', async () => {
         const promise = call('agent.get', {}, { timeoutMs: 1_000 })
         client.closeAll()
