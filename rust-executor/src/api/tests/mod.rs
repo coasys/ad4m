@@ -7,4 +7,6 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod shacl_ws_tests;
 #[cfg(test)]
+pub mod start_server_tests;
+#[cfg(test)]
 pub mod types_tests;

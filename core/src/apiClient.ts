@@ -6,7 +6,11 @@ export interface WsEvent {
 
 /** Error thrown by ApiClient when an RPC call fails. */
 export class RpcError extends Error {
-    /** Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500). */
+    /**
+     * Error code (maps to HTTP status semantics: 400, 401, 403, 404, 500).
+     * Client-side failures: 408 call timeout, 503 connection lost or client
+     * closed, CONNECT_FAILED_STATUS (504) no connection within the budget.
+     */
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
@@ -47,11 +51,34 @@ export interface CallOptions {
 /** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
-/** Maximum reconnect delay in ms. */
+/**
+ * Maximum reconnect delay in ms. Equal to CONNECT_TIMEOUT_MS by coincidence,
+ * not tuning: no retry wait inside one connect budget reaches it (the 7th
+ * attempt would fall past the budget). It only sets the pause before a
+ * subscriber-only client starts its next cycle.
+ */
 const MAX_RECONNECT_DELAY_MS = 30_000
 
 /** Initial reconnect delay in ms. */
 const INITIAL_RECONNECT_DELAY_MS = 500
+
+/**
+ * How long a caller waits for a WebSocket connection before `call()` rejects.
+ * Within this budget, failed connect attempts are retried with backoff, so a
+ * client created a moment before the executor binds its port still connects.
+ * After it, the waiting calls reject with CONNECT_FAILED_STATUS instead of
+ * hanging.
+ */
+const CONNECT_TIMEOUT_MS = 30_000
+
+/**
+ * `RpcError.status` when no WebSocket connection opened within the connect
+ * budget. Distinct from 503, which the client uses for a connection that was
+ * lost or closed, so a caller can tell "the executor is not there" apart by
+ * status alone. 504 because the client gave up waiting (a timeout); a 5xx, so
+ * `status >= 500` retry checks still treat it as a server-side failure.
+ */
+export const CONNECT_FAILED_STATUS = 504
 
 /** Counter for generating unique request IDs. */
 let _idCounter = 0
@@ -97,36 +124,97 @@ export class ApiClient {
     private _reconnectCallbacks = new Set<() => void>()
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
+    // A connection cycle starts when a caller needs the socket and ends when
+    // a socket opens (resolve) or the connect budget runs out (reject).
+    // Failed connect attempts inside a cycle are retried and keep the same
+    // promise, so every caller awaiting it is settled exactly once. The
+    // resolve/reject pair is non-null only while the cycle is pending.
     private _wsReady: Promise<void> | null = null
     private _wsReadyResolve: (() => void) | null = null
+    private _wsReadyReject: ((reason: unknown) => void) | null = null
+    private _wsConnectTimer: ReturnType<typeof setTimeout> | null = null
+    // Callers awaiting _wsReady. They are not in _pendingCalls yet, so
+    // unsubscribe() must count them before it closes the socket under them.
+    private _readyWaiters = 0
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsClosed = false
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     private _ignoredResponseIds = new Set<string>()
 
-    private _getWsUrl(): string {
+    /** The WS endpoint without the token, safe to put in error messages. */
+    private _getWsEndpoint(): string {
         const wsBase = this.baseUrl
             .replace(/^http:\/\//, 'ws://')
             .replace(/^https:\/\//, 'wss://')
-        const tokenParam = this.token ? `token=${encodeURIComponent(this.token)}` : ''
-        const path = '/api/v1/ws'
-        return tokenParam ? `${wsBase}${path}?${tokenParam}` : `${wsBase}${path}`
+        return `${wsBase}/api/v1/ws`
+    }
+
+    private _getWsUrl(): string {
+        const endpoint = this._getWsEndpoint()
+        return this.token ? `${endpoint}?token=${encodeURIComponent(this.token)}` : endpoint
     }
 
     private _ensureWs(): void {
         if (this._ws && (this._ws.readyState === 1 /* OPEN */ || this._ws.readyState === 0 /* CONNECTING */)) {
             return
         }
-        // Prevent duplicate connections from concurrent callers
-        if (this._wsReady) return
+        if (this._wsReady) {
+            // Connected, and the old socket's onclose hasn't run yet: it
+            // resets _wsReady, and the next caller starts a new cycle.
+            if (!this._wsReadyReject) return
+            // Pending cycle between attempts: the scheduled retry opens the
+            // next socket. Opening one now would skip the backoff.
+            if (this._wsReconnectTimer) return
+            this._openSocket()
+            return
+        }
 
         this._wsClosed = false
-
-        this._wsReady = new Promise<void>((resolve) => {
+        // Every cycle restarts the backoff. A call made after a failed cycle
+        // then retries within its budget: at the cap, its first retry would
+        // land at the budget's end.
+        this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+        this._wsReady = new Promise<void>((resolve, reject) => {
             this._wsReadyResolve = resolve
+            this._wsReadyReject = reject
         })
+        // Callers await _wsReady and see the rejection. This handler only
+        // keeps a cycle nobody awaits (subscribe() or connect() alone) from
+        // raising an unhandledRejection.
+        this._wsReady.catch(() => {})
+        this._wsConnectTimer = setTimeout(() => this._failConnect(), CONNECT_TIMEOUT_MS)
+        this._openSocket()
+    }
 
+    /** End a pending connection cycle whose budget ran out. */
+    private _failConnect(): void {
+        this._wsConnectTimer = null
+        const reject = this._wsReadyReject
+        if (!reject) return
+        this._wsReadyResolve = null
+        this._wsReadyReject = null
+        this._wsReady = null
+        if (this._wsReconnectTimer) {
+            clearTimeout(this._wsReconnectTimer)
+            this._wsReconnectTimer = null
+        }
+        // A socket still CONNECTING here is stuck (e.g. a dropped SYN).
+        // Detach it first, so its onclose is ignored as stale.
+        const stuck = this._ws
+        this._ws = null
+        stuck?.close()
+
+        reject(new RpcError(CONNECT_FAILED_STATUS, `WebSocket could not connect to ${this._getWsEndpoint()} within ${CONNECT_TIMEOUT_MS}ms`))
+
+        // Subscribers have no call to fail. Keep retrying for them, as
+        // onclose does after an established connection drops.
+        if (!this._wsClosed && this._wsCallbacks.size > 0) {
+            this._scheduleReconnect()
+        }
+    }
+
+    private _openSocket(): void {
         const url = this._getWsUrl()
         // Fallback order: injected impl → globalThis.WebSocket (browsers, Node ≥ 22) → require('ws') (Node ≤ 20).
         // globalThis lookup avoids a ReferenceError on Node 18 where `WebSocket` is not a global.
@@ -146,10 +234,16 @@ export class ApiClient {
         this._ws = ws
 
         ws.onopen = () => {
+            if (ws !== this._ws) return // detached by _failConnect/_closeWs
             this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
+            if (this._wsConnectTimer) {
+                clearTimeout(this._wsConnectTimer)
+                this._wsConnectTimer = null
+            }
             if (this._wsReadyResolve) {
                 this._wsReadyResolve()
                 this._wsReadyResolve = null
+                this._wsReadyReject = null
             }
             this._startPing()
 
@@ -207,10 +301,13 @@ export class ApiClient {
         }
 
         ws.onclose = () => {
+            // A socket we already detached (closeAll, a failed cycle) may
+            // report its close late, after a newer socket took its place.
+            // Its close must not null the new socket or reject the new
+            // socket's calls.
+            if (ws !== this._ws) return
             this._stopPing()
             this._ws = null
-            // Reset the readiness promise so future calls reconnect
-            this._wsReady = null
 
             // Reject all pending calls
             const hadPendingCalls = this._pendingCalls.size > 0
@@ -220,6 +317,17 @@ export class ApiClient {
             }
             this._pendingCalls.clear()
 
+            if (this._wsReadyReject) {
+                // The socket closed without opening: a failed connect attempt,
+                // e.g. ECONNREFUSED because the server is not listening yet.
+                // Keep the cycle and its waiters, and retry. _failConnect ends
+                // the cycle when the connect budget runs out.
+                if (!this._wsClosed) this._scheduleReconnect()
+                return
+            }
+
+            // Reset the readiness promise so future calls reconnect
+            this._wsReady = null
             if (!this._wsClosed && (this._wsCallbacks.size > 0 || hadPendingCalls)) {
                 this._scheduleReconnect()
             }
@@ -254,10 +362,21 @@ export class ApiClient {
         }, delay)
     }
 
-    /** Ensure WS is connected and ready. Lazy — connects on first use. */
+    /**
+     * Ensure WS is connected and ready. Lazy — connects on first use.
+     * Rejects with CONNECT_FAILED_STATUS if no connection opens within
+     * CONNECT_TIMEOUT_MS, or with a 503 if the client is closed while waiting.
+     */
     private async _ready(): Promise<void> {
         this._ensureWs()
-        if (this._wsReady) await this._wsReady
+        const ready = this._wsReady
+        if (!ready) return
+        this._readyWaiters++
+        try {
+            await ready
+        } finally {
+            this._readyWaiters--
+        }
     }
 
     /**
@@ -414,7 +533,7 @@ export class ApiClient {
 
         return () => {
             this._wsCallbacks.delete(callback as (data: unknown) => void)
-            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
+            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0 && this._readyWaiters === 0) {
                 this._closeWs()
             }
         }
@@ -434,16 +553,27 @@ export class ApiClient {
 
     private _closeWs(): void {
         this._stopPing()
+        this._wsClosed = true
         if (this._wsReconnectTimer) {
             clearTimeout(this._wsReconnectTimer)
             this._wsReconnectTimer = null
         }
-        if (this._ws) {
-            this._wsClosed = true
-            this._ws.close()
-            this._ws = null
-            this._wsReady = null
+        if (this._wsConnectTimer) {
+            clearTimeout(this._wsConnectTimer)
+            this._wsConnectTimer = null
         }
+        // Settle callers still waiting for the connection, which otherwise
+        // wait on a promise nothing will ever resolve.
+        const reject = this._wsReadyReject
+        this._wsReadyResolve = null
+        this._wsReadyReject = null
+        this._wsReady = null
+        reject?.(new RpcError(503, 'Client closed'))
+        // Detach before close(): the socket's own onclose then sees itself
+        // as stale and leaves state alone (see onclose).
+        const ws = this._ws
+        this._ws = null
+        ws?.close()
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
