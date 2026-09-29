@@ -8,3 +8,12 @@ export function notifyListeners<A extends unknown[]>(listeners: ReadonlyArray<(.
         }
     }
 }
+
+/** Add `listener` to `listeners`. Returns a function that removes it. */
+export function addListener<T>(listeners: T[], listener: T): () => void {
+    listeners.push(listener)
+    return () => {
+        const index = listeners.indexOf(listener)
+        if (index >= 0) listeners.splice(index, 1)
+    }
+}

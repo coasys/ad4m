@@ -151,6 +151,18 @@ describe('PerspectiveClient RPC operations', () => {
         expect(handlers.size).toBe(1)
     })
 
+    it('the function a lifecycle listener registration returns removes that listener', () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const added = jest.fn()
+        const release = client.addPerspectiveAddedListener(added)
+        const onEvent = mockSubscribe.mock.calls[0][0]
+
+        release()
+        onEvent({ type: 'perspective-added', perspective: makeHandle('uuid-r', 'R') })
+
+        expect(added).not.toHaveBeenCalled()
+    })
+
     it('removeAllListeners() also removes the sync-state subscription', async () => {
         const unsub = jest.fn()
         mockSubscribe.mockReturnValue(unsub)

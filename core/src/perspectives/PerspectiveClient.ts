@@ -1,5 +1,5 @@
 import { ApiClient, WsEvent, CallOptions, RpcError } from "../apiClient";
-import { notifyListeners } from "../notifyListeners"
+import { addListener, notifyListeners } from "../notifyListeners"
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -614,19 +614,22 @@ export class PerspectiveClient {
     }
 
     // Subscriptions:
-    addPerspectiveAddedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveAddedCallbacks.push(cb)
+    /** Returns a function that removes the listener. */
+    addPerspectiveAddedListener(cb: PerspectiveHandleCallback): () => void {
         this.#listen()
+        return addListener(this.#perspectiveAddedCallbacks, cb)
     }
 
-    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveUpdatedCallbacks.push(cb)
+    /** Returns a function that removes the listener. */
+    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback): () => void {
         this.#listen()
+        return addListener(this.#perspectiveUpdatedCallbacks, cb)
     }
 
-    addPerspectiveRemovedListener(cb: UuidCallback) {
-        this.#perspectiveRemovedCallbacks.push(cb)
+    /** Returns a function that removes the listener. */
+    addPerspectiveRemovedListener(cb: UuidCallback): () => void {
         this.#listen()
+        return addListener(this.#perspectiveRemovedCallbacks, cb)
     }
 
     /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
