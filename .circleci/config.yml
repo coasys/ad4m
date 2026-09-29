@@ -117,16 +117,30 @@ commands:
             # Drop the previous branch's outputs first (cross-branch shared
             # workdir) so nothing stale survives next to this SHA's files.
             rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build \
-                   ad4m-ldk/js/lib core/lib link-server/dist
+                   bootstrap-languages/local/dist ad4m-ldk/js/lib core/lib link-server/dist
             tar -xf "$src"
             echo "restored $(tar -tf "$src" | wc -l) entries from $src"
-            ls -l bootstrap-languages/*/build/bundle.js link-server/dist/index.js .hc-toolchain/bin/
+            ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
+                  link-server/dist/index.js .hc-toolchain/bin/
 
   setup_integration_test_environment:
-    description: "Setup common integration test environment"
+    description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
+    parameters:
+      local:
+        # true: local-only bootstrap languages, no Holochain conductor (#918).
+        # Both modes restore the same stash; they differ only in LOCAL_MODE,
+        # which the test scripts read to pick the language set.
+        type: boolean
+        default: false
     steps:
       - fix_workdir
       - checkout
+      - when:
+          condition: << parameters.local >>
+          steps:
+            - run:
+                name: Set LOCAL_MODE for downstream test suites
+                command: echo 'export LOCAL_MODE=true' >> "$BASH_ENV"
       - restore_binaries
       - setup_env
       - run:
@@ -144,19 +158,15 @@ commands:
           command: cd ./core && pnpm exec patch-package
       - run:
           # Tests need `hc` (tests/js/scripts/prepareTestDirectory.sh symlinks
-          # it into tst-tmp/) and `kitsune2-bootstrap-srv` (spawned by
-          # tests/js/utils/utils.ts) at RUNTIME, so the toolchain stays here.
-          # The binaries and the version stamps were just restored from build's
-          # tarball, so this script only compares the stamps against Cargo.lock
-          # and exits in well under a second; it rebuilds only on drift.
+          # it into tst-tmp/, in local mode too) and `kitsune2-bootstrap-srv`
+          # (spawned by tests/js/utils/utils.ts) at RUNTIME, so the toolchain
+          # stays here. The binaries and the version stamps were just restored
+          # from build's tarball, so this script only compares the stamps
+          # against Cargo.lock and exits in well under a second; it rebuilds
+          # only on drift.
           name: Verify pinned Holochain + kitsune2 CLIs (restored from build; matches Cargo.lock)
           command: bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
-      - run:
-          # dist/ was restored above; this only makes sure the native
-          # better-sqlite3 module for link-server's runtime is installed.
-          name: Install link-server dependencies
-          command: pnpm --filter @coasys/link-server install
 
   restore_rust_compile_inputs:
     description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
@@ -271,14 +281,17 @@ jobs:
           #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
           #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
           #                                    needed at test runtime
-          # A branch that adds a language output dir (e.g. #918's
-          # bootstrap-languages/local/dist) must add it to this list.
+          #   bootstrap-languages/local/dist   #918's local-language seed + bundles
+          #                                    (generate-seed.mjs); the tests read
+          #                                    local/*.js from git
+          # A branch that adds a language output dir must add it to this list.
           name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
           command: |
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
             tar -cf "$dst.tmp" \
               bootstrap-languages/*/build \
+              bootstrap-languages/local/dist \
               bootstrap-languages/*/hc-dna/workdir/*.dna \
               bootstrap-languages/*/hc-dna/workdir/*.happ \
               ad4m-ldk/js/lib \
@@ -366,17 +379,90 @@ jobs:
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
 
+  # The regular JS integration suite: local bootstrap languages only, no
+  # Holochain conductor. Two-executor suites share languages, neighbourhoods
+  # and agent profiles through the shared stores (tests/js/utils/sharedStores.ts).
   integration-tests-js:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          name: Run JS integration tests (local languages, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suite over the server-link-language: Alice + Bob on local
+  # languages (no Holochain), links syncing through a link-server the suite
+  # starts (tests/js/tests/integration-server-link.test.ts).
+  integration-tests-multi-node-server-link:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          # link-server/dist comes from build's stash (build-libs builds it);
+          # this only installs the native better-sqlite3 module its runtime needs.
+          name: Install link-server dependencies
+          command: pnpm --filter @coasys/link-server install
+      - run:
+          name: Run multi-node server-link integration tests (Alice + Bob, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suites that need Holochain: links syncing between executors
+  # through p-diff-sync (tests/js/tests/integration.test.ts).
+  integration-tests-multi-node-holochain:
     machine: true
     resource_class: coasys/marvin-light
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run integration tests
+          name: Run multi-node Holochain integration tests (Alice + Bob)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
-            cd ./tests/js && pnpm run test-main 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
@@ -390,7 +476,6 @@ jobs:
               cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
               cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
             done
-            # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
           when: always
@@ -411,19 +496,21 @@ jobs:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          name: Run email-verification integration tests (local)
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
 
   integration-tests-mcp:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run MCP integration tests
+          name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
@@ -431,9 +518,10 @@ jobs:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run Ad4mModel unit + integration tests
+          name: Run Ad4mModel unit + integration tests (local)
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
       - run:
@@ -542,6 +630,12 @@ workflows:
           requires:
             - build
       - integration-tests-js:
+          requires:
+            - build
+      - integration-tests-multi-node-server-link:
+          requires:
+            - build
+      - integration-tests-multi-node-holochain:
           requires:
             - build
       - integration-tests-multi-user-simple:
