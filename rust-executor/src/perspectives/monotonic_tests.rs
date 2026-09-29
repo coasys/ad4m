@@ -358,6 +358,53 @@ async fn t2_a_local_flow_link_can_still_be_removed() {
     assert!(!present(&p, &cache));
 }
 
+/// A batched `update_link` of the Local cache commits. The WS handler hands
+/// in the old link without a status, so the queued removal must carry the
+/// stored one, or the commit backstop reads it as Shared and drops the batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn t2_a_batched_update_of_a_local_flow_link_commits() {
+    let (mut p, ctx) = fixture().await;
+    let cache = LinkExpression::from(
+        p.add_link(
+            Link {
+                source: PROPOSAL.to_string(),
+                predicate: Some(CURRENT_STATE.to_string()),
+                target: "literal:string:done".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link"),
+    );
+    let mut old = cache.clone();
+    old.status = None;
+    let next = Link {
+        source: PROPOSAL.to_string(),
+        predicate: Some(CURRENT_STATE.to_string()),
+        target: "literal:string:next".to_string(),
+    };
+
+    let batch = p.create_batch().await;
+    p.update_link(old, next, Some(batch.clone()), &ctx)
+        .await
+        .expect("queue the update");
+    p.commit_batch(batch, &ctx)
+        .await
+        .expect("a batched update of a Local flow link commits");
+
+    assert!(!present(&p, &cache));
+    let targets: Vec<String> = p
+        .sparql_store
+        .query_links(Some(PROPOSAL), Some(CURRENT_STATE), None, None, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    assert_eq!(targets, vec!["literal:string:next".to_string()]);
+}
+
 // ---------------------------------------------------------------------------
 // T3: the author's signed retraction ends the link
 // ---------------------------------------------------------------------------
