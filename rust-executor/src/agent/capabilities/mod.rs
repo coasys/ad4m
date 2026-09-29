@@ -49,7 +49,11 @@ pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 /// listener's reach where it binds it (`api::listener_router`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ListenerReach {
-    /// Bound to a loopback address: only processes on this machine connect.
+    /// Bound to a loopback address: only processes on this machine connect, including any
+    /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
+    /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
+    /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
+    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
     Loopback,
     /// Bound to any other address: whoever can route to it connects.
     Network,
