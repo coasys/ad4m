@@ -48,8 +48,9 @@ anything that signs, bills or writes.
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
   inline on both sockets (per-connection state, like `request.cancel`).
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision: 0 }`;
-  each `query-subscription-update` carries the change (`added` / `removed` / `changed`, see
-  `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
+  each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
+  `removed` rows; see `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per
+  update). On a gap,
   `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`.
 - A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`):
   only that socket gets its updates (they bypass `events.watch`), and `ws_rpc::serve` ends them

@@ -5,7 +5,7 @@
 //! subscription registry without widening its visibility.
 
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{PerspectiveInstance, SubscribedQuery};
 use crate::prolog_service::get_prolog_service;
@@ -29,7 +29,7 @@ impl PerspectiveInstance {
     }
 
     /// Publish one update on the `query-subscription-update` topic:
-    /// `{ uuid, subscriptionId, revision, added, removed, changed, ... }` (see
+    /// `{ uuid, subscriptionId, revision, ... }` plus the change (see
     /// [`result_delta`]) plus `connectionId`, which the RPC socket uses to
     /// deliver it to the subscription's own connection only.
     pub(super) async fn send_delta_update(
@@ -99,104 +99,75 @@ pub(crate) fn result_json(result: &str) -> Value {
     serde_json::from_str(result).unwrap_or_else(|_| Value::String(result.to_string()))
 }
 
-/// The change from `old` to `new`, keyed by row.
+/// The change from `old` to `new`.
 ///
-/// - Model results (`{ instances, totalCount }`): rows are keyed by `id`.
-///   `added` / `changed` carry whole instances, `removed` carries ids, plus
-///   `ids` (the new order) and `totalCount`.
-/// - Query results (a JSON array of bindings): a binding row has no id, so the
-///   row itself is its key (multiset). `added` / `removed` carry rows;
-///   `changed` is always empty.
-/// - Anything else: `reset: true` with the whole `result`.
+/// - Model results (`{ instances, totalCount }`): `ids` (the new order, which
+///   also defines membership), `upsert` (instances that are new or differ) and
+///   `totalCount`.
+/// - Query results (a JSON array of rows): a row has no id, so rows are a
+///   multiset: `added` and `removed` rows.
+/// - Anything else: `result`, which replaces the old result.
 pub(crate) fn result_delta(old: &str, new: &str, is_model: bool) -> Map<String, Value> {
-    let (old_v, new_v) = (result_json(old), result_json(new));
+    let (old, new) = (result_json(old), result_json(new));
     let delta = if is_model {
-        model_delta(&old_v, &new_v)
+        model_delta(&old, &new)
     } else {
-        rows_delta(&old_v, &new_v)
+        rows_delta(&old, &new)
     };
-    delta.unwrap_or_else(|| {
-        let mut m = Map::new();
-        m.insert("reset".into(), json!(true));
-        m.insert("result".into(), new_v);
-        m
-    })
+    delta.unwrap_or_else(|| Map::from_iter([("result".into(), new)]))
 }
 
 fn model_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
-    let rows = |v: &Value| -> Option<Vec<(String, Value)>> {
+    let instances = |v: &Value| -> Option<Vec<(String, Value)>> {
         v.get("instances")?
             .as_array()?
             .iter()
             .map(|i| Some((i.get("id")?.as_str()?.to_string(), i.clone())))
             .collect()
     };
-    let (old_rows, new_rows) = (rows(old)?, rows(new)?);
-    let old_by_id: HashMap<&str, &Value> =
-        old_rows.iter().map(|(id, v)| (id.as_str(), v)).collect();
-    let new_ids: HashSet<&str> = new_rows.iter().map(|(id, _)| id.as_str()).collect();
-
-    let mut added = vec![];
-    let mut changed = vec![];
-    for (id, v) in &new_rows {
-        match old_by_id.get(id.as_str()) {
-            None => added.push(v.clone()),
-            Some(prev) if *prev != v => changed.push(v.clone()),
-            Some(_) => {}
-        }
-    }
-    let removed: Vec<&str> = old_rows
-        .iter()
-        .map(|(id, _)| id.as_str())
-        .filter(|id| !new_ids.contains(id))
-        .collect();
-
-    let mut m = Map::new();
-    m.insert("added".into(), json!(added));
-    m.insert("removed".into(), json!(removed));
-    m.insert("changed".into(), json!(changed));
-    m.insert(
-        "ids".into(),
-        json!(new_rows.iter().map(|(id, _)| id).collect::<Vec<_>>()),
-    );
-    m.insert(
-        "totalCount".into(),
-        new.get("totalCount").cloned().unwrap_or(Value::Null),
-    );
-    if let Some(cursor) = new.get("nextCursor") {
-        m.insert("nextCursor".into(), cursor.clone());
-    }
-    Some(m)
+    let old: HashMap<String, Value> = instances(old)?.into_iter().collect();
+    let (ids, upsert): (Vec<String>, Vec<Option<Value>>) = instances(new)?
+        .into_iter()
+        .map(|(id, v)| {
+            let changed = old.get(&id) != Some(&v);
+            (id, changed.then_some(v))
+        })
+        .unzip();
+    Some(Map::from_iter([
+        ("ids".into(), json!(ids)),
+        (
+            "upsert".into(),
+            json!(upsert.into_iter().flatten().collect::<Vec<_>>()),
+        ),
+        (
+            "totalCount".into(),
+            new.get("totalCount").cloned().unwrap_or(Value::Null),
+        ),
+    ]))
 }
 
 fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
-    let (old_rows, new_rows) = (old.as_array()?, new.as_array()?);
-    let mut remaining: HashMap<String, usize> = HashMap::new();
-    for row in old_rows {
-        *remaining.entry(row.to_string()).or_default() += 1;
+    let (old, new) = (old.as_array()?, new.as_array()?);
+    // Count each old row once by its serialised form; new rows consume counts.
+    let mut unmatched: HashMap<String, (usize, &Value)> = HashMap::new();
+    for row in old {
+        unmatched.entry(row.to_string()).or_insert((0, row)).0 += 1;
     }
     let mut added = vec![];
-    for row in new_rows {
-        match remaining.get_mut(&row.to_string()) {
-            Some(n) if *n > 0 => *n -= 1,
-            _ => added.push(row.clone()),
+    for row in new {
+        match unmatched.get_mut(&row.to_string()) {
+            Some((n, _)) if *n > 0 => *n -= 1,
+            _ => added.push(row),
         }
     }
-    // Whatever of `old` was not matched by `new` was removed.
-    let mut removed = vec![];
-    for row in old_rows {
-        if let Some(n) = remaining.get_mut(&row.to_string()) {
-            if *n > 0 {
-                *n -= 1;
-                removed.push(row.clone());
-            }
-        }
-    }
-    let mut m = Map::new();
-    m.insert("added".into(), json!(added));
-    m.insert("removed".into(), json!(removed));
-    m.insert("changed".into(), json!([]));
-    Some(m)
+    let removed: Vec<&Value> = unmatched
+        .into_values()
+        .flat_map(|(n, row)| std::iter::repeat_n(row, n))
+        .collect();
+    Some(Map::from_iter([
+        ("added".into(), json!(added)),
+        ("removed".into(), json!(removed)),
+    ]))
 }
 
 #[cfg(test)]
@@ -256,7 +227,7 @@ mod tests {
     // ── Delta updates ───────────────────────────────────────────────────
 
     #[test]
-    fn model_delta_is_keyed_by_id() {
+    fn model_delta_sends_the_new_order_and_changed_instances() {
         let old = json!({ "instances": [
             { "id": "a", "title": "A" }, { "id": "b", "title": "B" }, { "id": "c", "title": "C" }
         ], "totalCount": 3 });
@@ -267,10 +238,8 @@ mod tests {
         assert_eq!(
             d,
             json!({
-                "added": [{ "id": "d", "title": "D" }],
-                "removed": ["a"],
-                "changed": [{ "id": "b", "title": "B2" }],
                 "ids": ["c", "b", "d"],
+                "upsert": [{ "id": "b", "title": "B2" }, { "id": "d", "title": "D" }],
                 "totalCount": 3
             })
         );
@@ -280,19 +249,19 @@ mod tests {
     fn query_delta_is_a_row_multiset() {
         let old = json!([{ "s": "x" }, { "s": "x" }, { "s": "y" }]);
         let new = json!([{ "s": "x" }, { "s": "z" }]);
-        let d = Value::Object(result_delta(&old.to_string(), &new.to_string(), false));
-        assert_eq!(
-            d,
-            json!({ "added": [{ "s": "z" }], "removed": [{ "s": "x" }, { "s": "y" }], "changed": [] })
-        );
+        let d = result_delta(&old.to_string(), &new.to_string(), false);
+        assert_eq!(d["added"], json!([{ "s": "z" }]));
+        let mut removed = d["removed"].as_array().unwrap().clone();
+        removed.sort_by_key(|r| r.to_string());
+        assert_eq!(removed, vec![json!({ "s": "x" }), json!({ "s": "y" })]);
     }
 
     #[test]
-    fn unkeyable_results_reset() {
+    fn unkeyable_results_are_replaced() {
         let d = Value::Object(result_delta("true", "false", false));
-        assert_eq!(d, json!({ "reset": true, "result": false }));
+        assert_eq!(d, json!({ "result": false }));
         let d = Value::Object(result_delta("[]", "not json", true));
-        assert_eq!(d, json!({ "reset": true, "result": "not json" }));
+        assert_eq!(d, json!({ "result": "not json" }));
     }
 
     const TODO_SDNA: &str = r#"{
@@ -358,8 +327,7 @@ mod tests {
         let u = &updates[0];
         assert_eq!(u["revision"], json!(1));
         assert_eq!(u["connectionId"], json!("c"), "addressed to its connection");
-        assert_eq!(u["added"][0]["id"], json!("test://t1"));
-        assert_eq!(u["removed"], json!([]));
+        assert_eq!(u["upsert"][0]["id"], json!("test://t1"));
         assert_eq!(u["ids"], json!(["test://t1"]));
         assert!(u.get("result").is_none(), "no whole result on a delta");
 
@@ -370,7 +338,12 @@ mod tests {
         add(&mut p, "test://t2", "test://title", "literal://string:two").await;
         let u = &updates_after_check(&p, &id).await[0];
         assert_eq!(u["revision"], json!(2));
-        assert_eq!(u["added"][0]["id"], json!("test://t2"));
+        assert_eq!(
+            u["upsert"].as_array().unwrap().len(),
+            1,
+            "t1 is unchanged: {u}"
+        );
+        assert_eq!(u["upsert"][0]["id"], json!("test://t2"));
         assert_eq!(u["totalCount"], json!(2));
     }
 

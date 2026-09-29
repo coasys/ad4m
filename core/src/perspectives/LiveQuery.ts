@@ -7,44 +7,44 @@ export interface Subscribed {
     revision: number
 }
 
-/** A `query-subscription-update` event: the change from the previous revision. */
+/**
+ * A `query-subscription-update` event: the change from the previous revision.
+ * Model results carry `ids` (the new order), `upsert` (new or changed
+ * instances) and `totalCount`; query results carry `added` / `removed` rows;
+ * a result that could not be diffed comes whole as `result`.
+ */
 export interface QueryUpdate {
     subscriptionId: string
     revision: number
+    ids?: string[]
+    upsert?: any[]
+    totalCount?: number
     added?: any[]
     removed?: any[]
-    changed?: any[]
-    /** Model results: instance ids in the new order. */
-    ids?: string[]
-    totalCount?: number
-    nextCursor?: string
-    /** The result could not be keyed: `result` replaces it. */
-    reset?: boolean
     result?: any
 }
 
-/**
- * Apply one update to the last result. Model results (`{ instances, ... }`)
- * are keyed by instance `id`; query results are a multiset of rows, so a
- * removed row drops one equal row and added rows are appended.
- */
+/** Apply one update to the last result. Query rows are a multiset: added rows are appended. */
 export function applyUpdate(result: any, update: QueryUpdate): any {
-    if (update.reset) return update.result
+    if ('result' in update) return update.result
     if (update.ids) {
         const byId = new Map<string, any>(result.instances.map((i: any) => [i.id, i]))
-        for (const instance of [...update.added!, ...update.changed!]) byId.set(instance.id, instance)
-        const next = { ...result, instances: update.ids.map(id => byId.get(id)), totalCount: update.totalCount }
-        if (update.nextCursor === undefined) delete next.nextCursor
-        else next.nextCursor = update.nextCursor
-        return next
+        for (const instance of update.upsert!) byId.set(instance.id, instance)
+        return { ...result, instances: update.ids.map(id => byId.get(id)), totalCount: update.totalCount }
     }
-    const rows = [...result]
-    for (const removed of update.removed!) {
-        const key = JSON.stringify(removed)
-        const i = rows.findIndex(row => JSON.stringify(row) === key)
-        if (i >= 0) rows.splice(i, 1)
+    const toRemove = new Map<string, number>()
+    for (const row of update.removed!) {
+        const key = JSON.stringify(row)
+        toRemove.set(key, (toRemove.get(key) ?? 0) + 1)
     }
-    return [...rows, ...update.added!]
+    const kept = (result as any[]).filter(row => {
+        const key = JSON.stringify(row)
+        const n = toRemove.get(key)
+        if (!n) return true
+        toRemove.set(key, n - 1)
+        return false
+    })
+    return [...kept, ...update.added!]
 }
 
 /**

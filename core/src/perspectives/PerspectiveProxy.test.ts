@@ -203,12 +203,12 @@ describe('QuerySubscriptionProxy', () => {
 
     const results: any[] = [];
     subscription.onResult(r => results.push(r));
-    update({ subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [], changed: [] });
+    update({ subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [] });
     expect(results).toEqual([[{ s: 'a' }, { s: 'b' }]]);
 
     subscription.dispose();
     expect(client.disposeQuerySubscription).toHaveBeenCalledWith('perspective-1', 'sub-1');
-    update({ subscriptionId: 'sub-1', revision: 2, added: [{ s: 'c' }], removed: [], changed: [] });
+    update({ subscriptionId: 'sub-1', revision: 2, added: [{ s: 'c' }], removed: [] });
     expect(results).toHaveLength(1);
   });
 

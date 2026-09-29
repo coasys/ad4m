@@ -778,17 +778,17 @@ describe('PerspectiveClient', () => {
         expect(subscription.result).toEqual([{ s: 'a' }]);
 
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
-        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [], changed: [] });
-        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [{ s: 'a' }], changed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [{ s: 'a' }] });
         expect(results).toEqual([[{ s: 'b' }]]);
 
         // Revision 2 never arrives: the client asks for the current state.
-        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [], changed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
         await new Promise(r => setTimeout(r, 10));
         expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
         expect(subscription.result).toEqual([{ s: 'c' }]);
 
-        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [], changed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
         expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
 
         subscription.dispose();

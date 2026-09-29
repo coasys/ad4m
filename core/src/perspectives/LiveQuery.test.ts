@@ -2,11 +2,10 @@ import { applyUpdate, LiveQuery, QueryUpdate, Subscribed } from './LiveQuery';
 
 describe('applyUpdate', () => {
     it('keys model results by instance id and takes the new order', () => {
-        const old = { instances: [{ id: 'a', t: 1 }, { id: 'b', t: 1 }, { id: 'c', t: 1 }], totalCount: 3, nextCursor: 'x' };
+        const old = { instances: [{ id: 'a', t: 1 }, { id: 'b', t: 1 }, { id: 'c', t: 1 }], totalCount: 3 };
         const next = applyUpdate(old, {
             subscriptionId: 's', revision: 1,
-            added: [{ id: 'd', t: 1 }], removed: ['a'], changed: [{ id: 'b', t: 2 }],
-            ids: ['c', 'b', 'd'], totalCount: 3,
+            ids: ['c', 'b', 'd'], upsert: [{ id: 'b', t: 2 }, { id: 'd', t: 1 }], totalCount: 3,
         });
         expect(next).toEqual({ instances: [{ id: 'c', t: 1 }, { id: 'b', t: 2 }, { id: 'd', t: 1 }], totalCount: 3 });
         expect(old.instances).toHaveLength(3);
@@ -14,13 +13,13 @@ describe('applyUpdate', () => {
 
     it('treats query rows as a multiset', () => {
         const next = applyUpdate([{ s: 'x' }, { s: 'x' }, { s: 'y' }], {
-            subscriptionId: 's', revision: 1, added: [{ s: 'z' }], removed: [{ s: 'x' }, { s: 'y' }], changed: [],
+            subscriptionId: 's', revision: 1, added: [{ s: 'z' }], removed: [{ s: 'x' }, { s: 'y' }],
         });
         expect(next).toEqual([{ s: 'x' }, { s: 'z' }]);
     });
 
-    it('replaces a result that could not be keyed', () => {
-        expect(applyUpdate(true, { subscriptionId: 's', revision: 1, reset: true, result: false })).toBe(false);
+    it('replaces a result that could not be diffed', () => {
+        expect(applyUpdate(true, { subscriptionId: 's', revision: 1, result: false })).toBe(false);
     });
 });
 
@@ -35,7 +34,7 @@ function fakeClient() {
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
-        listener!({ subscriptionId, revision, added, removed, changed: [] });
+        listener!({ subscriptionId, revision, added, removed });
     return { client, update, reconnect: () => reconnect!() };
 }
 
