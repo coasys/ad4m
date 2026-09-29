@@ -365,7 +365,7 @@ mod tests {
         .expect("mint prior sources");
 
         let mut watcher = WatcherState::new();
-        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        let had_pending = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
         assert_eq!(
             watcher
                 .pending_for("cursor-skip")
@@ -373,6 +373,62 @@ mod tests {
                 .unwrap_or(0),
             0,
             "in-window sources must suppress re-enqueue after a RAM-empty restart"
+        );
+        assert!(
+            !had_pending,
+            "a tick whose only turn is already processed is idle, so the loop may back off (#1072)"
+        );
+    }
+
+    /// The tick's return value drives the watch loop's idle back-off (#1072):
+    /// no processor declared → idle; a new unprocessed turn still inside its
+    /// debounce window → pending, so the loop stays at the base rate.
+    #[tokio::test]
+    async fn tick_reports_pending_only_while_a_new_turn_waits() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_message(
+            &mut p,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        assert!(
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "no processor declared: nothing can be pending"
+        );
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "idle-backoff".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            // Longer than the test, so the batch never drains and no pass runs.
+            debounce_ms: 600_000,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "an unprocessed turn waiting out its debounce keeps the loop at the base rate"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+                .await,
+            "still pending on the next tick"
         );
     }
 
