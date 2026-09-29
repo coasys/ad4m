@@ -19,7 +19,15 @@ describe('SHACLFlow', () => {
 
     it('generates correct transition URIs', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
-      expect(flow.transitionUri('ready', 'doing')).toBe('todo://TODO.readyTodoing');
+      expect(flow.transitionUri('ready', 'doing', 'Start')).toBe('todo://TODO.transition/ready/doing/Start');
+    });
+
+    it('encodes transition URI parts like the executor flow writer', () => {
+      // Same fixture as `transition_uri_encodes_parts_like_the_sdk` in
+      // rust-executor/src/perspectives/shacl_parser.rs.
+      const flow = new SHACLFlow('TODO', 'todo://');
+      expect(flow.transitionUri("in review", "a/b", "Fast-track!*'()~._"))
+        .toBe("todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._");
     });
   });
 
@@ -1002,44 +1010,6 @@ describe('SHACLFlow', () => {
       expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
     });
 
-    it('still reads flows stored with the legacy {from}To{to} transition URIs', () => {
-      const flowUri = 'todo://TODOFlow';
-      const legacy = (from: string, to: string) => `todo://TODO.${from}To${to}`;
-      const transition = (from: string, to: string, actionName: string, actions: AD4MAction[]): Link[] => [
-        { source: flowUri, predicate: 'ad4m://hasTransition', target: legacy(from, to) },
-        { source: legacy(from, to), predicate: 'rdf://type', target: 'ad4m://FlowTransition' },
-        { source: legacy(from, to), predicate: 'ad4m://actionName', target: Literal.from(actionName).toUrl() },
-        { source: legacy(from, to), predicate: 'ad4m://fromState', target: `todo://TODO.${from}` },
-        { source: legacy(from, to), predicate: 'ad4m://toState', target: `todo://TODO.${to}` },
-        { source: legacy(from, to), predicate: 'ad4m://transitionActions', target: `literal:string:${encodeURIComponent(JSON.stringify(actions))}` },
-      ];
-      const state = (name: string, value: number): Link[] => [
-        { source: flowUri, predicate: 'ad4m://hasState', target: `todo://TODO.${name}` },
-        { source: `todo://TODO.${name}`, predicate: 'rdf://type', target: 'ad4m://FlowState' },
-        { source: `todo://TODO.${name}`, predicate: 'ad4m://stateName', target: Literal.from(name).toUrl() },
-        { source: `todo://TODO.${name}`, predicate: 'ad4m://stateValue', target: Literal.from(value).toUrl() },
-      ];
-      const links: Link[] = [
-        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
-        { source: flowUri, predicate: 'ad4m://flowName', target: Literal.from('TODO').toUrl() },
-        ...state('ready', 0),
-        ...state('done', 1),
-        ...transition('ready', 'done', 'Finish', [{ action: 'addLink', source: 'this', predicate: 'todo://done', target: 'true' }]),
-        ...transition('done', 'ready', 'Reopen', []),
-      ];
-
-      const flow = SHACLFlow.fromLinks(links, flowUri);
-      expect(flow.states.map(s => s.name)).toEqual(['ready', 'done']);
-      expect(byKey(flow.transitions)).toEqual([
-        'done->ready:Reopen:[]',
-        'ready->done:Finish:[{"action":"addLink","source":"this","predicate":"todo://done","target":"true"}]',
-      ]);
-    });
-
-    it('keeps the legacy two-argument transitionUri() output', () => {
-      const flow = new SHACLFlow('TODO', 'todo://');
-      expect(flow.transitionUri('ready', 'doing')).toBe('todo://TODO.readyTodoing');
-    });
   });
 
   describe('initial state ordering', () => {

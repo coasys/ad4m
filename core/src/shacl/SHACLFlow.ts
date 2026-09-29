@@ -488,14 +488,13 @@ export class SHACLFlow {
   }
 
   /**
-   * Get a transition URI. With `actionName` the parts are URI-encoded and the URI is
-   * unique; without it, the legacy `{from}To{to}` form. Readers never parse this URI.
+   * Get a transition URI: `{namespace}{name}.transition/{from}/{to}/{action}`.
+   * Each part is RFC 3986-encoded, so the URI is unique per transition. The
+   * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
-  transitionUri(fromState: string, toState: string, actionName?: string): string {
-    if (actionName === undefined) {
-      return `${this.namespace}${this.name}.${fromState}To${toState}`;
-    }
-    const part = encodeURIComponent;
+  transitionUri(fromState: string, toState: string, actionName: string): string {
+    const part = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
     return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 

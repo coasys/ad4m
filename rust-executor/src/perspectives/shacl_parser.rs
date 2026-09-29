@@ -481,6 +481,20 @@ impl SHACLFlow {
     }
 }
 
+/// `{namespace}{flow}.transition/{from}/{to}/{action}` with each part
+/// percent-encoded, so every transition gets its own URI. The SDK's
+/// `SHACLFlow.transitionUri` builds the same string.
+fn transition_uri(namespace: &str, flow_name: &str, transition: &FlowTransition) -> String {
+    format!(
+        "{}{}.transition/{}/{}/{}",
+        namespace,
+        flow_name,
+        urlencoding::encode(&transition.from_state),
+        urlencoding::encode(&transition.to_state),
+        urlencoding::encode(&transition.action_name)
+    )
+}
+
 /// Parse Flow JSON to RDF links
 pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>, AnyError> {
     let flow: SHACLFlow = serde_json::from_str(flow_json)
@@ -665,10 +679,7 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 
     // Transitions
     for transition in &flow.transitions {
-        let transition_uri = format!(
-            "{}{}.{}To{}",
-            flow.namespace, flow_name, transition.from_state, transition.to_state
-        );
+        let transition_uri = transition_uri(&flow.namespace, flow_name, transition);
         let from_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.from_state);
         let to_state_uri = format!("{}{}.{}", flow.namespace, flow_name, transition.to_state);
 
@@ -2343,14 +2354,16 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "todo://TODOFlow"
                 && l.predicate == Some("ad4m://hasTransition".to_string())
-                && l.target == "todo://TODO.readyTodone"),
+                && l.target == "todo://TODO.transition/ready/done/Complete"),
             "Missing transition link"
         );
 
         // Check for transition action name
         assert!(
-            links.iter().any(|l| l.source == "todo://TODO.readyTodone"
-                && l.predicate == Some("ad4m://actionName".to_string())),
+            links
+                .iter()
+                .any(|l| l.source == "todo://TODO.transition/ready/done/Complete"
+                    && l.predicate == Some("ad4m://actionName".to_string())),
             "Missing action name link"
         );
     }
@@ -2614,6 +2627,59 @@ mod tests {
         }
     }
 
+    /// Same fixture as the SDK test "encodes transition URI parts like the
+    /// executor flow writer" (core/src/shacl/SHACLFlow.test.ts): both writers
+    /// must name a transition identically.
+    #[test]
+    fn transition_uri_encodes_parts_like_the_sdk() {
+        let transition = FlowTransition {
+            action_name: "Fast-track!*'()~._".to_string(),
+            from_state: "in review".to_string(),
+            to_state: "a/b".to_string(),
+            actions: vec![],
+        };
+        assert_eq!(
+            transition_uri("todo://", "TODO", &transition),
+            "todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._"
+        );
+    }
+
+    /// Two transitions between the same states (different actions), and
+    /// `"a" -> "Tob"` next to `"aTo" -> "b"`, used to share one
+    /// `{from}To{to}` URI, so the reader merged them into one.
+    #[test]
+    fn parse_flow_to_links_keeps_transitions_that_used_to_collide() {
+        let flow_json = r#"{
+            "name": "F",
+            "namespace": "f://",
+            "states": [
+                {"name": "a", "value": 0.0},
+                {"name": "Tob", "value": 1.0},
+                {"name": "aTo", "value": 2.0},
+                {"name": "b", "value": 3.0}
+            ],
+            "transitions": [
+                {"action_name": "Approve", "from_state": "a", "to_state": "Tob", "actions": []},
+                {"action_name": "Fast-track", "from_state": "a", "to_state": "Tob", "actions": []},
+                {"action_name": "Go", "from_state": "aTo", "to_state": "b", "actions": []}
+            ]
+        }"#;
+
+        let links = parse_flow_to_links(flow_json, "F").expect("writer");
+        let flow = parse_flow_from_links(&links, "f://FFlow").expect("reader");
+
+        let mut got: Vec<String> = flow
+            .transitions
+            .iter()
+            .map(|t| format!("{}->{}:{}", t.from_state, t.to_state, t.action_name))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec!["a->Tob:Approve", "a->Tob:Fast-track", "aTo->b:Go"]
+        );
+    }
+
     /// Full-shape read — hand-built links matching what
     /// `core/src/shacl/SHACLFlow.ts::toLinks()` emits when every field
     /// is set. Independent of the Rust writer (so a Rust-writer bug
@@ -2624,7 +2690,7 @@ mod tests {
     fn parse_flow_from_links_reads_all_predicates_from_hand_built_links() {
         let flow_uri = "coasys://DeliberationFlow";
         let state_uri = "coasys://Deliberation.Resolution";
-        let transition_uri = "coasys://Deliberation.OverlapToResolution";
+        let transition_uri = "coasys://Deliberation.transition/Overlap/Resolution/Resolve";
         let overlap_uri = "coasys://Deliberation.Overlap";
         let requires_json = r#"[{"className": "coasys://Perspective", "count": {"min": 3}}]"#;
         let context_json = r#"[{"className": "coasys://Proposal"}]"#;
