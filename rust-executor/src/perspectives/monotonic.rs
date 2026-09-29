@@ -498,6 +498,46 @@ mod tests {
         );
     }
 
+    /// Only a `literal:string:` target names a predicate. A bare IRI or a
+    /// literal of another type (the issue's original `literal:true`) declares
+    /// nothing, even from the authority.
+    #[test]
+    fn a_flag_declares_only_a_string_literal_target() {
+        use crate::agent::signatures::TestSigner;
+        let alice = TestSigner::generate();
+        let flag = |target: &str| {
+            let mut link = LinkExpression::from(
+                alice.sign(
+                    Link {
+                        source: "app://Role.did".to_string(),
+                        predicate: Some(MONOTONIC_FLAG_PREDICATE.to_string()),
+                        target: target.to_string(),
+                    }
+                    .normalize(),
+                ),
+            );
+            link.status = Some(LinkStatus::Shared);
+            link
+        };
+        let declared = MonotonicDeclared::from_flags(
+            Some(alice.did.clone()),
+            [
+                flag("app://member"),
+                flag("literal:true"),
+                flag("literal:boolean:true"),
+                flag("literal:number:5"),
+                flag("literal:string:"),
+                flag("literal:string:app%3A%2F%2Fgood"),
+            ],
+        );
+        let leaked: Vec<_> = ["app://member", "literal:true", "true", "5", ""]
+            .into_iter()
+            .filter(|p| is_monotonic(Some(p), &declared))
+            .collect();
+        assert!(leaked.is_empty(), "declared {leaked:?}");
+        assert!(is_monotonic(Some("app://good"), &declared), "control");
+    }
+
     #[test]
     fn tombstones_and_the_flag_are_not_retractable() {
         assert!(is_retractable(Some("ad4m://acceptedBy")));

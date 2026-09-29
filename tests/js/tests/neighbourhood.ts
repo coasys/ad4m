@@ -1,5 +1,5 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle, Literal } from "@coasys/ad4m";
-import { Ad4mModel, Model, Property } from "@coasys/ad4m";
+import { Ad4mModel, Model, Property, Flag } from "@coasys/ad4m";
 import { TestContext } from './integration.test'
 import { sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
@@ -8,9 +8,13 @@ import { expect } from "chai";
 let aliceP1: null | PerspectiveProxy = null;
 
 // #1176: a role class whose DID property is declared monotonic, so a grant
-// ends only by a signed revocation, never by a removal.
+// ends only by a signed revocation, never by a removal. Its flag is declared
+// too: removing it would drop the instance out of a role query.
 @Model({ name: "MonotonicRoleGrant" })
 class MonotonicRoleGrant extends Ad4mModel {
+    @Flag({ through: "test://role/type", value: "test://role/grant", monotonic: true })
+    type: string = "";
+
     @Property({ through: "test://role/member", monotonic: true })
     member: string = "";
 }
@@ -249,12 +253,32 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(refusal, "Bob's removeLink must fail").to.not.be.null
                 expect(String(refusal?.message ?? refusal)).to.contain("is monotonic")
 
+                // The side door: removing the instance's flag instead.
+                const typeQuery = new LinkQuery({source: grant.id, predicate: 'test://role/type'})
+                const typeFlag = new LinkQuery({predicate: 'ad4m://monotonic', target: Literal.from('test://role/type').toUrl()})
+                let bobType = await bob.perspective.queryLinks(bobP.uuid, typeQuery)
+                for (let tries = 0; (bobType.length < 1 || (await bob.perspective.queryLinks(bobP.uuid, typeFlag)).length < 1) && tries < 30; tries++) {
+                    await sleep(1000)
+                    bobType = await bob.perspective.queryLinks(bobP.uuid, typeQuery)
+                }
+                expect(bobType.length, "Bob received the instance's flag").to.be.equal(1)
+                let flagRefusal: any = null
+                try {
+                    await bob.perspective.removeLink(bobP.uuid, bobType[0])
+                } catch (e) {
+                    flagRefusal = e
+                }
+                expect(flagRefusal, "Bob's removal of the declared flag must fail").to.not.be.null
+                expect(String(flagRefusal?.message ?? flagRefusal)).to.contain("is monotonic")
+
                 // Give a removal that did get committed time to reach Alice.
                 await sleep(10000)
                 const aliceLinks = await alice.perspective.queryLinks(aliceP.uuid, query)
                 expect(aliceLinks.length, "Alice still holds the grant").to.be.equal(1)
                 const bobAfter = await bob.perspective.queryLinks(bobP.uuid, query)
                 expect(bobAfter.length, "and so does Bob's replica").to.be.equal(1)
+                const aliceType = await alice.perspective.queryLinks(aliceP.uuid, typeQuery)
+                expect(aliceType.length, "Alice still holds the instance's flag").to.be.equal(1)
             })
 
             it('local link created by Alice NOT received by Bob', async () => {

@@ -177,6 +177,31 @@ describe('SHACLShape', () => {
     });
   });
 
+  describe('monotonic read-back (#1176)', () => {
+    // fromLinks reports a flag naming this property's own predicate, not the
+    // executor's author-gated declaration. A flag naming another predicate
+    // (a stale one after a `through` change) or a non-string target is
+    // not this property's flag.
+    const withFlag = (target: string) => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'field', path: 'test://field' });
+      const links = shape.toLinks();
+      const propShape = links.find(l => l.predicate === 'sh://path' && l.target === 'test://field')!.source;
+      links.push({ source: propShape, predicate: 'ad4m://monotonic', target });
+      return SHACLShape.fromLinks(links, 'test://ModelShape').properties[0].monotonic;
+    };
+
+    it('reads a flag naming the property path', () => {
+      expect(withFlag('literal:string:test%3A%2F%2Ffield')).toBe(true);
+    });
+
+    it('ignores a flag naming another predicate or not a string literal', () => {
+      expect(withFlag('literal:string:test%3A%2F%2Fold')).toBeUndefined();
+      expect(withFlag('literal:true')).toBeUndefined();
+      expect(withFlag('test://field')).toBeUndefined();
+    });
+  });
+
   describe('round-trip serialization', () => {
     it('preserves all property attributes', () => {
       const original = new SHACLShape('test://Model');

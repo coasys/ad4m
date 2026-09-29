@@ -406,3 +406,194 @@ async fn t5_a_batched_update_of_a_local_declared_link_commits() {
         .collect();
     assert_eq!(targets, vec!["did:key:someone-else".to_string()]);
 }
+
+/// A pulled diff can carry the author's declaration and a peer's removal
+/// together (a squashed pull, a late joiner). The removal is dropped, as it
+/// would be had they arrived in two diffs, so replicas do not diverge on how
+/// the link language batches.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_flag_protects_a_removal_in_the_same_diff() {
+    let alice = TestSigner::generate();
+    let bob = TestSigner::generate();
+    let mut p = neighbourhood_of(&alice).await;
+    let member = grant(&alice, ROLE, MEMBER);
+    let holder = grant(&alice, BADGE, HOLDER);
+    sync_in(&mut p, vec![member.clone(), holder.clone()], vec![]).await;
+
+    let mut additions = class_links(&alice, "Role", MEMBER, true);
+    additions.extend(class_links(&bob, "Badge", HOLDER, true));
+    sync_in(&mut p, additions, vec![member.clone(), holder.clone()]).await;
+
+    assert!(present(&p, &member), "the author's flag in the same diff");
+    assert!(
+        !present(&p, &holder),
+        "control: a member's flag in the same diff declares nothing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Every local entry point refuses a declared link (review of #1183, finding 3)
+// ---------------------------------------------------------------------------
+
+async fn declared_perspective() -> (PerspectiveInstance, AgentContext) {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    register_member_class(&mut p, &ctx).await;
+    (p, ctx)
+}
+
+async fn register_member_class(p: &mut PerspectiveInstance, ctx: &AgentContext) {
+    let shacl: serde_json::Value =
+        serde_json::from_str(&class_json("Role", MEMBER, true)).expect("json");
+    register(p, ctx, shacl).await;
+}
+
+async fn shared_member_link(
+    p: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+    target: &str,
+) -> LinkExpression {
+    LinkExpression::from(
+        p.add_link(
+            Link {
+                source: ROLE.to_string(),
+                predicate: Some(MEMBER.to_string()),
+                target: target.to_string(),
+            },
+            LinkStatus::Shared,
+            None,
+            ctx,
+        )
+        .await
+        .expect("add_link"),
+    )
+}
+
+fn refused<T: std::fmt::Debug>(r: Result<T, AnyError>, what: &str) {
+    let err = r.expect_err(what);
+    assert!(
+        format!("{err:#}").contains("is monotonic"),
+        "{what}: {err:#}"
+    );
+}
+
+fn removal_of(link: &LinkExpression) -> LinkMutations {
+    let mut input = as_input(link);
+    input.status = None;
+    LinkMutations {
+        additions: vec![],
+        removals: vec![input],
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_link_mutations_refuses_a_declared_link() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.link_mutations(removal_of(&link), LinkStatus::Shared, &ctx)
+            .await,
+        "link_mutations",
+    );
+    assert!(present(&p, &link));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_link_mutations_labelled_local_refuses_a_shared_declared_link() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.link_mutations(removal_of(&link), LinkStatus::Local, &ctx)
+            .await,
+        "link_mutations labelled Local",
+    );
+    assert!(present(&p, &link));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_update_link_refuses_a_declared_link() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let new = Link {
+        source: ROLE.to_string(),
+        predicate: Some(MEMBER.to_string()),
+        target: "did:key:b".to_string(),
+    };
+    refused(
+        p.update_link(link.clone(), new, None, &ctx).await,
+        "update_link",
+    );
+    assert!(present(&p, &link));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_remove_links_refuses_a_declared_link() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.remove_links(vec![link.clone()], None).await,
+        "remove_links",
+    );
+    assert!(present(&p, &link));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_batched_remove_link_refuses_a_declared_link() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let batch = p.create_batch().await;
+    refused(
+        p.remove_link(link.clone(), Some(batch)).await,
+        "remove_link into a batch",
+    );
+}
+
+/// The commit backstop: a removal queued before the declaration is refused
+/// at commit.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_commit_batch_refuses_a_removal_declared_after_it_was_queued() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let batch = p.create_batch().await;
+    p.remove_link(link.clone(), Some(batch.clone()))
+        .await
+        .expect("queued before the declaration");
+    register_member_class(&mut p, &ctx).await;
+    refused(p.commit_batch(batch, &ctx).await, "commit_batch backstop");
+    assert!(present(&p, &link));
+}
+
+/// The author's executor syncs a member's identical flag before registering
+/// the class. That flag declares nothing, so it must not stop ours from
+/// being written.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_peers_identical_flag_does_not_stand_in_for_ours() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let bob = TestSigner::generate();
+    sync_in(&mut p, class_links(&bob, "Role", MEMBER, true), vec![]).await;
+    register_member_class(&mut p, &ctx).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.remove_link(link.clone(), None).await,
+        "our own declaration must be written",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_an_authority_change_rebuilds_the_declared_set() {
+    let (mut p, ctx) = declared_perspective().await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.remove_link(link.clone(), None).await,
+        "declared while this agent is the authority",
+    );
+    let alice = TestSigner::generate();
+    p.persisted.lock().await.neighbourhood = Some(DecoratedNeighbourhoodExpression {
+        author: alice.did.clone(),
+        ..Default::default()
+    });
+    sync_in(&mut p, vec![], vec![link.clone()]).await;
+    assert!(
+        !present(&p, &link),
+        "Alice is the authority now and declared nothing: a peer's removal applies"
+    );
+}

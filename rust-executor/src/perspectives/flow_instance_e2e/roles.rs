@@ -385,11 +385,17 @@ async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
 /// Register `ns://Task` again with its `owner` property declared
 /// `monotonic`, as the class author (this agent, the owner) would.
 async fn declare_owner_monotonic(f: &mut Fixture) {
+    declare_monotonic(f, &["ns://owner"]).await;
+}
+
+/// Register `ns://Task` again with the properties under `paths` declared
+/// `monotonic`.
+async fn declare_monotonic(f: &mut Fixture, paths: &[&str]) {
     use crate::perspectives::interpretation_test_support::TASK_SDNA;
     use crate::perspectives::perspective_instance::SdnaType;
     let mut shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
     for property in shacl["properties"].as_array_mut().expect("properties") {
-        if property["path"] == "ns://owner" {
+        if paths.iter().any(|p| property["path"] == *p) {
             property["monotonic"] = serde_json::Value::Bool(true);
         }
     }
@@ -486,5 +492,81 @@ async fn a_declared_role_grant_ends_only_by_revocation() {
         owner_grants(&f).await,
         vec![grant],
         "and the grant stays in the graph"
+    );
+}
+
+/// T4, the instance side door (review of #1183, finding 1). A `fromRole`
+/// gate matches a role *instance*, so a peer who removes the instance's class
+/// flag un-grants the role even though the DID link stays. The role class
+/// must declare its flag (and its other required properties) too; then the
+/// peer's removal of the flag is dropped and the grant still resolves. The
+/// control shows the side door with only the DID property declared.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_role_instance_keeps_its_flag_and_its_grant() {
+    use crate::perspectives::flow_instance::roles::{resolve_role_grants, RoleGrantEvidence};
+    use crate::perspectives::shacl_parser::ModelQuery;
+
+    async fn peer_removes_the_type_flag_then_resolves(paths: &[&str]) -> bool {
+        let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
+        declare_monotonic(&mut f, paths).await;
+        let me = acting_did(&f);
+        f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Shared)
+            .await;
+        let role: ModelQuery =
+            serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
+                .expect("role");
+        let record = f.instances().await.remove(0);
+        let matched =
+            |ev: &Vec<RoleGrantEvidence>| ev[0].instances.iter().any(|i| i.instance_id == TASK);
+        let resolve = || {
+            resolve_role_grants(
+                &f.perspective,
+                "delivery://Delivery.scoped",
+                &role,
+                &record,
+                std::slice::from_ref(&me),
+            )
+        };
+        assert!(
+            matched(&resolve().await.expect("resolve")),
+            "control: the instance is a role instance"
+        );
+
+        let type_links: Vec<LinkExpression> = f
+            .perspective
+            .get_links(&LinkQuery {
+                source: Some(TASK.to_string()),
+                predicate: Some("ns://type".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links")
+            .into_iter()
+            .map(|l| {
+                let mut l = LinkExpression::from(l);
+                l.status = None;
+                l
+            })
+            .collect();
+        assert_eq!(type_links.len(), 1);
+        f.perspective
+            .diff_from_link_language(PerspectiveDiff {
+                additions: vec![],
+                removals: type_links,
+            })
+            .await
+            .expect("sync a peer's removal");
+        assert_eq!(owner_grants(&f).await.len(), 1, "the grant link stays");
+        let after = resolve().await.expect("resolve");
+        matched(&after)
+    }
+
+    assert!(
+        peer_removes_the_type_flag_then_resolves(&["ns://owner", "ns://type", "ns://title"]).await,
+        "the flag is declared: the peer's removal is dropped, the grant resolves"
+    );
+    assert!(
+        !peer_removes_the_type_flag_then_resolves(&["ns://owner"]).await,
+        "control: only the DID declared, the flag goes and the instance drops out"
     );
 }

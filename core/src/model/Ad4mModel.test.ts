@@ -99,6 +99,25 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(shape.toJSON().properties.find((p: any) => p.path === "test://member").monotonic).toBe(true);
   });
 
+  it("emits a monotonic flag as a flag naming its predicate (#1176)", () => {
+    @Model({ name: "MonotonicRole" })
+    class MonotonicRole extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://role", monotonic: true })
+      type: string = "";
+
+      @Flag({ through: "test://kind", value: "test://plain" })
+      kind: string = "";
+    }
+
+    const { shape } = (MonotonicRole as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("test://type").monotonic).toBe(true);
+    expect(byPath("test://type").hasValue).toBe("test://role");
+    expect(byPath("test://kind").monotonic).toBeUndefined();
+    expect(shape.toLinks().filter((l: any) => l.predicate === "ad4m://monotonic").map((l: any) => l.target))
+      .toEqual(["literal:string:test%3A%2F%2Ftype"]);
+  });
+
   it("should support NodeExpression transforms in properties", () => {
     // Transforms are now NodeExpression objects, not callable functions
     // The fileToDataUri and other builders are exported from @coasys/ad4m
