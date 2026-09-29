@@ -348,11 +348,14 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     aliceDID = (await alice.agent.me()).did
                     bobDID = (await bob.agent.me()).did
 
-                    // Wait for Bob's perspective to sync
+                    // Wait for Bob's joined perspective to have its link language.
+                    // Synced needs a successful link_language.sync(), which can back
+                    // off; telepresence only needs the language installed.
                     await pollUntil(async () => {
                         const p = await bob.perspective.byUUID(bobP1Handle.uuid);
-                        return p?.state === PerspectiveState.Synced;
-                    }, { timeoutMs: 10000, label: "bob's telepresence perspective synced" });
+                        return p?.state === PerspectiveState.Synced
+                            || p?.state === PerspectiveState.LinkLanguageInstalledButNotSynced;
+                    }, { timeoutMs: 10000, label: "bob's telepresence perspective has its link language" });
                 })
 
                 it('they see each other in `otherAgents`', async () => {

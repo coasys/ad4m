@@ -382,6 +382,27 @@ export async function pollUntil(
 }
 
 /**
+ * Resolves true once `child` has exited (or had already), false after `timeoutMs`.
+ * Use this, not `child.killed`: `killed` only records that a signal was delivered.
+ */
+export function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const onExit = () => { clearTimeout(timer); resolve(true); };
+        const timer = setTimeout(() => { child.off("exit", onExit); resolve(false); }, timeoutMs);
+        child.once("exit", onExit);
+    });
+}
+
+/** SIGTERM `child`, and SIGKILL it if it has not exited within `graceMs`; waits for the exit either way. */
+export async function stopChildProcess(child: ChildProcess, graceMs = 5000): Promise<void> {
+    child.kill("SIGTERM");
+    if (await waitForExit(child, graceMs)) return;
+    child.kill("SIGKILL");
+    await waitForExit(child, graceMs);
+}
+
+/**
  * Actively polls a predicate and fails immediately if it ever becomes true.
  * Returns successfully when the wait period expires without the predicate
  * firing — use this for negative assertions ("X should NOT happen").

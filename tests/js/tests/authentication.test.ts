@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, startExecutor, quitExecutor, pollUntil } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { ExceptionInfo } from "@coasys/ad4m";

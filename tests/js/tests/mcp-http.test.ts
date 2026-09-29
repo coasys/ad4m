@@ -6,7 +6,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { EventSource } from 'eventsource';
@@ -228,17 +228,13 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await sleep(1000);
-            if (!executorProcess.killed) {
-                executorProcess.kill('SIGKILL');
-            }
+            await stopChildProcess(executorProcess);
         }
-        // Exit before killByPorts: lsof includes the test process's own
-        // client connections, so killByPorts would SIGTERM mocha itself
-        // (exit 143). cleanup.js between test files handles residual ports.
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
-        process.exit(0);
     });
 
     // ========================================================================

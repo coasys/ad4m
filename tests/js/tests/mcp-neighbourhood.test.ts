@@ -14,7 +14,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { startExecutor, killByPorts, pollUntil } from "../utils/utils";
+import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
@@ -80,14 +80,12 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await pollUntil(() => executorProcess!.killed, { timeoutMs: 5000, label: "executor exits after SIGTERM" }).catch(() => {});
-            if (!executorProcess.killed) executorProcess.kill('SIGKILL');
+            await stopChildProcess(executorProcess);
         }
-        // Exit before killByPorts: lsof includes the test process's own
-        // client connections, so killByPorts would SIGTERM mocha itself
-        // (exit 143). cleanup.js between test files handles residual ports.
-        process.exit(0);
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
     });
 
     // ========================================================================
