@@ -1,7 +1,6 @@
 use deno_runtime::ops::bootstrap::SnapshotOptions;
 use deno_runtime::snapshot::create_runtime_snapshot;
 use deno_runtime::transpile::maybe_transpile_source;
-use rust_executor::entanglement_service::entanglement_service_extension::entanglement_service;
 use rust_executor::holochain_service::holochain_service_extension::holochain_service;
 use rust_executor::js_core::agent_extension::agent_service;
 use rust_executor::js_core::languages_extension::language_service;
@@ -33,7 +32,6 @@ fn main() {
         holochain_service::init(),
         signature_service::init(),
         agent_service::init(),
-        entanglement_service::init(),
         runtime_service::init(),
         language_service::init(),
     ];
