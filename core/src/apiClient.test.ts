@@ -4,6 +4,8 @@ import { AgentClient } from "./agent/AgentClient"
 import { LanguageClient } from "./language/LanguageClient"
 import { NeighbourhoodClient } from "./neighbourhood/NeighbourhoodClient"
 import { PerspectiveClient } from "./perspectives/PerspectiveClient"
+import { PerspectiveHandle } from "./perspectives/PerspectiveHandle"
+import { PerspectiveProxy } from "./perspectives/PerspectiveProxy"
 import { RuntimeClient } from "./runtime/RuntimeClient"
 
 type AnyMsg = Record<string, any>
@@ -348,33 +350,47 @@ describe('long calls', () => {
         ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, false, client).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
         ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, false, client).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
     ]
+    const proxy = () => new PerspectiveProxy(
+        new PerspectiveHandle('u', 'p'),
+        new PerspectiveClient(url, undefined, false, client),
+    )
+    const proxyCalls: typeof calls = [
+        ['perspective.runInterpretation', (o) => proxy().runInterpretation([], 'b', undefined, o)],
+        ['perspective.runInterpretationWithHarness', (o) => proxy().runInterpretationWithHarness([], 'b', 1, undefined, undefined, undefined, undefined, o)],
+    ]
     const lastSent = () => TestSocket.instances[TestSocket.instances.length - 1].sent.at(-1)!
-
-    it.each(calls)('%s waits LONG_TIMEOUT_MS by default', async (type, run) => {
+    /** Reads how `promise` settled so far: 'pending', 'resolved' or the rejection. */
+    function outcomeOf(promise: Promise<unknown>): () => unknown {
         let outcome: unknown = 'pending'
-        run().then(() => { outcome = 'resolved' }, (e) => { outcome = e })
-        await jest.advanceTimersByTimeAsync(1)
-        expect(lastSent().type).toBe(type)
+        promise.then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+        return () => outcome
+    }
 
-        await jest.advanceTimersByTimeAsync(31_000)
-        expect(outcome).toBe('pending')
-        await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS)
-        expect(outcome).toMatchObject({ name: 'RpcError', status: 408 })
-    })
+    describe.each([['client', calls], ['PerspectiveProxy', proxyCalls]])('%s', (_via, table) => {
+        it.each(table)('%s waits LONG_TIMEOUT_MS by default', async (type, run) => {
+            const outcome = outcomeOf(run())
+            await jest.advanceTimersByTimeAsync(1)
+            expect(lastSent().type).toBe(type)
 
-    it.each(calls)('%s takes timeoutMs and signal', async (_type, run) => {
-        const timedOut = run({ timeoutMs: 100 })
-        timedOut.catch(() => {})
-        await jest.advanceTimersByTimeAsync(100)
-        await expect(timedOut).rejects.toMatchObject({ status: 408 })
+            await jest.advanceTimersByTimeAsync(31_000)
+            expect(outcome()).toBe('pending')
+            await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS)
+            expect(outcome()).toMatchObject({ name: 'RpcError', status: 408 })
+        })
 
-        const controller = new AbortController()
-        const aborted = run({ signal: controller.signal })
-        aborted.catch(() => {})
-        await jest.advanceTimersByTimeAsync(1)
-        const sent = lastSent()
-        controller.abort()
-        await expect(aborted).rejects.toMatchObject({ name: 'AbortError' })
-        expect(lastSent()).toMatchObject({ type: 'request.cancel', params: { targetId: sent.id } })
+        it.each(table)('%s takes timeoutMs and signal', async (_type, run) => {
+            const timedOut = outcomeOf(run({ timeoutMs: 100 }))
+            await jest.advanceTimersByTimeAsync(100)
+            expect(timedOut()).toMatchObject({ status: 408 })
+
+            const controller = new AbortController()
+            const aborted = outcomeOf(run({ signal: controller.signal }))
+            await jest.advanceTimersByTimeAsync(1)
+            const sent = lastSent()
+            controller.abort()
+            await jest.advanceTimersByTimeAsync(0)
+            expect(aborted()).toMatchObject({ name: 'AbortError' })
+            expect(lastSent()).toMatchObject({ type: 'request.cancel', params: { targetId: sent.id } })
+        })
     })
 })
