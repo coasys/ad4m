@@ -2597,7 +2597,7 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let wanted = shacl_names_filter(&params)?;
+    let wanted = params.opt_str_set("names")?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
@@ -2667,28 +2667,6 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     }
 
     Ok(Value::Array(results))
-}
-
-/// `names` param of `perspective.getAllShacl`: `None` when absent or `null`,
-/// the set of names when it is an array of strings, 400 otherwise.
-pub(crate) fn shacl_names_filter(
-    params: &Value,
-) -> Result<Option<std::collections::HashSet<String>>, WsRpcError> {
-    match params.get("names") {
-        None | Some(Value::Null) => Ok(None),
-        Some(Value::Array(items)) => items
-            .iter()
-            .map(|v| {
-                v.as_str()
-                    .map(str::to_string)
-                    .ok_or_else(|| WsRpcError::bad_request("`names` must be an array of strings"))
-            })
-            .collect::<Result<_, _>>()
-            .map(Some),
-        Some(_) => Err(WsRpcError::bad_request(
-            "`names` must be an array of strings",
-        )),
-    }
 }
 
 // ── Registration ──
