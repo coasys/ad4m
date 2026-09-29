@@ -165,8 +165,32 @@ async function httpFetchImpl(url, method, headersJson, body) {
                 HTTP_FETCH_TIMEOUT_MS + " ms"
             );
         }
-        throw e;
+        // The runtime's error names the raw URL (e.g. "error sending request
+        // for url (http://user:pass@host/?token=...)"), so it is rebuilt from
+        // a scrubbed message and the original is not kept as its cause.
+        throw new Error(
+            "httpFetch " + init.method + " " + redactUrl(url) + " failed: " +
+            scrubUrl(e && e.message !== undefined ? e.message : e, url)
+        );
     }
+}
+
+// `message` with every form of `url` replaced by its redacted form, and any
+// remaining copy of its password or query removed.
+function scrubUrl(message, url) {
+    var out = String(message);
+    var redacted = redactUrl(url);
+    var secrets = [];
+    var forms = [url];
+    try {
+        var u = new URL(url);
+        forms.push(u.href);
+        if (u.password) secrets.push(u.password);
+        if (u.search.length > 1) secrets.push(u.search.slice(1));
+    } catch (_) { /* unparseable: only the raw form */ }
+    forms.forEach(function (f) { out = out.split(f).join(redacted); });
+    secrets.forEach(function (s) { out = out.split(s).join("<redacted>"); });
+    return out;
 }
 
 export function httpFetch(url, method, headersJson, body) {

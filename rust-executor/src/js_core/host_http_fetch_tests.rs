@@ -112,6 +112,50 @@ async fn http_fetch_timeout_error_redacts_credentials_and_query() {
     );
 }
 
+/// A fetch that fails for another reason names the redacted URL. The
+/// runtime's own "fetch failed" does not say which call failed.
+#[tokio::test]
+async fn http_fetch_other_errors_name_the_redacted_url() {
+    let (js, _dir) = language_isolate().await;
+    let url = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        format!("http://{}/probe", listener.local_addr().unwrap())
+    };
+    let secret_url = format!(
+        "{}?token=SECRET",
+        url.replacen("http://", "http://user:hunter2@", 1)
+    );
+    let (result, _) = fetch(&js, &secret_url).await;
+    assert!(
+        result.starts_with("err:") && !result.contains("timed out") && result.contains(&url),
+        "expected a non-timeout error naming {url}, got: {result}"
+    );
+    assert!(
+        !result.contains("hunter2") && !result.contains("SECRET"),
+        "fetch error leaks URL credentials or query: {result}"
+    );
+}
+
+/// The runtime's error for a URL it cannot parse quotes the raw URL,
+/// credentials and query included; it must not reach the caller as is.
+#[tokio::test]
+async fn http_fetch_invalid_url_error_does_not_leak_credentials_or_query() {
+    let (js, _dir) = language_isolate().await;
+    let (result, _) = fetch(
+        &js,
+        "http://user:hunter2@127.0.0.1:99999/probe?token=SECRET",
+    )
+    .await;
+    assert!(
+        result.starts_with("err:"),
+        "expected an error, got: {result}"
+    );
+    assert!(
+        !result.contains("hunter2") && !result.contains("SECRET"),
+        "fetch error leaks URL credentials or query: {result}"
+    );
+}
+
 #[tokio::test]
 async fn http_fetch_times_out_when_the_body_stalls() {
     let (js, _dir) = language_isolate().await;
