@@ -29,6 +29,7 @@ use crate::agent::AgentService;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
+use super::event_interest;
 use super::ws_handler::HandlerMap;
 
 /// Per-connection registry of in-flight request ids → cancellation
@@ -96,12 +97,14 @@ async fn handle_ws(
     let (mut ws_sink, mut ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
     let inflight: InflightRegistry = Arc::new(Mutex::new(HashMap::new()));
+    let interest: event_interest::SharedInterest = Default::default();
 
     // ── Event broadcast ─────────────────────────────────────────────────
     let token_for_events = token.clone();
     let user_email_for_events = ctx.user_email.clone();
     let is_admin_for_events = ctx.is_admin_credential;
     let tx_events = tx.clone();
+    let interest_for_events = interest.clone();
     tokio::spawn(async move {
         let event_stream = super::events_ws::build_event_stream(
             token_for_events,
@@ -109,6 +112,7 @@ async fn handle_ws(
             is_admin_for_events,
         )
         .await;
+        let event_stream = event_interest::filter_stream(event_stream, interest_for_events);
         tokio::pin!(event_stream);
         while let Some(msg) = event_stream.next().await {
             if tx_events.send(msg).is_err() {
@@ -169,6 +173,15 @@ async fn handle_ws(
         };
 
         let params = parsed.get("params").cloned().unwrap_or(json!({}));
+
+        // `events.watch` / `events.unwatch` set this connection's event
+        // filter (see `event_interest`), so they are handled inline too.
+        if let Some(reply) =
+            event_interest::handle_control(&msg_type, &Value::String(id.clone()), &params, &interest)
+        {
+            let _ = tx.send(reply);
+            continue;
+        }
 
         // ── `request.cancel` is dispatched inline ────────────────────────
         //

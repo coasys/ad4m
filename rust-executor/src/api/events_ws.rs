@@ -34,6 +34,7 @@
 //! | Type     | Description                          |
 //! |----------|--------------------------------------|
 //! | `ping`   | Server responds with `{"type":"pong"}`|
+//! | `events.watch` / `events.unwatch` | Per-socket event filter, see `event_interest.rs` (also on `/api/v1/ws`) |
 //!
 //! Other messages are silently ignored (future extensibility).
 
@@ -138,9 +139,6 @@ pub(crate) async fn build_event_stream(
     user_email: Option<String>,
     is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
-    use futures::stream;
-    use tokio_stream::wrappers::BroadcastStream;
-
     // Resolve the DID once at subscription time — avoids repeated JWT decode +
     // DB / AgentService lookups on every single event. If the client connected
     // before `agent.generate()` completed this returns `None`; the per-DID
@@ -149,6 +147,19 @@ pub(crate) async fn build_event_stream(
         let ctx = AgentContext::from_auth_token(auth_token.clone());
         did_for_context(&ctx).ok()
     };
+    build_event_stream_for(auth_token, resolved_did, user_email, is_admin).await
+}
+
+/// [`build_event_stream`] with the session DID already resolved (tests
+/// inject one directly).
+pub(crate) async fn build_event_stream_for(
+    auth_token: String,
+    resolved_did: Option<String>,
+    user_email: Option<String>,
+    is_admin: bool,
+) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
+    use futures::stream;
+    use tokio_stream::wrappers::BroadcastStream;
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
@@ -521,7 +532,12 @@ async fn handle_events_ws(
 ) {
     log::info!("Events WebSocket connected");
 
-    let mut event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let interest: super::event_interest::SharedInterest = Default::default();
+    let event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let mut event_stream = Box::pin(super::event_interest::filter_stream(
+        event_stream,
+        interest.clone(),
+    ));
 
     loop {
         tokio::select! {
@@ -541,8 +557,16 @@ async fn handle_events_ws(
                 match msg {
                     Some(Ok(Message::Text(text))) => {
                         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&*text) {
-                            if parsed.get("type").and_then(|v| v.as_str()) == Some("ping") {
+                            let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                            if msg_type == "ping" {
                                 let _ = socket.send(Message::Text(r#"{"type":"pong"}"#.into())).await;
+                            } else if let Some(reply) = super::event_interest::handle_control(
+                                msg_type,
+                                parsed.get("id").unwrap_or(&serde_json::Value::Null),
+                                parsed.get("params").unwrap_or(&serde_json::json!({})),
+                                &interest,
+                            ) {
+                                let _ = socket.send(Message::Text(reply.into())).await;
                             }
                         }
                     }
@@ -1131,4 +1155,71 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod event_interest_stream_tests {
+    //! X4 through the real event stream and global pubsub: the filter both
+    //! sockets wrap around `build_event_stream`.
+    use super::build_event_stream_for;
+    use crate::api::event_interest::{filter_stream, handle_control, SharedInterest, WATCH, UNWATCH};
+    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
+    use futures::StreamExt;
+    use serde_json::json;
+    use std::time::Duration;
+
+    async fn publish_link(perspective: &str, marker: &str) {
+        let event = json!({
+            "perspectiveUuid": perspective,
+            "owner": "did:key:alice",
+            "link": { "author": "did:key:alice", "timestamp": marker,
+                      "data": { "source": marker, "predicate": null, "target": "t" } }
+        });
+        get_global_pubsub()
+            .await
+            .publish(&PERSPECTIVE_LINK_ADDED_TOPIC, &event.to_string())
+            .await;
+    }
+
+    /// Markers of our own events received within 300 ms.
+    async fn drain<S: futures::Stream<Item = String> + Unpin>(s: &mut S, run: &str) -> Vec<String> {
+        let mut seen = vec![];
+        let _ = tokio::time::timeout(Duration::from_millis(300), async {
+            while let Some(e) = s.next().await {
+                if e.contains(run) {
+                    seen.push(e);
+                }
+            }
+        })
+        .await;
+        seen
+    }
+
+    #[tokio::test]
+    async fn watch_limits_and_unwatch_restores_the_stream() {
+        let run = uuid::Uuid::new_v4().to_string();
+        let (a, b) = (format!("A-{run}"), format!("B-{run}"));
+        let interest: SharedInterest = Default::default();
+        let stream =
+            build_event_stream_for(String::new(), Some("did:key:alice".into()), None, false)
+                .await;
+        let mut stream = Box::pin(filter_stream(stream, interest.clone()));
+
+        // Never watched: everything, as today.
+        publish_link(&a, &run).await;
+        publish_link(&b, &run).await;
+        assert_eq!(drain(&mut stream, &run).await.len(), 2);
+
+        handle_control(WATCH, &json!("w"), &json!({ "perspectives": [a] }), &interest).unwrap();
+        publish_link(&a, &run).await;
+        publish_link(&b, &run).await;
+        let got = drain(&mut stream, &run).await;
+        assert_eq!(got.len(), 1);
+        assert!(got[0].contains(&a));
+
+        handle_control(UNWATCH, &json!("u"), &json!({}), &interest).unwrap();
+        publish_link(&a, &run).await;
+        publish_link(&b, &run).await;
+        assert_eq!(drain(&mut stream, &run).await.len(), 2);
+    }
 }

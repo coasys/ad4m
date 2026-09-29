@@ -26,6 +26,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     // Registered before v2; listed so v2 clients need not probe for it.
     "expression.getMany",
     "perspective.keepAliveLease",
+    "events.watch",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.
