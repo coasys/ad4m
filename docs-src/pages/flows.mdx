@@ -49,7 +49,7 @@ Flow definitions are [Social DNA](/social-dna): a flow is data in the Perspectiv
 
 To answer *"what state is this task in?"*, the engine:
 
-1. starts at the flow's lowest-valued state,
+1. starts at the flow's lowest-valued state (if two states share the lowest `value`, the one whose name sorts first),
 2. looks at the declared edges that leave it,
 3. takes the edge that collected enough distinct, eligible signatures earliest,
 4. repeats from the state that edge leads to,
@@ -120,7 +120,7 @@ await perspective.addFlow("TaskFlow", flow);
 
 Facts about this shape:
 
-- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.**
+- `value` is an ordering key, not a progress percentage. `0, 1, 2` and `0, 10, 20` behave the same. **Every run begins in the lowest-valued state.** Give the entry state a `value` no other state shares. If two states do share the lowest `value`, the run begins in the one whose name sorts first (plain code-point order, the same in TypeScript and Rust), and the parser logs a warning. A state whose `value` is not a number sorts last.
 - The flow's canonical identity is its `flowUri`: `${namespace}${name}Flow`, here `handover://TaskFlowFlow`. Instances store that URI, because bare names collide when two communities share Social DNA.
 - Each state's `interpretationHint` is one English sentence. It is rendered into the prompt an interpreting LLM sees for that state, so an agent reasoning about a transition reads what the group meant, not a guess from the name.
 - A per-state `consensusRule` overrides the flow-level default. Cheap early edges can take one signature while the final one takes two, or a reviewer.
