@@ -335,7 +335,8 @@ pnpm test
 
 # Run the integration suites against a built executor (cd tests/js)
 pnpm run test-main                        # local languages, no Holochain (CI: integration-tests-js)
-pnpm run test-main-multi-node-holochain   # multi-node suites over Holochain
+pnpm run test-main-server-link            # multi-node suites over the server-link-language + link-server
+pnpm run test-main-multi-node-holochain   # multi-node suites over Holochain (p-diff-sync)
 
 # Run Rust tests (--test-threads=1 required: shared state)
 cd rust-executor && cargo test --release -- --test-threads=1

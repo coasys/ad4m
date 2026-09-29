@@ -64,22 +64,22 @@ After the Holochain 0.7.0 update with PR #5550:
 
 ## Running Integration Tests
 
-The integration tests are in `tests/js`. Two suites:
+The integration tests are in `tests/js`. Three suites, one CI job each:
 
-| Script (in `tests/js`) | CI job | Languages |
+| Script (in `tests/js`) | CI job | Executors |
 |---|---|---|
-| `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` | `bootstrap-languages/local/*`, executors run with `--run-holochain false` |
-| `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Holochain agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
+| `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` (required check) | single-executor suites + Alice/Bob on `bootstrap-languages/local/*`, `--run-holochain false` |
+| `pnpm run test-main-server-link` | `integration-tests-multi-node-server-link` | Alice + Bob on local languages, links over the server-link-language and a link-server the suite starts (`tests/js/tests/integration-server-link.test.ts`) |
+| `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Alice + Bob with Holochain: agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
 
-`integration-tests-js` is the regular suite and the required check. It is also
-the multi-node suite for the server-link-language: `integration-local.test.ts`
-starts a link-server and runs the Neighbourhood, Auto-processor and Cross-peer
-shape sync suites on the `[server-link]` config. Two executors there see each
-other's languages, neighbourhoods and agent profiles because `startExecutor`
-points the local language-language, neighbourhood store and agent-language of
-every executor at shared directories under `tests/js/tst-tmp`
-(`tests/js/utils/sharedStores.ts`). Only tests of p-diff-sync itself (links
-syncing over Holochain) go in the multi-node Holochain suite.
+Where a two-executor test belongs: if it only needs one executor to see
+languages, neighbourhoods or agent profiles the other published, the local
+suite — `startExecutor` points the local language-language, neighbourhood store
+and agent-language of every executor at shared directories under
+`tests/js/tst-tmp` (`tests/js/utils/sharedStores.ts`). If it needs links to sync
+between executors, the server-link suite (and, for p-diff-sync itself, the
+Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
+so the same file runs on both link languages.
 
 ### Port Conflicts
 
