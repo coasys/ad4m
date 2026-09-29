@@ -151,6 +151,18 @@ export default function shaclRpcTests(testContext: TestContext) {
                     expect(byName.body.path).to.equal("todo://state");
                 });
 
+                it("getClassShape('Todo') reports the @HasMany relation as a collection", async () => {
+                    // ensureSDNASubjectClass sends SHACLShape.toJSON() to the
+                    // executor, which types a property ad4m://CollectionShape
+                    // only when the JSON carries `collection: true`.
+                    const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
+                    const classShape = await perspective!.getClassShape("Todo");
+                    expect(classShape).to.not.be.null;
+                    const byName = Object.fromEntries(classShape!.properties.map((p) => [p.name, p]));
+                    expect(byName.comments.collection).to.equal(true);
+                    expect(byName.state.collection).to.equal(false);
+                });
+
                 it("getShacl() returns null for an unknown name", async () => {
                     const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
                     expect(await perspective!.getShacl("DoesNotExist")).to.be.null;

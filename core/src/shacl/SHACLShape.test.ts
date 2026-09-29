@@ -320,6 +320,48 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].minCount).toBe(1);
     });
 
+    it('writes collection for *Many relations and round-trips it', () => {
+      const original = new SHACLShape('todo://Todo');
+      original.addProperty({ name: 'state', path: 'todo://state', maxCount: 1 });
+      original.addProperty({ name: 'comments', path: 'todo://comment', relationKind: 'hasMany' });
+      original.addProperty({ name: 'owners', path: 'todo://owner', relationKind: 'belongsToMany' });
+      original.addProperty({ name: 'parent', path: 'todo://parent', relationKind: 'hasOne', maxCount: 1 });
+      original.addProperty({ name: 'tags', path: 'todo://tag', collection: true });
+      original.addProperty({ name: 'notMany', path: 'todo://x', relationKind: 'hasMany', collection: false });
+
+      const json: any = original.toJSON();
+      const collectionByName = Object.fromEntries(json.properties.map((p: any) => [p.name, p.collection]));
+      expect(collectionByName).toEqual({
+        state: undefined,
+        comments: true,
+        owners: true,
+        parent: undefined,
+        tags: true,
+        notMany: false,
+      });
+      // The wire form (JSON.stringify) carries the flag the executor reads.
+      expect(JSON.parse(JSON.stringify(json)).properties[1].collection).toBe(true);
+
+      const reconstructed = SHACLShape.fromJSON(JSON.parse(JSON.stringify(json)));
+      expect(reconstructed.toJSON()).toEqual(json);
+    });
+
+    it('reads collection back from the ad4m://CollectionShape type link', () => {
+      const shape = new SHACLShape('todo://TodoShape', 'todo://Todo');
+      shape.addProperty({ name: 'tags', path: 'todo://tag', collection: true });
+      shape.addProperty({ name: 'title', path: 'todo://title' });
+      const links = shape.toLinks();
+      // addShacl and the executor type each property shape.
+      for (const l of links.filter(l => l.predicate === 'sh://property')) {
+        const target = l.target.endsWith('.tags') ? 'ad4m://CollectionShape' : 'sh://PropertyShape';
+        links.push({ source: l.target, predicate: 'rdf://type', target });
+      }
+
+      const read = SHACLShape.fromLinks(links, shape.nodeShapeUri);
+      expect(read.properties.find(p => p.name === 'tags')?.collection).toBe(true);
+      expect(read.properties.find(p => p.name === 'title')?.collection).toBeUndefined();
+    });
+
     it('preserves nodeShapeUri in round-trip', () => {
       const original = new SHACLShape('custom://CustomShape', 'recipe://Recipe');
 

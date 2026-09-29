@@ -197,6 +197,12 @@ export interface SHACLPropertyShape {
    *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
   in?: Array<{ value: string; label?: string }>;
 
+  /** AD4M-specific: multi-valued property. Sent to the executor as
+   *  `collection`, which types the property shape `ad4m://CollectionShape`.
+   *  When unset, `toJSON()` derives it from `relationKind` (`hasMany` and
+   *  `belongsToMany` are collections). */
+  collection?: boolean;
+
   /** AD4M-specific: kind of relation this property describes.
    *  Drives direction (forward/reverse), scalar-vs-collection rendering,
    *  and default max-count. */
@@ -243,6 +249,11 @@ export interface SHACLPropertyShape {
  * SHACL Node Shape
  * Defines constraints for instances of a class
  */
+/** Whether a property holds many values: set explicitly, or implied by a `*Many` relation. */
+export function isCollectionProperty(p: SHACLPropertyShape): boolean {
+  return p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany');
+}
+
 export class SHACLShape {
   /** URI of this shape (e.g., recipe:RecipeShape) */
   nodeShapeUri: string;
@@ -807,6 +818,9 @@ export class SHACLShape {
         name: propertyName,
         path: pathLink.target
       };
+      if (links.some(l => l.source === propShapeId && l.predicate === "rdf://type" && l.target === "ad4m://CollectionShape")) {
+        prop.collection = true;
+      }
       
       // Extract constraints
       const datatypeLink = links.find(l => 
@@ -1124,6 +1138,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
+        collection: p.collection ?? (isCollectionProperty(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
         where_predicates: p.wherePredicates,
@@ -1181,6 +1196,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relationKind: p.relation_kind,
+        collection: p.collection,
         targetClassName: p.target_class_name,
         whereFilter: p.where_filter,
         wherePredicates: p.where_predicates,
