@@ -71,7 +71,8 @@ impl PerspectiveInstance {
         let mut queries = self.subscribed_queries.lock().await;
         let mut renewed = 0;
         for query in queries.values_mut() {
-            if query.user_email.as_deref() == user_email && query.connections.contains(connection_id)
+            if query.user_email.as_deref() == user_email
+                && query.connections.contains(connection_id)
             {
                 query.last_keepalive = now;
                 renewed += 1;
@@ -253,8 +254,7 @@ mod tests {
     async fn lease_renews_only_the_calling_connections_subscriptions() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let live_tab = subscribe_from(&p, QUERY, None, "live").await;
-        let dead_tab =
-            subscribe_from(&p, "SELECT ?o WHERE { ?s ?p ?o }", None, "dead").await;
+        let dead_tab = subscribe_from(&p, "SELECT ?o WHERE { ?s ?p ?o }", None, "dead").await;
         expire(&p, &live_tab).await;
         expire(&p, &dead_tab).await;
 
@@ -457,7 +457,11 @@ mod tests {
         assert_eq!(revision, 1, "the revision of the last update sent");
         let rows = super::result_json(&result);
         assert_eq!(rows.as_array().unwrap().len(), 1);
-        assert_eq!(json!(updates[0]["added"]), rows, "the result the update led to");
+        assert_eq!(
+            json!(updates[0]["added"]),
+            rows,
+            "the result the update led to"
+        );
 
         assert!(
             p.delta_subscription_state(&id, Some("other@example.com"))

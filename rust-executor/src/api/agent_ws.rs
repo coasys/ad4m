@@ -156,7 +156,10 @@ async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .map(|(did, r)| (did, r.unwrap_or(Value::Null)))
         .collect();
     Ok(Value::Array(
-        body.dids.iter().map(|did| by_did[did.as_str()].clone()).collect(),
+        body.dids
+            .iter()
+            .map(|did| by_did[did.as_str()].clone())
+            .collect(),
     ))
 }
 

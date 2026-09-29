@@ -10,7 +10,8 @@
 //! `request.cancel { targetId: operationId }` cancels it (the event then
 //! carries error 499). Without `async: true` these methods reply as before.
 //! Only the RPC socket (`/api/v1/ws`) supports this: the event goes to the
-//! calling socket only, never through the shared event bus.
+//! calling socket only, never through the shared event bus. An operation
+//! keeps running if its socket closes; its result is then lost.
 
 use serde_json::{json, Value};
 

@@ -281,13 +281,12 @@ mod pipeline_tests {
             .await
             .unwrap();
         assert_eq!(ids(&first), vec!["ns://t00", "ns://t01", "ns://t02"]);
-        let cursor = first.next_cursor.expect("cursor mode: a full page has a successor");
-        let second = run(
-            &store,
-            json!({ "after": cursor, "limit": 3, "offset": 0 }),
-        )
-        .await
-        .expect("offset 0 combines with a cursor");
+        let cursor = first
+            .next_cursor
+            .expect("cursor mode: a full page has a successor");
+        let second = run(&store, json!({ "after": cursor, "limit": 3, "offset": 0 }))
+            .await
+            .expect("offset 0 combines with a cursor");
         assert_eq!(ids(&second)[0], "ns://t03");
     }
 

@@ -172,5 +172,73 @@ async fn closing_the_socket_ends_the_event_task() {
         while socket.out.recv().await.is_some() {}
     })
     .await;
-    assert!(rest.is_ok(), "the event task still holds the socket's sender");
+    assert!(
+        rest.is_ok(),
+        "the event task still holds the socket's sender"
+    );
+}
+
+// ── X8: operation handles on the socket ─────────────────────────────────────
+
+/// `agent.unlock` answers at once; `ai.prompt` runs until cancelled. Both
+/// are in `ASYNC_METHODS`, so `{ async: true }` makes them operations.
+fn operation_handlers() -> HandlerMap {
+    let mut map = HandlerMap::new();
+    map.register("agent.unlock", |_params, _ctx| async { Ok(json!("done")) });
+    map.register("ai.prompt", |_params, _ctx| async {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        Ok(json!("too late"))
+    });
+    map
+}
+
+fn is_completion(msg: &Value) -> bool {
+    msg["type"] == "operation-completed"
+}
+
+#[tokio::test]
+async fn the_ack_arrives_before_the_completion() {
+    let mut socket = Socket::open(operation_handlers()).await;
+    socket.send(json!({ "id": "r1", "type": "agent.unlock", "params": { "async": true } }));
+    let first = socket
+        .next_of(|m| m["id"] == "r1" || is_completion(m))
+        .await;
+    assert_eq!(first["id"], json!("r1"), "the ack comes first: {first}");
+    let operation_id = first["result"]["operationId"].clone();
+    assert!(operation_id.is_string());
+    let done = socket.next_of(is_completion).await;
+    assert_eq!(
+        done,
+        json!({ "type": "operation-completed", "operationId": operation_id, "result": "done" })
+    );
+}
+
+#[tokio::test]
+async fn cancelling_an_operation_right_after_the_ack_completes_it_with_499() {
+    let mut socket = Socket::open(operation_handlers()).await;
+    socket.send(json!({ "id": "p1", "type": "ai.prompt", "params": { "async": true } }));
+    let operation_id = socket.reply("p1").await["result"]["operationId"].clone();
+
+    socket.send(
+        json!({ "id": "c1", "type": "request.cancel", "params": { "targetId": operation_id } }),
+    );
+    assert_eq!(
+        socket.reply("c1").await["result"],
+        json!({ "cancelled": true, "targetId": operation_id })
+    );
+    let done = socket.next_of(is_completion).await;
+    assert_eq!(done["operationId"], operation_id);
+    assert_eq!(done["error"]["code"], json!(499));
+}
+
+#[tokio::test]
+async fn a_watch_does_not_filter_operation_completions() {
+    let mut socket = Socket::open(operation_handlers()).await;
+    socket.send(json!({ "id": "w", "type": "events.watch", "params": { "types": [] } }));
+    socket.reply("w").await;
+    socket.send(json!({ "id": "r2", "type": "agent.unlock", "params": { "async": true } }));
+    let operation_id = socket.reply("r2").await["result"]["operationId"].clone();
+    let done = socket.next_of(is_completion).await;
+    assert_eq!(done["operationId"], operation_id);
+    assert_eq!(done["result"], json!("done"));
 }

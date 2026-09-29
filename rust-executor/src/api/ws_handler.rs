@@ -266,6 +266,9 @@ mod param_ext_tests {
         assert_eq!(p.opt_bool("n").unwrap(), None);
         assert_eq!(p.opt_bool("missing").unwrap(), None);
         let err = p.opt_bool("bad").unwrap_err();
-        assert_eq!((err.code, err.message.as_str()), (400, "`bad` must be a boolean"));
+        assert_eq!(
+            (err.code, err.message.as_str()),
+            (400, "`bad` must be a boolean")
+        );
     }
 }

@@ -54,7 +54,8 @@ anything that signs, bills or writes.
   `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }` and apply only
   the updates after that revision.
 - `operations.rs`: `{ async: true }` on `ASYNC_METHODS` → `{ operationId }` now, `operation-completed` event
-  on the same socket later. `ws_rpc::run_call` is the shared dispatch body.
+  on the same socket later. `ws_rpc::run_call` is the shared dispatch body. An operation keeps
+  running if its socket closes; its result is then lost.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
   (ts-rs export dir) and fails if `core/src/generated/api/HandlerMethods.ts` is stale — regenerate
   (`pnpm run generate:api-types` in `core/`) after adding a handler.

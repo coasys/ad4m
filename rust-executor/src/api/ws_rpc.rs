@@ -127,7 +127,12 @@ async fn handle_ws(
                 _ => None,
             })
         });
-    serve(Connection::new(handler_map, ctx, token, tx), incoming, events).await;
+    serve(
+        Connection::new(handler_map, ctx, token, tx),
+        incoming,
+        events,
+    )
+    .await;
 
     // The writer ends once calls still in flight drop their senders.
     if let Err(e) = write_handle.await {
@@ -260,11 +265,11 @@ impl Connection {
         };
 
         // Allocate a CancellationToken for this request and stash it in
-        // the registry under the request id (the operation id for an
-        // async call).  The handler races its
-        // work against `cancel_token.cancelled()`; if the client sends
-        // `request.cancel`, the racing future fires immediately and we
-        // reply with an `AbortError` (code 499).
+        // the registry under the request id (the operation id for an async
+        // call).  The handler races its work against
+        // `cancel_token.cancelled()`; if the client sends `request.cancel`,
+        // the racing future fires immediately and we reply with an
+        // `AbortError` (code 499).
         let cancel_token = CancellationToken::new();
         {
             let mut guard = self.inflight.lock().await;
