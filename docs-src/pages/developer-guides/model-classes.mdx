@@ -458,6 +458,8 @@ type: string = "";
 
 Attempting to update a flag after creation throws an error.
 
+`@Flag` also takes `monotonic: true`, as `@Property` does: a peer can then no longer remove the flag link, so the instance cannot drop out of a query keyed on it. Role classes use it (see [Role grants that cannot be removed](../flows#role-grants-that-cannot-be-removed-monotonic)). The declaration is per predicate, so give such a flag a predicate of its own rather than a shared `ad4m://type`, or the instances of every class flagged through it become undeletable.
+
 ## How It Works Under the Hood
 
 ### Graph-Based Storage
