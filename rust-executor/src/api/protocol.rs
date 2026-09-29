@@ -27,6 +27,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "expression.getMany",
     "perspective.keepAliveLease",
     "events.watch",
+    "modelQuery.cursor",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.
