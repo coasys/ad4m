@@ -161,7 +161,7 @@ describe("Multi-User Simple integration tests", () => {
             await pollUntil(async () => {
                 const u = await adminAd4mClient!.runtime.listUsers();
                 const user = u.find((x: any) => x.email === "stats1@example.com");
-                return user && user.perspectiveCount === 1;
+                return user?.perspectiveCount === 1;
             }, { timeoutMs: 5000, intervalMs: 200, label: "user perspectiveCount updated" });
 
             // List users
@@ -229,7 +229,7 @@ describe("Multi-User Simple integration tests", () => {
             await pollUntil(async () => {
                 const u = await adminAd4mClient!.runtime.listUsers();
                 const found = u.find((x: any) => x.email === "lastseen@example.com");
-                return found && found.lastSeen !== undefined;
+                return found?.lastSeen != null;
             }, { timeoutMs: 5000, intervalMs: 200, label: "last_seen timestamp updated" });
 
             // List users again
@@ -1506,6 +1506,10 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("User 1 signal listener set up");
 
+            // Subscription-init delay: addSignalHandler() does not wait for the
+            // server to register the subscription, and signals are not redelivered.
+            await sleep(500);
+
             // User 1 sends a signal to User 2
             const testSignalPayload = new PerspectiveUnsignedInput([
                 {
@@ -1679,6 +1683,10 @@ describe("Multi-User Simple integration tests", () => {
 
             console.log("Signal handlers set up for both users");
 
+            // Subscription-init delay: addSignalHandler() does not wait for the
+            // server to register the subscription, and signals are not redelivered.
+            await sleep(1000);
+
             // Check if users can see each other in otherAgents
             console.log("\n=== Checking otherAgents() ===");
             const user1Others = await user1Neighbourhood!.otherAgents();
@@ -1816,6 +1824,10 @@ describe("Multi-User Simple integration tests", () => {
                 console.log("✉️ Managed user received signal:", JSON.stringify(signal));
                 userReceivedSignals.push(signal);
             });
+
+            // Subscription-init delay: addSignalHandler() does not wait for the
+            // server to register the subscription, and signals are not redelivered.
+            await sleep(1000);
 
             // --- Test 1: main agent sends signal to managed user ---
             console.log("\n--- Main agent sending signal to managed user ---");
@@ -2216,6 +2228,10 @@ describe("Multi-User Simple integration tests", () => {
                 node1User1ReceivedSignals.push(signal);
             });
 
+            // Subscription-init delay: addSignalHandler() does not wait for the
+            // server to register the subscription, and signals are not redelivered.
+            await sleep(1500);
+
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 1 User 1 (${node1User1Did.substring(0, 20)}...)`);
             await node2User1Proxy!.sendSignalU(node1User1Did, new PerspectiveUnsignedInput([
                 {
@@ -2289,20 +2305,24 @@ describe("Multi-User Simple integration tests", () => {
             });
             console.log("Node 2 User 2 added link");
 
-            // Exchange agent infos before sync polling
+            // Wait for background Holochain commits to complete before polling
+            await sleep(5000);
+
+            // Re-exchange agent infos before sync polling — K2 spaces created
+            // during link-language install may need fresh peer info. Repeated
+            // exchanges on purpose (see the setup comment above).
             console.log("Re-exchanging agent infos before link sync polling...");
-            await pollUntil(async () => {
+            for (let attempt = 1; attempt <= 3; attempt++) {
                 try {
                     const n1Infos = await adminAd4mClient!.runtime.hcAgentInfos();
                     const n2Infos = await node2AdminClient!.runtime.hcAgentInfos();
                     await adminAd4mClient!.runtime.hcAddAgentInfos(n2Infos);
                     await node2AdminClient!.runtime.hcAddAgentInfos(n1Infos);
-                    return true;
                 } catch (e) {
-                    console.log("  Agent info exchange failed:", e);
-                    return false;
+                    console.log(`  Agent info exchange attempt ${attempt} failed:`, e);
                 }
-            }, { timeoutMs: 10000, intervalMs: 2000, label: "pre-sync agent info exchange" });
+                if (attempt < 3) await sleep(2000);
+            }
 
             // Wait for cross-node Holochain gossip synchronization with retry
             console.log("\nWaiting for cross-node sync (polling until all users see >= 5 links)...");
@@ -3195,10 +3215,15 @@ describe("Multi-User Simple integration tests", () => {
                 console.log("  [RECV] Local main agent got signal from:", signal.author);
                 localMainReceivedSignals.push(signal);
             });
+            // Subscription-init delay: addSignalHandler() does not wait for the
+            // server to register the subscription, and signals are not redelivered.
+            await sleep(3000);
+
+            // A miss must not throw here: the A-E summary below decides.
             const waitForSignal = async (signals: any[], label: string) => {
                 await pollUntil(() => signals.length > 0, {
                     timeoutMs: 30000, intervalMs: 100, label: `${label} receives signal`
-                });
+                }).catch(() => {});
                 if (signals.length > 0) {
                     console.log(`  ✅ ${label}: received signal from ${signals[0].author}`);
                 } else {

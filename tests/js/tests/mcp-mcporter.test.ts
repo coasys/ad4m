@@ -74,12 +74,14 @@ describe("MCP mcporter Integration Tests", function() {
             MCP_PORT,           // mcpPort
         );
 
-        // Poll until agent generation succeeds (server ready)
+        // Poll until the server answers, then generate once: generate() is
+        // not idempotent, so retrying it could only fail with "already exists".
         const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
         await pollUntil(async () => {
-            await adminClient.agent.generate("test-passphrase");
+            await adminClient.runtime.info();
             return true;
-        }, { timeoutMs: 15000, label: "executor ready and agent generated" });
+        }, { timeoutMs: 15000, label: "executor API ready" });
+        await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via REST");
 
         // Create mcporter config

@@ -3812,8 +3812,6 @@ describe("Prolog + Literals", () => {
 
 })
 
-// sleep() removed — all callers now use pollUntil/assertStaysFalse from utils
-
 /**
  * Wait for a condition to become true, polling at fixed intervals.
  * Delegates to the shared pollUntil from utils.ts.

@@ -323,6 +323,9 @@ describe("Authentication integration tests", () => {
             let excpetions: ExceptionInfo[] = [];
             adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e); return null; })
             adminAd4mClient!.runtime.subscribeExceptionOccurred();
+            // Subscription-init delay: subscribe*() does not wait for the server,
+            // and exceptions are not redelivered.
+            await sleep(1000);
 
             let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
                 appName: "demo-app",

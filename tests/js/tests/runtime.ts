@@ -290,6 +290,8 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
             await pollUntil(() => mockFunction.callCount >= 2, { timeoutMs: 15000, label: "notification trigger fires for target2" });
+            // No third, stale trigger may follow
+            await assertStaysFalse(() => mockFunction.callCount > 2, { waitMs: 2000, label: "stale third notification trigger" });
             expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
             triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
