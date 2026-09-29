@@ -18,7 +18,7 @@
 //! and that is by design: keeping the two concerns separate is what lets the
 //! fold be pure.
 //!
-//! Two rules do all the work:
+//! Three rules do all the work:
 //!
 //! - **Identity is a signature check.** [`signed_by`] is the only place in
 //!   the flow engine that compares authors, and it requires the stored
@@ -30,12 +30,27 @@
 //!   published two different values. Anyone else's link on that predicate is
 //!   invisible, so a peer cannot re-point someone else's proposal by
 //!   appending a later value — the trick model hydration would fall for.
+//! - **The URI is the fields.** A vote signs nothing but the proposal URI,
+//!   so the URI is the content address of every field above
+//!   ([`proposal_uri`], recomputed in [`TransitionAtom::from_links`],
+//!   #1108). Without it the *proposer* could do what the second rule stops
+//!   a peer from doing: retract and re-sign `outputs_hash` or the seal
+//!   under the voted URI after the co-signs landed.
+
+pub mod outputs;
+pub mod uri;
+
+pub use outputs::{
+    check_outputs_commitment, normalised_outputs, outputs_hash, OutputRef, OutputsRefusal,
+};
+pub use uri::proposal_uri;
 
 use super::time::parse_link_timestamp;
 use crate::perspectives::flow_classes::FLOW_TRANSITION_PROPOSAL_CLASS;
 use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, LinkQuery, LinkStatus};
+use outputs::named_outputs;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -53,6 +68,34 @@ pub const TO_STATE_PREDICATE: &str = "ad4m://flow/to_state";
 pub const PROPOSER_PREDICATE: &str = "ad4m://flow/proposer";
 /// Proposal → the evidence seal computed at mint. `literal:string:`-encoded.
 pub const EVIDENCE_HASHES_PREDICATE: &str = "ad4m://flow/evidence_hashes";
+/// Proposal → [`outputs_hash`] over the **content** of the instances the
+/// proposer names as the run's outputs. Written only on a proposal **into a
+/// terminal state**, next to the evidence seal. `literal:string:`-encoded.
+/// Every voter loads each named instance on its own replica and recomputes it
+/// before co-signing (`super::accept`), and a receipt's output preimages must
+/// hash to it (`super::verify`, #1104).
+pub const OUTPUTS_HASH_PREDICATE: &str = "ad4m://flow/outputs_hash";
+/// Proposal → one instance the proposer names as an output of the run, as an
+/// [`OutputRef`]. One link per output. The target is a `literal:string:` whose
+/// text is the canonical JSON `{"className":"…","id":"…"}`
+/// ([`OutputRef::encode`]); a pair, not a bare id, because an output is an
+/// instance **of a class** and its content is read through that class's
+/// shape. Only the proposer's own signed links count, like every other field
+/// of an atom, and one that does not parse rejects the atom
+/// ([`AtomRejection::MalformedOutput`]).
+pub const OUTPUT_PREDICATE: &str = "ad4m://flow/output";
+/// Domain tag of [`outputs_hash`]. Versioned: v1 hashed ids only (#1108 v2),
+/// v2 hashes instance content.
+pub const OUTPUTS_HASH_TAG: &str = "ad4m-flow-outputs/v2";
+/// Proposal → the proposer's uniqueness salt for this proposal's
+/// content-addressed URI. `literal:string:`-encoded. Any string the proposer
+/// can defend as unique (the engine writes a UUID); it exists so one
+/// proposer can open two proposals whose other fields agree (a re-propose
+/// after a retraction, a deliberate twin). Signed by the proposer like every
+/// other field, and part of the [`proposal_uri`] preimage.
+pub const PROPOSAL_NONCE_PREDICATE: &str = "ad4m://flow/nonce";
+/// Domain tag of a proposal's content-addressed URI ([`proposal_uri`]).
+pub const PROPOSAL_URI_TAG: &str = "ad4m-flow-proposal-uri/v1";
 /// Proposal → a voting DID. A vote counts only when the link's author IS the
 /// DID it names, with a valid signature (see [`valid_votes`]).
 pub const ACCEPTED_BY_PREDICATE: &str = "ad4m://acceptedBy";
@@ -105,6 +148,15 @@ pub struct TransitionAtom {
     /// The fold never re-runs the guard behind it; every voter checked the
     /// seal on their own replica before signing (`super::accept`).
     pub evidence_hash: String,
+    /// The proposer's [`OUTPUTS_HASH_PREDICATE`] value. `None` when the
+    /// proposer signed none, which is correct for a proposal into a
+    /// non-terminal state and a refusal reason for one into a terminal state
+    /// ([`check_outputs_commitment`]).
+    pub outputs_hash: Option<String>,
+    /// The instances the proposer named with [`OUTPUT_PREDICATE`], sorted and
+    /// deduplicated. What a voter loads, re-hashes and checks against
+    /// `outputs_hash`; not read by the fold or by `verify_receipt`.
+    pub outputs: Vec<OutputRef>,
     /// The proposer's own vote plus every self-authored `acceptedBy`,
     /// one per DID, earliest first.
     pub votes: Vec<Vote>,
@@ -131,6 +183,21 @@ pub enum AtomRejection {
     /// timestamp, so the proposal cannot be placed in time (#1000). Fail
     /// closed: a proposal that cannot be dated must not sort anywhere.
     NoParseableTimestamp,
+    /// One of the proposer's own [`OUTPUT_PREDICATE`] links is not an
+    /// encoded [`OutputRef`]. Rejecting the atom, rather than skipping the
+    /// link, keeps a voter from co-signing outputs it could not read.
+    MalformedOutput(String),
+    /// The proposal's URI is not the content address of its own
+    /// proposer-signed fields ([`proposal_uri`]). Either a field was re-signed
+    /// after the URI was fixed — the post-co-sign swap this check exists to
+    /// refuse — or the proposal predates content-addressed URIs (a pre-#1108
+    /// UUID URI), which is rejected the same way: a vote on such a URI covers
+    /// nothing.
+    UriMismatch {
+        /// [`proposal_uri`] over the fields as the proposer currently signs
+        /// them.
+        expected: String,
+    },
 }
 
 impl std::fmt::Display for AtomRejection {
@@ -151,6 +218,16 @@ impl std::fmt::Display for AtomRejection {
             Self::NoParseableTimestamp => write!(
                 f,
                 "none of the proposer's own links carries an RFC 3339-parseable timestamp"
+            ),
+            Self::MalformedOutput(text) => write!(
+                f,
+                "the proposer's `{OUTPUT_PREDICATE}` value `{text}` is not a \
+                 {{\"className\", \"id\"}} pair"
+            ),
+            Self::UriMismatch { expected } => write!(
+                f,
+                "its URI is not the content address of its proposer-signed fields \
+                 (they address `{expected}`), so a vote on it covers nothing"
             ),
         }
     }
@@ -291,7 +368,7 @@ pub fn valid_votes(
 /// not an answer about this replica at all.
 ///
 /// The gap is closed one layer up rather than here:
-/// [`reverified_link`](super::reverified_link) clears `status` on every
+/// [`reverified_link`](super::read_set::reverified_link) clears `status` on every
 /// carried link, so a re-verified read-set answers `false` for every
 /// proposal. That is the truthful answer — this replica has marked nothing it
 /// never read — and it is why this function must keep testing
@@ -327,13 +404,47 @@ impl TransitionAtom {
         if evidence_hash.is_empty() {
             return Err(AtomRejection::EmptySeal);
         }
+        // Optional, because only a proposal into a terminal state carries
+        // one. Two distinct proposer values are still a rejection: "pick one"
+        // would let the proposer show different voters different outputs.
+        let outputs_hash = match unique_field(links, OUTPUTS_HASH_PREDICATE, &proposer) {
+            Ok(hash) => Some(hash),
+            Err(AtomRejection::MissingField(_)) => None,
+            Err(other) => return Err(other),
+        };
+        let from_state = unique_field(links, FROM_STATE_PREDICATE, &proposer)?;
+        let to_state = unique_field(links, TO_STATE_PREDICATE, &proposer)?;
+        // The vote-covers-fields invariant (#1108). A vote is
+        // `uri --acceptedBy--> did` and signs nothing but the URI, so the
+        // URI must be the content address of every field read above — or
+        // the proposer could re-sign `outputs_hash` (or the seal) under the
+        // voted URI after the co-signs landed, and the swapped value would
+        // read as quorum-agreed. Recomputed here, on every read, from the
+        // proposer's own signed fields; a mismatch — including every
+        // pre-#1108 random-UUID proposal — is not an atom, so no vote on it
+        // is ever counted.
+        let nonce = unique_field(links, PROPOSAL_NONCE_PREDICATE, &proposer)?;
+        let expected = proposal_uri(
+            instance_uri,
+            &from_state,
+            &to_state,
+            &evidence_hash,
+            outputs_hash.as_deref(),
+            &proposer,
+            &nonce,
+        );
+        if uri != expected {
+            return Err(AtomRejection::UriMismatch { expected });
+        }
         let proposed_at = earliest_proposer_timestamp(links, &proposer)
             .ok_or(AtomRejection::NoParseableTimestamp)?;
         Ok(TransitionAtom {
             uri: uri.to_string(),
-            from_state: unique_field(links, FROM_STATE_PREDICATE, &proposer)?,
-            to_state: unique_field(links, TO_STATE_PREDICATE, &proposer)?,
+            from_state,
+            to_state,
             votes: valid_votes(links, &proposer, &proposed_at),
+            outputs: named_outputs(links, &proposer)?,
+            outputs_hash,
             proposed_at,
             proposer,
             evidence_hash,
@@ -407,8 +518,7 @@ pub async fn load_proposal_links(
         ));
     }
 
-    // Half 1: discover which FlowTransitionProposal instances belong to this
-    // flow instance via the subject-class query layer.
+    // Half 1: discovery through the class query.
     let query_json = serde_json::json!({ "where": { "flowInstance": instance_uri } }).to_string();
     let raw = perspective
         .model_query(FLOW_TRANSITION_PROPOSAL_CLASS, &query_json)
@@ -433,8 +543,7 @@ pub async fn load_proposal_links(
     uris.sort();
     uris.dedup();
 
-    // Half 2: raw get_links per proposal — see doc comment for why this half
-    // must stay raw rather than using model_query hydration.
+    // Half 2: raw links per proposal, never hydrated (see the doc above).
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         let links = perspective
@@ -450,212 +559,9 @@ pub async fn load_proposal_links(
 }
 
 #[cfg(test)]
-pub(super) mod fixtures {
-    use super::*;
-    use crate::types::{DecoratedExpressionProof, Link};
-
-    pub const INSTANCE: &str = "ad4m://flow/instance/i1";
-    pub const PROPOSAL: &str = "ad4m://flow/proposal/p1";
-    pub const ALICE: &str = "did:key:alice";
-    pub const BOB: &str = "did:key:bob";
-    pub const MALLORY: &str = "did:key:mallory";
-    pub const T1: &str = "2026-01-01T00:00:00.000Z";
-    pub const T2: &str = "2026-01-02T00:00:00.000Z";
-    pub const T3: &str = "2026-01-03T00:00:00.000Z";
-
-    pub fn literal(s: &str) -> String {
-        format!("literal:string:{}", urlencoding::encode(s))
-    }
-
-    /// One link as `get_links` returns it. Author, signature verdict and
-    /// timestamp are all inputs the checks read, so every fixture states
-    /// them explicitly.
-    pub fn link(
-        predicate: &str,
-        target: &str,
-        author: &str,
-        valid: bool,
-        timestamp: &str,
-    ) -> DecoratedLinkExpression {
-        DecoratedLinkExpression {
-            author: author.to_string(),
-            timestamp: timestamp.to_string(),
-            data: Link {
-                source: PROPOSAL.to_string(),
-                predicate: Some(predicate.to_string()),
-                target: target.to_string(),
-            },
-            proof: DecoratedExpressionProof {
-                key: format!("{author}#key"),
-                signature: "sig".to_string(),
-                valid: Some(valid),
-                invalid: Some(!valid),
-            },
-            status: None,
-        }
-    }
-
-    /// The five links `write_flow_transition_proposal` emits, all signed by
-    /// the proposer.
-    pub fn honest_proposal(
-        proposer: &str,
-        from: &str,
-        to: &str,
-        seal: &str,
-        at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        vec![
-            link(PROPOSER_PREDICATE, proposer, proposer, true, at),
-            link(FLOW_INSTANCE_PREDICATE, INSTANCE, proposer, true, at),
-            link(FROM_STATE_PREDICATE, &literal(from), proposer, true, at),
-            link(TO_STATE_PREDICATE, &literal(to), proposer, true, at),
-            link(
-                EVIDENCE_HASHES_PREDICATE,
-                &literal(seal),
-                proposer,
-                true,
-                at,
-            ),
-        ]
-    }
-
-    pub fn atom_of(links: &[DecoratedLinkExpression]) -> Result<TransitionAtom, AtomRejection> {
-        TransitionAtom::from_links(INSTANCE, PROPOSAL, links)
-    }
-
-    // -----------------------------------------------------------------------
-    // Cryptographically honest fixtures
-    //
-    // The builders above state a signature verdict; these ones *earn* it.
-    // Both kinds are needed and neither replaces the other:
-    //
-    // - `link` / `honest_proposal` exercise the checks that read a carried
-    //   verdict (`signed_by`, `from_links`), where the verdict is the input
-    //   under test and inventing a keypair would only obscure it;
-    // - `signed_*` exercise anything downstream of
-    //   [`ReadSet::reverified`](super::super::ReadSet::reverified), which
-    //   recomputes the verdict from the signature — there a fixture that
-    //   merely *claims* `valid: true` is exactly the minter's word the
-    //   reader no longer takes, so it has to sign for real.
-    // -----------------------------------------------------------------------
-
-    use crate::agent::signatures::TestSigner;
-    use crate::types::{Link as CoreLink, LinkExpression, LinkStatus as CoreLinkStatus};
-    use std::collections::HashMap;
-    use std::sync::{LazyLock, Mutex};
-
-    /// A named persona holding a **real** Ed25519 keypair. Leaked on first use
-    /// so the DIDs read like the `&'static str` constants they stand beside.
-    /// One keypair per persona per process.
-    pub fn persona(name: &str) -> &'static TestSigner {
-        static SIGNERS: LazyLock<Mutex<HashMap<String, &'static TestSigner>>> =
-            LazyLock::new(|| Mutex::new(HashMap::new()));
-        *SIGNERS
-            .lock()
-            .expect("persona registry")
-            .entry(name.to_string())
-            .or_insert_with(|| Box::leak(Box::new(TestSigner::generate())))
-    }
-
-    /// `persona(name).did`, for fixtures that need the identity rather than
-    /// the key.
-    pub fn did_of(name: &str) -> &'static str {
-        &persona(name).did
-    }
-
-    /// One link as `get_links` returns it, with its `valid` flag honoured
-    /// **cryptographically**: a valid link is signed by `author_name`'s own
-    /// key over its own data and timestamp, and a forged one carries a
-    /// signature from a key that is not theirs.
-    ///
-    /// `proof.valid` is still pre-set to match, because that is what a store
-    /// hands back — but every reader downstream of the ingest recomputes it,
-    /// so a fixture whose claim and signature disagree gets ruled on by the
-    /// signature. That disagreement is itself a fixture: pass
-    /// `claims_valid = Some(true)` with `valid = false` to build the forgery
-    /// a dishonest minter would carry.
-    pub fn signed_link(
-        source: &str,
-        predicate: &str,
-        target: &str,
-        author_name: &str,
-        valid: bool,
-        claims_valid: Option<bool>,
-        timestamp: &str,
-    ) -> DecoratedLinkExpression {
-        let at = chrono::DateTime::parse_from_rfc3339(timestamp)
-            .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
-            .with_timezone(&chrono::Utc);
-        let author = persona(author_name);
-        let signing_key = if valid { author } else { persona("forger") };
-        let mut expr = signing_key.sign_at(
-            CoreLink {
-                source: source.to_string(),
-                predicate: Some(predicate.to_string()),
-                target: target.to_string(),
-            }
-            .normalize(),
-            at,
-        );
-        expr.author = author.did.clone();
-        expr.proof.key = author.key_id.clone();
-        let mut link =
-            DecoratedLinkExpression::from((LinkExpression::from(expr), CoreLinkStatus::Shared));
-        let claimed = claims_valid.unwrap_or(valid);
-        link.proof.valid = Some(claimed);
-        link.proof.invalid = Some(!claimed);
-        link
-    }
-
-    /// The five links `write_flow_transition_proposal` emits, all genuinely
-    /// signed by the proposer, sourced at the proposal's own URI.
-    pub fn signed_proposal(
-        proposal_uri: &str,
-        proposer_name: &str,
-        from: &str,
-        to: &str,
-        seal: &str,
-        at: &str,
-    ) -> Vec<DecoratedLinkExpression> {
-        let signed = |predicate: &str, target: &str| {
-            signed_link(
-                proposal_uri,
-                predicate,
-                target,
-                proposer_name,
-                true,
-                None,
-                at,
-            )
-        };
-        vec![
-            signed(PROPOSER_PREDICATE, did_of(proposer_name)),
-            signed(FLOW_INSTANCE_PREDICATE, INSTANCE),
-            signed(FROM_STATE_PREDICATE, &literal(from)),
-            signed(TO_STATE_PREDICATE, &literal(to)),
-            signed(EVIDENCE_HASHES_PREDICATE, &literal(seal)),
-        ]
-    }
-
-    /// A genuinely signed `proposal --acceptedBy--> voter` co-signature.
-    pub fn signed_vote(proposal_uri: &str, voter_name: &str, at: &str) -> DecoratedLinkExpression {
-        signed_link(
-            proposal_uri,
-            ACCEPTED_BY_PREDICATE,
-            did_of(voter_name),
-            voter_name,
-            true,
-            None,
-            at,
-        )
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::fixtures::*;
+    use super::super::test_support::*;
     use super::*;
-
     #[test]
     fn an_engine_minted_proposal_is_an_atom_and_its_proposer_is_its_first_voter() {
         let atom = atom_of(&honest_proposal(ALICE, "review", "approved", "h1", T1))

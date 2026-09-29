@@ -593,6 +593,124 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
   });
 });
 
+describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
+  const overlayA = [{ base: 'a', kind: 'create', inferred: [] }];
+  const overlayB = [{ base: 'b', kind: 'update', inferred: [] }];
+
+  it('coalesces concurrent reads into one RPC', async () => {
+    let resolveFetch: (v: any) => void;
+    let fetchCount = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => {
+        fetchCount++;
+        return new Promise(r => { resolveFetch = r; });
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    resolveFetch!(overlayA);
+    expect(await a).toEqual(overlayA);
+    expect(await b).toEqual(overlayA);
+    expect(fetchCount).toBe(1);
+  });
+
+  it('gives each caller its own copy of the array', async () => {
+    let resolveFetch: (v: any) => void;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolveFetch = r; })),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    resolveFetch!(overlayA);
+    const first = await a;
+    const second = await b;
+    expect(second).not.toBe(first);
+    first.length = 0;
+    expect(second).toEqual(overlayA);
+    expect(overlayA).toHaveLength(1);
+  });
+
+  it('does not cache: a call after the previous one resolved sends a new RPC', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
+    };
+    const proxy = createProxy(mockClient);
+
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
+    expect(await proxy.interpretationOverlays()).toEqual(overlayB);
+    expect(calls).toBe(2);
+  });
+
+  it('shares a failed RPC with concurrent callers and does not keep it', async () => {
+    let calls = 0;
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(async () => {
+        calls++;
+        if (calls === 1) throw new Error('boom');
+        return overlayA;
+      }),
+    };
+    const proxy = createProxy(mockClient);
+
+    const a = proxy.interpretationOverlays();
+    const b = proxy.interpretationOverlays();
+    await expect(a).rejects.toThrow('boom');
+    await expect(b).rejects.toThrow('boom');
+    expect(await proxy.interpretationOverlays()).toEqual(overlayA);
+    expect(calls).toBe(2);
+  });
+
+  it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      acceptInterpretation: jest.fn(async () => true),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    await proxy.acceptInterpretation('a');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[0](overlayA);
+    resolvers[1]([]);
+    expect(await before).toEqual(overlayA);
+    expect(await after).toEqual([]);
+  });
+
+  it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
+    const resolvers: Array<(v: any) => void> = [];
+    const mockClient: any = {
+      ...createMockPerspectiveClient(),
+      interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
+      rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
+    };
+    const proxy = createProxy(mockClient);
+    const before = proxy.interpretationOverlays();
+    // Detaches even when the write throws: it may have landed before the error.
+    await expect(proxy.rejectInterpretation('a')).rejects.toThrow('reject failed');
+    const after = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    // The detached RPC settling first must not clear the newer one.
+    resolvers[0](overlayA);
+    expect(await before).toEqual(overlayA);
+    const joiner = proxy.interpretationOverlays();
+    expect(resolvers.length).toBe(2);
+    resolvers[1]([]);
+    expect(await after).toEqual([]);
+    expect(await joiner).toEqual([]);
+  });
+});
+
 // ── fix #1008: PerspectiveProxy.remove accepts bare Link ────────────────────
 //
 // PerspectiveClient.removeLink does `delete link.data.__typename` which throws

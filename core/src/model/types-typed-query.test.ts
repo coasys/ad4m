@@ -15,6 +15,7 @@ import type {
   TypedQuery, TypedWhere, TypedOrder, TypedIncludeMap, TypedIncludeProjection,
   IncludeExtras, Query,
 } from "./types";
+import type { ModelQueryBuilder } from "./ModelQueryBuilder";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -183,6 +184,31 @@ expectAssignable<TypedWhere<Post>>({ title: { gt: 5 } });
 // String op on numeric field — must error
 // @ts-expect-error
 expectAssignable<TypedWhere<Post>>({ views: { contains: "x" } });
+
+// producedByFlow — accepted at the top level of a typed query and by
+// ModelQueryBuilder.where(), which is where the executor reads it
+expectAssignable<TypedQuery<Post>>({ where: { producedByFlow: { flow: "coasys://F" } } });
+expectAssignable<TypedQuery<Post>>({
+  where: { title: "x", producedByFlow: { flow: "coasys://F", state: "done" } },
+});
+expectAssignable<Parameters<ModelQueryBuilder<Post>["where"]>[0]>({
+  producedByFlow: { flow: "coasys://F" },
+});
+
+// ...and rejected everywhere the executor errors on it: nested under a
+// combinator, or in an include sub-query's `where`
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { OR: [{ producedByFlow: { flow: "coasys://F" } }] } });
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { NOT: { producedByFlow: { flow: "coasys://F" } } } });
+expectAssignable<TypedQuery<Post>>({
+  // @ts-expect-error
+  include: { comments: { where: { producedByFlow: { flow: "coasys://F" } } } },
+});
+
+// Malformed filter — must error
+// @ts-expect-error
+expectAssignable<TypedQuery<Post>>({ where: { producedByFlow: { state: "done" } } });
 
 // ---------------------------------------------------------------------------
 // TypedOrder

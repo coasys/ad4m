@@ -209,6 +209,40 @@ pub struct ModelQuery {
     /// TS `or?: ModelQuery[]` field (§7.3 multi-role composition).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub or: Option<Vec<ModelQuery>>,
+    /// Role membership granted by another flow completing: each matched
+    /// instance must be a valid output of that flow, and the grant is dated
+    /// from the run's quorum. Only meaningful on a `fromRole` query; see
+    /// [`grant`](crate::perspectives::flow_instance::grant) for the semantics,
+    /// the failure directions, and — importantly for anyone configuring one —
+    /// what it takes to un-grant.
+    #[serde(
+        rename = "producedByFlow",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub produced_by_flow: Option<ProducedByFlow>,
+}
+
+/// A `fromRole` gate that additionally requires each matched instance to be a
+/// valid output of a completed run of a named flow, and dates the grant from
+/// that run's quorum rather than from an assignment link.
+///
+/// The same name and shape as the model-query filter
+/// `where: { producedByFlow: { flow, state? } }` (#1127), and decided by the
+/// same check ([`produced`](crate::perspectives::flow_instance::produced)).
+/// The one difference is that `state` is **required** here: without it, a
+/// run that settled into a flow's `rejected` state would grant what its
+/// `approved` state was meant to.
+///
+/// Mirrors `ProducedByFlow` in `core/src/shacl/SHACLFlow.ts`.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ProducedByFlow {
+    /// The granting flow's `flow_uri()` — `{namespace}{name}Flow`. Compared
+    /// with the receipt's own `flow_uri`.
+    pub flow: String,
+    /// The state that run must have settled into, compared with the state the
+    /// verifier's **own** fold re-derived, never the one the receipt asserts.
+    pub state: String,
 }
 
 /// `count` shape on a `ModelQuery`. Default `{ min: 1 }` — at least one
@@ -363,7 +397,10 @@ pub struct FlowTransition {
 }
 
 /// SHACL Flow structure - state machine definition
-#[derive(Debug, Deserialize, Serialize)]
+///
+/// `Clone` so a caller can put a definition into its own catalogue without
+/// re-parsing the graph; every field was already `Clone`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SHACLFlow {
     /// Flow name (e.g., "TODO"). Human-readable label; NOT the identity
     /// used in cross-module joins (see [`SHACLFlow::flow_uri`]).
@@ -1275,13 +1312,17 @@ pub fn parse_flow_from_links(links: &[Link], flow_uri: &str) -> Result<SHACLFlow
 /// depending on which instance you ask. See issue #974: a `hasOne` relation
 /// named `author` read back the creating agent's DID instead of the linked
 /// instance.
-const RESERVED_PROPERTY_NAMES: [&str; 6] = [
+///
+/// `__links` is written only when a query asks for `links` (#1046 §3/§4), after
+/// every property — the same silent-overwrite direction as the second group.
+const RESERVED_PROPERTY_NAMES: [&str; 7] = [
     "id",
     "baseExpression",
     "createdAt",
     "updatedAt",
     "author",
     "timestamp",
+    "__links",
 ];
 
 /// Make the property-shape-level `local: true` authoritative by pushing it
@@ -1381,8 +1422,9 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
             "Property name(s) {:?} collide with synthetic fields every hydrated instance \
              already carries ({}). `id`/`baseExpression` would be silently overwritten by \
              this property; `createdAt`/`updatedAt`/`author`/`timestamp` would silently \
-             overwrite it instead, and only on instances where a value is derivable — pick \
-             a different property name.",
+             overwrite it instead, and only on instances where a value is derivable; \
+             `__links` would overwrite it whenever a query asks for `links` — pick a \
+             different property name.",
             reserved_collisions,
             RESERVED_PROPERTY_NAMES.join(", "),
         ));

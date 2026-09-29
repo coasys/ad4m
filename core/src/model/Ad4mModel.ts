@@ -22,7 +22,7 @@ import type {
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
-  TypedQuery, IncludeExtras, IncludeOf,
+  TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
 import { isTraverseScope } from "./types";
 
@@ -393,6 +393,11 @@ export class Ad4mModel {
   author: string;
   createdAt: any;
   updatedAt: any;
+  /**
+   * Per-link rows for the entries asked for with `Query.links`, keyed as they
+   * were asked. Absent when the query did not ask for any.
+   */
+  declare __links?: LinksMap;
 
   /**
    * Backwards compatibility alias for createdAt.
@@ -1065,7 +1070,10 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
+    if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes
     // are all resolved by the executor from the perspective's SHACL triples

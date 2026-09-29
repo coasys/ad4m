@@ -1,6 +1,6 @@
 {
   "target_class": "ad4m://FlowTransitionProposal",
-  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits.",
+  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits. A proposal into a terminal state also names the run's outputs as (class, id) pairs and signs a hash over their content. The proposal's URI is the content address of its signed fields, salted by the proposer's nonce, so a co-signature on the URI covers them all.",
   "constructor_actions": [
     {"action": "addLink", "source": "this", "predicate": "ad4m://flow/instance", "target": "placeholder"}
   ],
@@ -11,6 +11,9 @@
     {"path": "ad4m://flow/proposer",         "name": "proposer",                           "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/proposer", "target": "value"}]},
     {"path": "ad4m://flow/evidence",         "name": "evidence",         "collection": true, "datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://flow/evidence", "target": "value"}]},
     {"path": "ad4m://flow/evidence_hashes",  "name": "evidenceHashes",                     "min_count": 1, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/evidence_hashes", "target": "value"}]},
+    {"path": "ad4m://flow/output",           "name": "outputs",          "collection": true, "datatype": "xsd://string", "min_count": 0, "setter": [{"action": "addLink", "source": "this", "predicate": "ad4m://flow/output", "target": "value"}]},
+    {"path": "ad4m://flow/outputs_hash",     "name": "outputsHash",                        "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/outputs_hash", "target": "value"}]},
+    {"path": "ad4m://flow/nonce",            "name": "nonce",                              "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/nonce", "target": "value"}]},
     {"path": "ad4m://flow/run_uri",          "name": "runUri",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/run_uri", "target": "value"}]},
     {"path": "ad4m://flow/rationale",        "name": "rationale",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/rationale", "target": "value"}]}
   ]

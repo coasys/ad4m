@@ -99,6 +99,13 @@ describe("buildConformanceFilter()", () => {
     expect(result!.getter).toContain("test://type");
     expect(result!.getter).toContain("test://flagged_type");
     expect(result!.getter).toContain("test://name");
+    // Exact form: the executor's `verify_relation_getter` (rust-executor
+    // model_query/getters.rs) matches this prefix to add the #1113 proof
+    // filter, and `verify_relation_getter_rewrites_the_sdk_conformance_getter`
+    // holds the same string. Change both together.
+    expect(result!.getter).toBe(
+      "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . ?target <test://type> <test://flagged_type> . ?target <test://name> ?_v0 . }"
+    );
   });
 
   it("should return undefined for a target with no conformance conditions", () => {
