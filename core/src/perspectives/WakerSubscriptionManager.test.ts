@@ -16,8 +16,9 @@ describe('WakerSubscriptionManager', () => {
     debug: () => {},
   });
 
+  // querySparql returns a flat array of rows, as the executor does.
   const perspectiveClient = {
-    querySparql: () => Promise.resolve({ results: { bindings: [] } }),
+    querySparql: () => Promise.resolve([]),
   };
 
   const sub = {
@@ -180,6 +181,44 @@ describe('WakerSubscriptionManager', () => {
     expect(manager.has(sub.id)).toBe(true);
     expect(manager.getPending()).toHaveLength(0);
     expect(attempt).toBe(2);
+
+    manager.disposeAll();
+  });
+
+  it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
+    let deliver: ((result: any) => Promise<void>) | undefined;
+    const ProxyClass = function () {
+      return {
+        initialized: Promise.resolve(true),
+        subscribe: () => Promise.resolve(),
+        dispose: () => {},
+        onResult: (cb: (result: any) => Promise<void>) => { deliver = cb; },
+      };
+    };
+    const queries: string[] = [];
+    // The executor's row shape: one object per solution, variables as plain strings.
+    const client = {
+      querySparql: (_uuid: string, query: string) => {
+        queries.push(query);
+        return Promise.resolve([{ source: 'test://parent' }]);
+      },
+    };
+    const wakes: any[] = [];
+    const manager = new WakerSubscriptionManager({
+      perspectiveClient: client,
+      logger: noopLogger(),
+      QuerySubscriptionProxy: ProxyClass,
+      debounceMs: 10,
+      retryPendingMs: 60_000,
+      onWake: (_sub, _result, mentions) => { wakes.push(mentions); },
+    });
+
+    await manager.subscribe({ ...sub, id: 'mention-parents' });
+    await deliver!([{ source: 'test://message' }]);
+    await waitUntil(() => wakes.length > 0);
+
+    expect(queries[0]).toContain('<ad4m://has_child> <test://message>');
+    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'] }]]);
 
     manager.disposeAll();
   });
