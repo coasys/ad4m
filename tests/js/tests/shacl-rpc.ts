@@ -1,5 +1,6 @@
 import { expect } from "chai";
 import {
+    SHACLShape,
     Ad4mModel,
     Flag,
     HasMany,
@@ -161,6 +162,28 @@ export default function shaclRpcTests(testContext: TestContext) {
                     const byName = Object.fromEntries(classShape!.properties.map((p) => [p.name, p]));
                     expect(byName.comments.collection).to.equal(true);
                     expect(byName.state.collection).to.equal(false);
+                });
+
+                it("a class added with addShacl() appears in subjectClasses() and getClassShape()", async () => {
+                    // Own perspective, so the getShaclNames()/getAllShacl() checks on the
+                    // shared one keep seeing exactly Message + Todo.
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-addshacl");
+                    try {
+                        const shape = new SHACLShape("note://Note");
+                        shape.addProperty({ name: "text", path: "note://text", datatype: "xsd://string", maxCount: 1 });
+                        shape.addProperty({ name: "tags", path: "note://tag", relationKind: "hasMany" });
+                        await perspective.addShacl("Note", shape);
+
+                        expect(await perspective.subjectClasses()).to.include("Note");
+                        const classShape = await perspective.getClassShape("Note");
+                        expect(classShape).to.not.be.null;
+                        const byName = Object.fromEntries(classShape!.properties.map((p) => [p.name, p]));
+                        expect(Object.keys(byName).sort()).to.deep.equal(["tags", "text"]);
+                        expect(byName.tags.collection).to.equal(true);
+                        expect(byName.text.collection).to.equal(false);
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
                 });
 
                 it("getShacl() returns null for an unknown name", async () => {

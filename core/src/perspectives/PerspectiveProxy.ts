@@ -19,7 +19,7 @@ import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "..
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
-import { SHACLShape } from "../shacl/SHACLShape";
+import { SHACLShape, isCollectionProperty } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
 import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -1687,6 +1687,25 @@ export class PerspectiveProxy {
     async addShacl(name: string, shape: SHACLShape): Promise<void> {
         // Serialize shape to links
         const shapeLinks = shape.toLinks();
+
+        // Class-registration links that the executor's own writer
+        // (`parse_shacl_to_links`) adds and `toLinks()` does not. The readers
+        // `subjectClasses()` and `getClassShape()` find a class only through them.
+        const registrationLinks: Link[] = [];
+        if (shape.targetClass) {
+            registrationLinks.push(
+                new Link({ source: shape.targetClass, predicate: "rdf://type", target: "ad4m://SubjectClass" }),
+                new Link({ source: shape.targetClass, predicate: "ad4m://shape", target: shape.nodeShapeUri }),
+            );
+        }
+        // toLinks writes one sh://property link per property, in order.
+        shapeLinks
+            .filter(l => l.source === shape.nodeShapeUri && l.predicate === "sh://property")
+            .forEach((l, i) => registrationLinks.push(new Link({
+                source: l.target,
+                predicate: "rdf://type",
+                target: isCollectionProperty(shape.properties[i]) ? "ad4m://CollectionShape" : "sh://PropertyShape"
+            })));
         
         // Create name -> shape mapping links
         const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
@@ -1696,6 +1715,7 @@ export class PerspectiveProxy {
                 predicate: l.predicate,
                 target: l.target
             })),
+            ...registrationLinks,
             new Link({
                 source: "ad4m://self",
                 predicate: "ad4m://has_shacl",
