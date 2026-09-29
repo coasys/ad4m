@@ -961,4 +961,98 @@ describe('SHACLFlow', () => {
       expect(roundTripped.consensusRule?.fromRole?.where?.agent).toBe('$did');
     });
   });
+
+  describe('transition URIs', () => {
+    const byKey = (ts: FlowTransition[]) =>
+      ts.map(t => `${t.fromState}->${t.toState}:${t.actionName}:${JSON.stringify(t.actions)}`).sort();
+
+    const roundTrip = (flow: SHACLFlow) => SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+
+    it('keeps two transitions between the same states after toLinks -> fromLinks', () => {
+      const flow = new SHACLFlow('Review', 'review://');
+      flow.addState({ name: 'review', value: 0 });
+      flow.addState({ name: 'done', value: 1 });
+      flow.addTransition({ actionName: 'Approve', fromState: 'review', toState: 'done', actions: [{ action: 'addLink', source: 'this', predicate: 'review://by', target: 'approver' }] });
+      flow.addTransition({ actionName: 'Fast-track', fromState: 'review', toState: 'done', actions: [] });
+
+      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
+    });
+
+    it('keeps same-named transitions from two states after toLinks -> fromLinks', () => {
+      const flow = new SHACLFlow('TODO', 'todo://');
+      flow.addState({ name: 'ready', value: 0 });
+      flow.addState({ name: 'doing', value: 0.5 });
+      flow.addState({ name: 'done', value: 1 });
+      flow.addTransition({ actionName: 'Finish', fromState: 'ready', toState: 'done', actions: [] });
+      flow.addTransition({ actionName: 'Finish', fromState: 'doing', toState: 'done', actions: [] });
+
+      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
+    });
+
+    it('does not collide "a" -> "Tob" with "aTo" -> "b"', () => {
+      const flow = new SHACLFlow('F', 'f://');
+      for (const [name, value] of [['a', 0], ['Tob', 1], ['aTo', 2], ['b', 3]] as const) {
+        flow.addState({ name, value });
+      }
+      flow.addTransition({ actionName: 'Go', fromState: 'a', toState: 'Tob', actions: [] });
+      flow.addTransition({ actionName: 'Go', fromState: 'aTo', toState: 'b', actions: [] });
+
+      const transitionUris = flow.toLinks().filter(l => l.predicate === 'ad4m://hasTransition').map(l => l.target);
+      expect(new Set(transitionUris).size).toBe(2);
+      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
+    });
+
+    it('still reads flows stored with the legacy {from}To{to} transition URIs', () => {
+      const flowUri = 'todo://TODOFlow';
+      const legacy = (from: string, to: string) => `todo://TODO.${from}To${to}`;
+      const transition = (from: string, to: string, actionName: string, actions: AD4MAction[]): Link[] => [
+        { source: flowUri, predicate: 'ad4m://hasTransition', target: legacy(from, to) },
+        { source: legacy(from, to), predicate: 'rdf://type', target: 'ad4m://FlowTransition' },
+        { source: legacy(from, to), predicate: 'ad4m://actionName', target: Literal.from(actionName).toUrl() },
+        { source: legacy(from, to), predicate: 'ad4m://fromState', target: `todo://TODO.${from}` },
+        { source: legacy(from, to), predicate: 'ad4m://toState', target: `todo://TODO.${to}` },
+        { source: legacy(from, to), predicate: 'ad4m://transitionActions', target: `literal:string:${encodeURIComponent(JSON.stringify(actions))}` },
+      ];
+      const state = (name: string, value: number): Link[] => [
+        { source: flowUri, predicate: 'ad4m://hasState', target: `todo://TODO.${name}` },
+        { source: `todo://TODO.${name}`, predicate: 'rdf://type', target: 'ad4m://FlowState' },
+        { source: `todo://TODO.${name}`, predicate: 'ad4m://stateName', target: Literal.from(name).toUrl() },
+        { source: `todo://TODO.${name}`, predicate: 'ad4m://stateValue', target: Literal.from(value).toUrl() },
+      ];
+      const links: Link[] = [
+        { source: flowUri, predicate: 'rdf://type', target: 'ad4m://Flow' },
+        { source: flowUri, predicate: 'ad4m://flowName', target: Literal.from('TODO').toUrl() },
+        ...state('ready', 0),
+        ...state('done', 1),
+        ...transition('ready', 'done', 'Finish', [{ action: 'addLink', source: 'this', predicate: 'todo://done', target: 'true' }]),
+        ...transition('done', 'ready', 'Reopen', []),
+      ];
+
+      const flow = SHACLFlow.fromLinks(links, flowUri);
+      expect(flow.states.map(s => s.name)).toEqual(['ready', 'done']);
+      expect(byKey(flow.transitions)).toEqual([
+        'done->ready:Reopen:[]',
+        'ready->done:Finish:[{"action":"addLink","source":"this","predicate":"todo://done","target":"true"}]',
+      ]);
+    });
+
+    it('keeps the legacy two-argument transitionUri() output', () => {
+      const flow = new SHACLFlow('TODO', 'todo://');
+      expect(flow.transitionUri('ready', 'doing')).toBe('todo://TODO.readyTodoing');
+    });
+  });
+
+  describe('initial state ordering', () => {
+    it('fromJSON sorts states by value, like fromLinks', () => {
+      const flow = new SHACLFlow('TODO', 'todo://');
+      flow.addState({ name: 'done', value: 1 });
+      flow.addState({ name: 'ready', value: 0 });
+      flow.addState({ name: 'doing', value: 0.5 });
+
+      const fromLinks = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+      const fromJSON = SHACLFlow.fromJSON(flow.toJSON());
+      expect(fromLinks.states.map(s => s.name)).toEqual(['ready', 'doing', 'done']);
+      expect(fromJSON.states.map(s => s.name)).toEqual(['ready', 'doing', 'done']);
+    });
+  });
 });

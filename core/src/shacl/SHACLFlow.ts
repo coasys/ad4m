@@ -488,10 +488,15 @@ export class SHACLFlow {
   }
 
   /**
-   * Get a transition URI
+   * Get a transition URI. With `actionName` the parts are URI-encoded and the URI is
+   * unique; without it, the legacy `{from}To{to}` form. Readers never parse this URI.
    */
-  transitionUri(fromState: string, toState: string): string {
-    return `${this.namespace}${this.name}.${fromState}To${toState}`;
+  transitionUri(fromState: string, toState: string, actionName?: string): string {
+    if (actionName === undefined) {
+      return `${this.namespace}${this.name}.${fromState}To${toState}`;
+    }
+    const part = encodeURIComponent;
+    return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
   /**
@@ -660,7 +665,7 @@ export class SHACLFlow {
 
     // Transitions
     for (const transition of this._transitions) {
-      const transitionUri = this.transitionUri(transition.fromState, transition.toState);
+      const transitionUri = this.transitionUri(transition.fromState, transition.toState, transition.actionName);
       const fromStateUri = this.stateUri(transition.fromState);
       const toStateUri = this.stateUri(transition.toState);
 
@@ -1107,6 +1112,8 @@ export class SHACLFlow {
       }
       flow.addState(sanitized);
     }
+    // Same "states[0] is the initial state" ordering as fromLinks.
+    flow._states.sort((a, b) => a.value - b.value);
     for (const transition of json.transitions || []) {
       flow.addTransition(transition);
     }
