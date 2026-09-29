@@ -145,22 +145,26 @@ fn store_a_valid_proof_upgrades_an_unverified_one() {
 
 /// Verification never reads `proof.key`, so Alice's real signature under a
 /// garbage key still verifies. valid→valid is not an upgrade: the replay
-/// must not rewrite Alice's stored key.
+/// must not rewrite Alice's stored key. Both row shapes: one with no
+/// `wireTarget` (the heal's shape, which writes only `wireTarget`) and one
+/// with a `wireTarget` (which writes nothing).
 #[test]
 fn store_a_replayed_signature_with_another_key_keeps_the_stored_key() {
     let alice = TestSigner::generate();
-    let genuine = signed(&alice, "ingest://key", "ingest://t");
-    let mut replay = genuine.clone();
-    replay.proof.key = "not-alices-key".to_string();
-    assert!(
-        replay.compute_proof_valid(),
-        "fixture: verification ignores the key"
-    );
+    for target in ["ingest://t", RAW_TARGET] {
+        let genuine = signed(&alice, "ingest://key", target);
+        let mut replay = genuine.clone();
+        replay.proof.key = "not-alices-key".to_string();
+        assert!(
+            replay.compute_proof_valid(),
+            "fixture: verification ignores the key"
+        );
 
-    let store = SparqlStore::new(None).unwrap();
-    store.add_link(&genuine).unwrap();
-    store.add_link(&replay).unwrap();
-    assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+        let store = SparqlStore::new(None).unwrap();
+        store.add_link(&genuine).unwrap();
+        store.add_link(&replay).unwrap();
+        assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+    }
 }
 
 /// Mallory re-sends Alice's link over an equivalent encoding of the target
@@ -173,6 +177,24 @@ fn store_an_equivalent_encoding_under_the_authors_signature_keeps_the_signed_byt
     let genuine = signed(&alice, "ingest://wire", RAW_TARGET);
     let mut forged = genuine.clone();
     forged.data.target = CANONICAL_TARGET.to_string();
+    assert!(!forged.compute_proof_valid(), "fixture must not verify");
+
+    let store = SparqlStore::new(None).unwrap();
+    store.add_link(&genuine).unwrap();
+    store.add_link(&forged).unwrap();
+    assert_row_is(&only_link(store.get_all_links().unwrap()), &genuine);
+}
+
+/// T3 in reverse: Alice signs the canonical target, so no `wireTarget` is
+/// stored, and a caller re-sends the raw encoding under her signature. Same
+/// reifier, same signature, no `wireTarget`: only the incoming verdict keeps
+/// the heal from writing the unsigned bytes.
+#[test]
+fn store_a_canonical_row_is_not_healed_by_an_unverified_encoding() {
+    let alice = TestSigner::generate();
+    let genuine = signed(&alice, "ingest://rev", CANONICAL_TARGET);
+    let mut forged = genuine.clone();
+    forged.data.target = RAW_TARGET.to_string();
     assert!(!forged.compute_proof_valid(), "fixture must not verify");
 
     let store = SparqlStore::new(None).unwrap();
@@ -346,4 +368,22 @@ async fn ingest_still_applies_a_removal_of_a_shared_link() {
     assert_eq!(links_from(&p, "ingest://rm").len(), 1);
     ingest(&p, vec![], vec![genuine]).await;
     assert_eq!(links_from(&p, "ingest://rm"), vec![]);
+}
+
+/// #1146 PR 2: removals are applied before additions, so one diff that
+/// removes Alice's link and re-adds it with her signature under another key
+/// starts from an empty reifier and writes the garbage key. The tombstone
+/// and anti-resurrection rule in PR 2 must keep Alice's key.
+#[tokio::test]
+#[ignore = "#1146 PR 2: remove + replay in one diff resets the proof unit"]
+async fn ingest_remove_then_replay_in_one_diff_keeps_the_stored_key() {
+    let p = perspective().await;
+    let alice = TestSigner::generate();
+    let genuine = signed(&alice, "ingest://rr", "ingest://t");
+    ingest(&p, vec![genuine.clone()], vec![]).await;
+
+    let mut replay = genuine.clone();
+    replay.proof.key = "not-alices-key".to_string();
+    ingest(&p, vec![replay], vec![genuine.clone()]).await;
+    assert_row_is(&only_link(links_from(&p, "ingest://rr")), &genuine);
 }

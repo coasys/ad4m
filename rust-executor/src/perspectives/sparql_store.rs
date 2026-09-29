@@ -3142,6 +3142,59 @@ mod tests {
         );
     }
 
+    /// `Whole` always writes all four proof annotations, so no production
+    /// path stores a partial row. These two pin how `proof_write` reads one.
+    ///
+    /// A verified row with no stored signature is not healed: an empty
+    /// signature is never the same statement as the incoming one.
+    #[test]
+    fn a_verified_row_without_a_signature_is_not_healed() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let link = make_link(
+            &signer,
+            "ad4m://partial-sig",
+            "ad4m://pred",
+            "literal:string:Write the guide",
+        );
+        svc.add_link(&link).unwrap();
+        svc.remove_reifier_annotation(&link, ONT_WIRE_TARGET)
+            .unwrap();
+        svc.remove_reifier_annotation(&link, ONT_PROOF_SIG).unwrap();
+
+        svc.add_link(&link).unwrap();
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].data.target, "literal:string:Write%20the%20guide",
+            "no wireTarget is written for a row without a stored signature"
+        );
+    }
+
+    /// A partial row (key and signature, no verdict) counts as not verified:
+    /// a proof that does not verify does not replace it.
+    #[test]
+    fn a_partial_row_without_a_verdict_is_not_replaced_by_a_bad_proof() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+        let link = make_link(
+            &signer,
+            "ad4m://partial-verdict",
+            "ad4m://pred",
+            "ad4m://tgt",
+        );
+        svc.add_link(&link).unwrap();
+        svc.remove_reifier_annotation(&link, ONT_PROOF_VALID)
+            .unwrap();
+
+        let mut bad = link.clone();
+        bad.proof.signature = "cafebabe".to_string();
+        svc.add_link(&bad).unwrap();
+        let links = svc.get_all_links().unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].proof.signature, link.proof.signature);
+    }
+
     /// Every write carries the annotation, so the two read paths never have to
     /// answer "nobody checked". Pins both, because each decodes independently.
     ///
