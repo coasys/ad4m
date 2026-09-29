@@ -21,6 +21,7 @@ pub const PROTOCOL_VERSION: u32 = 2;
 pub const PROTOCOL_FEATURES: &[&str] = &[
     "runtime.protocol",
     "perspective.discardBatch",
+    "perspective.getAllShacl.names",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

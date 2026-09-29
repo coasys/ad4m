@@ -162,3 +162,102 @@ async fn discard_batch_checks_the_update_capability() {
     .expect_err("no capability");
     assert_eq!(err.code, 403);
 }
+
+// ── X6: perspective.getAllShacl { names } ───────────────────────────────────
+
+pub(crate) const TODO_SDNA: &str = r#"{
+  "target_class": "test://Todo",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"test://Todo"}
+  ],
+  "properties": [
+    {"path":"test://title","name":"title","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://title","target":"value"}]}
+  ]
+}"#;
+
+pub(crate) const NOTE_SDNA: &str = r#"{
+  "target_class": "test://Note",
+  "constructor_actions": [
+    {"action":"addLink","source":"this","predicate":"rdf://type","target":"test://Note"}
+  ],
+  "properties": [
+    {"path":"test://body","name":"body","datatype":"xsd:string","min_count":1,"max_count":1,"writable":true,
+     "setter":[{"action":"setSingleTarget","source":"this","predicate":"test://body","target":"value"}]}
+  ]
+}"#;
+
+fn shape_names(reply: &Value) -> Vec<String> {
+    let mut names: Vec<String> = reply
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|e| e["name"].as_str().unwrap().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn get_all_shacl_without_names_returns_every_shape() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
+    let all = call("perspective.getAllShacl", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    assert_eq!(shape_names(&all), vec!["Note", "Todo"]);
+    let with_null = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0, "names": null }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(with_null, all, "names: null is the same as no filter");
+}
+
+#[tokio::test]
+async fn get_all_shacl_names_filters_the_reply() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
+    let all = call("perspective.getAllShacl", json!({ "uuid": p.0 }), admin_ctx())
+        .await
+        .unwrap();
+    let only_todo = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0, "names": ["Todo", "Unknown"] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(shape_names(&only_todo), vec!["Todo"]);
+    let todo_in_all = all
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["name"] == "Todo")
+        .unwrap();
+    assert_eq!(&only_todo[0], todo_in_all, "same entry as the unfiltered read");
+
+    let none = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0, "names": [] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(none, json!([]));
+}
+
+#[tokio::test]
+async fn get_all_shacl_rejects_malformed_names() {
+    let p = registered_perspective(&[]).await;
+    for bad in [json!("Todo"), json!([1]), json!({ "a": 1 })] {
+        let err = call(
+            "perspective.getAllShacl",
+            json!({ "uuid": p.0, "names": bad }),
+            admin_ctx(),
+        )
+        .await
+        .expect_err("malformed names");
+        assert_eq!(err.code, 400);
+    }
+}

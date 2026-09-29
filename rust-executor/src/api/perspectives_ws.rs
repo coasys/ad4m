@@ -2512,6 +2512,10 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 /// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
 /// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
 /// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
+///
+/// Optional `names: string[]` (protocol feature `perspective.getAllShacl.names`)
+/// restricts the reply to those shapes. Entries keep the perspective's order;
+/// unknown names are left out. Absent or `null` = every shape, as before.
 async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -2519,6 +2523,8 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         &perspective_query_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let wanted = shacl_names_filter(&params)?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
@@ -2534,6 +2540,7 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .iter()
         .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
         .filter(|name| seen_names.insert(name.clone()))
+        .filter(|name| wanted.as_ref().map_or(true, |w| w.contains(name)))
         .collect();
 
     // Step 2: resolve each shape's full link set. Concurrent per-shape
@@ -2587,6 +2594,28 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     }
 
     Ok(Value::Array(results))
+}
+
+/// `names` param of `perspective.getAllShacl`: `None` when absent or `null`,
+/// the set of names when it is an array of strings, 400 otherwise.
+pub(crate) fn shacl_names_filter(
+    params: &Value,
+) -> Result<Option<std::collections::HashSet<String>>, WsRpcError> {
+    match params.get("names") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| {
+                v.as_str().map(str::to_string).ok_or_else(|| {
+                    WsRpcError::bad_request("`names` must be an array of strings")
+                })
+            })
+            .collect::<Result<_, _>>()
+            .map(Some),
+        Some(_) => Err(WsRpcError::bad_request(
+            "`names` must be an array of strings",
+        )),
+    }
 }
 
 // ── Registration ──
