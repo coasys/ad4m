@@ -65,10 +65,18 @@ const RETRYABLE_READS = new Set([
     'runtime.info',
 ])
 
+/** Sockets that may close before a call goes out before the call fails with
+ *  503. A call that never went out never reached the executor, so waiting
+ *  for the next socket is safe for writes too. This covers an executor that
+ *  is still binding its port (about 1.5 s with the reconnect backoff). */
+const MAX_CONNECT_ATTEMPTS = 3
+
 interface PendingCall {
     message: string
     /** True once the message went out on the current socket. */
     sent: boolean
+    /** Sockets that closed before this call went out. */
+    failedConnects: number
     /** True while a retryable read has its one retry left. */
     retry: boolean
     resolve: (value: unknown) => void
@@ -163,6 +171,8 @@ export class ApiClient {
     }
 
     private _onOpen(ws: WebSocket): void {
+        // A socket closed by _closeWs() must not take the calls queued for its successor.
+        if (this._ws !== ws) return
         this._wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
         this._startPing()
         for (const pending of this._pendingCalls.values()) {
@@ -188,6 +198,7 @@ export class ApiClient {
         this._ws = null
         this._wsOpen = null
         for (const pending of this._pendingCalls.values()) {
+            if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.retry) {
                 pending.sent = false
                 pending.retry = false
@@ -263,6 +274,7 @@ export class ApiClient {
             const pending: PendingCall = {
                 message,
                 sent: false,
+                failedConnects: 0,
                 retry: RETRYABLE_READS.has(type),
                 resolve: (value) => settle(() => resolve(value as T)),
                 reject: (reason) => settle(() => reject(reason)),

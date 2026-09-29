@@ -121,10 +121,76 @@ describe('ApiClient calls', () => {
 describe('ApiClient connect-phase failures', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 
-    it('rejects with 503 when the socket closes before it opens', async () => {
-        const promise = call('agent.get', {}, { timeoutMs: 1_000 })
-        socket(0).drop()
-        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    it('rejects with 503 once three sockets closed before it could be sent', async () => {
+        jest.useFakeTimers()
+        try {
+            const promise = call('agent.get', {}, { timeoutMs: 10_000 })
+            socket(0).drop()
+            await jest.advanceTimersByTimeAsync(500)
+            socket(1).drop()
+            await jest.advanceTimersByTimeAsync(1_000)
+            socket(2).drop()
+            await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+            expect(TestSocket.instances).toHaveLength(3)
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('sends a call made while the first connect is refused once a later socket opens', async () => {
+        // An executor that logs "API server starting" before it binds refuses the first connect.
+        jest.useFakeTimers()
+        try {
+            const promise = call<string>('agent.generate', { passphrase: 'p' }, { timeoutMs: 10_000 })
+            socket(0).drop()
+            await jest.advanceTimersByTimeAsync(500)
+            socket(1).open()
+            expect(socket(1).sent[0]).toMatchObject({ type: 'agent.generate' })
+            socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
+            await expect(promise).resolves.toBe('ok')
+        } finally {
+            jest.useRealTimers()
+        }
+    })
+
+    it('a replaced socket that opens late does not take the queued calls', async () => {
+        const unsubscribe = client.subscribe(() => {})
+        unsubscribe()
+        const promise = call<string>('x')
+        socket(0).open()
+        expect(socket(0).sent).toEqual([])
+        socket(1).open()
+        socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it("a replaced socket's late onclose does not fail the call on its successor", async () => {
+        TestSocket.asyncClose = true
+        client.waitForSubscription()
+        socket(0).open()
+        client.closeAll() // socket 0's onclose arrives 5 ms later
+        const promise = call<string>('x')
+        await flush()
+        socket(1).open()
+        await sleep(10)
+        socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
+        await expect(promise).resolves.toBe('ok')
+    })
+
+    it('a settled call leaves only the ping timer, and closeAll leaves none', async () => {
+        jest.useFakeTimers()
+        try {
+            const promise = call('agent.status')
+            socket(0).open()
+            await jest.advanceTimersByTimeAsync(1)
+            socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
+            await promise
+            expect(jest.getTimerCount()).toBe(1)
+            client.closeAll()
+            expect(jest.getTimerCount()).toBe(0)
+        } finally {
+            jest.useRealTimers()
+        }
     })
 
     it('rejects with 408 when the socket never opens within the timeout', async () => {
