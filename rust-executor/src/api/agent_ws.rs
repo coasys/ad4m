@@ -590,7 +590,10 @@ async fn revoke_token(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     // The SDK sends the app's request id here; the field name promises the JWT. Both work,
     // and a value that names no app answers 404 instead of a silent success (#1060).
     let token = params.require_str("token")?;
-    apps_map::revoke_app(&token).map_err(|e| WsRpcError::not_found(e))?;
+    apps_map::revoke_app(&token).map_err(|e| match e {
+        apps_map::RevokeError::NotFound => WsRpcError::not_found(e.to_string()),
+        apps_map::RevokeError::Store(_) => WsRpcError::internal(e.to_string()),
+    })?;
     Ok(serde_json::to_value(apps_map::get_apps())?)
 }
 
@@ -1034,5 +1037,23 @@ mod revoke_token_tests {
     async fn a_value_that_names_no_app_is_an_error() {
         let err = revoke("names-no-app").await.unwrap_err();
         assert_eq!(err.0, 404, "{}", err.1);
+    }
+
+    // A failed write must not read as "no such app": the operator would stop looking, and a
+    // restart would bring the app back.
+    #[tokio::test]
+    async fn a_revoke_that_cannot_be_saved_is_a_server_error() {
+        let (request_id, token) = approved_app();
+        apps_map::set_data_file_path("/nonexistent-dir-for-revoke-test/apps.json".to_string());
+        let result = revoke(&request_id).await;
+        crate::test_utils::use_test_apps_file();
+
+        let err = result.unwrap_err();
+        assert_eq!(err.0, 500, "{}", err.1);
+        assert!(
+            check_token_revoked(&token).is_err(),
+            "the app stays revoked in memory"
+        );
+        apps_map::remove_app(&request_id).unwrap();
     }
 }

@@ -77,12 +77,31 @@ pub fn insert_app(
     Ok(())
 }
 
+/// Why `revoke_app` failed.
+#[derive(Debug)]
+pub enum RevokeError {
+    /// No app has this request id or token.
+    NotFound,
+    /// The app stays revoked in memory, but the registry file did not take the change, so a
+    /// restart would bring the app back.
+    Store(String),
+}
+
+impl std::fmt::Display for RevokeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RevokeError::NotFound => write!(f, "No app matches this token or request id"),
+            RevokeError::Store(e) => write!(f, "Revoked until restart, but not saved: {e}"),
+        }
+    }
+}
+
 /// Revokes the app that `token_or_request_id` names: its request id, which the SDK sends, or
 /// its JWT, which the RPC's field name (`token`) promises. A value that names no app is an
 /// error: a revoke that reports success and revokes nothing ends the search for a leak
 /// (#1060).
-pub fn revoke_app(token_or_request_id: &str) -> Result<(), String> {
-    let mut apps = APPS.lock().map_err(|e| e.to_string())?;
+pub fn revoke_app(token_or_request_id: &str) -> Result<(), RevokeError> {
+    let mut apps = APPS.lock().map_err(|e| RevokeError::Store(e.to_string()))?;
     let key = if apps.contains_key(token_or_request_id) {
         Some(token_or_request_id.to_string())
     } else {
@@ -91,10 +110,10 @@ pub fn revoke_app(token_or_request_id: &str) -> Result<(), String> {
             .map(|(key, _)| key.clone())
     };
     let Some(app) = key.and_then(|key| apps.get_mut(&key)) else {
-        return Err("No app matches this token or request id".to_string());
+        return Err(RevokeError::NotFound);
     };
     app.revoked = true;
-    persist_apps_to_file(&apps).map_err(|e| e.to_string())
+    persist_apps_to_file(&apps).map_err(|e| RevokeError::Store(e.to_string()))
 }
 
 pub fn remove_app(request_key: &str) -> Result<(), String> {
