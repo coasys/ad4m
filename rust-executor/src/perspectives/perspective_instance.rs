@@ -1572,7 +1572,10 @@ impl PerspectiveInstance {
         let mut unique_removals: Vec<LinkExpression> = Vec::new();
         // A peer's removal never ends a monotonic link (#1176); dropped here
         // rather than in `persist_link_diff`, whose local callers get an error.
-        let declared = self.monotonic_declared().await?;
+        let declared = self
+            .monotonic_declared()
+            .await?
+            .with_incoming(&unique_additions);
         for link in drop_monotonic_removals(diff.removals, &declared).iter() {
             let key_tuple = (
                 &link.author,

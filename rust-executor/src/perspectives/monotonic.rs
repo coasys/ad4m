@@ -59,9 +59,12 @@
 //! gate reads is all in the fixed core and cannot be removed. A flag counts
 //! only if it is Shared, its signature verifies, and its author is the
 //! neighbourhood author (the primary owner, or this agent, while the
-//! perspective is not shared): the authority the Prolog SDNA pool uses. From
-//! anyone else it declares nothing, so no member can freeze a predicate for
-//! everyone.
+//! perspective is not shared). That is stricter than the Prolog SDNA pool,
+//! which also accepts the owner and this agent in a neighbourhood; keep it
+//! so. From anyone else it declares nothing, so no member can freeze a
+//! predicate for everyone. A flag in an incoming diff counts for the
+//! removals in that same diff ([`MonotonicDeclared::with_incoming`]), so
+//! replicas agree however the link language batches.
 //!
 //! The check is per predicate, not per class: another class using the same
 //! predicate URI is monotonic too, which fails safe (the link stays). A
@@ -108,7 +111,8 @@ pub struct MonotonicDeclared {
 
 impl MonotonicDeclared {
     /// The declared set from `flags` (the stored `ad4m://monotonic` links):
-    /// those that are Shared, verify, and were written by `authority`.
+    /// those that are Shared, verify, were written by `authority`, and name
+    /// the predicate as a `literal:string:`.
     pub fn from_flags(
         authority: Option<String>,
         flags: impl IntoIterator<Item = LinkExpression>,
@@ -121,6 +125,7 @@ impl MonotonicDeclared {
                     && flag.status == Some(LinkStatus::Shared)
                     && flag.compute_proof_valid()
             })
+            .filter(|flag| flag.data.target.starts_with("literal:string:"))
             .filter_map(|flag| match parse_literal_value(&flag.data.target) {
                 serde_json::Value::String(p) if !p.is_empty() => Some(p),
                 _ => None,
@@ -130,6 +135,25 @@ impl MonotonicDeclared {
             authority,
             predicates,
         }
+    }
+
+    /// This set plus what the flags among `links` declare, under the same
+    /// authority and checks. For an incoming diff, whose flags are not in
+    /// the store yet: `links` arrive as Shared.
+    pub fn with_incoming(&self, links: &[LinkExpression]) -> Self {
+        let mut declared = Self::from_flags(
+            self.authority.clone(),
+            links
+                .iter()
+                .filter(|l| l.data.predicate.as_deref() == Some(MONOTONIC_FLAG_PREDICATE))
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                }),
+        );
+        declared.predicates.extend(self.predicates.iter().cloned());
+        declared
     }
 }
 
