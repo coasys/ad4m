@@ -300,8 +300,8 @@ export class Ad4mConnectElement extends LitElement {
     } catch {
       // Fall back to direct connection
       const host = window.location.hostname === '127.0.0.1' ? '127.0.0.1' : 'localhost';
+      // Unchecked: connect() stores it once /health accepts it.
       this.core.url = `http://${host}:${this.core.port}`;
-      setLocal("ad4m-url", this.core.url);
     }
     
     try {
@@ -431,12 +431,12 @@ export class Ad4mConnectElement extends LitElement {
   private async connectRemoteNode(e: CustomEvent) {
     // Legacy direct-URL connection (kept for backward compat if needed)
     this.core.url = e.detail.remoteUrl;
-    setLocal("ad4m-url", this.core.url);
 
     try {
       await checkConnection(wsUrlToHttpBase(e.detail.remoteUrl));
       const isValidAd4mApi = await this.core.isValidAd4mAPI();
       if (!isValidAd4mApi) throw new Error("Server is reachable but doesn't appear to be an AD4M executor");
+      setLocal("ad4m-url", this.core.url);
 
       this.currentView = "remote-authentication";
     } catch (error) {
