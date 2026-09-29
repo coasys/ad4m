@@ -99,6 +99,9 @@ export class ApiClient {
     private _pendingCalls = new Map<string, PendingCall>()
     private _wsReady: Promise<void> | null = null
     private _wsReadyResolve: (() => void) | null = null
+    private _wsReadyReject: ((reason: unknown) => void) | null = null
+    /** Calls waiting for the socket to open; not yet in `_pendingCalls`. */
+    private _connectWaiters = 0
     private _wsReconnectTimer: ReturnType<typeof setTimeout> | null = null
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsClosed = false
@@ -123,9 +126,13 @@ export class ApiClient {
 
         this._wsClosed = false
 
-        this._wsReady = new Promise<void>((resolve) => {
+        this._wsReady = new Promise<void>((resolve, reject) => {
             this._wsReadyResolve = resolve
+            this._wsReadyReject = reject
         })
+        // Nothing awaits readiness after connect()/subscribe() alone; keep a
+        // close-before-open rejection from surfacing as unhandled.
+        this._wsReady.catch(() => {})
 
         const url = this._getWsUrl()
         // Fallback order: injected impl → globalThis.WebSocket (browsers, Node ≥ 22) → require('ws') (Node ≤ 20).
@@ -150,6 +157,7 @@ export class ApiClient {
             if (this._wsReadyResolve) {
                 this._wsReadyResolve()
                 this._wsReadyResolve = null
+                this._wsReadyReject = null
             }
             this._startPing()
 
@@ -207,10 +215,15 @@ export class ApiClient {
         }
 
         ws.onclose = () => {
+            // A socket closed by _closeWs() can report after a new one exists.
+            const current = this._ws === ws
             this._stopPing()
             this._ws = null
             // Reset the readiness promise so future calls reconnect
             this._wsReady = null
+            // Closed before it opened: fail the callers waiting for readiness
+            // instead of leaving them on a promise that never settles.
+            if (current) this._rejectReady()
 
             // Reject all pending calls
             const hadPendingCalls = this._pendingCalls.size > 0
@@ -223,6 +236,14 @@ export class ApiClient {
             if (!this._wsClosed && (this._wsCallbacks.size > 0 || hadPendingCalls)) {
                 this._scheduleReconnect()
             }
+        }
+    }
+
+    private _rejectReady(message = 'WebSocket connection closed'): void {
+        if (this._wsReadyReject) {
+            this._wsReadyReject(new RpcError(503, message))
+            this._wsReadyReject = null
+            this._wsReadyResolve = null
         }
     }
 
@@ -261,20 +282,24 @@ export class ApiClient {
     }
 
     /**
-     * Like `_ready()`, but races the connection against an AbortSignal so
-     * that callers don't hang if the signal fires while connecting.
+     * Like `_ready()`, but races the connection against an AbortSignal and
+     * a deadline so that callers don't hang while connecting.
      */
-    private async _readyOrAbort(signal?: AbortSignal): Promise<void> {
+    private async _readyOrAbort(signal?: AbortSignal, deadline?: number, timeoutError?: () => Error): Promise<void> {
         if (signal?.aborted) {
             throw new DOMException('Aborted', 'AbortError')
         }
 
+        this._connectWaiters++
         await new Promise<void>((resolve, reject) => {
             let settled = false
+            let timer: ReturnType<typeof setTimeout> | null = null
 
             const finish = (fn: () => void) => {
                 if (settled) return
                 settled = true
+                this._connectWaiters--
+                if (timer) clearTimeout(timer)
                 if (signal && onAbort) {
                     signal.removeEventListener('abort', onAbort)
                 }
@@ -287,6 +312,10 @@ export class ApiClient {
 
             if (onAbort) {
                 signal!.addEventListener('abort', onAbort, { once: true })
+            }
+
+            if (deadline !== undefined && timeoutError) {
+                timer = setTimeout(() => finish(() => reject(timeoutError())), Math.max(0, deadline - Date.now()))
             }
 
             this._ready().then(
@@ -316,14 +345,18 @@ export class ApiClient {
             throw new DOMException('Aborted', 'AbortError')
         }
 
-        await this._readyOrAbort(signal)
+        // The timeout covers the whole call, including waiting for the
+        // socket to open.
+        const effectiveTimeout = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+        const deadline = Date.now() + effectiveTimeout
+        const timeoutError = () => new RpcError(408, `RPC call '${type}' timed out after ${effectiveTimeout}ms`)
+        await this._readyOrAbort(signal, deadline, timeoutError)
 
         const id = nextId()
         // Put params under a "params" key to avoid collision with
         // protocol fields "id" and "type" (e.g. params might contain
         // { id: modelId } or { type: "db" }).
         const message: Record<string, unknown> = { id, type, params: params || {} }
-        const effectiveTimeout = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
         return new Promise<T>((resolve, reject) => {
             let abortHandler: (() => void) | null = null
@@ -338,8 +371,8 @@ export class ApiClient {
             const timer = setTimeout(() => {
                 this._pendingCalls.delete(id)
                 cleanup()
-                reject(new RpcError(408, `RPC call '${type}' timed out after ${effectiveTimeout}ms`))
-            }, effectiveTimeout)
+                reject(timeoutError())
+            }, Math.max(0, deadline - Date.now()))
 
             // Wrap resolve/reject so we always clean up the abort listener.
             this._pendingCalls.set(id, {
@@ -414,7 +447,7 @@ export class ApiClient {
 
         return () => {
             this._wsCallbacks.delete(callback as (data: unknown) => void)
-            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
+            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0 && this._connectWaiters === 0) {
                 this._closeWs()
             }
         }
@@ -432,7 +465,7 @@ export class ApiClient {
         this._ensureWs()
     }
 
-    private _closeWs(): void {
+    private _closeWs(reason?: string): void {
         this._stopPing()
         if (this._wsReconnectTimer) {
             clearTimeout(this._wsReconnectTimer)
@@ -444,6 +477,7 @@ export class ApiClient {
             this._ws = null
             this._wsReady = null
         }
+        this._rejectReady(reason)
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
@@ -462,7 +496,7 @@ export class ApiClient {
             pending.reject(new RpcError(503, 'Client closed'))
         }
         this._pendingCalls.clear()
-        this._closeWs()
+        this._closeWs('Client closed')
         this._wsCallbacks.clear()
         this._reconnectCallbacks.clear()
         // Reset the first-connect gate so a reused client (closeAll() →

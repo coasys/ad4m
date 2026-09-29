@@ -225,3 +225,115 @@ describe('ApiClient AbortSignal support', () => {
         FakeWebSocket.last = null
     })
 })
+
+describe('ApiClient connect-phase failures', () => {
+    // A socket that never opens on its own; tests drive close explicitly.
+    class NeverOpenWebSocket {
+        static instances: NeverOpenWebSocket[] = []
+        readyState = 0
+        onopen: ((ev?: unknown) => void) | null = null
+        onmessage: ((ev: { data: string }) => void) | null = null
+        onerror: ((ev: unknown) => void) | null = null
+        onclose: ((ev?: unknown) => void) | null = null
+        constructor(public url: string) { NeverOpenWebSocket.instances.push(this) }
+        send(_data: string) {}
+        close() { this.readyState = 3; this.onclose?.() }
+        /** Simulate the server refusing the connection. */
+        refuse() { this.readyState = 3; this.onclose?.() }
+    }
+
+    beforeEach(() => { NeverOpenWebSocket.instances = [] })
+
+    function makeClient() {
+        return new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            NeverOpenWebSocket as unknown as new (url: string) => WebSocket,
+        )
+    }
+
+    it('rejects with 503 when the socket closes before it opens', async () => {
+        const client = makeClient()
+        const promise = client.call('agent.get', {}, { timeoutMs: 1_000 })
+        await flushMicrotasks()
+        NeverOpenWebSocket.instances[0].refuse()
+
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+        client.closeAll()
+    })
+
+    it('rejects with 408 when the socket never opens within the timeout', async () => {
+        const client = makeClient()
+        const started = Date.now()
+        await expect(client.call('agent.get', {}, { timeoutMs: 50 }))
+            .rejects.toMatchObject({ name: 'RpcError', status: 408 })
+        expect(Date.now() - started).toBeLessThan(1_000)
+        client.closeAll()
+    })
+
+    it('rejects callers waiting to connect when the client is closed', async () => {
+        const client = makeClient()
+        const promise = client.call('agent.get', {}, { timeoutMs: 1_000 })
+        await flushMicrotasks()
+        client.closeAll()
+
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
+    })
+})
+
+describe('ApiClient with a socket that closes asynchronously', () => {
+    // Browsers and `ws` fire onclose some time after close().
+    class AsyncCloseWebSocket {
+        static instances: AsyncCloseWebSocket[] = []
+        readyState = 0
+        sent: { id: string }[] = []
+        onopen: ((ev?: unknown) => void) | null = null
+        onmessage: ((ev: { data: string }) => void) | null = null
+        onerror: ((ev: unknown) => void) | null = null
+        onclose: ((ev?: unknown) => void) | null = null
+        constructor(public url: string) { AsyncCloseWebSocket.instances.push(this) }
+        send(data: string) { this.sent.push(JSON.parse(data)) }
+        close() { this.readyState = 2; setTimeout(() => { this.readyState = 3; this.onclose?.() }, 5) }
+        open() { this.readyState = 1; this.onopen?.() }
+    }
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+    beforeEach(() => { AsyncCloseWebSocket.instances = [] })
+
+    function makeClient() {
+        return new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            AsyncCloseWebSocket as unknown as new (url: string) => WebSocket,
+        )
+    }
+
+    it('a late close of the previous socket does not fail the next connection', async () => {
+        const client = makeClient()
+        const unsubscribe = client.subscribe(() => {})
+        AsyncCloseWebSocket.instances[0].open()
+        unsubscribe()
+        client.subscribe(() => {})
+        const ready = client.waitForSubscription()
+        await sleep(10)
+        AsyncCloseWebSocket.instances[1].open()
+
+        await expect(ready).resolves.toBeUndefined()
+        client.closeAll()
+    })
+
+    it('keeps the socket for a call still connecting when the last subscriber leaves', async () => {
+        const client = makeClient()
+        const unsubscribe = client.subscribe(() => {})
+        const promise = client.call<number>('agent.get', {}, { timeoutMs: 1_000 })
+        await flushMicrotasks()
+        unsubscribe()
+        const ws = AsyncCloseWebSocket.instances[0]
+        ws.open()
+        await flushMicrotasks()
+        ws.onmessage?.({ data: JSON.stringify({ id: ws.sent[0].id, result: 1 }) })
+
+        await expect(promise).resolves.toBe(1)
+        client.closeAll()
+    })
+})
