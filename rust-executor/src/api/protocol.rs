@@ -28,6 +28,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "perspective.keepAliveLease",
     "events.watch",
     "modelQuery.cursor",
+    "subscriptions.delta",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

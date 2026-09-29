@@ -9,6 +9,7 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::perspective_instance::result_json;
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -944,17 +945,36 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let delta = delta_param(&params)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
-        .subscribe_and_query(body.query, ctx.user_email.clone())
+        .subscribe_and_query_mode(body.query, ctx.user_email.clone(), delta)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    if delta {
+        return Ok(serde_json::json!({
+            "subscriptionId": subscription_id,
+            "result": result_json(&result),
+            "revision": 0,
+        }));
+    }
 
     Ok(serde_json::to_value(SubscribeQueryResponse {
         subscription_id,
         result,
     })?)
+}
+
+/// Optional `delta` param of `subscribeQuery` / `modelSubscribe` (protocol
+/// feature `subscriptions.delta`): absent or `false` = whole-result updates.
+fn delta_param(params: &Value) -> Result<bool, WsRpcError> {
+    match params.get("delta") {
+        None | Some(Value::Null) => Ok(false),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(WsRpcError::bad_request("`delta` must be a boolean")),
+    }
 }
 
 async fn subscribe_sparql_query(
@@ -1311,13 +1331,22 @@ async fn model_subscribe_handler(
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
 
+    let delta = delta_param(&params)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let user_email = ctx.user_email.clone();
     let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query(class_name, query_json, user_email)
+        .model_subscribe_and_query_mode(class_name, query_json, user_email, delta)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    if delta {
+        return Ok(serde_json::json!({
+            "subscription_id": subscription_id,
+            "result": result_json(&result_string),
+            "revision": 0,
+        }));
+    }
 
     Ok(serde_json::to_value(serde_json::json!({
         "subscription_id": subscription_id,
