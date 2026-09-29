@@ -53,11 +53,8 @@ const MAX_RECONNECT_DELAY_MS = 30_000
 /** Initial reconnect delay in ms. */
 const INITIAL_RECONNECT_DELAY_MS = 500
 
-/** Counter for generating unique request IDs. */
-let _idCounter = 0
-function nextId(): string {
-    return String(++_idCounter)
-}
+/** Most cancel-ack ids an ApiClient keeps; the oldest is dropped past this. */
+const MAX_IGNORED_RESPONSE_IDS = 1_000
 
 interface PendingCall {
     resolve: (value: unknown) => void
@@ -103,7 +100,43 @@ export class ApiClient {
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsClosed = false
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
-    private _ignoredResponseIds = new Set<string>()
+    /** Ids of `request.cancel` messages whose ack must not reach subscribers, with their expiry time. */
+    private _ignoredResponseIds = new Map<string, number>()
+    private _ignoredSweepTimer: ReturnType<typeof setInterval> | null = null
+    /** Request-id counter. Ids only need to be unique per socket, so each client keeps its own. */
+    private _idCounter = 0
+
+    private _nextId(): string {
+        return String(++this._idCounter)
+    }
+
+    /** Remember a cancel id until its ack arrives, the socket closes, or DEFAULT_TIMEOUT_MS passes.
+     *  One sweep interval serves every id, and the number of ids is bounded. */
+    private _ignoreResponse(id: string): void {
+        this._ignoredResponseIds.set(id, Date.now() + DEFAULT_TIMEOUT_MS)
+        if (this._ignoredResponseIds.size > MAX_IGNORED_RESPONSE_IDS) {
+            this._ignoredResponseIds.delete(this._ignoredResponseIds.keys().next().value!)
+        }
+        if (!this._ignoredSweepTimer) {
+            this._ignoredSweepTimer = setInterval(() => {
+                const now = Date.now()
+                for (const [ignoredId, expiry] of this._ignoredResponseIds) {
+                    if (expiry <= now) this._ignoredResponseIds.delete(ignoredId)
+                }
+                if (this._ignoredResponseIds.size === 0) this._clearIgnoredResponses()
+            }, DEFAULT_TIMEOUT_MS)
+            // Do not keep a Node process alive for this sweep.
+            ;(this._ignoredSweepTimer as { unref?: () => void }).unref?.()
+        }
+    }
+
+    private _clearIgnoredResponses(): void {
+        this._ignoredResponseIds.clear()
+        if (this._ignoredSweepTimer) {
+            clearInterval(this._ignoredSweepTimer)
+            this._ignoredSweepTimer = null
+        }
+    }
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -193,8 +226,8 @@ export class ApiClient {
             // Discard ack responses to cancel requests we sent — they have
             // an id that was never in _pendingCalls, so without this guard
             // they'd leak into subscriber callbacks as spurious events.
-            if (id && this._ignoredResponseIds.has(id)) {
-                this._ignoredResponseIds.delete(id)
+            if (id && this._ignoredResponseIds.delete(id)) {
+                if (this._ignoredResponseIds.size === 0) this._clearIgnoredResponses()
                 return
             }
 
@@ -211,6 +244,8 @@ export class ApiClient {
             this._ws = null
             // Reset the readiness promise so future calls reconnect
             this._wsReady = null
+            // Acks for cancels sent on this socket can no longer arrive.
+            this._clearIgnoredResponses()
 
             // Reject all pending calls
             const hadPendingCalls = this._pendingCalls.size > 0
@@ -318,7 +353,7 @@ export class ApiClient {
 
         await this._readyOrAbort(signal)
 
-        const id = nextId()
+        const id = this._nextId()
         // Put params under a "params" key to avoid collision with
         // protocol fields "id" and "type" (e.g. params might contain
         // { id: modelId } or { type: "db" }).
@@ -364,20 +399,11 @@ export class ApiClient {
                     // still aborted either way.
                     if (this._ws && this._ws.readyState === 1 /* OPEN */) {
                         try {
-                            const cancelId = nextId()
-                            this._ignoredResponseIds.add(cancelId)
-                            // Safety-net eviction: if the executor's ack never
-                            // arrives (e.g. the socket drops right after we
-                            // send request.cancel), the normal cleanup path
-                            // (deleting the id when its response lands) never
-                            // fires and the entry would live in this set for
-                            // the lifetime of the client. Bound it instead —
-                            // DEFAULT_TIMEOUT_MS is already the ceiling every
-                            // other in-flight call uses, so an ack that hasn't
-                            // shown up by then isn't coming.
-                            setTimeout(() => {
-                                this._ignoredResponseIds.delete(cancelId)
-                            }, DEFAULT_TIMEOUT_MS)
+                            const cancelId = this._nextId()
+                            // Evicted when the ack lands, when the socket
+                            // closes, or after DEFAULT_TIMEOUT_MS (the ceiling
+                            // every other in-flight call uses).
+                            this._ignoreResponse(cancelId)
                             this._ws.send(JSON.stringify({
                                 id: cancelId,
                                 type: 'request.cancel',
@@ -463,6 +489,7 @@ export class ApiClient {
         }
         this._pendingCalls.clear()
         this._closeWs()
+        this._clearIgnoredResponses()
         this._wsCallbacks.clear()
         this._reconnectCallbacks.clear()
         // Reset the first-connect gate so a reused client (closeAll() →

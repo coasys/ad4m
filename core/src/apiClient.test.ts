@@ -225,3 +225,86 @@ describe('ApiClient AbortSignal support', () => {
         FakeWebSocket.last = null
     })
 })
+
+describe('ApiClient cancel-ack ids and request ids (L6)', () => {
+    const makeClient = () => new ApiClient(
+        'http://localhost:1234',
+        undefined,
+        FakeWebSocket as unknown as new (url: string) => WebSocket,
+    )
+
+    async function flushAll() {
+        for (let i = 0; i < 20; i++) await Promise.resolve()
+    }
+
+    async function openClient() {
+        const client = makeClient()
+        client.connect()
+        jest.advanceTimersByTime(0)
+        await flushAll()
+        return { client, ws: FakeWebSocket.last! }
+    }
+
+    async function cancelCalls(client: ApiClient, count: number) {
+        const controllers = Array.from({ length: count }, () => new AbortController())
+        const calls = controllers.map((c) => client.call('perspective.querySparql', {}, { signal: c.signal }).catch(() => {}))
+        await flushAll()
+        controllers.forEach((c) => c.abort())
+        await Promise.all(calls)
+    }
+
+    beforeEach(() => jest.useFakeTimers())
+    afterEach(() => jest.useRealTimers())
+
+    it('10,000 cancelled calls leave one timer', async () => {
+        const { client, ws } = await openClient()
+        const baseline = jest.getTimerCount() // the ping interval
+
+        await cancelCalls(client, 10_000)
+
+        expect(ws.sent.filter((m) => JSON.parse(m).type === 'request.cancel')).toHaveLength(10_000)
+        expect(jest.getTimerCount()).toBe(baseline + 1)
+        client.closeAll()
+    })
+
+    it('keeps a bounded number of ignored ids and sweeps them after the timeout', async () => {
+        const { client } = await openClient()
+        const baseline = jest.getTimerCount()
+
+        await cancelCalls(client, 1_500)
+        expect((client as any)._ignoredResponseIds.size).toBe(1_000)
+
+        jest.advanceTimersByTime(30_000)
+        expect((client as any)._ignoredResponseIds.size).toBe(0)
+        expect(jest.getTimerCount()).toBe(baseline)
+        client.closeAll()
+    })
+
+    it('still swallows the ack of a cancel, and releases the sweep timer when the last ack lands', async () => {
+        const { client, ws } = await openClient()
+        const baseline = jest.getTimerCount()
+        const events: AnyMsg[] = []
+        client.subscribe((m) => events.push(m as AnyMsg))
+
+        await cancelCalls(client, 1)
+        const cancel = lastSent(ws)!
+        expect(cancel.type).toBe('request.cancel')
+        ws.serverPush({ id: cancel.id, result: true })
+
+        expect(events).toHaveLength(0)
+        expect(jest.getTimerCount()).toBe(baseline)
+        client.closeAll()
+    })
+
+    it('uses a separate request-id counter per client', async () => {
+        const a = await openClient()
+        const b = await openClient()
+        a.client.call('agent.get').catch(() => {})
+        b.client.call('agent.get').catch(() => {})
+        await flushAll()
+        expect(JSON.parse(a.ws.sent[0]).id).toBe('1')
+        expect(JSON.parse(b.ws.sent[0]).id).toBe('1')
+        a.client.closeAll()
+        b.client.closeAll()
+    })
+})
