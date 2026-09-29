@@ -419,17 +419,12 @@ pub(crate) async fn build_event_stream_for(
     );
 
     // ── Query subscriptions: only the connection that opened one ──
-    let s_query_sub = BroadcastStream::new(
+    let s_query_sub = query_update_stream(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-    )
-    .filter_map(move |r| {
-        let event = r
-            .ok()
-            .and_then(|msg| query_update_for(&msg, connection_id.as_deref()));
-        async move { event }
-    });
+        connection_id,
+    );
 
     // ── Auto-processor step signals ──
     // DID-scoped: an event is delivered ONLY to the DID whose pass produced
@@ -740,6 +735,25 @@ pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -
             true
         }
     }
+}
+
+/// The `query-subscription-update` events of the connection `connection_id`.
+/// When the topic lags, updates were dropped, maybe this connection's: it
+/// gets one `{ "type": "query-subscription-update", "lagged": true }`, and
+/// the client resyncs every live query.
+fn query_update_stream(
+    rx: tokio::sync::broadcast::Receiver<String>,
+    connection_id: Option<String>,
+) -> impl futures::stream::Stream<Item = String> + Send {
+    tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |r| {
+        let event = match r {
+            Ok(msg) => query_update_for(&msg, connection_id.as_deref()),
+            Err(BroadcastStreamRecvError::Lagged(_)) => connection_id
+                .as_ref()
+                .map(|_| r#"{"type":"query-subscription-update","lagged":true}"#.to_string()),
+        };
+        async move { event }
+    })
 }
 
 /// The `query-subscription-update` event for `msg` if it belongs to the
@@ -1180,7 +1194,35 @@ mod lazy_did_tests {
 #[cfg(test)]
 mod events_socket_message_tests {
     use crate::api::event_interest::SharedInterest;
-    use serde_json::json;
+    use futures::StreamExt;
+    use serde_json::{json, Value};
+
+    #[tokio::test]
+    async fn a_lagged_query_topic_tells_the_connection_to_resync() {
+        let updates = |connection: Option<&str>| {
+            let (tx, rx) = tokio::sync::broadcast::channel(1);
+            for revision in [1, 2] {
+                let msg =
+                    json!({ "subscriptionId": "s", "revision": revision, "connectionId": "c" });
+                tx.send(msg.to_string()).unwrap();
+            }
+            let stream = super::query_update_stream(rx, connection.map(String::from));
+            stream
+                .map(|e| serde_json::from_str::<Value>(&e).unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            updates(Some("c")).await,
+            vec![
+                json!({ "type": "query-subscription-update", "lagged": true }),
+                json!({ "type": "query-subscription-update", "subscriptionId": "s", "revision": 2 }),
+            ]
+        );
+        assert!(
+            updates(None).await.is_empty(),
+            "a socket with no live queries gets nothing"
+        );
+    }
 
     #[test]
     fn events_socket_watch_round_trip_carries_the_request_id() {

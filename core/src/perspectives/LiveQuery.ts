@@ -24,6 +24,12 @@ export interface QueryUpdate {
     result?: any
 }
 
+/** The executor dropped updates, maybe for any live query on this socket:
+ *  every live query resyncs. */
+export interface QueryLagged {
+    lagged: true
+}
+
 /** Apply one update to the last result. Query rows are a multiset: added rows are appended. */
 export function applyUpdate(result: any, update: QueryUpdate): any {
     if ('result' in update) return update.result
@@ -67,7 +73,7 @@ export class LiveQuery {
     #generation = 0
     #latest?: Promise<any>
     // Updates that arrive while a subscribe or resync reply is outstanding.
-    #buffer: QueryUpdate[] | null = null
+    #buffer: (QueryUpdate | QueryLagged)[] | null = null
     #unlisten: () => void
     #unreconnect: () => void
 
@@ -129,9 +135,13 @@ export class LiveQuery {
         for (const update of buffered) this.#receive(update)
     }
 
-    #receive(update: QueryUpdate) {
+    #receive(update: QueryUpdate | QueryLagged) {
         if (this.#buffer) {
             this.#buffer.push(update)
+            return
+        }
+        if ('lagged' in update) {
+            if (this.#id) this.#resync()
             return
         }
         if (update.subscriptionId !== this.#id || update.revision <= this.#revision) return

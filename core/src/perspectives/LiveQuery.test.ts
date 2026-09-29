@@ -1,4 +1,4 @@
-import { applyUpdate, LiveQuery, QueryUpdate, Subscribed } from './LiveQuery';
+import { applyUpdate, LiveQuery, QueryLagged, QueryUpdate, Subscribed } from './LiveQuery';
 
 describe('applyUpdate', () => {
     it('keys model results by instance id and takes the new order', () => {
@@ -25,17 +25,17 @@ describe('applyUpdate', () => {
 
 /** A PerspectiveClient stand-in with the calls LiveQuery makes. */
 function fakeClient() {
-    let listener: ((u: QueryUpdate) => void) | undefined;
+    let listener: ((u: QueryUpdate | QueryLagged) => void) | undefined;
     let reconnect: (() => void) | undefined;
     const client = {
-        onQueryUpdate: jest.fn((cb: (u: QueryUpdate) => void) => { listener = cb; return jest.fn(); }),
+        onQueryUpdate: jest.fn((cb: (u: QueryUpdate | QueryLagged) => void) => { listener = cb; return jest.fn(); }),
         onReconnect: jest.fn((cb: () => void) => { reconnect = cb; return jest.fn(); }),
         resyncSubscription: jest.fn(),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
         listener!({ subscriptionId, revision, added, removed });
-    return { client, update, reconnect: () => reconnect!() };
+    return { client, update, lagged: () => listener!({ lagged: true }), reconnect: () => reconnect!() };
 }
 
 function deferred<T>() {
@@ -89,6 +89,22 @@ describe('LiveQuery', () => {
 
         expect(live.result).toEqual(['a', 'b', 'c', 'd']);
         expect(onResult).toHaveBeenLastCalledWith(['a', 'b', 'c', 'd']);
+    });
+
+    it('resyncs when the executor reports dropped updates', async () => {
+        const { client, update, lagged } = fakeClient();
+        client.resyncSubscription.mockResolvedValue({ revision: 7, result: ['a', 'b'] });
+        const onResult = jest.fn();
+        const live = new LiveQuery(client as any, 'p', async () => ({ subscriptionId: 's1', result: ['a'], revision: 0 }), onResult);
+        await live.start();
+
+        lagged();
+        expect(client.resyncSubscription).toHaveBeenCalledWith('p', 's1');
+        await tick();
+        expect(live.result).toEqual(['a', 'b']);
+        expect(onResult).toHaveBeenLastCalledWith(['a', 'b']);
+        update('s1', 8, ['c']);
+        expect(live.result).toEqual(['a', 'b', 'c']);
     });
 
     it('opens a new subscription when a resync fails', async () => {

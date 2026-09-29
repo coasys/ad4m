@@ -49,9 +49,11 @@ anything that signs, bills or writes.
   inline on both sockets (per-connection state, like `request.cancel`).
 - Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision: 0 }`;
   each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
-  `removed` rows; see `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per
-  update). On a gap,
-  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`.
+  `removed` rows, or the whole `result` when the rows would lose their order; see
+  `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
+  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the
+  update topic lags, the socket gets one `{ type: 'query-subscription-update', lagged: true }` and
+  the client resyncs every live query.
 - A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`):
   only that socket gets its updates (they bypass `events.watch`), and `ws_rpc::serve` ends them
   when the socket closes. No keepalive; subscribing without a connection (REST) is a 400.

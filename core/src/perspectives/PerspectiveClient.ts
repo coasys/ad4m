@@ -9,7 +9,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import type { QueryUpdate, Subscribed } from "./LiveQuery";
+import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
@@ -121,9 +121,9 @@ export class PerspectiveClient {
     }
 
     /** Every `query-subscription-update` event on this client's socket. */
-    onQueryUpdate(cb: (update: QueryUpdate) => void): () => void {
+    onQueryUpdate(cb: (update: QueryUpdate | QueryLagged) => void): () => void {
         return this.#apiClient.subscribe((data) => {
-            if (data.type === 'query-subscription-update') cb(data as unknown as QueryUpdate)
+            if (data.type === 'query-subscription-update') cb(data as unknown as QueryUpdate | QueryLagged)
         })
     }
 
