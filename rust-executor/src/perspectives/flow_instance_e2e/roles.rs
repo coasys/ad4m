@@ -625,3 +625,198 @@ async fn a_declared_role_instance_keeps_its_where_field_and_its_grant() {
         "control: the where field undeclared, it goes and the instance drops out"
     );
 }
+
+/// Register `ns://Task` with every property declared plus a `holder` DID
+/// property on `ns://task_holder`, a predicate no other class writes. Give
+/// `TASK` to this agent under `did_path`. Seed `NOTE`, a non-role node
+/// (`ns://type ns://note`) whose `ns://owner` the admin (this agent) wrote for
+/// a stranger, as an assignment on another class that shares `ns://owner`
+/// would, and on which the stranger wrote `did_path -> themselves`. Then a
+/// peer removes the `removed` link of the Task's `type` property shape (the
+/// flag). Returns whether `role` matches the stranger on `NOTE` before and
+/// after the removal. The admin stays matched on `TASK` throughout. `ADMIN`
+/// in `role` stands for this agent's DID, which the fixture only mints.
+async fn a_widened_role_matches_a_stranger(
+    did_path: &str,
+    role: &str,
+    removed: &str,
+) -> (bool, bool) {
+    use crate::agent::signatures::TestSigner;
+    use crate::perspectives::flow_instance::roles::resolve_role_grants;
+    use crate::perspectives::interpretation_test_support::TASK_SDNA;
+    use crate::perspectives::shacl_parser::ModelQuery;
+    const NOTE: &str = "ad4m://note/1";
+
+    let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
+    let mut shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
+    shacl["properties"]
+        .as_array_mut()
+        .expect("properties")
+        .push(serde_json::json!({
+            "path": "ns://task_holder", "name": "holder", "min_count": 0, "max_count": 1,
+            "resolve_language": "literal",
+            "setter": [{"action": "setSingleTarget", "source": "this",
+                        "predicate": "ns://task_holder", "target": "value"}]
+        }));
+    register_task_class(
+        &mut f,
+        shacl,
+        &["ns://owner", "ns://task_holder", "ns://type", "ns://title"],
+    )
+    .await;
+    let me = acting_did(&f);
+    let stranger = TestSigner::generate();
+    f.link(TASK, did_path, &literal(&me), LinkStatus::Shared)
+        .await;
+    f.link(NOTE, "ns://type", "ns://note", LinkStatus::Shared)
+        .await;
+    f.link(NOTE, "ns://title", &literal("a note"), LinkStatus::Shared)
+        .await;
+    f.link(
+        NOTE,
+        "ns://owner",
+        &literal(&stranger.did),
+        LinkStatus::Shared,
+    )
+    .await;
+    let own_claim = stranger.sign(
+        Link {
+            source: NOTE.to_string(),
+            predicate: Some(did_path.to_string()),
+            target: literal(&stranger.did),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(own_claim), LinkStatus::Shared, None)
+        .await
+        .expect("sync the stranger's own claim");
+
+    let role: ModelQuery = serde_json::from_str(&role.replace("ADMIN", &me)).expect("role");
+    let record = f.instances().await.remove(0);
+    let matches = |who: &str, id: &str| {
+        let (who, id) = (who.to_string(), id.to_string());
+        let (f, role, record) = (&f, &role, &record);
+        async move {
+            resolve_role_grants(
+                &f.perspective,
+                "delivery://Delivery.scoped",
+                role,
+                record,
+                std::slice::from_ref(&who),
+            )
+            .await
+            .expect("resolve")[0]
+                .instances
+                .iter()
+                .any(|i| i.instance_id == id)
+        }
+    };
+    assert!(
+        matches(&me, TASK).await,
+        "control: the task is a role instance"
+    );
+    let before = matches(&stranger.did, NOTE).await;
+
+    let type_shape = f
+        .perspective
+        .get_links(&LinkQuery {
+            predicate: Some("sh://path".to_string()),
+            target: Some("ns://type".to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| l.data.source)
+        .find(|s| s.contains("Task"))
+        .expect("the type property shape");
+    let removals: Vec<LinkExpression> = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(type_shape),
+            predicate: Some(removed.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        })
+        .collect();
+    // One per registration of the class: the peer removes them all.
+    assert!(!removals.is_empty(), "a {removed} link to remove");
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff {
+            additions: vec![],
+            removals,
+        })
+        .await
+        .expect("sync a peer's removal");
+    assert!(matches(&me, TASK).await, "the task stays a role instance");
+    (before, matches(&stranger.did, NOTE).await)
+}
+
+/// The class shape side door, widening half (review of #1183, round 3;
+/// tracked in #1195). The role class's own SHACL links are ordinary Shared
+/// links. A peer who removes the flag's `sh://hasValue` or `sh://minCount`
+/// makes every node that carries the role's predicates a role instance, so
+/// the admin's `ns://owner` on a note grants the role to the stranger it
+/// names, even under an admin-only rule. This pins the hole as it is today.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_the_flags_conformance_link_widens_the_role() {
+    const ROLE: &str = r#"{"className":"ns://Task","didProperty":"owner"}"#;
+    for removed in ["sh://hasValue", "sh://minCount"] {
+        assert_eq!(
+            a_widened_role_matches_a_stranger("ns://owner", ROLE, removed).await,
+            (false, true),
+            "{removed}: the note becomes a role instance"
+        );
+    }
+}
+
+/// The same with an admin-only rule: the admin wrote the note's `ns://owner`.
+#[tokio::test(flavor = "multi_thread")]
+async fn removing_the_flags_conformance_link_widens_an_admin_only_role() {
+    const ROLE: &str =
+        r#"{"className":"ns://Task","didProperty":"owner","where":{"author":"ADMIN"}}"#;
+    for removed in ["sh://hasValue", "sh://minCount"] {
+        assert_eq!(
+            a_widened_role_matches_a_stranger("ns://owner", ROLE, removed).await,
+            (false, true),
+            "{removed}: the admin's owner link on the note grants the role"
+        );
+    }
+}
+
+/// The mitigation the docs give until #1195 lands: a DID property on a
+/// predicate no other class writes, and an author condition. After either
+/// removal the note still counts as an instance, but the only `holder` link
+/// on it is the stranger's own, which the admin-only rule does not accept.
+/// The control shows the author condition is needed: without it, the
+/// stranger's own claim matches.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_did_predicate_of_its_own_and_an_author_condition_keep_a_widened_role_closed() {
+    const ADMIN_ONLY: &str =
+        r#"{"className":"ns://Task","didProperty":"holder","where":{"author":"ADMIN"}}"#;
+    for removed in ["sh://hasValue", "sh://minCount"] {
+        assert_eq!(
+            a_widened_role_matches_a_stranger("ns://task_holder", ADMIN_ONLY, removed).await,
+            (false, false),
+            "{removed}: the stranger is not matched"
+        );
+    }
+    assert_eq!(
+        a_widened_role_matches_a_stranger(
+            "ns://task_holder",
+            r#"{"className":"ns://Task","didProperty":"holder"}"#,
+            "sh://hasValue"
+        )
+        .await,
+        (false, true),
+        "control: without the author condition the stranger's own claim matches"
+    );
+}

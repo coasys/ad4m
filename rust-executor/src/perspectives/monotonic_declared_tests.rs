@@ -750,3 +750,44 @@ async fn t5_a_local_flag_in_the_same_call_declares_nothing() {
         .expect("a Local flag does not declare");
     assert!(!present(&p, &link));
 }
+
+/// The same through a batch (review of #1183, round 3, nit 3): the commit
+/// backstop counts only the batch's Shared flags.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_local_flag_in_the_same_batch_declares_nothing() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    let batch = p.create_batch().await;
+    p.add_link(
+        Link::from(member_flag()),
+        LinkStatus::Local,
+        Some(batch.clone()),
+        &ctx,
+    )
+    .await
+    .expect("queue the flag");
+    p.remove_link(link.clone(), Some(batch.clone()))
+        .await
+        .expect("queue the removal");
+    p.commit_batch(batch, &ctx)
+        .await
+        .expect("a Local flag does not declare");
+    assert!(!present(&p, &link));
+}
+
+/// Unbatched `update_link` of a Shared link into the authority's flag
+/// declaring its predicate (review of #1183, round 3, finding 2): one commit
+/// diff carries the flag and the removal, so peers drop the removal and this
+/// replica must refuse it too.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_update_link_into_a_flag_is_refused() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let link = shared_member_link(&mut p, &ctx, "did:key:a").await;
+    refused(
+        p.update_link(link.clone(), Link::from(member_flag()), None, &ctx)
+            .await,
+        "update_link into the flag declaring the old link's predicate",
+    );
+    assert!(present(&p, &link));
+    assert!(links_under(&p, FLAG).is_empty(), "nothing was written");
+}
