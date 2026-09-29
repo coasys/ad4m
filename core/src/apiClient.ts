@@ -60,6 +60,11 @@ const MAX_RECONNECT_DELAY_MS = 30_000
 /** Initial reconnect delay in ms. */
 const INITIAL_RECONNECT_DELAY_MS = 500
 
+/** A failed `events.watch` is sent again after this delay, at most
+ *  MAX_WATCH_RETRIES times in a row. */
+const WATCH_RETRY_DELAY_MS = 1_000
+const MAX_WATCH_RETRIES = 5
+
 /** Counter for generating unique request IDs. */
 let _idCounter = 0
 function nextId(): string {
@@ -119,6 +124,8 @@ export class ApiClient {
     private _watchDone: Promise<void> = Promise.resolve()
     // The last `events.watch` sent, settled once the executor replied.
     private _watchSent: Promise<void> = Promise.resolve()
+    private _watchRetries = 0
+    private _watchRetryTimer: ReturnType<typeof setTimeout> | null = null
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -168,6 +175,7 @@ export class ApiClient {
             }
             this._startPing()
             this._watching = '{}'
+            this._watchRetries = 0
             this._scheduleWatch()
 
             // Fire reconnect callbacks only on reconnect (not first connect)
@@ -503,9 +511,18 @@ export class ApiClient {
         const key = JSON.stringify(events)
         if (key === this._watching) return
         this._watching = key
-        this._watchSent = this._send('events.watch', events).then(() => {}, (e) => {
-            if (this._watching === key) this._watching = null
+        this._watchSent = this._send('events.watch', events).then(() => { this._watchRetries = 0 }, (e) => {
             console.error('events.watch failed:', e)
+            if (this._watching !== key) return
+            this._watching = null
+            // A closed socket (503) sends the watch again from `onopen`.
+            const closed = e instanceof RpcError && e.status === 503
+            if (!closed && !this._watchRetryTimer && this._watchRetries++ < MAX_WATCH_RETRIES) {
+                this._watchRetryTimer = setTimeout(() => {
+                    this._watchRetryTimer = null
+                    this._scheduleWatch()
+                }, WATCH_RETRY_DELAY_MS)
+            }
         })
     }
 
@@ -518,6 +535,10 @@ export class ApiClient {
 
     private _closeWs(): void {
         this._stopPing()
+        if (this._watchRetryTimer) {
+            clearTimeout(this._watchRetryTimer)
+            this._watchRetryTimer = null
+        }
         if (this._wsReconnectTimer) {
             clearTimeout(this._wsReconnectTimer)
             this._wsReconnectTimer = null

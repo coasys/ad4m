@@ -771,6 +771,45 @@ describe('PerspectiveClient', () => {
         expect(ws.rpc.slice(4).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
 
+    test('a failed events.watch is sent again, a bounded number of times', async () => {
+        jest.useFakeTimers();
+        const watchReply = MOCK_RESPONSES['events.watch'];
+        const errors = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const watchCount = (ws: MockWebSocket) => ws.rpc.filter(c => c.type === 'events.watch').length;
+        // Open the socket first, so that only the listener sends a watch.
+        const opened = async (client: Ad4mClient) => {
+            const snapshot = client.perspective.snapshotByUUID('A');
+            await jest.advanceTimersByTimeAsync(10);
+            await snapshot;
+            return client;
+        };
+        try {
+            // The executor rejects the watch once (404: not a closed socket), then accepts it.
+            delete MOCK_RESPONSES['events.watch'];
+            const recovering = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token', false));
+            recovering.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+            await jest.advanceTimersByTimeAsync(10);
+            const ws = lastOf(MockWebSocket.instances);
+            expect(watchCount(ws)).toBe(1);
+            MOCK_RESPONSES['events.watch'] = watchReply;
+            await jest.advanceTimersByTimeAsync(1_010);
+            expect(watchCount(ws)).toBe(2);
+            for (let i = 0; i < 10; i++) await jest.advanceTimersByTimeAsync(1_000);
+            expect(watchCount(ws)).toBe(2);
+
+            // An executor that keeps rejecting it gets the first try and five retries.
+            delete MOCK_RESPONSES['events.watch'];
+            const failing = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token', false));
+            failing.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+            for (let i = 0; i < 20; i++) await jest.advanceTimersByTimeAsync(1_000);
+            expect(watchCount(lastOf(MockWebSocket.instances))).toBe(6);
+        } finally {
+            MOCK_RESPONSES['events.watch'] = watchReply;
+            errors.mockRestore();
+            jest.useRealTimers();
+        }
+    });
+
     test('sync-state and signal listeners only fire for their perspective', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const syncState = jest.fn(() => null);
