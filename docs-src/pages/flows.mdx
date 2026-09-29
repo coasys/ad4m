@@ -328,7 +328,8 @@ The convention above is enforced when the role class declares `monotonic` on **e
 
 - the DID property,
 - every property the role rule's `where` filters on,
-- every flag and required property of the role class.
+- every flag and required property of the role class,
+- if the class has no required property: its first property with an initial value. The role query then matches instances by that property instead, so it is in the same position as a flag.
 
 ```typescript
 @Model({ name: "HandoverReviewerRole" })
@@ -348,12 +349,14 @@ Give a declared flag a predicate of its own. The declaration is per predicate (s
 
 Relations (`@HasMany`, `@HasOne`, and so on) do not take `monotonic` yet. A rule that filters through a relation, such as a `linkedTo` parent link, cannot be protected this way for now.
 
+The role **class** itself is not protected yet. The gate loads the class's SHACL definition (`<class> ad4m://shape <shape>`, `<shape> sh://property <property shape>`, `<property shape> sh://path <predicate>`), and these are ordinary Shared links: any member can remove one. That does not grant the role to anyone: the gate fails closed and matches no one. But the gate's role query then returns an error, so every flow gated on that role stops deriving. Protecting these links is tracked in [#1195](https://github.com/coasys/ad4m/issues/1195).
+
 A Shared link under a declared predicate is then handled like a flow link (see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone)): a peer's removal is dropped on arrival, and your own `removeLink`, `updateLink`, setter or instance delete that would remove it fails with `<predicate> is monotonic`. Membership ends only through `ad4m://flow/role_grant_revoked`. The generic `ad4m://flow/retracted` tombstone does not apply to declared predicates, not even from the grant's author, because the role history is what every replica's vote gating reads. A Local link under a declared predicate stays removable, by the same rule as a Local flow link: the executor goes by the stored status, not the one a call names, and never sends that removal to peers.
 
 The rules for the declaration:
 
 - **Only the neighbourhood author's declaration counts.** The class registration writes `<property shape> --ad4m://monotonic--> literal:string:<predicate>`. An executor honours it only if the link is Shared, its signature verifies and its author is the neighbourhood author (the owner, while the perspective is not shared). The same link written by any other member declares nothing, so no member can freeze a predicate for everyone.
-- **A declaration protects removals in the same sync.** When a peer's diff carries both the author's declaration and a removal under that predicate, the removal is dropped, just as it would be if they arrived separately.
+- **A declaration protects removals in the same sync, call or batch.** When a peer's diff carries both the author's declaration and a removal under that predicate, the removal is dropped, just as it would be if they arrived separately. When the author writes the declaration and removes a Shared link under it in one `linkMutations` call or one batch, the call fails, because peers receive both in one diff and would keep the link.
 - **The link names the predicate itself.** It does not depend on the property shape's `sh://path` link: removing or adding a path changes nothing about what is declared.
 - **A declaration stays once made.** The `ad4m://monotonic` link is itself a flow-vocabulary link and cannot be removed. Registering the class again keeps it. If you change `through`, the new predicate is declared as well and the old one stays declared.
 - **It is per predicate, not per class.** Any other class that uses the same predicate URI gets the same treatment. The link stays, which is the safe side.
