@@ -188,6 +188,42 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
       expect(shapes.map(s => s.name).sort()).toEqual(['Empty', 'Good']);
     });
 
+    it('skips a shape that cannot be decoded and returns the others', async () => {
+      // A transform variant this SDK does not know (e.g. written by a newer
+      // SDK) makes SHACLShape.fromLinks throw for that one shape.
+      const brokenLinks = [
+        ...buildShapeLinks('app://BrokenShape', 'app://Broken', [{ name: 'img', path: 'app://img' }]),
+        { source: 'app://BrokenShape.img', predicate: 'ad4m://transform', target: 'literal:string:{"type":"fromTheFuture"}' },
+      ];
+      const good = (n: string) => ({
+        name: n,
+        shapeUri: `app://${n}Shape`,
+        links: buildShapeLinks(`app://${n}Shape`, `app://${n}`, [{ name: 'x', path: 'app://x' }]),
+      });
+
+      const client = createMockClient({
+        getAllShacl: jest.fn().mockResolvedValue([
+          good('A'),
+          { name: 'Broken', shapeUri: 'app://BrokenShape', links: brokenLinks },
+          good('B'),
+          good('C'),
+        ]),
+      });
+      const proxy = createProxy(client);
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      try {
+        const shapes = await proxy.getAllShacl();
+        expect(shapes.map(s => s.name)).toEqual(['A', 'B', 'C']);
+        expect(shapes.map(s => s.shape.targetClass)).toEqual(['app://A', 'app://B', 'app://C']);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('"Broken"');
+        expect(warn.mock.calls[0][1]).toBeInstanceOf(Error);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     it('drops entries when SHACLShape.fromLinks returns null', async () => {
       // Exercises the actual filter in `PerspectiveProxy.getAllShacl`:
       // `SHACLShape.fromLinks` doesn't currently return null for any

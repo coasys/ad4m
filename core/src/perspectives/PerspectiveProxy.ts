@@ -1745,15 +1745,21 @@ export class PerspectiveProxy {
     /**
      * Get all SHACL shapes stored in this Perspective (one RPC call).
      * The executor resolves all shapes in-process and returns them in bulk.
+     * A shape this SDK cannot decode (e.g. one written by a newer SDK) is
+     * skipped with a `console.warn`, so it does not hide the other shapes.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const entries = await this.#client.getAllShacl(this.#handle.uuid);
-        return entries
-            .map(({ name, shapeUri, links }) => {
+        const shapes: Array<{name: string, shape: SHACLShape}> = [];
+        for (const { name, shapeUri, links } of entries) {
+            try {
                 const shape = SHACLShape.fromLinks(links as any, shapeUri);
-                return shape ? { name, shape } : null;
-            })
-            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
+                if (shape) shapes.push({ name, shape });
+            } catch (e) {
+                console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
+            }
+        }
+        return shapes;
     }
 
     /**
