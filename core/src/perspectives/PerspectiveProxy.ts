@@ -1196,7 +1196,8 @@ export class PerspectiveProxy {
      * The executor checks the signature against `link.author` and stores the
      * verdict as `proof.valid`. If the same link (author, source, predicate,
      * target and timestamp) is already stored with a signature that verifies,
-     * its stored proof is kept and the one passed here is ignored.
+     * its stored proof is kept. The expression passed here is still returned
+     * and, when Shared, committed to the neighbourhood as given.
      * 
      * @param link - The signed LinkExpression to add
      * @param status - Whether the link should be shared
