@@ -443,7 +443,11 @@ async fn a_declared_role_grant_ends_only_by_revocation() {
         })
         .await
         .expect("sync a peer's removal");
-    assert_eq!(owner_grants(&f).await, vec![grant.clone()], "peer removal dropped");
+    assert_eq!(
+        owner_grants(&f).await,
+        vec![grant.clone()],
+        "peer removal dropped"
+    );
 
     let err = f
         .perspective
@@ -478,5 +482,9 @@ async fn a_declared_role_grant_ends_only_by_revocation() {
         "the revocation ends the grant for votes after it"
     );
     assert_eq!(f.derived().await.state, "changes_requested");
-    assert_eq!(owner_grants(&f).await, vec![grant], "and the grant stays in the graph");
+    assert_eq!(
+        owner_grants(&f).await,
+        vec![grant],
+        "and the grant stays in the graph"
+    );
 }

@@ -1,7 +1,10 @@
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
-use super::monotonic::{drop_monotonic_removals, refuse_monotonic_removal};
+use super::monotonic::{
+    drop_monotonic_removals, is_monotonic, refuse_monotonic_removal, MonotonicDeclared,
+    MONOTONIC_FLAG_PREDICATE,
+};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
@@ -502,6 +505,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// The predicates declared monotonic by `ad4m://monotonic` flags
+    /// (`monotonic::MonotonicDeclared`), with a generation bumped by every
+    /// flag write; `None` until read or after a flag write.
+    pub(crate) monotonic_declared: Arc<std::sync::RwLock<(u64, Option<Arc<MonotonicDeclared>>)>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -579,6 +586,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            monotonic_declared: Arc::new(std::sync::RwLock::new((0, None))),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
@@ -1564,7 +1572,8 @@ impl PerspectiveInstance {
         let mut unique_removals: Vec<LinkExpression> = Vec::new();
         // A peer's removal never ends a monotonic link (#1176); dropped here
         // rather than in `persist_link_diff`, whose local callers get an error.
-        for link in drop_monotonic_removals(diff.removals).iter() {
+        let declared = self.monotonic_declared().await?;
+        for link in drop_monotonic_removals(diff.removals, &declared).iter() {
             let key_tuple = (
                 &link.author,
                 &link.timestamp,
@@ -1686,6 +1695,7 @@ impl PerspectiveInstance {
         link_expression: LinkExpression,
         batch_id: Option<String>,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        let declared = self.monotonic_declared().await?;
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1709,7 +1719,7 @@ impl PerspectiveInstance {
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
             let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
-            refuse_monotonic_removal(&link_from_db, &status)?;
+            refuse_monotonic_removal(&link_from_db, &status, &declared)?;
 
             diff.removals.push(link_from_db.clone());
             Ok(DecoratedLinkExpression::from((link_from_db, status)))
@@ -1726,7 +1736,7 @@ impl PerspectiveInstance {
             )? {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
-                refuse_monotonic_removal(&link_from_db, &status)?;
+                refuse_monotonic_removal(&link_from_db, &status, &declared)?;
 
                 let diff = PerspectiveDiff::from_removals(vec![link_from_db.clone()]);
                 let decorated_link_result =
@@ -2011,8 +2021,10 @@ impl PerspectiveInstance {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+        let declared = self.monotonic_declared().await?;
         for link in &removals {
-            refuse_monotonic_removal(link, &self.removal_status(link, &status)?)?;
+            let removal_status = self.removal_status(link, &status, &declared)?;
+            refuse_monotonic_removal(link, &removal_status, &declared)?;
         }
 
         let store_diff = PerspectiveDiff::from(
@@ -2125,7 +2137,7 @@ impl PerspectiveInstance {
             }
         };
         // The old link is a removal.
-        refuse_monotonic_removal(&link, &link_status)?;
+        refuse_monotonic_removal(&link, &link_status, &*self.monotonic_declared().await?)?;
 
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
@@ -2251,8 +2263,9 @@ impl PerspectiveInstance {
             return Ok(Vec::new());
         }
         // All or nothing: one refused link fails the whole call.
+        let declared = self.monotonic_declared().await?;
         for (link, status) in &existing_links {
-            refuse_monotonic_removal(link, status)?;
+            refuse_monotonic_removal(link, status, &declared)?;
         }
 
         if let Some(batch_id) = batch_id {
@@ -2597,11 +2610,16 @@ impl PerspectiveInstance {
     ///     ── *other shape-level predicates*
     ///   prop_shape_uri
     ///     ── *property-level predicates*
+    ///
+    /// Shared links under a monotonic predicate (the `ad4m://monotonic`
+    /// flags) are left in place, filtered out before `remove_links` so that
+    /// any other error there still fails the refresh; they are returned so
+    /// the caller does not write them a second time.
     async fn remove_subject_class_shacl_links(
         &mut self,
         target_class_uris: &[String],
-    ) -> Result<(), AnyError> {
-        let mut to_remove: Vec<LinkExpression> = Vec::new();
+    ) -> Result<Vec<LinkExpression>, AnyError> {
+        let mut to_remove: Vec<(LinkExpression, LinkStatus)> = Vec::new();
 
         for target_class_uri in target_class_uris {
             // 1. target_class_uri → rdf://type → ad4m://SubjectClass
@@ -2617,17 +2635,12 @@ impl PerspectiveInstance {
                 .map(|(link, _)| link.data.target.clone())
                 .collect();
 
-            to_remove.extend(
-                target_class_links
-                    .into_iter()
-                    .filter(|(link, _)| {
-                        matches!(
-                            link.data.predicate.as_deref(),
-                            Some("rdf://type") | Some("ad4m://shape")
-                        )
-                    })
-                    .map(|(link, _)| link),
-            );
+            to_remove.extend(target_class_links.into_iter().filter(|(link, _)| {
+                matches!(
+                    link.data.predicate.as_deref(),
+                    Some("rdf://type") | Some("ad4m://shape")
+                )
+            }));
 
             for shape_uri in &shape_uris {
                 let shape_links = self.get_links_local(&LinkQuery {
@@ -2641,23 +2654,30 @@ impl PerspectiveInstance {
                     .map(|(link, _)| link.data.target.clone())
                     .collect();
 
-                to_remove.extend(shape_links.into_iter().map(|(link, _)| link));
+                to_remove.extend(shape_links);
 
                 for prop_shape_uri in prop_shape_uris {
                     let prop_links = self.get_links_local(&LinkQuery {
                         source: Some(prop_shape_uri),
                         ..Default::default()
                     })?;
-                    to_remove.extend(prop_links.into_iter().map(|(link, _)| link));
+                    to_remove.extend(prop_links);
                 }
             }
         }
 
+        let declared = self.monotonic_declared().await?;
+        let (kept, to_remove): (Vec<_>, Vec<_>) =
+            to_remove.into_iter().partition(|(link, status)| {
+                *status == LinkStatus::Shared
+                    && is_monotonic(link.data.predicate.as_deref(), &declared)
+            });
+        let to_remove: Vec<LinkExpression> = to_remove.into_iter().map(|(link, _)| link).collect();
         if !to_remove.is_empty() {
             self.remove_links(to_remove, None).await?;
         }
 
-        Ok(())
+        Ok(kept.into_iter().map(|(link, _)| link).collect())
     }
 
     /// Batch variant: registers multiple SDNA entries under a single mutex acquisition.
@@ -2718,6 +2738,9 @@ impl PerspectiveInstance {
             .expect("just initialized Literal couldn't be turned into URL");
 
         let mut sdna_links: Vec<Link> = Vec::new();
+        // Links a refresh could not remove (see
+        // `remove_subject_class_shacl_links`); not written again.
+        let mut kept: Vec<LinkExpression> = Vec::new();
 
         // For SubjectClass refresh: if a class with this name already exists
         // we must purge the prior SHACL graph before writing new triples.
@@ -2767,7 +2790,8 @@ impl PerspectiveInstance {
                     "Class '{}' already exists — refreshing SHACL definition",
                     name
                 );
-                self.remove_subject_class_shacl_links(&existing_target_class_uris)
+                kept = self
+                    .remove_subject_class_shacl_links(&existing_target_class_uris)
                     .await?;
             }
         }
@@ -2798,7 +2822,15 @@ impl PerspectiveInstance {
 
         // Handle SHACL links if SHACL JSON provided explicitly
         if let Some(shacl) = shacl_json {
-            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+            let mut shacl_links = parse_shacl_to_links(&shacl, &name)?;
+            // Only our own copy makes a rewrite redundant: a peer's identical
+            // flag does not count for us.
+            let me = did_for_context(context)?;
+            shacl_links.retain(|link| {
+                !kept
+                    .iter()
+                    .any(|k| k.author == me && k.data == link.normalize())
+            });
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
             // SHACL just changed for this class — drop any cached shape so the
@@ -4001,6 +4033,16 @@ impl PerspectiveInstance {
         // is a real concern in production it should be addressed via
         // configuration (smaller write_buffer_size, more memtables) or a
         // throttled background flush, not a per-write fsync.
+
+        // After the write, so a concurrent read cannot re-cache the old set.
+        if diff
+            .additions
+            .iter()
+            .chain(diff.removals.iter())
+            .any(|l| l.data.predicate.as_deref() == Some(MONOTONIC_FLAG_PREDICATE))
+        {
+            self.invalidate_monotonic_declared();
+        }
 
         Ok(effects)
     }
@@ -6659,8 +6701,10 @@ impl PerspectiveInstance {
         };
         // Backstop for a removal queued past the refusing entry points; the
         // batch is dropped whole, as on any other commit error.
+        let declared = self.monotonic_declared().await?;
         for link in &diff.removals {
-            refuse_monotonic_removal(link, link.status.as_ref().unwrap_or(&LinkStatus::Shared))?;
+            let status = link.status.as_ref().unwrap_or(&LinkStatus::Shared);
+            refuse_monotonic_removal(link, status, &declared)?;
         }
 
         //log::info!("🔄 BATCH COMMIT: Retrieved batch diff in {:?} - {} additions, {} removals",

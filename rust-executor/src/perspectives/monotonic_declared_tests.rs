@@ -137,10 +137,12 @@ async fn the_parser_emits_the_flag_with_the_predicate_as_target() {
     assert_eq!(flags.len(), 1, "{links:?}");
     assert_eq!(flags[0].target, "literal:string:app%3A%2F%2Fmember");
 
-    let unflagged = parse_shacl_to_links(&class_json("Role", MEMBER, false), "Role")
-        .expect("shacl");
+    let unflagged =
+        parse_shacl_to_links(&class_json("Role", MEMBER, false), "Role").expect("shacl");
     assert!(
-        unflagged.iter().all(|l| l.predicate.as_deref() != Some(FLAG)),
+        unflagged
+            .iter()
+            .all(|l| l.predicate.as_deref() != Some(FLAG)),
         "`monotonic: false` declares nothing"
     );
 }
@@ -252,17 +254,22 @@ async fn t5_removing_the_path_leaves_the_predicate_monotonic() {
 #[tokio::test(flavor = "multi_thread")]
 async fn t5_re_registering_a_class_keeps_its_declarations() {
     let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
-    let class = |properties: serde_json::Value| {
-        serde_json::json!({ "target_class": "app://Role", "properties": properties })
-    };
-    let did = |path: &str, monotonic: bool| {
-        serde_json::json!({ "path": path, "name": "did", "min_count": 0, "monotonic": monotonic })
-    };
+    let class = |properties: serde_json::Value| serde_json::json!({ "target_class": "app://Role", "properties": properties });
+    let did = |path: &str, monotonic: bool| serde_json::json!({ "path": path, "name": "did", "min_count": 0, "monotonic": monotonic });
     let note = serde_json::json!({ "path": "app://note", "name": "note", "min_count": 0 });
 
-    register(&mut p, &ctx, class(serde_json::json!([did(MEMBER, true), note]))).await;
+    register(
+        &mut p,
+        &ctx,
+        class(serde_json::json!([did(MEMBER, true), note])),
+    )
+    .await;
     register(&mut p, &ctx, class(serde_json::json!([did(MEMBER, true)]))).await;
-    assert_eq!(links_under(&p, FLAG).len(), 1, "one flag, not a copy per refresh");
+    assert_eq!(
+        links_under(&p, FLAG).len(),
+        1,
+        "one flag, not a copy per refresh"
+    );
     assert!(
         links_under(&p, "sh://path")
             .iter()
@@ -270,7 +277,12 @@ async fn t5_re_registering_a_class_keeps_its_declarations() {
         "the rest of the old shape is gone: the refresh ran"
     );
 
-    register(&mut p, &ctx, class(serde_json::json!([did("app://member2", true)]))).await;
+    register(
+        &mut p,
+        &ctx,
+        class(serde_json::json!([did("app://member2", true)])),
+    )
+    .await;
     assert_eq!(links_under(&p, FLAG).len(), 2, "the new path adds a flag");
 
     for predicate in [MEMBER, "app://member2"] {

@@ -1,9 +1,11 @@
 //! Monotonic flow state (#1176): under the flow vocabulary, a Shared link is
 //! never removed by a diff. The only way to end one is a new signed link.
 //!
-//! [`is_monotonic`] names the predicates: everything under `ad4m://flow/`,
-//! `ad4m://acceptedBy` and `ad4m://monotonic`. The rule is enforced where
-//! links cross into this replica's store:
+//! [`is_monotonic`] names the predicates: the fixed core (everything under
+//! `ad4m://flow/`, `ad4m://acceptedBy` and `ad4m://monotonic`), plus the app
+//! predicates the perspective's authority declared (see *Declared
+//! predicates*). The rule is enforced where links cross into this replica's
+//! store:
 //!
 //! ```text
 //!  peer diff ──► diff_from_link_language ──► drop_monotonic_removals (warn)
@@ -46,6 +48,26 @@
 //! hole this closes. Pending diffs from before an upgrade go through the same
 //! ingest.
 //!
+//! # Declared predicates
+//!
+//! A SHACL property shape with `monotonic: true` emits
+//! `<propShape> --ad4m://monotonic--> literal:string:<predicate>`. The flag
+//! names the predicate itself; `sh://path` is never read for it, so what the
+//! gate reads is all in the fixed core and cannot be removed. A flag counts
+//! only if it is Shared, its signature verifies, and its author is the
+//! neighbourhood author (the primary owner, or this agent, while the
+//! perspective is not shared): the authority the Prolog SDNA pool uses. From
+//! anyone else it declares nothing, so no member can freeze a predicate for
+//! everyone.
+//!
+//! The check is per predicate, not per class: another class using the same
+//! predicate URI is monotonic too, which fails safe (the link stays). A
+//! declaration stays once made: a re-registration that changes the path adds
+//! a new flag, and the old predicate stays monotonic. The generic
+//! `ad4m://flow/retracted` does not apply to declared predicates: a role
+//! grant ends only by `ad4m://flow/role_grant_revoked`, which keeps the role
+//! history replicas gate votes on (#1027).
+//!
 //! [`retraction_effects`]: PerspectiveInstance::retraction_effects
 
 use crate::perspectives::flow_instance::atom::{
@@ -58,19 +80,63 @@ use crate::types::{
 };
 use ad4m_client::literal::Literal;
 use deno_core::error::AnyError;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Namespace of the flow engine's shared vocabulary; every predicate under it
 /// is monotonic.
 pub const FLOW_NAMESPACE: &str = "ad4m://flow/";
-/// The property-shape flag that declares an app predicate monotonic (#1176
-/// PR B reads it). The flag link is itself monotonic, so a declaration
-/// cannot be withdrawn.
+/// The property-shape flag that declares an app predicate monotonic; its
+/// target is `literal:string:<predicate>`. The flag link is itself
+/// monotonic, so a declaration cannot be withdrawn.
 pub const MONOTONIC_FLAG_PREDICATE: &str = "ad4m://monotonic";
 /// Tombstone: link source → `literal:string:<signature of the ended link>`.
 pub const RETRACTED_PREDICATE: &str = "ad4m://flow/retracted";
 
-/// Whether a Shared link under `predicate` may only be ended by a tombstone.
-pub fn is_monotonic(predicate: Option<&str>) -> bool {
+/// The app predicates the perspective's authority declared monotonic, as
+/// read from its `ad4m://monotonic` flags. See the module doc.
+#[derive(Debug, Default)]
+pub struct MonotonicDeclared {
+    /// Whose flags count: the neighbourhood author, else the owner.
+    authority: Option<String>,
+    predicates: HashSet<String>,
+}
+
+impl MonotonicDeclared {
+    /// The declared set from `flags` (the stored `ad4m://monotonic` links):
+    /// those that are Shared, verify, and were written by `authority`.
+    pub fn from_flags(
+        authority: Option<String>,
+        flags: impl IntoIterator<Item = LinkExpression>,
+    ) -> Self {
+        let predicates = flags
+            .into_iter()
+            .filter(|flag| {
+                flag.data.predicate.as_deref() == Some(MONOTONIC_FLAG_PREDICATE)
+                    && Some(&flag.author) == authority.as_ref()
+                    && flag.status == Some(LinkStatus::Shared)
+                    && flag.compute_proof_valid()
+            })
+            .filter_map(|flag| match parse_literal_value(&flag.data.target) {
+                serde_json::Value::String(p) if !p.is_empty() => Some(p),
+                _ => None,
+            })
+            .collect();
+        MonotonicDeclared {
+            authority,
+            predicates,
+        }
+    }
+}
+
+/// Whether a Shared link under `predicate` may only be ended by a tombstone:
+/// the fixed core, or a predicate the authority declared.
+pub fn is_monotonic(predicate: Option<&str>, declared: &MonotonicDeclared) -> bool {
+    is_core_monotonic(predicate) || predicate.is_some_and(|p| declared.predicates.contains(p))
+}
+
+/// The fixed core: monotonic whatever any perspective declares.
+pub fn is_core_monotonic(predicate: Option<&str>) -> bool {
     match predicate {
         Some(p) => {
             p.starts_with(FLOW_NAMESPACE)
@@ -82,9 +148,10 @@ pub fn is_monotonic(predicate: Option<&str>) -> bool {
 }
 
 /// Whether an `ad4m://flow/retracted` tombstone can end a link under
-/// `predicate`: monotonic, and not itself a tombstone or the flag.
+/// `predicate`: in the fixed core, and not itself a tombstone or the flag.
+/// Declared predicates are not retractable.
 pub fn is_retractable(predicate: Option<&str>) -> bool {
-    is_monotonic(predicate)
+    is_core_monotonic(predicate)
         && !matches!(
             predicate,
             Some(RETRACTED_PREDICATE | ROLE_GRANT_REVOKED_PREDICATE | MONOTONIC_FLAG_PREDICATE)
@@ -96,9 +163,10 @@ pub fn is_retractable(predicate: Option<&str>) -> bool {
 pub fn refuse_monotonic_removal(
     link: &LinkExpression,
     status: &LinkStatus,
+    declared: &MonotonicDeclared,
 ) -> Result<(), AnyError> {
     let predicate = link.data.predicate.as_deref();
-    if *status == LinkStatus::Shared && is_monotonic(predicate) {
+    if *status == LinkStatus::Shared && is_monotonic(predicate, declared) {
         return Err(anyhow::anyhow!(
             "{} is monotonic; retract with a tombstone ({RETRACTED_PREDICATE}) instead of removing {} -> {}",
             predicate.unwrap_or_default(),
@@ -112,11 +180,14 @@ pub fn refuse_monotonic_removal(
 /// Ingest side: the removals of a peer's diff that may be applied. Every
 /// removal under a monotonic predicate is dropped with a warning, whatever
 /// status the sender claims; everything arriving by sync is Shared.
-pub fn drop_monotonic_removals(removals: Vec<LinkExpression>) -> Vec<LinkExpression> {
+pub fn drop_monotonic_removals(
+    removals: Vec<LinkExpression>,
+    declared: &MonotonicDeclared,
+) -> Vec<LinkExpression> {
     removals
         .into_iter()
         .filter(|link| {
-            let keep = !is_monotonic(link.data.predicate.as_deref());
+            let keep = !is_monotonic(link.data.predicate.as_deref(), declared);
             if !keep {
                 log::warn!(
                     "dropping a peer's removal of a monotonic link ({} -[{}]-> {} by {}); only its author's tombstone ends it",
@@ -208,6 +279,50 @@ fn same_link(a: &LinkExpression, b: &LinkExpression) -> bool {
 }
 
 impl PerspectiveInstance {
+    /// Whose `ad4m://monotonic` flags count: the neighbourhood author, else
+    /// the primary owner, else this agent.
+    async fn monotonic_authority(&self) -> Option<String> {
+        let handle = self.persisted.lock().await;
+        match &handle.neighbourhood {
+            Some(n) => Some(n.author.clone()),
+            None => handle.get_primary_owner().or_else(|| {
+                crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).ok()
+            }),
+        }
+    }
+
+    /// The declared set, cached until a flag is written
+    /// ([`Self::invalidate_monotonic_declared`]) or the authority changes.
+    pub(crate) async fn monotonic_declared(&self) -> Result<Arc<MonotonicDeclared>, AnyError> {
+        let authority = self.monotonic_authority().await;
+        let generation = {
+            let cache = self.monotonic_declared.read().unwrap();
+            if let Some(declared) = cache.1.as_ref().filter(|d| d.authority == authority) {
+                return Ok(declared.clone());
+            }
+            cache.0
+        };
+        let flags = self
+            .sparql_store
+            .query_links(None, Some(MONOTONIC_FLAG_PREDICATE), None, None, None, None)?
+            .into_iter()
+            .map(LinkExpression::from);
+        let declared = Arc::new(MonotonicDeclared::from_flags(authority, flags));
+        let mut cache = self.monotonic_declared.write().unwrap();
+        // A flag written while this read ran leaves the result uncached.
+        if cache.0 == generation {
+            cache.1 = Some(declared.clone());
+        }
+        Ok(declared)
+    }
+
+    /// Called by every store write that touches an `ad4m://monotonic` link.
+    pub(crate) fn invalidate_monotonic_declared(&self) {
+        let mut cache = self.monotonic_declared.write().unwrap();
+        cache.0 += 1;
+        cache.1 = None;
+    }
+
     /// The retraction effects of writing `additions`: see the module doc.
     /// Reads the store, writes nothing.
     pub(crate) fn retraction_effects(
@@ -267,8 +382,11 @@ impl PerspectiveInstance {
         &self,
         link: &LinkExpression,
         requested: &LinkStatus,
+        declared: &MonotonicDeclared,
     ) -> Result<LinkStatus, AnyError> {
-        if *requested == LinkStatus::Shared || !is_monotonic(link.data.predicate.as_deref()) {
+        if *requested == LinkStatus::Shared
+            || !is_monotonic(link.data.predicate.as_deref(), declared)
+        {
             return Ok(requested.clone());
         }
         let stored = self.sparql_store.get_link(
@@ -297,7 +415,7 @@ mod tests {
             "ad4m://acceptedBy",
             "ad4m://monotonic",
         ] {
-            assert!(is_monotonic(Some(p)), "{p}");
+            assert!(is_core_monotonic(Some(p)), "{p}");
         }
         for p in [
             "ad4m://flowName",
@@ -305,9 +423,59 @@ mod tests {
             "ad4m://acceptedByX",
             "test://likes",
         ] {
-            assert!(!is_monotonic(Some(p)), "{p}");
+            assert!(!is_core_monotonic(Some(p)), "{p}");
         }
-        assert!(!is_monotonic(None));
+        assert!(!is_core_monotonic(None));
+    }
+
+    #[test]
+    fn only_the_authoritys_shared_verified_flags_declare() {
+        use crate::agent::signatures::TestSigner;
+        let alice = TestSigner::generate();
+        let bob = TestSigner::generate();
+        let flag = |signer: &TestSigner, predicate: &str, status: LinkStatus| {
+            let mut link = LinkExpression::from(
+                signer.sign(
+                    Link {
+                        source: "app://Role.did".to_string(),
+                        predicate: Some(MONOTONIC_FLAG_PREDICATE.to_string()),
+                        target: Literal::from_string(predicate.to_string())
+                            .to_url()
+                            .expect("literal"),
+                    }
+                    .normalize(),
+                ),
+            );
+            link.status = Some(status);
+            link
+        };
+        let declared = MonotonicDeclared::from_flags(
+            Some(alice.did.clone()),
+            [
+                flag(&alice, "app://shared", LinkStatus::Shared),
+                flag(&alice, "app://local", LinkStatus::Local),
+                flag(&bob, "app://bobs", LinkStatus::Shared),
+            ],
+        );
+        assert!(is_monotonic(Some("app://shared"), &declared));
+        assert!(
+            !is_monotonic(Some("app://local"), &declared),
+            "a Local flag"
+        );
+        assert!(
+            !is_monotonic(Some("app://bobs"), &declared),
+            "not the authority"
+        );
+        assert!(
+            !is_retractable(Some("app://shared")),
+            "declared is not retractable"
+        );
+        let nobody =
+            MonotonicDeclared::from_flags(None, [flag(&alice, "app://shared", LinkStatus::Shared)]);
+        assert!(
+            !is_monotonic(Some("app://shared"), &nobody),
+            "no authority, no declaration"
+        );
     }
 
     #[test]
