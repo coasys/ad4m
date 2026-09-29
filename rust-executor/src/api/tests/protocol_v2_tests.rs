@@ -101,9 +101,13 @@ pub(crate) async fn registered_perspective(classes: &[(&str, &str)]) -> Register
 #[tokio::test]
 async fn discard_batch_drops_an_open_batch_once() {
     let p = registered_perspective(&[]).await;
-    let batch_id = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
-        .await
-        .unwrap();
+    let batch_id = call(
+        "perspective.createBatch",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
     let params = json!({ "uuid": p.0, "batchId": batch_id });
 
     assert_eq!(
@@ -128,12 +132,20 @@ async fn discard_batch_drops_an_open_batch_once() {
 #[tokio::test]
 async fn discard_batch_leaves_other_batches_committable() {
     let p = registered_perspective(&[]).await;
-    let a = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
-        .await
-        .unwrap();
-    let b = call("perspective.createBatch", json!({ "uuid": p.0 }), admin_ctx())
-        .await
-        .unwrap();
+    let a = call(
+        "perspective.createBatch",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    let b = call(
+        "perspective.createBatch",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
     call(
         "perspective.discardBatch",
         json!({ "uuid": p.0, "batchId": a }),
@@ -201,9 +213,13 @@ fn shape_names(reply: &Value) -> Vec<String> {
 #[tokio::test]
 async fn get_all_shacl_without_names_returns_every_shape() {
     let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
-    let all = call("perspective.getAllShacl", json!({ "uuid": p.0 }), admin_ctx())
-        .await
-        .unwrap();
+    let all = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
     assert_eq!(shape_names(&all), vec!["Note", "Todo"]);
     let with_null = call(
         "perspective.getAllShacl",
@@ -218,9 +234,13 @@ async fn get_all_shacl_without_names_returns_every_shape() {
 #[tokio::test]
 async fn get_all_shacl_names_filters_the_reply() {
     let p = registered_perspective(&[("Todo", TODO_SDNA), ("Note", NOTE_SDNA)]).await;
-    let all = call("perspective.getAllShacl", json!({ "uuid": p.0 }), admin_ctx())
-        .await
-        .unwrap();
+    let all = call(
+        "perspective.getAllShacl",
+        json!({ "uuid": p.0 }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
     let only_todo = call(
         "perspective.getAllShacl",
         json!({ "uuid": p.0, "names": ["Todo", "Unknown"] }),
@@ -235,7 +255,10 @@ async fn get_all_shacl_names_filters_the_reply() {
         .iter()
         .find(|e| e["name"] == "Todo")
         .unwrap();
-    assert_eq!(&only_todo[0], todo_in_all, "same entry as the unfiltered read");
+    assert_eq!(
+        &only_todo[0], todo_in_all,
+        "same entry as the unfiltered read"
+    );
 
     let none = call(
         "perspective.getAllShacl",
@@ -455,4 +478,95 @@ async fn delta_must_be_a_boolean() {
     .await
     .expect_err("non-boolean delta");
     assert_eq!(err.code, 400);
+}
+
+// ── X8: operation handles (`async: true`) ───────────────────────────────────
+
+use crate::api::operations::{is_async_call, ReplyTarget};
+use crate::api::ws_rpc::run_call;
+use tokio_util::sync::CancellationToken;
+
+/// Run one call through the RPC socket's dispatch path; returns what the
+/// socket would have been sent.
+async fn run(target: ReplyTarget, method: &str, cancel: CancellationToken) -> Value {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let inflight: crate::api::ws_rpc::InflightRegistry = Default::default();
+    inflight
+        .lock()
+        .await
+        .insert(target.key().to_string(), cancel.clone());
+    run_call(
+        Arc::new(build_handler_map()),
+        admin_ctx(),
+        String::new(),
+        inflight.clone(),
+        tx,
+        target.clone(),
+        method.to_string(),
+        json!({}),
+        cancel,
+    )
+    .await;
+    assert!(
+        inflight.lock().await.get(target.key()).is_none(),
+        "the cancel token is released"
+    );
+    serde_json::from_str(&rx.recv().await.unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn a_request_still_gets_its_reply() {
+    let reply = run(
+        ReplyTarget::Request("r1".into()),
+        "runtime.protocol",
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(reply["id"], json!("r1"));
+    assert_eq!(reply["result"]["version"], json!(2));
+    assert_eq!(reply.as_object().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn an_operation_completes_as_an_event() {
+    let event = run(
+        ReplyTarget::Operation("op-1".into()),
+        "runtime.protocol",
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(event["type"], json!("operation-completed"));
+    assert_eq!(event["operationId"], json!("op-1"));
+    assert_eq!(event["result"]["version"], json!(2));
+
+    let failed = run(
+        ReplyTarget::Operation("op-2".into()),
+        "no.such.method",
+        CancellationToken::new(),
+    )
+    .await;
+    assert_eq!(failed["error"]["code"], json!(404));
+}
+
+#[tokio::test]
+async fn a_cancelled_operation_reports_499() {
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let event = run(
+        ReplyTarget::Operation("op-3".into()),
+        "runtime.protocol",
+        cancel,
+    )
+    .await;
+    assert_eq!(event["operationId"], json!("op-3"));
+    assert_eq!(event["error"]["code"], json!(499));
+}
+
+#[test]
+fn async_is_opt_in_per_call() {
+    assert!(is_async_call(
+        "neighbourhood.join",
+        &json!({ "async": true })
+    ));
+    assert!(!is_async_call("neighbourhood.join", &json!({ "url": "x" })));
 }

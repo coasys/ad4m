@@ -340,10 +340,7 @@ pub(super) fn build_instance_sparql(
 /// Cursor mode for the timestamp order: `HAVING` keeps rows strictly after
 /// the cursor's `(first timestamp, id)`, and `?source` breaks timestamp ties
 /// so the order is total and pages neither repeat nor skip rows.
-fn keyset_suffix(
-    direction: OrderDirection,
-    after: &Option<super::cursor::KeysetCursor>,
-) -> String {
+fn keyset_suffix(direction: OrderDirection, after: &Option<super::cursor::KeysetCursor>) -> String {
     let (dir, cmp) = match direction {
         OrderDirection::ASC => ("ASC", ">"),
         OrderDirection::DESC => ("DESC", "<"),

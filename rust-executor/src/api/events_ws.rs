@@ -1162,7 +1162,9 @@ mod event_interest_stream_tests {
     //! X4 through the real event stream and global pubsub: the filter both
     //! sockets wrap around `build_event_stream`.
     use super::build_event_stream_for;
-    use crate::api::event_interest::{filter_stream, handle_control, SharedInterest, WATCH, UNWATCH};
+    use crate::api::event_interest::{
+        filter_stream, handle_control, SharedInterest, UNWATCH, WATCH,
+    };
     use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
     use futures::StreamExt;
     use serde_json::json;
@@ -1201,8 +1203,7 @@ mod event_interest_stream_tests {
         let (a, b) = (format!("A-{run}"), format!("B-{run}"));
         let interest: SharedInterest = Default::default();
         let stream =
-            build_event_stream_for(String::new(), Some("did:key:alice".into()), None, false)
-                .await;
+            build_event_stream_for(String::new(), Some("did:key:alice".into()), None, false).await;
         let mut stream = Box::pin(filter_stream(stream, interest.clone()));
 
         // Never watched: everything, as today.
@@ -1210,7 +1211,13 @@ mod event_interest_stream_tests {
         publish_link(&b, &run).await;
         assert_eq!(drain(&mut stream, &run).await.len(), 2);
 
-        handle_control(WATCH, &json!("w"), &json!({ "perspectives": [a] }), &interest).unwrap();
+        handle_control(
+            WATCH,
+            &json!("w"),
+            &json!({ "perspectives": [a] }),
+            &interest,
+        )
+        .unwrap();
         publish_link(&a, &run).await;
         publish_link(&b, &run).await;
         let got = drain(&mut stream, &run).await;

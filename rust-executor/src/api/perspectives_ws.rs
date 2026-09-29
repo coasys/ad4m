@@ -925,7 +925,7 @@ async fn discard_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         &ctx.capabilities,
         &perspective_update_capability(vec![uuid.clone()]),
     )
-    .map_err(|e| WsRpcError::forbidden(e))?;
+    .map_err(WsRpcError::forbidden)?;
 
     let body: DiscardBatchRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -1030,7 +1030,7 @@ async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Val
                 &ctx.capabilities,
                 &perspective_query_capability(vec![uuid.clone()]),
             )
-            .map_err(|e| WsRpcError::forbidden(e))?;
+            .map_err(WsRpcError::forbidden)?;
             get_perspective_with_access(&uuid, &ctx)
                 .await?
                 .renew_subscriptions_of(&ctx.user_email)
@@ -2613,7 +2613,7 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .iter()
         .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
         .filter(|name| seen_names.insert(name.clone()))
-        .filter(|name| wanted.as_ref().map_or(true, |w| w.contains(name)))
+        .filter(|name| wanted.as_ref().is_none_or(|w| w.contains(name)))
         .collect();
 
     // Step 2: resolve each shape's full link set. Concurrent per-shape
@@ -2679,9 +2679,9 @@ pub(crate) fn shacl_names_filter(
         Some(Value::Array(items)) => items
             .iter()
             .map(|v| {
-                v.as_str().map(str::to_string).ok_or_else(|| {
-                    WsRpcError::bad_request("`names` must be an array of strings")
-                })
+                v.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| WsRpcError::bad_request("`names` must be an array of strings"))
             })
             .collect::<Result<_, _>>()
             .map(Some),

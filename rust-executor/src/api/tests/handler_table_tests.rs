@@ -30,7 +30,11 @@ pub(crate) fn render_handler_table(names: &[String]) -> String {
 #[test]
 fn handler_table_is_sorted_and_unique() {
     let names = build_handler_map().method_names();
-    assert!(names.len() > 100, "expected the full table, got {}", names.len());
+    assert!(
+        names.len() > 100,
+        "expected the full table, got {}",
+        names.len()
+    );
     for pair in names.windows(2) {
         assert!(pair[0] < pair[1], "not sorted/unique: {:?}", pair);
     }

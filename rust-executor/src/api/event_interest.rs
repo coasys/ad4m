@@ -72,9 +72,9 @@ fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> 
             event.get("perspective").and_then(|p| p.get("uuid"))
         }
         "perspective-removed" | "query-subscription-update" => event.get("uuid"),
-        "notification-triggered" => event.get("notification").and_then(|n| {
-            n.get("perspectiveId").or_else(|| n.get("perspective_id"))
-        }),
+        "notification-triggered" => event
+            .get("notification")
+            .and_then(|n| n.get("perspectiveId").or_else(|| n.get("perspective_id"))),
         _ => None,
     };
     v.and_then(Value::as_str)
@@ -165,8 +165,10 @@ mod tests {
 
     const LINK_A: &str = r#"{"type":"link-added","perspectiveUuid":"A","owner":"did:x","link":{}}"#;
     const LINK_B: &str = r#"{"type":"link-added","perspectiveUuid":"B","owner":"did:x","link":{}}"#;
-    const UPDATED_B: &str = r#"{"type":"perspective-updated","perspective":{"uuid":"B"},"owner":"did:x"}"#;
-    const QUERY_A: &str = r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","result":"[]"}"#;
+    const UPDATED_B: &str =
+        r#"{"type":"perspective-updated","perspective":{"uuid":"B"},"owner":"did:x"}"#;
+    const QUERY_A: &str =
+        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","result":"[]"}"#;
     const AGENT: &str = r#"{"type":"agent-updated","agent":{"did":"did:x"}}"#;
 
     #[test]
@@ -220,9 +222,20 @@ mod tests {
     #[test]
     fn watch_replaces_and_echoes_the_interest() {
         let i = shared();
-        handle_control(WATCH, &json!("1"), &json!({ "types": ["agent-updated"] }), &i).unwrap();
-        let reply = handle_control(WATCH, &json!("2"), &json!({ "perspectives": ["B", "A"] }), &i)
-            .unwrap();
+        handle_control(
+            WATCH,
+            &json!("1"),
+            &json!({ "types": ["agent-updated"] }),
+            &i,
+        )
+        .unwrap();
+        let reply = handle_control(
+            WATCH,
+            &json!("2"),
+            &json!({ "perspectives": ["B", "A"] }),
+            &i,
+        )
+        .unwrap();
         assert_eq!(
             serde_json::from_str::<Value>(&reply).unwrap(),
             json!({ "id": "2", "result": { "watching": { "types": null, "perspectives": ["A", "B"] } } })
@@ -233,7 +246,8 @@ mod tests {
     #[test]
     fn malformed_watch_is_rejected_and_keeps_the_old_interest() {
         let i = shared();
-        let reply = handle_control(WATCH, &json!("1"), &json!({ "types": "link-added" }), &i).unwrap();
+        let reply =
+            handle_control(WATCH, &json!("1"), &json!({ "types": "link-added" }), &i).unwrap();
         let reply: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(reply["error"]["code"], 400);
         assert!(wants(&i, AGENT));
@@ -248,11 +262,26 @@ mod tests {
     fn perspective_extraction_per_event_type() {
         let cases = [
             (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, Some("P")),
-            (r#"{"type":"sync-state-change","perspective":{"uuid":"P"},"state":"x"}"#, Some("P")),
-            (r#"{"type":"perspective-removed","uuid":"P","owner":"o"}"#, Some("P")),
-            (r#"{"type":"notification-triggered","notification":{"perspectiveId":"P"}}"#, Some("P")),
-            (r#"{"type":"auto-processor-event","perspectiveUuid":"P"}"#, Some("P")),
-            (r#"{"type":"exception-occurred","exception":{"uuid":"P"}}"#, None),
+            (
+                r#"{"type":"sync-state-change","perspective":{"uuid":"P"},"state":"x"}"#,
+                Some("P"),
+            ),
+            (
+                r#"{"type":"perspective-removed","uuid":"P","owner":"o"}"#,
+                Some("P"),
+            ),
+            (
+                r#"{"type":"notification-triggered","notification":{"perspectiveId":"P"}}"#,
+                Some("P"),
+            ),
+            (
+                r#"{"type":"auto-processor-event","perspectiveUuid":"P"}"#,
+                Some("P"),
+            ),
+            (
+                r#"{"type":"exception-occurred","exception":{"uuid":"P"}}"#,
+                None,
+            ),
         ];
         for (event, want) in cases {
             let v: Value = serde_json::from_str(event).unwrap();

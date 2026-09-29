@@ -126,8 +126,7 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
 /// `agent.byDIDs { dids }` → one entry per input DID, in input order: the
 /// agent as `agent.byDid` returns it, or `null` when unknown or on error.
 async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)?;
 
     let body: AgentsByDidsRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;

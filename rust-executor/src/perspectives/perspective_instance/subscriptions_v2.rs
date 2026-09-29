@@ -225,10 +225,14 @@ mod tests {
         assert_eq!(p.renew_subscriptions_of(&None).await, 1);
 
         // The renewed one survives the timeout sweep; the other owner's does not.
-        p.check_subscribed_queries(ChangedPredicates::CheckAll).await;
+        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
         let subs = p.subscribed_queries.lock().await;
         assert!(subs.contains_key(&mine), "renewed subscription was kept");
-        assert!(!subs.contains_key(&theirs), "other owner's subscription timed out");
+        assert!(
+            !subs.contains_key(&theirs),
+            "other owner's subscription timed out"
+        );
     }
 
     #[tokio::test]
@@ -256,7 +260,8 @@ mod tests {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let (id, _) = p.subscribe_and_query(QUERY.into(), None).await.unwrap();
         expire(&p, &id).await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll).await;
+        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
         assert!(!p.subscribed_queries.lock().await.contains_key(&id));
     }
 
@@ -340,7 +345,8 @@ mod tests {
             .await
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll).await;
+        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
         let mut out = vec![];
         // Legacy updates are published from a spawned task; give it a moment.
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
@@ -392,7 +398,10 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
         let (legacy, _) = p.subscribe_and_query(q.clone(), None).await.unwrap();
-        let (delta, _) = p.subscribe_and_query_mode(q.clone(), None, true).await.unwrap();
+        let (delta, _) = p
+            .subscribe_and_query_mode(q.clone(), None, true)
+            .await
+            .unwrap();
         assert_ne!(legacy, delta, "a delta subscription is never shared");
         let (again, _) = p.subscribe_and_query(q, None).await.unwrap();
         assert_eq!(again, legacy, "legacy dedup unchanged");
@@ -402,7 +411,8 @@ mod tests {
             .await
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll).await;
+        p.check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
         let (mut legacy_updates, mut delta_updates) = (vec![], vec![]);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
         while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {

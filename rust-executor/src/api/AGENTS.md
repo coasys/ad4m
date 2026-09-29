@@ -40,6 +40,19 @@ Until then: **every new handler must check a capability** (or be registered with
 explicit comment saying why not) and take `AgentContext` from the token for
 anything that signs, bills or writes.
 
+## Protocol v2 (opt-in features)
+
+- `protocol.rs`: `runtime.protocol` → `{ version: 2, features }`. `PROTOCOL_FEATURES` is the one list;
+  append to it for every new opt-in RPC or parameter. Clients fall back to v1 when a feature is absent.
+- `event_interest.rs`: `events.watch` / `events.unwatch`, handled inline on both sockets (per-connection
+  state, like `request.cancel`). No watch = every event.
+- `operations.rs`: `{ async: true }` on `ASYNC_METHODS` → `{ operationId }` now, `operation-completed` event
+  on the same socket later. `ws_rpc::run_call` is the shared dispatch body.
+- Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
+  (ts-rs export dir) and fails if `core/src/generated/api/HandlerMethods.ts` is stale — regenerate
+  (`pnpm run generate:api-types` in `core/`) after adding a handler.
+- Rule: a client that sends none of the new params gets byte-identical replies and events.
+
 ## Types
 
 - `types.rs`: request/response structs for WS (`ts-rs` exported for the SDK).

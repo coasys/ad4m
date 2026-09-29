@@ -6086,10 +6086,8 @@ impl PerspectiveInstance {
                     if changed && stored_query.delta.is_some() {
                         let revision = stored_query.delta.map_or(1, |r| r + 1);
                         stored_query.delta = Some(revision);
-                        let old = std::mem::replace(
-                            &mut stored_query.last_result,
-                            result_string.clone(),
-                        );
+                        let old =
+                            std::mem::replace(&mut stored_query.last_result, result_string.clone());
                         let is_model = stored_query.model_query_params.is_some();
                         delta_updates.push((id, old, result_string, revision, is_model));
                     } else if changed {

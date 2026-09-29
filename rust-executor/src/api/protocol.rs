@@ -29,6 +29,7 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "events.watch",
     "modelQuery.cursor",
     "subscriptions.delta",
+    "operations.async",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

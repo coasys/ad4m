@@ -64,11 +64,7 @@ pub(super) fn is_timestamp_order(order: &Option<Vec<(String, OrderDirection)>>) 
     match order {
         None => true,
         Some(keys) => {
-            keys.len() == 1
-                && matches!(
-                    keys[0].0.as_str(),
-                    "timestamp" | "createdAt" | "updatedAt"
-                )
+            keys.len() == 1 && matches!(keys[0].0.as_str(), "timestamp" | "createdAt" | "updatedAt")
         }
     }
 }
@@ -151,22 +147,40 @@ mod pipeline_tests {
 
     fn add(store: &SparqlStore, id: &str, second: u32) {
         let ts = format!("2026-01-01T00:00:{second:02}.000Z");
-        store.add_link(&link(id, "ns://kind", "ns://todo", &ts)).unwrap();
+        store
+            .add_link(&link(id, "ns://kind", "ns://todo", &ts))
+            .unwrap();
         let title = format!("literal:string:{}", literal_percent_encode(id));
-        store.add_link(&link(id, "ns://title", &title, &ts)).unwrap();
+        store
+            .add_link(&link(id, "ns://title", &title, &ts))
+            .unwrap();
     }
 
     /// Ten todos; `ns://t03` and `ns://t04` share a timestamp (a tie the
     /// cursor must break by id).
     fn store() -> SparqlStore {
         let store = SparqlStore::new(None).unwrap();
-        for (i, second) in [(0, 10), (1, 11), (2, 12), (3, 13), (4, 13), (5, 15), (6, 16), (7, 17), (8, 18), (9, 19)] {
+        for (i, second) in [
+            (0, 10),
+            (1, 11),
+            (2, 12),
+            (3, 13),
+            (4, 13),
+            (5, 15),
+            (6, 16),
+            (7, 17),
+            (8, 18),
+            (9, 19),
+        ] {
             add(&store, &format!("ns://t{i:02}"), second);
         }
         store
     }
 
-    async fn run(store: &SparqlStore, query: Value) -> Result<ModelQueryResult, deno_core::anyhow::Error> {
+    async fn run(
+        store: &SparqlStore,
+        query: Value,
+    ) -> Result<ModelQueryResult, deno_core::anyhow::Error> {
         let (resolver, shape) = StaticShapeResolver::from_json("Todo", SHAPE_JSON).unwrap();
         let shape: ModelShape = (*shape).clone();
         let mut input: ModelQueryInput = serde_json::from_value(query).unwrap();
@@ -202,7 +216,9 @@ mod pipeline_tests {
     #[tokio::test]
     async fn cursor_pages_cover_every_row_once_in_order() {
         let store = store();
-        let full = ids(&run(&store, json!({ "order": { "timestamp": "ASC" } })).await.unwrap());
+        let full = ids(&run(&store, json!({ "order": { "timestamp": "ASC" } }))
+            .await
+            .unwrap());
         assert_eq!(full.len(), 10);
         let (paged, pages) = walk(&store, json!({}), 3).await;
         assert_eq!(paged.len(), 10, "no row repeated or skipped: {paged:?}");
@@ -236,7 +252,9 @@ mod pipeline_tests {
     #[tokio::test]
     async fn an_insert_before_the_cursor_does_not_shift_the_next_page() {
         let store = store();
-        let first = run(&store, json!({ "after": "", "limit": 3 })).await.unwrap();
+        let first = run(&store, json!({ "after": "", "limit": 3 }))
+            .await
+            .unwrap();
         assert_eq!(ids(&first), vec!["ns://t00", "ns://t01", "ns://t02"]);
         // A row that sorts before the cursor arrives between the two reads.
         add(&store, "ns://early", 1);
@@ -246,7 +264,11 @@ mod pipeline_tests {
         )
         .await
         .unwrap();
-        assert_eq!(ids(&second)[0], "ns://t03", "offset 3 would now repeat ns://t02");
+        assert_eq!(
+            ids(&second)[0],
+            "ns://t03",
+            "offset 3 would now repeat ns://t02"
+        );
         assert_eq!(second.total_count, 11);
     }
 
@@ -273,23 +295,33 @@ mod pipeline_tests {
         assert!(r.next_cursor.is_none(), "unsupported order: no cursor");
         assert_eq!(r.instances.len(), 3);
 
-        let first = run(&store, json!({ "after": "", "limit": 3 })).await.unwrap();
+        let first = run(&store, json!({ "after": "", "limit": 3 }))
+            .await
+            .unwrap();
         let cursor = first.next_cursor.unwrap();
         let mut q = by_title;
         q["after"] = json!(cursor.clone());
         assert!(run(&store, q).await.is_err());
         assert!(
-            run(&store, json!({ "after": cursor.clone(), "limit": 3, "offset": 1 }))
-                .await
-                .is_err(),
+            run(
+                &store,
+                json!({ "after": cursor.clone(), "limit": 3, "offset": 1 })
+            )
+            .await
+            .is_err(),
             "after and offset do not combine"
         );
         assert!(
-            run(&store, json!({ "after": cursor, "limit": 3, "order": { "timestamp": "DESC" } }))
-                .await
-                .is_err(),
+            run(
+                &store,
+                json!({ "after": cursor, "limit": 3, "order": { "timestamp": "DESC" } })
+            )
+            .await
+            .is_err(),
             "cursor from the other direction"
         );
-        assert!(run(&store, json!({ "after": "garbage", "limit": 3 })).await.is_err());
+        assert!(run(&store, json!({ "after": "garbage", "limit": 3 }))
+            .await
+            .is_err());
     }
 }
