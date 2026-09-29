@@ -1,5 +1,5 @@
 import { ApiClient, WsEvent } from "../apiClient";
-import { notifyListeners } from "../notifyListeners";
+import { addListener, notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -256,24 +256,25 @@ export class AgentClient {
     return this.#apiClient.call<EntanglementProof>('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
-  addUpdatedListener(listener: AgentUpdatedCallback) {
-    this.#updatedCallbacks.push(listener);
+  /** Each addXListener returns a function that removes the listener. */
+  addUpdatedListener(listener: AgentUpdatedCallback): () => void {
     this.#listen();
+    return addListener(this.#updatedCallbacks, listener);
   }
 
-  addAppChangedListener(listener: AgentAppsUpdatedCallback) {
-    this.#appsChangedCallback.push(listener);
+  addAppChangedListener(listener: AgentAppsUpdatedCallback): () => void {
     this.#listen();
+    return addListener(this.#appsChangedCallback, listener);
   }
 
-  addAgentStatusChangedListener(listener: AgentStatusChangedCallback) {
-    this.#agentStatusChangedCallbacks.push(listener);
+  addAgentStatusChangedListener(listener: AgentStatusChangedCallback): () => void {
     this.#listen();
+    return addListener(this.#agentStatusChangedCallbacks, listener);
   }
 
-  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
-    this.#hostingUserInfoChangedCallbacks.push(listener);
+  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback): () => void {
     this.#listen();
+    return addListener(this.#hostingUserInfoChangedCallbacks, listener);
   }
 
   /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */

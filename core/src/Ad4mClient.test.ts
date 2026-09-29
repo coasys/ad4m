@@ -1259,6 +1259,23 @@ describe('Ad4mClient', () => {
         expect(freshClient.agent.addComputeLogUpdatedListener).toBeUndefined();
     });
 
+    test('agent and runtime listener registrations return a function that removes the listener', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        const hosting = jest.fn();
+        const exception = jest.fn();
+        freshClient.agent.addHostingUserInfoChangedListener(hosting)();
+        freshClient.runtime.addExceptionCallback(exception)();
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c' });
+        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
+
+        expect(hosting).not.toHaveBeenCalled();
+        expect(exception).not.toHaveBeenCalled();
+        freshClient.close();
+    });
+
     test('a listener added after close() receives events again', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());

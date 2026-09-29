@@ -56,6 +56,7 @@ export default class Ad4mConnect extends EventTarget {
   hostIndexUrl: string;
   lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
+  private releaseCreditListener?: () => void;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
@@ -250,6 +251,7 @@ export default class Ad4mConnect extends EventTarget {
     this.connectedHost = null;
     this.userInfo = null;
     this.stopCreditPolling();
+    this.releaseCreditListener?.();
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -262,12 +264,13 @@ export default class Ad4mConnect extends EventTarget {
 
   /**
    * Subscribe to real-time credit updates.
-   * Polling runs beside them as a safety net.
+   * Polling runs beside it as a safety net.
    */
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
-    this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
+    this.releaseCreditListener?.();
+    this.releaseCreditListener = this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
       const userInfo: UserInfo = {
         email: info.email,
         remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),

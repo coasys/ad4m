@@ -325,6 +325,20 @@ describe('Ad4mConnect', () => {
       expect(events[0]).toMatchObject({ email: 'test@test.com', remainingCredits: 100 });
     });
 
+    it('startCreditSubscription() keeps one credit listener however often it runs', async () => {
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      const release = vi.fn();
+      mockAgent.addHostingUserInfoChangedListener.mockClear().mockReturnValue(release);
+
+      conn.startCreditSubscription();
+      conn.startCreditSubscription();
+      conn.stopCreditPolling();
+
+      expect(mockAgent.addHostingUserInfoChangedListener).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledTimes(1);
+    });
+
     it('stopCreditPolling clears interval', async () => {
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();

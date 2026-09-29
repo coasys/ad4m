@@ -1,5 +1,5 @@
 import { ApiClient, WsEvent } from "../apiClient"
-import { notifyListeners } from "../notifyListeners"
+import { addListener, notifyListeners } from "../notifyListeners"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type {
@@ -260,19 +260,20 @@ export class RuntimeClient {
         }
     }
 
-    addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
-        this.#notificationTriggeredCallbacks.push(cb)
+    /** Each addXCallback returns a function that removes the callback. */
+    addNotificationTriggeredCallback(cb: NotificationTriggeredCallback): () => void {
         this.#listen()
+        return addListener(this.#notificationTriggeredCallbacks, cb)
     }
 
-    addMessageCallback(cb: MessageCallback) {
-        this.#messageReceivedCallbacks.push(cb)
+    addMessageCallback(cb: MessageCallback): () => void {
         this.#listen()
+        return addListener(this.#messageReceivedCallbacks, cb)
     }
 
-    addExceptionCallback(cb: ExceptionCallback) {
-        this.#exceptionOccurredCallbacks.push(cb)
+    addExceptionCallback(cb: ExceptionCallback): () => void {
         this.#listen()
+        return addListener(this.#exceptionOccurredCallbacks, cb)
     }
 
     /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
