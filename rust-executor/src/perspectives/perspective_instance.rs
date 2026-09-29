@@ -1,7 +1,7 @@
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
-use super::monotonic::{drop_monotonic_removals, refuse_monotonic_removal};
+use super::monotonic::{committable, drop_monotonic_removals, refuse_monotonic_removal};
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
 use super::update_perspective;
@@ -2054,7 +2054,7 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&store_diff);
+            self.spawn_commit_and_handle_error(&committable(&store_diff));
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
