@@ -1,5 +1,7 @@
 import { SHACLShape, SHACLPropertyShape, AD4MAction } from './SHACLShape';
 import { concat, literal, focus } from './builders';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
@@ -329,9 +331,10 @@ describe('SHACLShape', () => {
 
         const stringValue = link.target.match(/^literal:string:([\s\S]*)$/);
         if (link.predicate === 'ad4m://identity') {
-          expect(turtle).toContain('ad4m:identity true'); // Turtle boolean, as before
+          expect(turtle).toContain('ad4m:identity true'); // a Turtle boolean
         } else if (stringValue) {
-          expect(strings).toContain(stringValue[1]);
+          // Only sh:hasValue is URL-encoded in its link, as the executor stores it.
+          expect(strings).toContain(link.predicate === 'sh://hasValue' ? decodeURIComponent(stringValue[1]) : stringValue[1]);
         } else if (!link.target.startsWith('literal:') && !link.target.startsWith('sh://')) {
           expect(turtle).toContain(`<${link.target}>`);
         }
@@ -868,6 +871,21 @@ describe('SHACLShape', () => {
         expect(link.target).not.toMatch(/^literal:string:undefined$/);
         expect(link.target).not.toMatch(/^literal:string:.*function/);
       }
+    });
+  });
+  describe('executor golden links', () => {
+    // Written by the executor's parse_shacl_to_links; its test
+    // `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
+    const fixture = JSON.parse(readFileSync(
+      join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
+
+    it("decodes the executor's golden links back to the shape it sent", () => {
+      const shape = SHACLShape.fromLinks(fixture.links, `zoo://${fixture.name}Shape`);
+      expect(JSON.parse(JSON.stringify(shape.toJSON()))).toEqual(fixture.shape);
+    });
+
+    it('sends the executor the shape fromJSON read', () => {
+      expect(JSON.parse(JSON.stringify(SHACLShape.fromJSON(fixture.shape).toJSON()))).toEqual(fixture.shape);
     });
   });
 });

@@ -19,7 +19,7 @@ import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "..
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 
-import { SHACLShape, isCollectionProperty } from "../shacl/SHACLShape";
+import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
 import { Ad4mModel } from "../model/Ad4mModel";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
@@ -1660,8 +1660,9 @@ export class PerspectiveProxy {
     /**
      * **Recommended way to add SDNA schemas.**
      * 
-     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
-     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * Store a SHACL shape in this Perspective. The executor writes it as links, as it
+     * does for `@Model` classes. The shape needs a `targetClass`; its URI becomes
+     * `{namespace}{name}Shape`.
      * 
      * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
      * @param shape - SHACLShape instance defining the schema
@@ -1685,51 +1686,7 @@ export class PerspectiveProxy {
      * await perspective.addShacl('Recipe', shape);
      */
     async addShacl(name: string, shape: SHACLShape): Promise<void> {
-        // Serialize shape to links
-        const shapeLinks = shape.toLinks();
-
-        // Class-registration links that the executor's own writer
-        // (`parse_shacl_to_links`) adds and `toLinks()` does not. The readers
-        // `subjectClasses()` and `getClassShape()` find a class only through them.
-        const registrationLinks: Link[] = [];
-        if (shape.targetClass) {
-            registrationLinks.push(
-                new Link({ source: shape.targetClass, predicate: "rdf://type", target: "ad4m://SubjectClass" }),
-                new Link({ source: shape.targetClass, predicate: "ad4m://shape", target: shape.nodeShapeUri }),
-            );
-        }
-        // toLinks writes one sh://property link per property, in order.
-        shapeLinks
-            .filter(l => l.source === shape.nodeShapeUri && l.predicate === "sh://property")
-            .forEach((l, i) => registrationLinks.push(new Link({
-                source: l.target,
-                predicate: "rdf://type",
-                target: isCollectionProperty(shape.properties[i]) ? "ad4m://CollectionShape" : "sh://PropertyShape"
-            })));
-        
-        // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const allLinks: Link[] = [
-            ...shapeLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            ...registrationLinks,
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_shacl",
-                target: nameMapping.toUrl()
-            }),
-            new Link({
-                source: nameMapping.toUrl(),
-                predicate: "ad4m://shacl_shape_uri",
-                target: shape.nodeShapeUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        await this.addSdna(name, '', 'subject_class', JSON.stringify(shape.toJSON()));
     }
     
     /**
@@ -1765,8 +1722,8 @@ export class PerspectiveProxy {
     /**
      * Get all SHACL shapes stored in this Perspective (one RPC call).
      * The executor resolves all shapes in-process and returns them in bulk.
-     * A shape this SDK cannot decode (e.g. one written by a newer SDK) is
-     * skipped with a `console.warn`, so it does not hide the other shapes.
+     * A shape that fails to decode is skipped with a `console.warn`, so it
+     * does not hide the others.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const entries = await this.#client.getAllShacl(this.#handle.uuid);

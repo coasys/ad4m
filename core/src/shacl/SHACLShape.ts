@@ -197,10 +197,8 @@ export interface SHACLPropertyShape {
    *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
   in?: Array<{ value: string; label?: string }>;
 
-  /** AD4M-specific: multi-valued property. Sent to the executor as
-   *  `collection`, which types the property shape `ad4m://CollectionShape`.
-   *  When unset, `toJSON()` derives it from `relationKind` (`hasMany` and
-   *  `belongsToMany` are collections). */
+  /** AD4M-specific: multi-valued property (`ad4m://CollectionShape`).
+   *  `toJSON()` defaults it to true for `hasMany` and `belongsToMany`. */
   collection?: boolean;
 
   /** AD4M-specific: kind of relation this property describes.
@@ -249,11 +247,6 @@ export interface SHACLPropertyShape {
  * SHACL Node Shape
  * Defines constraints for instances of a class
  */
-/** Whether a property holds many values: set explicitly, or implied by a `*Many` relation. */
-export function isCollectionProperty(p: SHACLPropertyShape): boolean {
-  return p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany');
-}
-
 export class SHACLShape {
   /** URI of this shape (e.g., recipe:RecipeShape) */
   nodeShapeUri: string;
@@ -671,10 +664,12 @@ export class SHACLShape {
       }
       
       if (prop.hasValue) {
+        // Same encoding as the executor: URIs and literal URLs as they are.
+        const v = prop.hasValue;
         links.push({
           source: propShapeId,
           predicate: "sh://hasValue",
-          target: `literal:${prop.hasValue}`
+          target: v.includes('://') || v.startsWith('literal:') ? v : `literal:string:${encodeURIComponent(v)}`
         });
       }
       
@@ -987,7 +982,8 @@ export class SHACLShape {
         l.source === propShapeId && l.predicate === "sh://hasValue"
       );
       if (hasValueLink) {
-        prop.hasValue = hasValueLink.target.replace(/^literal:\/\/|^literal:/, '');
+        const v = hasValueLink.target;
+        prop.hasValue = v.startsWith('literal:string:') ? decodeURIComponent(v.slice(15)) : v;
       }
       
       // AD4M-specific
@@ -1230,7 +1226,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
-        collection: p.collection ?? (isCollectionProperty(p) || undefined),
+        collection: p.collection ?? ((p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany') || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
         where_predicates: p.wherePredicates,

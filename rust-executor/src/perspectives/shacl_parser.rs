@@ -133,6 +133,15 @@ pub struct PropertyShape {
     /// Serialized as JSON and stored as a `literal:string:` link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<serde_json::Value>,
+    /// `sh:in` — allowed values with optional AD4M labels, stored as JSON.
+    #[serde(rename = "in", default, skip_serializing_if = "Option::is_none")]
+    pub in_values: Option<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_inclusive: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_inclusive: Option<f64>,
 }
 
 // ============================================================================
@@ -1798,6 +1807,38 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 target: format!("literal:string:{}", json_str),
             });
         }
+
+        if let Some(in_values) = prop.in_values.as_ref().filter(|v| !v.is_empty()) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some("sh://in".to_string()),
+                target: format!(
+                    "literal:string:{}",
+                    serde_json::to_string(in_values).unwrap_or_default()
+                ),
+            });
+        }
+
+        let plain_literals = [
+            ("sh://pattern", prop.pattern.clone()),
+            (
+                "sh://minInclusive",
+                prop.min_inclusive.map(|v| v.to_string()),
+            ),
+            (
+                "sh://maxInclusive",
+                prop.max_inclusive.map(|v| v.to_string()),
+            ),
+        ];
+        for (predicate, value) in plain_literals {
+            if let Some(value) = value {
+                links.push(Link {
+                    source: prop_shape_uri.clone(),
+                    predicate: Some(predicate.to_string()),
+                    target: format!("literal:{}", value),
+                });
+            }
+        }
     }
 
     Ok(links)
@@ -2164,6 +2205,33 @@ mod tests {
         assert!(!no_parents
             .iter()
             .any(|l| l.predicate.as_deref() == Some("sh://node")));
+    }
+
+    /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds a
+    /// shape using every field `SHACLShape.toJSON()` sends and the exact links
+    /// this writer stores for it. The SDK test "decodes the executor's golden
+    /// links back to the shape it sent" reads the same file through
+    /// `SHACLShape.fromLinks`, so a field this writer drops fails one side.
+    #[test]
+    fn parse_shacl_to_links_matches_the_golden_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/shacl_writer_golden.json")).unwrap();
+        let links = parse_shacl_to_links(
+            &fixture["shape"].to_string(),
+            fixture["name"].as_str().unwrap(),
+        )
+        .unwrap();
+        let actual: Vec<serde_json::Value> = links
+            .iter()
+            .map(|l| {
+                serde_json::json!({
+                    "source": l.source,
+                    "predicate": l.predicate,
+                    "target": l.target,
+                })
+            })
+            .collect();
+        assert_eq!(serde_json::Value::from(actual), fixture["links"]);
     }
 
     #[test]

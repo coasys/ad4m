@@ -261,26 +261,15 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
 });
 
 describe('addShacl', () => {
-  it('writes the class-registration links the executor readers expect', async () => {
-    const addLinks = jest.fn().mockResolvedValue([]);
-    const proxy = createProxy(createMockClient({ addLinks }));
+  it('registers the shape through the executor writer, like @Model classes', async () => {
+    const addSdna = jest.fn().mockResolvedValue(true);
+    const proxy = createProxy(createMockClient({ addSdna }));
 
     const shape = new SHACLShape('todo://Todo');
     shape.addProperty({ name: 'title', path: 'todo://title', maxCount: 1 });
-    shape.addProperty({ name: 'comments', path: 'todo://comment', relationKind: 'hasMany' });
     await proxy.addShacl('Todo', shape);
 
-    const written = addLinks.mock.calls[0][1].map((l: any) => ({ source: l.source, predicate: l.predicate, target: l.target }));
-    // Same graph parse_shacl_to_links writes: the class marker, the class ->
-    // shape pointer and a type on every property shape.
-    expect(written).toEqual(expect.arrayContaining([
-      { source: 'todo://Todo', predicate: 'rdf://type', target: 'ad4m://SubjectClass' },
-      { source: 'todo://Todo', predicate: 'ad4m://shape', target: 'todo://TodoShape' },
-      { source: 'todo://Todo.title', predicate: 'rdf://type', target: 'sh://PropertyShape' },
-      { source: 'todo://Todo.comments', predicate: 'rdf://type', target: 'ad4m://CollectionShape' },
-    ]));
-    // Everything toLinks() writes is still written.
-    expect(written).toEqual(expect.arrayContaining(shape.toLinks()));
+    expect(addSdna).toHaveBeenCalledWith('test-uuid', 'Todo', '', 'subject_class', JSON.stringify(shape.toJSON()));
   });
 });
 
