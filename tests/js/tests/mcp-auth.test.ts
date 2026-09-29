@@ -81,7 +81,7 @@ describe("MCP Authentication HTTP Tests", function() {
         // not idempotent, so retrying it could only fail with "already exists".
         const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
         await pollUntil(async () => {
-            await adminClient.runtime.info();
+            await adminClient.agent.status();
             return true;
         }, { timeoutMs: 15000, label: "executor API ready" });
         await adminClient.agent.generate("test-passphrase");

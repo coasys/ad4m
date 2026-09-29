@@ -79,11 +79,9 @@ export class TestCluster {
     private async waitForApi(port: number, adminCredential: string, timeoutMs: number = 60000): Promise<Ad4mClient> {
         let client: Ad4mClient | null = null;
         await pollUntil(async () => {
-            try {
-                client = new Ad4mClient(baseUrl(port), adminCredential, false);
-                await client.runtime.info();
-                return true;
-            } catch { return false; }
+            client = new Ad4mClient(baseUrl(port), adminCredential, false);
+            await client.runtime.info();
+            return true;
         }, { timeoutMs, intervalMs: 1000, label: `API endpoint on port ${port} ready` });
         return client!;
     }
