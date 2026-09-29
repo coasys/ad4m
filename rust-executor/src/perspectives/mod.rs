@@ -11,6 +11,7 @@ mod flow_instance_e2e;
 pub(crate) mod flow_semantic_check;
 pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
+pub(crate) mod ingest;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;

@@ -1578,6 +1578,12 @@ impl PerspectiveInstance {
             }
         }
 
+        super::ingest::retain_ingestible(
+            &self.sparql_store,
+            &mut unique_additions,
+            &mut unique_removals,
+        );
+
         // Links arriving from the link language are shared by definition, but
         // the wire form usually carries `status: None`. Assign it explicitly
         // here — the store refuses status-less inserts rather than defaulting.

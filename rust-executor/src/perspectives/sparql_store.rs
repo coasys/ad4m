@@ -363,6 +363,15 @@ pub fn validate_readonly_query(query: &str) -> Result<(), Error> {
     Ok(())
 }
 
+/// The proof annotations an insert writes: see [`SparqlStore::proof_write`].
+enum ProofWrite {
+    /// Key, signature, verdict and `wireTarget` together.
+    Whole,
+    /// Only `wireTarget`, for a verified row stored before #1141.
+    WireTargetOnly,
+    Nothing,
+}
+
 /// Generate a deterministic reifier IRI from link data + timestamp.
 fn make_reifier_iri(link: &LinkExpression) -> NamedNode {
     // Hash the *normalized* storage-term form of the target, not the raw
@@ -549,7 +558,8 @@ impl SparqlStore {
         // test helper, migration, or external caller can slip a fabricated or
         // stale verdict onto disk. The caller's `proof.valid` is intentionally
         // ignored here â tests that want `Some(true)` must carry a real signature.
-        let valid_str = link.compute_proof_valid().to_string();
+        let incoming_valid = link.compute_proof_valid();
+        let valid_str = incoming_valid.to_string();
 
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
@@ -569,27 +579,35 @@ impl SparqlStore {
 
         let wire_target = signed_target_annotation(link, &target_term);
 
-        // `None` writes nothing, after clearing a stale value: a canonical
-        // re-insert must not keep the wire target of an earlier encoding.
-        let annotations: Vec<(&str, Option<&str>)> = vec![
+        // `None` writes nothing, after clearing a stale value: a proof written
+        // with a canonical target must not keep the wire target of an earlier
+        // encoding.
+        let mut annotations: Vec<(&str, Option<&str>)> = vec![
             (ONT_AUTHOR, Some(&link.author)),
             (ONT_TIMESTAMP, Some(&link.timestamp)),
-            (ONT_PROOF_KEY, Some(&proof.key)),
-            (ONT_PROOF_SIG, Some(&proof.signature)),
             (ONT_STATUS, Some(status_str(status))),
-            (ONT_PROOF_VALID, Some(&valid_str)),
-            (ONT_WIRE_TARGET, wire_target.as_deref()),
         ];
+        match self.proof_write(&reifier_iri, incoming_valid, &proof.signature)? {
+            ProofWrite::Whole => annotations.extend([
+                (ONT_PROOF_KEY, Some(proof.key.as_str())),
+                (ONT_PROOF_SIG, Some(proof.signature.as_str())),
+                (ONT_PROOF_VALID, Some(valid_str.as_str())),
+                (ONT_WIRE_TARGET, wire_target.as_deref()),
+            ]),
+            ProofWrite::WireTargetOnly => {
+                annotations.push((ONT_WIRE_TARGET, wire_target.as_deref()))
+            }
+            ProofWrite::Nothing => {}
+        }
 
         for (pred_uri, value) in &annotations {
             let pred = NamedNodeRef::new_unchecked(pred_uri);
 
             // Delete before insert. `make_reifier_iri` hashes author, source,
-            // predicate, target and timestamp — not the proof — so re-inserting
-            // a link whose verdict, key or signature changed lands on the same
-            // reifier. Without the delete the old annotation stays alongside the
-            // new one: a link once stored "true" keeps reading back verified,
-            // and the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
+            // predicate, target and timestamp — not the proof — so an upgraded
+            // proof lands on the same reifier as the one it replaces. Without
+            // the delete the old annotation stays alongside the new one, and
+            // the `OPTIONAL { ?reifier <proofValid> ?proofValid }` in
             // `query_links` matches both quads and returns the link twice.
             let stale: Vec<_> = self
                 .store
@@ -615,6 +633,81 @@ impl SparqlStore {
         }
 
         Ok(())
+    }
+
+    /// Which proof annotations an insert may write on `reifier` (#1146).
+    ///
+    /// The proof (key, signature, verdict and `wireTarget`) is one unit.
+    /// The reifier does not hash it, so anyone who has seen a link can
+    /// re-assert its five fields with another proof and land here. The unit
+    /// is written only when nothing is stored yet, or as an upgrade: the
+    /// stored verdict is not `"true"` and the incoming one is. Verified to
+    /// verified is not an upgrade, because verification never reads the key:
+    /// a replay of the author's signature with another key would rewrite it.
+    ///
+    /// One partial write heals rows stored before #1141, which kept no
+    /// `wireTarget`: a verified row without one, re-inserted with the same
+    /// signature (the same statement), gets the signed target bytes back.
+    fn proof_write(
+        &self,
+        reifier: &NamedNode,
+        incoming_valid: bool,
+        incoming_signature: &str,
+    ) -> Result<ProofWrite, Error> {
+        let key = self.annotation_values(reifier, ONT_PROOF_KEY)?;
+        let signature = self.annotation_values(reifier, ONT_PROOF_SIG)?;
+        let verdict = self.annotation_values(reifier, ONT_PROOF_VALID)?;
+        if key.is_empty() && signature.is_empty() && verdict.is_empty() {
+            return Ok(ProofWrite::Whole);
+        }
+        let stored_valid = verdict.iter().any(|v| v == "true");
+        if !stored_valid {
+            return Ok(if incoming_valid {
+                ProofWrite::Whole
+            } else {
+                ProofWrite::Nothing
+            });
+        }
+        let same_statement = incoming_valid && signature == [incoming_signature];
+        let no_wire_target = self.annotation_values(reifier, ONT_WIRE_TARGET)?.is_empty();
+        Ok(if same_statement && no_wire_target {
+            ProofWrite::WireTargetOnly
+        } else {
+            ProofWrite::Nothing
+        })
+    }
+
+    /// The literal values stored under `predicate` on `reifier`.
+    fn annotation_values(
+        &self,
+        reifier: &NamedNode,
+        predicate: &str,
+    ) -> Result<Vec<String>, Error> {
+        self.store
+            .quads_for_pattern(
+                Some(reifier.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(predicate)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .map(|q| {
+                q.map(|quad| match quad.object {
+                    Term::Literal(l) => l.value().to_string(),
+                    other => other.to_string(),
+                })
+                .map_err(Error::from)
+            })
+            .collect()
+    }
+
+    /// Whether this store holds `link` (by its reifier) with `Local` status.
+    /// A link language's diff must not add to or remove such a link (#1146).
+    pub(crate) fn is_stored_local(&self, link: &LinkExpression) -> Result<bool, Error> {
+        let local = status_str(&LinkStatus::Local);
+        Ok(self
+            .annotation_values(&make_reifier_iri(link), ONT_STATUS)?
+            .iter()
+            .any(|s| s == local))
     }
 
     /// Insert triples for a link into the store.
