@@ -117,6 +117,8 @@ export class ApiClient {
     private _watching: string | null = '{}'
     private _watchScheduled = false
     private _watchDone: Promise<void> = Promise.resolve()
+    // The last `events.watch` call, settled once the executor replied.
+    private _watchSent: Promise<void> = Promise.resolve()
 
     private _getWsUrl(): string {
         const wsBase = this.baseUrl
@@ -333,6 +335,14 @@ export class ApiClient {
         }
 
         await this._readyOrAbort(signal)
+        // A listener added just before this call is only served once the
+        // executor has its `events.watch`. The executor applies a watch as
+        // it reads it, so sending this call after the watch is enough for
+        // the event this call causes to reach the listener.
+        if (type !== 'events.watch') {
+            await this._watchDone
+            if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+        }
 
         const id = nextId()
         // Put params under a "params" key to avoid collision with
@@ -482,14 +492,17 @@ export class ApiClient {
         await this._ready()
         const events = this.watchedEvents()
         const key = JSON.stringify(events)
-        if (key === this._watching) return
+        if (key === this._watching) {
+            // Already sent, or on its way: wait until the executor has it.
+            await this._watchSent
+            return
+        }
         this._watching = key
-        try {
-            await this.call('events.watch', events)
-        } catch (e) {
+        this._watchSent = this.call('events.watch', events).then(() => {}, (e) => {
             if (this._watching === key) this._watching = null
             console.error('events.watch failed:', e)
-        }
+        })
+        await this._watchSent
     }
 
     // ── Explicit connection ─────────────────────────────────────────────────

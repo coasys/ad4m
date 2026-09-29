@@ -748,6 +748,20 @@ describe('PerspectiveClient', () => {
         expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'link-added': ['B'] });
     });
 
+    test('a call made right after adding a listener is sent after the events.watch it needs', async () => {
+        // First use: the listener and the call both wait for the socket.
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+        await freshClient.perspective.snapshotByUUID('A');
+        const ws = lastOf(MockWebSocket.instances);
+        expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
+
+        // Open socket: a listener added in the same tick as the call.
+        freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
+        await freshClient.perspective.snapshotByUUID('A');
+        expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
+    });
+
     test('sync-state and signal listeners only fire for their perspective', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const syncState = jest.fn(() => null);
