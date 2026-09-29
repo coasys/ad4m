@@ -159,11 +159,16 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
 
+        // Routers are built before the listeners bind: the integration tests take the
+        // "starting" log line as the server being ready.
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
+        let app = listener_router(state.clone(), &addr);
+
         log::info!("Starting API server (HTTP) on 127.0.0.1:{}", port);
         log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
 
         let tls_addr = SocketAddr::from(([0, 0, 0, 0], tls_port));
-        let tls_app = listener_router(state.clone(), &tls_addr);
+        let tls_app = listener_router(state, &tls_addr);
 
         let rustls_config =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
@@ -189,9 +194,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 });
         });
 
-        let listener =
-            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-        let app = listener_router(state, &listener.local_addr()?);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
         axum::serve(listener, app.into_make_service()).await?;
     } else {
         let address: [u8; 4] = if config.localhost.unwrap_or(true) {
@@ -201,10 +204,10 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         };
 
         let addr = SocketAddr::from((address, port));
+        let app = listener_router(state, &addr);
         log::info!("API server starting on http://{}/api/v1", addr);
 
         let listener = tokio::net::TcpListener::bind(addr).await?;
-        let app = listener_router(state, &listener.local_addr()?);
         axum::serve(listener, app.into_make_service()).await?;
     }
 
