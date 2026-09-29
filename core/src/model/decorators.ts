@@ -340,6 +340,19 @@ export interface PropertyOptions {
     local?: boolean;
 
     /**
+     * Declares the property's predicate monotonic: once written, a Shared
+     * link under it cannot be removed by anyone, locally or by sync. A setter
+     * that would replace an existing value is refused, so use it for add-only
+     * data such as role grants, and end a grant with a signed
+     * `ad4m://flow/role_grant_revoked` tombstone.
+     *
+     * Honoured only when the neighbourhood author registered the class (the
+     * owner, while the perspective is not shared). A declaration stays once
+     * made: changing `through` later leaves the old predicate monotonic too.
+     */
+    monotonic?: boolean;
+
+    /**
      * Optional transform expression to modify the property value.
      * This is a SHACL-AF Node Expression that runs in the Rust model query engine.
      * Examples: `fileToDataUri`, `concat(literal('prefix_'), focus())`, etc.
@@ -728,6 +741,7 @@ export function Model(opts: ModelConfig) {
  * @param {string} [opts.prologGetter] - Custom Prolog code for getting the property value
  * @param {string} [opts.prologSetter] - Custom Prolog code for setting the property value
  * @param {boolean} [opts.local] - Whether the property should only be stored locally
+ * @param {boolean} [opts.monotonic] - Whether Shared links under the predicate end only by tombstone, never by removal
  */
 export function Property(opts: PropertyOptions) {
     const required = opts.required ?? false;

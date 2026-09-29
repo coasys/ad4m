@@ -339,6 +339,22 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
     expect(metadata.properties.email.local).toBe(true);
   });
 
+  it("reads x-ad4m monotonic from a JSON schema (#1176)", () => {
+    const RoleClass = Ad4mModel.fromJSONSchema({
+      title: "Role",
+      type: "object",
+      properties: {
+        member: { type: "string", "x-ad4m": { through: "role://member", monotonic: true } },
+        note: { type: "string", "x-ad4m": { through: "role://note" } },
+      },
+    }, { name: "MonotonicSchemaRole" });
+
+    const { shape } = (RoleClass as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("role://member").monotonic).toBe(true);
+    expect(byPath("role://note").monotonic).toBeUndefined();
+  });
+
   it("should handle property mapping override in options", () => {
     const schema = {
       title: "User",

@@ -26,6 +26,8 @@ export interface JSONSchemaProperty {
     through?: string;
     resolveLanguage?: string;
     local?: boolean;
+    /** See `PropertyOptions.monotonic` */
+    monotonic?: boolean;
     writable?: boolean;
     initial?: string;
   };
@@ -326,6 +328,7 @@ export function buildModelFromJSONSchema(
       } else {
         // Handle regular properties
         const local = getPropertyOption(propertyName, propertySchema, options, 'local');
+        const monotonic = getPropertyOption(propertyName, propertySchema, options, 'monotonic');
         let readOnly = getPropertyOption(propertyName, propertySchema, options, 'readOnly');
         if (readOnly === undefined) {
           const xWritable = propertySchema["x-ad4m"]?.writable;
@@ -358,6 +361,7 @@ export function buildModelFromJSONSchema(
           writable: writable,
           ...(resolveLanguage !== undefined && { resolveLanguage }),
           ...(local !== undefined && { local }),
+          ...(monotonic && { monotonic: true }),
           ...(initial && { initial })
         };
         
