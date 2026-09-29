@@ -22,29 +22,14 @@ export class RpcError extends Error {
 /** Options accepted by [`ApiClient.call`]. */
 export interface CallOptions {
     /**
-     * AbortSignal that, when fired, sends a `request.cancel` to the
-     * executor and rejects the call with a DOMException (`name === 'AbortError'`).
-     *
-     * Use this for long-running operations like `querySparql` so a UI
-     * teardown or a newer query supersession can stop the in-flight one
-     * without paying the network + deserialise tax on its result.
-     *
-     * Cancellation is best-effort on the executor: the SPARQL evaluation
-     * itself isn't preempted (Oxigraph can't be interrupted), but the
-     * reply is discarded and the network traffic + JSON parsing on the
-     * client are skipped.
+     * Aborting sends `request.cancel` and rejects the call with an
+     * `AbortError`. The executor drops the reply; it cannot always stop the work.
      */
     signal?: AbortSignal
-
-    /**
-     * Per-call timeout override in ms. Defaults to [[DEFAULT_TIMEOUT_MS]].
-     * Use for long-running calls (LLM prompts, holochain ops) that
-     * legitimately exceed the default.
-     */
+    /** Timeout in ms, from the call to the reply. Defaults to 30 s. */
     timeoutMs?: number
 }
 
-/** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
 /** Default timeout for calls that can run for minutes: LLM work, Holochain, publishing. */
@@ -55,11 +40,8 @@ export function longCall(options?: CallOptions): CallOptions {
     return { ...options, timeoutMs: options?.timeoutMs ?? LONG_TIMEOUT_MS }
 }
 
-/** Maximum reconnect delay in ms. */
-const MAX_RECONNECT_DELAY_MS = 30_000
-
-/** Initial reconnect delay in ms. */
 const INITIAL_RECONNECT_DELAY_MS = 500
+const MAX_RECONNECT_DELAY_MS = 30_000
 
 let _idCounter = 0
 function nextId(): string {
@@ -272,7 +254,6 @@ export class ApiClient {
                 () => settle(() => reject(new RpcError(408, `RPC call '${type}' timed out after ${timeoutMs}ms`))),
                 timeoutMs,
             )
-            // Best effort: the executor drops the reply; it cannot always stop the work.
             const onAbort = () => {
                 if (pending.sent && this._ws?.readyState === 1 /* OPEN */) {
                     this._ws.send(JSON.stringify({ id: nextId(), type: 'request.cancel', params: { targetId: id } }))
