@@ -2,12 +2,14 @@
 //! function of and nothing else.
 //!
 //! [`verify_receipt`] is pure: its verdict depends only on the receipt's
-//! own contents and on the reader's copy of the flow the receipt names.
-//! Both have a content hash — the receipt's URI is the hash of its body
-//! ([`FlowReceipt::uri`]), and [`flow_dna_hash`] is the hash of the whole
-//! definition — so `(receipt URI, flow DNA hash)` determines the verdict
-//! completely. That is the memo key. Under the same key the answer cannot
-//! differ, so the memo can only save work, never change an answer:
+//! own contents and on the reader's copy of the flow the receipt names —
+//! the whole `SHACLFlow` as the catalogue holds it, **element order
+//! included**. Both have a content hash — the receipt's URI is the hash of
+//! its body ([`FlowReceipt::uri`]), and [`held_definition_hash`] is the
+//! hash of the definition exactly as held — so `(receipt URI, held
+//! definition hash)` determines the verdict completely. That is the memo
+//! key. Under the same key the answer cannot differ, so the memo can only
+//! save work, never change an answer:
 //!
 //! - **A DNA edit is a different key.** The reader's held hash changes, the
 //!   lookup misses, and the receipt is verified afresh — which reports
@@ -16,6 +18,19 @@
 //!   entries simply stop being looked up and age out of the LRU.
 //! - **A forged receipt is a different key too.** Its body hashes to another
 //!   URI, so it can never be served the honest receipt's verdict.
+//! - **A reload in another link order is a different key as well.** The
+//!   key is deliberately *not*
+//!   [`flow_dna_hash`](crate::perspectives::flow_instance::receipt::flow_dna_hash),
+//!   which sorts `states` and
+//!   `transitions` so that two replicas name the same DNA alike whatever
+//!   order their links arrive in. The verifier reads that order:
+//!   `initial_state_of` is `states.first()`, and the fold refuses a genesis
+//!   other than it. The parser keeps equal-`value` states in link order, so
+//!   the same DNA can load as `[open, done]` on one read and `[done, open]`
+//!   on the next, verify differently, and hash the same under
+//!   `flow_dna_hash` — a memo keyed on it would serve the first load's
+//!   verdict on the second (CodeRabbit on #1201). Keyed on the held
+//!   definition, it misses and re-verifies, as an un-memoised read would.
 //!
 //! What is not memoised: a receipt for a flow the catalogue does not hold
 //! (`FlowUnknown` costs nothing and the catalogue may fill in), and material
@@ -37,9 +52,11 @@
 //! never more.
 
 use super::{verify_receipt, ReceiptVerdict};
-use crate::perspectives::flow_instance::receipt::{flow_dna_hash, FlowReceipt};
+use crate::perspectives::flow_evaluator::canonical_json;
+use crate::perspectives::flow_instance::receipt::FlowReceipt;
 use crate::perspectives::shacl_parser::SHACLFlow;
 use lru::LruCache;
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -49,8 +66,8 @@ use std::sync::Mutex;
 /// and voter DIDs), so this is well under a megabyte per perspective.
 pub const VERDICT_MEMO_CAPACITY: usize = 4096;
 
-/// `(receipt URI, flow DNA hash) → verdict` for one perspective. See the
-/// module header for why this key is exact.
+/// `(receipt URI, held definition hash) → verdict` for one perspective. See
+/// the module header for why this key is exact.
 pub struct VerdictMemo {
     verdicts: Mutex<LruCache<(String, String), ReceiptVerdict>>,
     /// Test-only: how many times this memo has actually run
@@ -77,7 +94,8 @@ impl VerdictMemo {
     }
 
     /// [`verify_receipt`], answered from the memo when the same receipt was
-    /// already verified under the same DNA. Same verdict either way.
+    /// already verified under the same held definition. Same verdict either
+    /// way.
     pub fn verify(
         &self,
         catalogue: &HashMap<String, SHACLFlow>,
@@ -116,13 +134,29 @@ impl VerdictMemo {
 
 /// The key under which `receipt`'s verdict is a constant: its own
 /// content-derived URI and the hash of the definition **this reader** holds
-/// for the flow it names. `None` when either does not hash or the flow is
-/// not held — nothing worth memoising, and nothing safe to.
+/// for the flow it names, exactly as held. `None` when either does not hash
+/// or the flow is not held — nothing worth memoising, and nothing safe to.
 fn memo_key(
     catalogue: &HashMap<String, SHACLFlow>,
     receipt: &FlowReceipt,
 ) -> Option<(String, String)> {
-    let held = flow_dna_hash(catalogue.get(&receipt.flow_uri)?).ok()?;
+    let held = held_definition_hash(catalogue.get(&receipt.flow_uri)?).ok()?;
     let uri = receipt.uri().ok()?;
     Some((uri, held))
+}
+
+/// `hex(SHA256(canonical_json(flow)))` over the definition **as held**:
+/// every field `verify_receipt` can read, in the order it will read it.
+/// Object keys are sorted (that is what makes it canonical); arrays are
+/// not, and that is the difference from
+/// [`flow_dna_hash`](crate::perspectives::flow_instance::receipt::flow_dna_hash),
+/// which sorts `states` and `transitions` because it names the DNA across
+/// replicas.
+/// This hash names one reader's copy, and one reader's copy is what the
+/// verdict is a function of — see the module header.
+fn held_definition_hash(flow: &SHACLFlow) -> anyhow::Result<String> {
+    let value = serde_json::to_value(flow)?;
+    Ok(hex::encode(Sha256::digest(
+        canonical_json(&value).as_bytes(),
+    )))
 }

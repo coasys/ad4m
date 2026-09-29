@@ -1171,6 +1171,52 @@ mod tests {
         );
     }
 
+    /// The memo key has to cover every input `verify_receipt` reads from the
+    /// catalogue, and the DNA hash alone does not. `flow_dna_hash` sorts
+    /// `states` by name on purpose (link order is a store artefact), but
+    /// `initial_state_of` is `states.first()`, and the fold refuses a
+    /// genesis other than it. The parser keeps equal-`value` states in link
+    /// order, so one DNA can load as `[open, done]` on one read and
+    /// `[done, open]` on the next: same DNA hash, different verdict. Keyed on
+    /// the DNA hash alone, the memo serves the first read's `Verified` on
+    /// the second, where a fresh verify says `Unfoldable`. (CodeRabbit on
+    /// #1201.)
+    ///
+    /// Red with the memo keyed on `flow_dna_hash`.
+    #[test]
+    fn a_memo_hit_equals_a_fresh_verify_when_the_states_reload_in_another_order() {
+        use crate::perspectives::flow_instance::receipt::flow_dna_hash;
+
+        let equal_value_states = |order: [&str; 2]| -> SHACLFlow {
+            let mut flow = flow_named("Delivery");
+            flow.states = order
+                .iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({ "name": name, "value": 0.0 }))
+                        .expect("state parses")
+                })
+                .collect();
+            flow
+        };
+        let first_load = catalogue(vec![equal_value_states(["open", "done"])]);
+        let second_load = catalogue(vec![equal_value_states(["done", "open"])]);
+        assert_eq!(
+            flow_dna_hash(&first_load[FLOW]).expect("hash"),
+            flow_dna_hash(&second_load[FLOW]).expect("hash"),
+            "precondition: state order is not part of the DNA"
+        );
+        let receipt = mint(&first_load[FLOW], &[OUTPUT]);
+        let memo = VerdictMemo::default();
+        assert!(memo.verify(&first_load, &receipt).is_verified());
+
+        let fresh = verify_receipt(&second_load, &receipt);
+        let hit = memo.verify(&second_load, &receipt);
+        assert_eq!(
+            hit, fresh,
+            "a memo hit must equal a fresh verify — fresh: {fresh}; memo: {hit}"
+        );
+    }
+
     // ---- determinism -------------------------------------------------------
 
     /// Two mints of the same completion collapse to one entry, and the list
