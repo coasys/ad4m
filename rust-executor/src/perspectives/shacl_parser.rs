@@ -29,6 +29,10 @@ pub struct SHACLShape {
     /// Destructor actions for removing instances
     #[serde(default)]
     pub destructor_actions: Vec<AD4MAction>,
+    /// Parent shape URIs (model inheritance). Emitted as one `sh://node`
+    /// link per parent on the shape node.
+    #[serde(default)]
+    pub parent_shapes: Vec<String>,
 }
 
 /// A single structured conformance condition for relation filtering.
@@ -1490,6 +1494,14 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         target: shape.target_class.clone(),
     });
 
+    for parent_shape in &shape.parent_shapes {
+        links.push(Link {
+            source: shape_uri.clone(),
+            predicate: Some("sh://node".to_string()),
+            target: parent_shape.clone(),
+        });
+    }
+
     // Natural-language interpretation hint (steers LLM interpretation)
     if let Some(hint) = &shape.interpretation_hint {
         links.push(Link {
@@ -2127,6 +2139,31 @@ mod tests {
             ]
         }"#;
         assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
+    }
+
+    /// `@Model` subclasses register through this writer; without `sh://node`
+    /// links `getShacl` reads the shape back without its parents.
+    #[test]
+    fn parse_shacl_to_links_writes_parent_shapes() {
+        let shacl_json = r#"{
+            "target_class": "zoo://Dog",
+            "parent_shapes": ["zoo://AnimalShape", "zoo://PetShape"],
+            "properties": []
+        }"#;
+        let links = parse_shacl_to_links(shacl_json, "Dog").unwrap();
+        let parents: Vec<&str> = links
+            .iter()
+            .filter(|l| l.source == "zoo://DogShape" && l.predicate.as_deref() == Some("sh://node"))
+            .map(|l| l.target.as_str())
+            .collect();
+        assert_eq!(parents, vec!["zoo://AnimalShape", "zoo://PetShape"]);
+
+        let no_parents =
+            parse_shacl_to_links(r#"{"target_class": "zoo://Cat", "properties": []}"#, "Cat")
+                .unwrap();
+        assert!(!no_parents
+            .iter()
+            .any(|l| l.predicate.as_deref() == Some("sh://node")));
     }
 
     #[test]

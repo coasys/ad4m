@@ -186,6 +186,20 @@ export default function shaclRpcTests(testContext: TestContext) {
                     }
                 });
 
+                it("getShacl() keeps parentShapes of a class registered with addSdna()", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-parents");
+                    try {
+                        const shape = new SHACLShape("zoo://Dog");
+                        shape.addParentShape("zoo://AnimalShape");
+                        shape.addProperty({ name: "name", path: "zoo://name", datatype: "xsd://string", maxCount: 1 });
+                        await perspective.addSdna("Dog", "", "subject_class", JSON.stringify(shape.toJSON()));
+
+                        expect((await perspective.getShacl("Dog"))!.parentShapes).to.deep.equal(["zoo://AnimalShape"]);
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
+                });
+
                 it("getShacl() returns null for an unknown name", async () => {
                     const perspective = await testContext.ad4mClient.perspective.byUUID(perspectiveUuid);
                     expect(await perspective!.getShacl("DoesNotExist")).to.be.null;
