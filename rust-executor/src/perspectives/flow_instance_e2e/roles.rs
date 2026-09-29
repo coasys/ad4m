@@ -392,8 +392,14 @@ async fn declare_owner_monotonic(f: &mut Fixture) {
 /// `monotonic`.
 async fn declare_monotonic(f: &mut Fixture, paths: &[&str]) {
     use crate::perspectives::interpretation_test_support::TASK_SDNA;
+    let shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
+    register_task_class(f, shacl, paths).await;
+}
+
+/// Register `shacl` as `ns://Task` with the properties under `paths`
+/// declared `monotonic`.
+async fn register_task_class(f: &mut Fixture, mut shacl: serde_json::Value, paths: &[&str]) {
     use crate::perspectives::perspective_instance::SdnaType;
-    let mut shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
     for property in shacl["properties"].as_array_mut().expect("properties") {
         if paths.iter().any(|p| property["path"] == *p) {
             property["monotonic"] = serde_json::Value::Bool(true);
@@ -495,6 +501,84 @@ async fn a_declared_role_grant_ends_only_by_revocation() {
     );
 }
 
+/// Seed the owner-gated flow with `TASK` granted to this agent and tagged
+/// `ns://domain` "design", register `ns://Task` with an optional `domain`
+/// property and `declared` monotonic, let a peer remove every `removed` link
+/// of `TASK`, and report whether the `role` query still matches `TASK`. The
+/// grant link itself stays in every case.
+async fn a_peers_removal_keeps_the_role_instance(
+    declared: &[&str],
+    role: &str,
+    removed: &str,
+) -> bool {
+    use crate::perspectives::flow_instance::roles::{resolve_role_grants, RoleGrantEvidence};
+    use crate::perspectives::interpretation_test_support::TASK_SDNA;
+    use crate::perspectives::shacl_parser::ModelQuery;
+
+    let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
+    let mut shacl: serde_json::Value = serde_json::from_str(TASK_SDNA).expect("TASK_SDNA");
+    shacl["properties"]
+        .as_array_mut()
+        .expect("properties")
+        .push(serde_json::json!({
+            "path": "ns://domain", "name": "domain", "min_count": 0, "max_count": 1,
+            "resolve_language": "literal",
+            "setter": [{"action": "setSingleTarget", "source": "this",
+                        "predicate": "ns://domain", "target": "value"}]
+        }));
+    register_task_class(&mut f, shacl, declared).await;
+    let me = acting_did(&f);
+    f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Shared)
+        .await;
+    f.link(TASK, "ns://domain", &literal("design"), LinkStatus::Shared)
+        .await;
+    let role: ModelQuery = serde_json::from_str(role).expect("role");
+    let record = f.instances().await.remove(0);
+    let matched =
+        |ev: &Vec<RoleGrantEvidence>| ev[0].instances.iter().any(|i| i.instance_id == TASK);
+    let resolve = || {
+        resolve_role_grants(
+            &f.perspective,
+            "delivery://Delivery.scoped",
+            &role,
+            &record,
+            std::slice::from_ref(&me),
+        )
+    };
+    assert!(
+        matched(&resolve().await.expect("resolve")),
+        "control: the instance is a role instance"
+    );
+
+    let removals: Vec<LinkExpression> = f
+        .perspective
+        .get_links(&LinkQuery {
+            source: Some(TASK.to_string()),
+            predicate: Some(removed.to_string()),
+            ..Default::default()
+        })
+        .await
+        .expect("get_links")
+        .into_iter()
+        .map(|l| {
+            let mut l = LinkExpression::from(l);
+            l.status = None;
+            l
+        })
+        .collect();
+    assert_eq!(removals.len(), 1, "one {removed} link to remove");
+    f.perspective
+        .diff_from_link_language(PerspectiveDiff {
+            additions: vec![],
+            removals,
+        })
+        .await
+        .expect("sync a peer's removal");
+    assert_eq!(owner_grants(&f).await.len(), 1, "the grant link stays");
+    let after = resolve().await.expect("resolve");
+    matched(&after)
+}
+
 /// T4, the instance side door (review of #1183, finding 1). A `fromRole`
 /// gate matches a role *instance*, so a peer who removes the instance's class
 /// flag un-grants the role even though the DID link stays. The role class
@@ -503,70 +587,41 @@ async fn a_declared_role_grant_ends_only_by_revocation() {
 /// control shows the side door with only the DID property declared.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_declared_role_instance_keeps_its_flag_and_its_grant() {
-    use crate::perspectives::flow_instance::roles::{resolve_role_grants, RoleGrantEvidence};
-    use crate::perspectives::shacl_parser::ModelQuery;
-
-    async fn peer_removes_the_type_flag_then_resolves(paths: &[&str]) -> bool {
-        let mut f = seed_owner_gated_review_flow(OWNER_RULE).await;
-        declare_monotonic(&mut f, paths).await;
-        let me = acting_did(&f);
-        f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Shared)
-            .await;
-        let role: ModelQuery =
-            serde_json::from_str(r#"{"className":"ns://Task","didProperty":"owner"}"#)
-                .expect("role");
-        let record = f.instances().await.remove(0);
-        let matched =
-            |ev: &Vec<RoleGrantEvidence>| ev[0].instances.iter().any(|i| i.instance_id == TASK);
-        let resolve = || {
-            resolve_role_grants(
-                &f.perspective,
-                "delivery://Delivery.scoped",
-                &role,
-                &record,
-                std::slice::from_ref(&me),
-            )
-        };
-        assert!(
-            matched(&resolve().await.expect("resolve")),
-            "control: the instance is a role instance"
-        );
-
-        let type_links: Vec<LinkExpression> = f
-            .perspective
-            .get_links(&LinkQuery {
-                source: Some(TASK.to_string()),
-                predicate: Some("ns://type".to_string()),
-                ..Default::default()
-            })
-            .await
-            .expect("get_links")
-            .into_iter()
-            .map(|l| {
-                let mut l = LinkExpression::from(l);
-                l.status = None;
-                l
-            })
-            .collect();
-        assert_eq!(type_links.len(), 1);
-        f.perspective
-            .diff_from_link_language(PerspectiveDiff {
-                additions: vec![],
-                removals: type_links,
-            })
-            .await
-            .expect("sync a peer's removal");
-        assert_eq!(owner_grants(&f).await.len(), 1, "the grant link stays");
-        let after = resolve().await.expect("resolve");
-        matched(&after)
-    }
-
+    const ROLE: &str = r#"{"className":"ns://Task","didProperty":"owner"}"#;
     assert!(
-        peer_removes_the_type_flag_then_resolves(&["ns://owner", "ns://type", "ns://title"]).await,
+        a_peers_removal_keeps_the_role_instance(
+            &["ns://owner", "ns://type", "ns://title"],
+            ROLE,
+            "ns://type"
+        )
+        .await,
         "the flag is declared: the peer's removal is dropped, the grant resolves"
     );
     assert!(
-        !peer_removes_the_type_flag_then_resolves(&["ns://owner"]).await,
+        !a_peers_removal_keeps_the_role_instance(&["ns://owner"], ROLE, "ns://type").await,
         "control: only the DID declared, the flag goes and the instance drops out"
+    );
+}
+
+/// T4, the `where` side door (review of #1183, finding 1). A role query that
+/// filters on `domain` stops matching once a peer removes the instance's
+/// `domain` link, unless the role class declares `domain` monotonic too.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_declared_role_instance_keeps_its_where_field_and_its_grant() {
+    const ROLE: &str =
+        r#"{"className":"ns://Task","didProperty":"owner","where":{"domain":"design"}}"#;
+    let required = ["ns://owner", "ns://type", "ns://title"];
+    assert!(
+        a_peers_removal_keeps_the_role_instance(
+            &[&required[..], &["ns://domain"]].concat(),
+            ROLE,
+            "ns://domain"
+        )
+        .await,
+        "the where field is declared: the peer's removal is dropped, the grant resolves"
+    );
+    assert!(
+        !a_peers_removal_keeps_the_role_instance(&required, ROLE, "ns://domain").await,
+        "control: the where field undeclared, it goes and the instance drops out"
     );
 }
