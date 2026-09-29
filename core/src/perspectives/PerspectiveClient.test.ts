@@ -47,7 +47,7 @@ describe('PerspectiveClient RPC operations', () => {
         const handle = makeHandle('uuid-1', 'Test')
         mockCall.mockResolvedValue(handle)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const proxy = await client.byUUID('uuid-1')
 
         expect(proxy).not.toBeNull()
@@ -59,7 +59,7 @@ describe('PerspectiveClient RPC operations', () => {
     it('byUUID returns null when server returns null', async () => {
         mockCall.mockResolvedValue(null)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const proxy = await client.byUUID('non-existent')
 
         expect(proxy).toBeNull()
@@ -68,7 +68,7 @@ describe('PerspectiveClient RPC operations', () => {
     it('byUUID returns null on 404 RpcError', async () => {
         mockCall.mockRejectedValue(new RpcError(404, 'Not found'))
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const proxy = await client.byUUID('missing')
 
         expect(proxy).toBeNull()
@@ -77,7 +77,7 @@ describe('PerspectiveClient RPC operations', () => {
     it('byUUID rethrows non-404 errors', async () => {
         mockCall.mockRejectedValue(new RpcError(500, 'Internal error'))
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
 
         await expect(client.byUUID('error-uuid')).rejects.toThrow('RPC error 500')
     })
@@ -89,7 +89,7 @@ describe('PerspectiveClient RPC operations', () => {
         ]
         mockCall.mockResolvedValue(handles)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const all = await client.all()
 
         expect(all.length).toBe(2)
@@ -104,7 +104,7 @@ describe('PerspectiveClient RPC operations', () => {
         const handle = makeHandle('uuid-new', 'New')
         mockCall.mockResolvedValue(handle)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const proxy = await client.add('New')
 
         expect(proxy.uuid).toBe('uuid-new')
@@ -116,7 +116,7 @@ describe('PerspectiveClient RPC operations', () => {
         const updatedHandle = makeHandle('uuid-u', 'Updated')
         mockCall.mockResolvedValue(updatedHandle)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const proxy = await client.update('uuid-u', 'Updated')
 
         expect(proxy.uuid).toBe('uuid-u')
@@ -127,24 +127,39 @@ describe('PerspectiveClient RPC operations', () => {
     it('remove() calls perspective.remove and returns result', async () => {
         mockCall.mockResolvedValue(true)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const result = await client.remove('uuid-r')
 
         expect(result).toEqual({ perspectiveRemove: true })
         expect(mockCall).toHaveBeenCalledWith('perspective.remove', { uuid: 'uuid-r' })
     })
 
-    it('constructor subscribes to events when subscribe=true', () => {
-        new PerspectiveClient('http://localhost:12000', 'token', true)
-
-        // Should have subscribed 3 times (added, updated, removed)
-        expect(mockSubscribe).toHaveBeenCalledTimes(3)
-    })
-
-    it('constructor does not subscribe when subscribe=false', () => {
-        new PerspectiveClient('http://localhost:12000', 'token', false)
+    it('constructor opens no event subscription', () => {
+        new PerspectiveClient('http://localhost:12000', 'token')
 
         expect(mockSubscribe).not.toHaveBeenCalled()
+    })
+
+    it('adding a lifecycle listener subscribes one shared event handler', () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        client.addPerspectiveAddedListener(() => null)
+        client.addPerspectiveUpdatedListener(() => null)
+        client.addPerspectiveRemovedListener(() => null)
+
+        // ApiClient keeps handlers in a Set: the same handler every time adds nothing.
+        const handlers = new Set(mockSubscribe.mock.calls.map(([cb]) => cb))
+        expect(handlers.size).toBe(1)
+    })
+
+    it('removeAllListeners() also removes the sync-state subscription', async () => {
+        const unsub = jest.fn()
+        mockSubscribe.mockReturnValue(unsub)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+
+        await client.addPerspectiveSyncStateChangeListener('uuid-s', [])
+        client.removeAllListeners('uuid-s')
+
+        expect(unsub).toHaveBeenCalledTimes(1)
     })
 
     it('addPerspectiveAddedListener dispatches events to callbacks', () => {
@@ -154,7 +169,7 @@ describe('PerspectiveClient RPC operations', () => {
             return () => {}
         })
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', true)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const received: PerspectiveHandle[] = []
         client.addPerspectiveAddedListener((h) => { received.push(h); return null })
 
@@ -170,7 +185,7 @@ describe('PerspectiveClient RPC operations', () => {
         const linkExpr = { author: 'did:test', timestamp: '2026-01-01', data: { source: 'a', target: 'b', predicate: 'c' }, proof: {} }
         mockCall.mockResolvedValue(linkExpr)
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const result = await client.addLink('uuid-l', { source: 'a', target: 'b', predicate: 'c' })
 
         expect(result).toEqual(linkExpr)
@@ -185,7 +200,7 @@ describe('PerspectiveClient RPC operations', () => {
     it('queryLinks sends query parameters correctly', async () => {
         mockCall.mockResolvedValue([])
 
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         await client.queryLinks('uuid-q', new LinkQuery({ source: 'src', predicate: 'pred', target: 'tgt' }))
 
         expect(mockCall).toHaveBeenCalledWith(
@@ -211,7 +226,7 @@ describe('PerspectiveClient RPC operations', () => {
 
     it('querySparql forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue(JSON.stringify([]))
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
         await client.querySparql('uuid-q', 'SELECT * WHERE { ?s ?p ?o }', { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(
@@ -223,7 +238,7 @@ describe('PerspectiveClient RPC operations', () => {
 
     it('modelQuery forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue(JSON.stringify({ instances: [], totalCount: 0 }))
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
         await client.modelQuery('uuid-q', 'Recipe', '{}', { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(
@@ -235,7 +250,7 @@ describe('PerspectiveClient RPC operations', () => {
 
     it('queryLinks forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue([])
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
         await client.queryLinks('uuid-q', new LinkQuery({ source: 'src' }), { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(
@@ -247,7 +262,7 @@ describe('PerspectiveClient RPC operations', () => {
 
     it('queryProlog forwards options to apiClient.call', async () => {
         mockCall.mockResolvedValue(JSON.stringify([]))
-        const client = new PerspectiveClient('http://localhost:12000', 'token', false)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
         const controller = new AbortController()
         await client.queryProlog('uuid-q', 'foo(X).', { signal: controller.signal })
         expect(mockCall).toHaveBeenCalledWith(

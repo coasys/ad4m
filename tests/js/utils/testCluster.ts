@@ -82,7 +82,7 @@ export class TestCluster {
 
         while (Date.now() - start < timeoutMs) {
             try {
-                const client = new Ad4mClient(baseUrl(port), adminCredential, false);
+                const client = new Ad4mClient(baseUrl(port), adminCredential);
                 // Try a simple query to verify connectivity
                 await client.runtime.info();
                 return client;

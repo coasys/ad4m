@@ -2,9 +2,9 @@ import { Ad4mClient, LinkExpression } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { version } from "../package.json";
 
-export async function buildAd4mClient(server: string, subscribe = true): Promise<Ad4mClient> {
+export async function buildAd4mClient(server: string): Promise<Ad4mClient> {
   let token: string = await invoke("request_credential");
-  return new Ad4mClient(server, token, subscribe);
+  return new Ad4mClient(server, token);
 }
 
 export function generateLanguageInitials(name: string) {

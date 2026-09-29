@@ -41,7 +41,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             apiPort, hcAdminPort, hcAppPort, false);
 
-        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort))
         
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")

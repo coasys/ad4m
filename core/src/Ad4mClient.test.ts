@@ -343,7 +343,7 @@ let ad4m: Ad4mClient;
 beforeAll(() => {
     (global as any).WebSocket = MockWebSocket as any;
     // Ad4mClient takes an HTTP base URL; apiClient converts to ws:// internally
-    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
 });
 
 afterAll(() => {
@@ -462,10 +462,9 @@ describe('AgentClient', () => {
     });
 
     test('agent-updated event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         freshClient.agent.addUpdatedListener(callback);
-        freshClient.agent.subscribeAgentUpdated();
 
         const ws = lastOf(MockWebSocket.instances);
 
@@ -482,10 +481,9 @@ describe('AgentClient', () => {
     });
 
     test('agent-status-changed event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         freshClient.agent.addAgentStatusChangedListener(callback);
-        freshClient.agent.subscribeAgentStatusChanged();
 
         const ws = lastOf(MockWebSocket.instances);
 
@@ -609,7 +607,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
@@ -621,16 +619,15 @@ describe('PerspectiveClient', () => {
     });
 
     test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
-        freshClient.perspective.subscribePerspectiveAdded();
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
     });
 
     test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
@@ -689,10 +686,9 @@ describe('PerspectiveClient', () => {
     });
 
     test('runtime exception subscriptions normalize PascalCase exception types', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn(() => null);
         freshClient.runtime.addExceptionCallback(callback);
-        freshClient.runtime.subscribeExceptionOccurred();
 
         const ws = lastOf(MockWebSocket.instances);
         ws.emit({
@@ -714,7 +710,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('subscribeToQueryUpdates() ignores unrelated events and accepts object results', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
@@ -1234,68 +1230,60 @@ describe('Ad4mClient', () => {
     });
 
     test('token is passed via WebSocket URL query param', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token');
         await freshClient.agent.me();
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
-    test('startSubscriptions() on a subscribe=false client delivers each default event exactly once', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
-        const added = jest.fn();
-        const updated = jest.fn();
-        const removed = jest.fn();
-        const message = jest.fn();
-        freshClient.perspective.addPerspectiveAddedListener(added);
-        freshClient.perspective.addPerspectiveUpdatedListener(updated);
-        freshClient.perspective.addPerspectiveRemovedListener(removed);
-        freshClient.runtime.addMessageCallback(message);
-
-        // Called twice (as ad4m-connect does on re-auth): must not double-deliver.
-        freshClient.startSubscriptions();
-        freshClient.startSubscriptions();
+    test('a listener on a new client receives each default event exactly once', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        const listeners = {
+            agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
+            hosting: jest.fn(), computeLog: jest.fn(),
+            added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
+            message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
+        };
+        freshClient.agent.addUpdatedListener(listeners.agentUpdated);
+        freshClient.agent.addAgentStatusChangedListener(listeners.agentStatus);
+        freshClient.agent.addAppChangedListener(listeners.apps);
+        freshClient.agent.addHostingUserInfoChangedListener(listeners.hosting);
+        freshClient.agent.addComputeLogUpdatedListener(listeners.computeLog);
+        freshClient.perspective.addPerspectiveAddedListener(listeners.added);
+        freshClient.perspective.addPerspectiveUpdatedListener(listeners.updated);
+        freshClient.perspective.addPerspectiveRemovedListener(listeners.removed);
+        freshClient.runtime.addMessageCallback(listeners.message);
+        freshClient.runtime.addExceptionCallback(listeners.exception);
+        freshClient.runtime.addNotificationTriggeredCallback(listeners.notification);
         await freshClient.agent.me(); // wait for the socket to open
 
         const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:upd' } });
+        ws.emit({ type: 'agent-status-changed', agent: { did: 'did:test:upd' } });
+        ws.emit({ type: 'apps-changed' });
+        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c', remainingCredits: '1', freeAccess: false });
+        ws.emit({ type: 'compute-log-updated', id: 'log-1' });
         ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-a' } });
         ws.emit({ type: 'perspective-updated', perspective: { uuid: 'uuid-a' } });
         ws.emit({ type: 'perspective-removed', uuid: 'uuid-a' });
         ws.emit({ type: 'message-received', message: { author: 'did:test:1' } });
+        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
+        ws.emit({ type: 'notification-triggered', notification: { id: 'n-1' } });
 
-        expect(added).toHaveBeenCalledTimes(1);
-        expect(added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
-        expect(updated).toHaveBeenCalledTimes(1);
-        expect(removed).toHaveBeenCalledTimes(1);
-        expect(removed).toHaveBeenCalledWith('uuid-a');
-        expect(message).toHaveBeenCalledTimes(1);
+        for (const listener of Object.values(listeners)) {
+            expect(listener).toHaveBeenCalledTimes(1);
+        }
+        expect(listeners.added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
+        expect(listeners.removed).toHaveBeenCalledWith('uuid-a');
         freshClient.close();
     });
 
-    test('startSubscriptions() on a subscribe=true client does not double-deliver', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', true);
-        const added = jest.fn();
-        const agentUpdated = jest.fn();
-        freshClient.perspective.addPerspectiveAddedListener(added);
-        freshClient.agent.addUpdatedListener(agentUpdated);
-        freshClient.startSubscriptions();
-        await freshClient.agent.me();
-
-        const ws = lastOf(MockWebSocket.instances);
-        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-b' } });
-        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:upd' } });
-
-        expect(added).toHaveBeenCalledTimes(1);
-        expect(agentUpdated).toHaveBeenCalledTimes(1);
+    test('a listener added after close() receives events again', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
         freshClient.close();
-    });
-
-    test('startSubscriptions() after close() subscribes again', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
         const added = jest.fn();
         freshClient.perspective.addPerspectiveAddedListener(added);
-        freshClient.startSubscriptions();
-        freshClient.close();
-        freshClient.startSubscriptions();
         await freshClient.agent.me();
 
         lastOf(MockWebSocket.instances).emit({ type: 'perspective-added', perspective: { uuid: 'uuid-c' } });
@@ -1304,8 +1292,14 @@ describe('Ad4mClient', () => {
         freshClient.close();
     });
 
+    test('a client without listeners opens no event subscription', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        expect(MockWebSocket.instances).toHaveLength(0);
+        freshClient.close();
+    });
+
     test('a throwing listener does not stop later listeners for the same event', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', true);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
         const first = jest.fn();
         const third = jest.fn();

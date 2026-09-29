@@ -6,7 +6,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
     isLocked: vi.fn().mockResolvedValue(false),
     status: vi.fn().mockResolvedValue({ isInitialized: true }),
-    startSubscriptions: vi.fn(),
     requestCapability: vi.fn().mockResolvedValue('req-123'),
     generateJwt: vi.fn().mockResolvedValue('jwt-token'),
     hostingUserInfo: vi.fn().mockResolvedValue({
@@ -21,9 +20,7 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
     createUser: vi.fn().mockResolvedValue({ success: true }),
     signMessage: vi.fn().mockResolvedValue({ signature: 'sig', publicKey: 'pk' }),
     addHostingUserInfoChangedListener: vi.fn(),
-    subscribeHostingUserInfoChanged: vi.fn(),
     addComputeLogUpdatedListener: vi.fn(),
-    subscribeComputeLogUpdated: vi.fn(),
     computeLog: vi.fn().mockResolvedValue([]),
     requestPayment: vi.fn().mockResolvedValue({ success: true, message: 'OK' }),
   };
@@ -35,7 +32,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 
   const mockClientInstance = {
     close: vi.fn(),
-    startSubscriptions: vi.fn(),
     agent: mockAgent,
     runtime: mockRuntime,
   };
@@ -83,7 +79,6 @@ describe('Ad4mConnect', () => {
     mockAgent.loginUser.mockClear();
     mockAgent.createUser.mockClear();
     mockClientInstance.close.mockClear();
-    mockClientInstance.startSubscriptions.mockClear();
     mockRuntime.info.mockClear();
     mockRuntime.multiUserEnabled.mockClear();
     // Restore default implementations

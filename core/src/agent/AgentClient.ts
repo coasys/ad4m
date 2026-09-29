@@ -1,5 +1,4 @@
 import { ApiClient, WsEvent } from "../apiClient";
-import { subscribeChannel } from "../subscribeChannel";
 import { notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
@@ -49,8 +48,6 @@ export class AgentClient {
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
-  #unsubscribers: (() => void)[];
-  #channelHandlers: Map<string, (data: WsEvent) => void> = new Map();
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -66,7 +63,7 @@ export class AgentClient {
    *  After this window any restart triggers a fresh network fetch. */
   static REMOTE_AGENT_TTL_L2_MS = 5 * 60_000; // 5 minutes
 
-  constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+  constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#baseUrl = baseUrl;
     this.#token = token;
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
@@ -75,14 +72,7 @@ export class AgentClient {
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
     this.#computeLogUpdatedCallbacks = [];
-    this.#unsubscribers = [];
     this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
-
-    if (subscribe) {
-      this.subscribeAgentUpdated();
-      this.subscribeAgentStatusChanged();
-      this.subscribeAppsChanged();
-    }
   }
 
   async me(): Promise<Agent> {
@@ -125,6 +115,8 @@ export class AgentClient {
   }
 
   async byDID(did: string): Promise<Agent> {
+    // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
+    this.#listen();
     const now = Date.now();
     const cached = this.#memCache.get(did);
 
@@ -162,6 +154,13 @@ export class AgentClient {
     });
 
     return promise;
+  }
+
+  #cacheAgent(agent: Agent): void {
+    if (!agent.did) return;
+    this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
+    this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
+    this.#listen();
   }
 
   /**
@@ -203,17 +202,14 @@ export class AgentClient {
     agent.directMessageLanguage = a.directMessageLanguage;
 
     // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the subscription event
-    if (agent.did) {
-      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-    }
+    // return fresh data without waiting for the agent-updated event
+    this.#cacheAgent(agent);
 
     return agent;
   }
 
   async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token);
+    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token, this.#apiClient);
 
     const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
     const agentMe = await this.me();
@@ -241,11 +237,8 @@ export class AgentClient {
     agent.directMessageLanguage = a.directMessageLanguage;
 
     // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the subscription event
-    if (agent.did) {
-      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-    }
+    // return fresh data without waiting for the agent-updated event
+    this.#cacheAgent(agent);
 
     return agent;
   }
@@ -268,79 +261,56 @@ export class AgentClient {
 
   addUpdatedListener(listener: AgentUpdatedCallback) {
     this.#updatedCallbacks.push(listener);
+    this.#listen();
   }
 
   addAppChangedListener(listener: AgentAppsUpdatedCallback) {
     this.#appsChangedCallback.push(listener);
-  }
-
-  subscribeAgentUpdated() {
-    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'agent-updated', (data) => {
-      if (data.type === 'agent-updated') {
-        const agent = (data.agent || data) as Agent;
-
-        // Update L1 and L2 cache from the event payload
-        if (agent.did) {
-          this.#memCache.set(agent.did, {
-            promise: Promise.resolve(agent),
-            ts: Date.now(),
-          });
-          this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-        }
-
-        notifyListeners(this.#updatedCallbacks, 'agent-updated', agent);
-      }
-    });
-    if (unsub) this.#unsubscribers.push(unsub);
-  }
-
-  subscribeAppsChanged() {
-    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'apps-changed', (data) => {
-      if (data.type === 'apps-changed') {
-        notifyListeners(this.#appsChangedCallback, 'apps-changed');
-      }
-    });
-    if (unsub) this.#unsubscribers.push(unsub);
+    this.#listen();
   }
 
   addAgentStatusChangedListener(listener: AgentStatusChangedCallback) {
     this.#agentStatusChangedCallbacks.push(listener);
-  }
-
-  subscribeAgentStatusChanged() {
-    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'agent-status-changed', (data) => {
-      if (data.type === 'agent-status-changed') {
-        notifyListeners(this.#agentStatusChangedCallbacks, 'agent-status-changed', (data.agent || data) as Agent);
-      }
-    });
-    if (unsub) this.#unsubscribers.push(unsub);
+    this.#listen();
   }
 
   addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
     this.#hostingUserInfoChangedCallbacks.push(listener);
-  }
-
-  subscribeHostingUserInfoChanged() {
-    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'hosting-user-info-changed', (data) => {
-      if (data.type === 'hosting-user-info-changed') {
-        notifyListeners(this.#hostingUserInfoChangedCallbacks, 'hosting-user-info-changed', (data.info || data) as HostingUserInfo);
-      }
-    });
-    if (unsub) this.#unsubscribers.push(unsub);
+    this.#listen();
   }
 
   addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
     this.#computeLogUpdatedCallbacks.push(listener);
+    this.#listen();
   }
 
-  subscribeComputeLogUpdated() {
-    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'compute-log-updated', (data) => {
-      if (data.type === 'compute-log-updated') {
-        notifyListeners(this.#computeLogUpdatedCallbacks, 'compute-log-updated', (data.entry || data) as ComputeLogEntry);
-      }
-    });
-    if (unsub) this.#unsubscribers.push(unsub);
+  /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
+  #listen(): void {
+    this.#apiClient.subscribe(this.#onEvent);
   }
+
+  #onEvent = (data: WsEvent): void => {
+    switch (data.type) {
+      case 'agent-updated': {
+        const agent = data.agent as Agent;
+        this.#cacheAgent(agent);
+        notifyListeners(this.#updatedCallbacks, 'agent-updated', agent);
+        break;
+      }
+      case 'agent-status-changed':
+        notifyListeners(this.#agentStatusChangedCallbacks, 'agent-status-changed', data.agent as Agent);
+        break;
+      case 'apps-changed':
+        notifyListeners(this.#appsChangedCallback, 'apps-changed');
+        break;
+      case 'hosting-user-info-changed':
+        notifyListeners(this.#hostingUserInfoChangedCallbacks, 'hosting-user-info-changed', data as unknown as HostingUserInfo);
+        break;
+      case 'compute-log-updated':
+        notifyListeners(this.#computeLogUpdatedCallbacks, 'compute-log-updated', data as unknown as ComputeLogEntry);
+        break;
+    }
+  };
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     return this.#apiClient.call<string>('agent.requestCapability', { authInfo });

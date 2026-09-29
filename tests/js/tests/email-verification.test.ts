@@ -64,7 +64,7 @@ describe("Email Verification with Mock Service", () => {
             : await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false);
 
-        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, undefined, false)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")

@@ -1,5 +1,4 @@
 import { ApiClient, WsEvent } from "../apiClient"
-import { subscribeChannel } from "../subscribeChannel"
 import { notifyListeners } from "../notifyListeners"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
@@ -20,7 +19,6 @@ import type {
 export type MessageCallback = (message: PerspectiveExpression) => null
 export type ExceptionCallback = (info: ExceptionInfo) => null
 export type NotificationTriggeredCallback = (notification: TriggeredNotification) => null
-export type NotificationRequestedCallback = (notification: Notification) => null
 
 function normalizeExceptionType(type: ExceptionInfo['type'] | string): ExceptionInfo['type'] {
     if (typeof type !== 'string' || type === type.toUpperCase()) {
@@ -38,23 +36,12 @@ export class RuntimeClient {
     #messageReceivedCallbacks: MessageCallback[]
     #exceptionOccurredCallbacks: ExceptionCallback[]
     #notificationTriggeredCallbacks: NotificationTriggeredCallback[]
-    #notificationRequestedCallbacks: NotificationRequestedCallback[]
-    #unsubscribers: (() => void)[]
-    #channelHandlers: Map<string, (data: WsEvent) => void> = new Map()
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
         this.#messageReceivedCallbacks = []
         this.#exceptionOccurredCallbacks = []
         this.#notificationTriggeredCallbacks = []
-        this.#notificationRequestedCallbacks = []
-        this.#unsubscribers = []
-
-        if(subscribe) {
-            this.subscribeMessageReceived()
-            this.subscribeExceptionOccurred()
-            this.subscribeNotificationTriggered()
-        }
     }
 
     async info(): Promise<RuntimeInfo> {
@@ -286,45 +273,42 @@ export class RuntimeClient {
 
     addNotificationTriggeredCallback(cb: NotificationTriggeredCallback) {
         this.#notificationTriggeredCallbacks.push(cb)
-    }
-
-    subscribeNotificationTriggered() {
-        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'notification-triggered', (data) => {
-            if (data.type === 'notification-triggered') {
-                notifyListeners(this.#notificationTriggeredCallbacks, 'notification-triggered', data.notification as TriggeredNotification)
-            }
-        })
-        if (unsub) this.#unsubscribers.push(unsub)
+        this.#listen()
     }
 
     addMessageCallback(cb: MessageCallback) {
         this.#messageReceivedCallbacks.push(cb)
-    }
-
-    subscribeMessageReceived() {
-        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'message-received', (data) => {
-            if (data.type === 'message-received') {
-                notifyListeners(this.#messageReceivedCallbacks, 'message-received', data.message as PerspectiveExpression)
-            }
-        })
-        if (unsub) this.#unsubscribers.push(unsub)
+        this.#listen()
     }
 
     addExceptionCallback(cb: ExceptionCallback) {
         this.#exceptionOccurredCallbacks.push(cb)
+        this.#listen()
     }
 
-    subscribeExceptionOccurred() {
-        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'exception-occurred', (data) => {
-            if (data.type === 'exception-occurred' && data.exception) {
+    /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
+    #listen(): void {
+        this.#apiClient.subscribe(this.#onEvent)
+    }
+
+    #onEvent = (data: WsEvent): void => {
+        switch (data.type) {
+            case 'notification-triggered':
+                notifyListeners(this.#notificationTriggeredCallbacks, 'notification-triggered', data.notification as TriggeredNotification)
+                break
+            case 'message-received':
+                notifyListeners(this.#messageReceivedCallbacks, 'message-received', data.message as PerspectiveExpression)
+                break
+            case 'exception-occurred': {
+                if (!data.exception) break
                 const exception = data.exception as ExceptionInfo
                 const normalizedException = {
                     ...exception,
                     type: normalizeExceptionType(exception.type),
                 }
                 notifyListeners(this.#exceptionOccurredCallbacks, 'exception-occurred', normalizedException)
+                break
             }
-        })
-        if (unsub) this.#unsubscribers.push(unsub)
+        }
     }
 }
