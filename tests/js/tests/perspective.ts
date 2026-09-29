@@ -3,6 +3,7 @@ import { TestContext } from './integration.test'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { sleep } from "../utils/utils";
+import { pollUntil } from "../utils/linkLangConfig";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -281,7 +282,7 @@ export default function perspectiveTests(testContext: TestContext) {
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
                     await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
 
-                    for (let i = 0; i < 150 && wakes.length === 0; i++) await sleep(100)
+                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
                     expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
                 } finally {
                     manager.disposeAll()
