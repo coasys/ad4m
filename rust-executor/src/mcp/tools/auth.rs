@@ -542,14 +542,12 @@ mod capability_mint_tests {
     }
 
     /// The no-credential convenience must survive the gate: on an executor
-    /// started WITHOUT --admin-credential, `check_auth` reports a bare
-    /// caller (no session token, no Authorization header) as authenticated,
-    /// so the auto-permit and inline code behave exactly as before this fix.
-    /// Note that this is NOT localhost-scoped: `check_auth` has no
-    /// peer-address check, so with the default 0.0.0.0 bind any LAN caller
-    /// gets the same treatment — see #1033. Composes the same two halves the
-    /// transport wrapper does: verdict from `check_auth_with_header`, then
-    /// the request body.
+    /// started WITHOUT --admin-credential, the empty token holds ALL_CAPABILITY,
+    /// so a bare caller (no session token, no Authorization header) still gets
+    /// the auto-permit and the inline code. Note that this is NOT
+    /// localhost-scoped: with the default 0.0.0.0 bind any LAN caller gets the
+    /// same treatment — see #1033 and #1059. Runs the tool's real path,
+    /// `request_capability_with_header`, with no header.
     #[tokio::test]
     async fn without_admin_credential_an_unauthenticated_caller_is_still_auto_permitted() {
         let handler = Ad4mMcpHandler::new(McpContext {
@@ -558,14 +556,8 @@ mod capability_mint_tests {
             dynamic_class_tools: false,
         });
 
-        let verdict = handler.check_auth_with_header(None).await;
-        assert!(
-            verdict,
-            "a no-admin-credential executor should authenticate a bare caller"
-        );
-
         let resp = handler
-            .handle_capability_request(mint_params(), verdict)
+            .request_capability_with_header(None, mint_params())
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
