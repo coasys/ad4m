@@ -118,6 +118,21 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
+    // Class-field initialisers (`count: number = 0`) run in the constructor,
+    // so the prototype never holds them. Read them from one throwaway
+    // instance, built without a perspective; a constructor that throws
+    // without one just loses inference.
+    let fieldDefaults: any;
+    try { fieldDefaults = new target(); } catch {}
+    const fieldValue = (propName: string): unknown => {
+        if (obj[propName] !== undefined) return obj[propName];
+        try {
+            return fieldDefaults?.[propName];
+        } catch {
+            return undefined;
+        }
+    };
+
     // ── Convert properties to SHACL property shapes ────────────────────
     for (const propName in properties) {
         const propMeta = properties[propName];
@@ -163,9 +178,10 @@ export function buildSHACL(
             const isLiteral =
                 propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
             if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
-                const initialType = typeof obj[propName];
+                const initialType = typeof fieldValue(propName);
                 if (initialType === "number") {
-                    propShape.datatype = "xsd://integer";
+                    // decimal, not integer: a `= 0` default must not make 0.5 invalid.
+                    propShape.datatype = "xsd://decimal";
                 } else if (initialType === "boolean") {
                     propShape.datatype = "xsd://boolean";
                 } else if (initialType === "string" || isLiteral) {
