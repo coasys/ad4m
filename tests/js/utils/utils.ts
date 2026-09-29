@@ -356,15 +356,16 @@ export function sleep(ms: number) {
 }
 
 /**
- * Poll a predicate until it returns true, or throw after `timeoutMs`.
+ * Poll a predicate until it returns true, or throw with `label` after
+ * `timeoutMs`.
  *
  * Replaces the `await sleep(N); expect(x)` pattern: the test completes as
- * soon as the condition holds (fast path) and only fails after a bounded
- * timeout (no flake from "sleep wasn't long enough").
+ * soon as the condition holds and only fails after a bounded timeout.
+ * Only for POSITIVE conditions: an absence check ("X does not happen") passes
+ * on the first tick. Use `assertStaysFalse` after a positive barrier for those.
  *
  * The predicate may be sync or async. Exceptions from it are treated as
- * "not yet true" so an API call that throws while the executor is still
- * starting doesn't have to be wrapped by the caller.
+ * "not yet true"; the last one is reported in the timeout message.
  */
 export async function pollUntil(
     predicate: () => boolean | Promise<boolean>,
@@ -372,13 +373,15 @@ export async function pollUntil(
 ): Promise<void> {
     const { timeoutMs = 15000, intervalMs = 200, label = "condition" } = opts;
     const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
     while (Date.now() < deadline) {
         try {
             if (await predicate()) return;
-        } catch { /* treat as "not yet" */ }
+        } catch (err) { lastError = err; /* treat as "not yet" */ }
         await sleep(intervalMs);
     }
-    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}`);
+    const suffix = lastError ? ` (last error: ${lastError instanceof Error ? lastError.message : String(lastError)})` : "";
+    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}${suffix}`);
 }
 
 /**
@@ -403,12 +406,14 @@ export async function stopChildProcess(child: ChildProcess, graceMs = 5000): Pro
 }
 
 /**
- * Actively polls a predicate and fails immediately if it ever becomes true.
- * Returns successfully when the wait period expires without the predicate
- * firing — use this for negative assertions ("X should NOT happen").
+ * Actively polls a predicate for `waitMs` and fails as soon as it becomes true.
+ * Use this for negative assertions ("X should NOT happen"), and run it after a
+ * positive barrier or with a window at least as long as the latency of the
+ * thing that must not happen.
  *
- * This replaces `await sleep(N); expect(x).to.be.false` with an approach
- * that catches transient true states and can use a shorter wait window.
+ * A predicate that throws counts as "not evaluable", not as false: if it never
+ * evaluated successfully during the window, this fails with the last error, so
+ * a broken predicate cannot pass the check vacuously.
  */
 export async function assertStaysFalse(
     predicate: () => boolean | Promise<boolean>,
@@ -416,16 +421,24 @@ export async function assertStaysFalse(
 ): Promise<void> {
     const { waitMs = 1000, intervalMs = 100, label = "condition" } = opts;
     const deadline = Date.now() + waitMs;
+    let evaluations = 0;
+    let lastError: unknown;
     while (Date.now() < deadline) {
+        let value: boolean;
         try {
-            if (await predicate()) {
-                throw new Error(`assertStaysFalse failed: ${label} became true`);
-            }
-        } catch (e: any) {
-            if (e.message?.startsWith("assertStaysFalse failed:")) throw e;
-            /* treat other exceptions as "not yet evaluable" */
+            value = await predicate();
+            evaluations++;
+        } catch (err) {
+            lastError = err;
+            await sleep(intervalMs);
+            continue;
         }
+        if (value) throw new Error(`assertStaysFalse failed: ${label} became true`);
         await sleep(intervalMs);
+    }
+    if (evaluations === 0) {
+        const detail = lastError instanceof Error ? lastError.message : String(lastError);
+        throw new Error(`assertStaysFalse: ${label} never evaluated in ${waitMs}ms (last error: ${detail})`);
     }
 }
 

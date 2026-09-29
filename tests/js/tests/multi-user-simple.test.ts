@@ -2410,6 +2410,13 @@ describe("Multi-User Simple integration tests", () => {
         });
     });
 
+    // The isolation tests below check that user 1 does NOT get user 2's event.
+    // An absence check needs a positive barrier: the executor delivers each
+    // topic's events to a WebSocket in publish order, so once user 1 receives
+    // its own barrier event (published after user 2's action), a leaked user 2
+    // event would already have arrived. User 2's own event is the barrier for
+    // the reverse direction. The subscription-init sleep stays: subscribe*()
+    // does not wait for the server, and there is no state to poll for it.
     describe("Perspective Subscriptions", () => {
         after(cleanupAllMainExecutorPerspectives);
 
@@ -2445,6 +2452,9 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveAdded();
 
+            // Subscription-init delay (see comment above this describe)
+            await sleep(1000);
+
             // User 1 creates a perspective
             console.log("\nUser 1 creating perspective...");
             const user1Perspective = await client1.perspective.add("User 1 Only Perspective");
@@ -2459,11 +2469,15 @@ describe("Multi-User Simple integration tests", () => {
 
             await pollUntil(() => user2Events.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveAdded event" });
 
+            // Barrier: user 1's next event arrives after any leaked user 2 event
+            const user1Barrier = await client1.perspective.add("User 1 Barrier Perspective");
+            await pollUntil(() => user1Events.some(e => e.uuid === user1Barrier.uuid), { timeoutMs: 5000, intervalMs: 200, label: "user1 barrier perspectiveAdded event" });
+
             console.log(`\nUser 1 received ${user1Events.length} events`);
             console.log(`User 2 received ${user2Events.length} events`);
 
             // Each user should only see their own perspective creation event
-            expect(user1Events.length).to.equal(1, "User 1 should only receive 1 event (their own perspective)");
+            expect(user1Events.map(e => e.uuid)).to.deep.equal([user1Perspective.uuid, user1Barrier.uuid], "User 1 should only receive events for their own perspectives");
             expect(user2Events.length).to.equal(1, "User 2 should only receive 1 event (their own perspective)");
 
             expect(user1Events[0].uuid).to.equal(user1Perspective.uuid, "User 1 should only see their own perspective");
@@ -2507,6 +2521,9 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveUpdated();
 
+            // Subscription-init delay (see comment above this describe)
+            await sleep(1000);
+
             // User 1 updates their perspective metadata (name)
             console.log("\nUser 1 updating their perspective name...");
             await client1.perspective.update(user1Perspective.uuid, "User 1 Updated Name");
@@ -2519,11 +2536,16 @@ describe("Multi-User Simple integration tests", () => {
 
             await pollUntil(() => user2UpdateEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveUpdated event" });
 
+            // Barrier: user 1's next event arrives after any leaked user 2 event
+            await client1.perspective.update(user1Perspective.uuid, "User 1 Barrier Name");
+            await pollUntil(() => user1UpdateEvents.some(e => e.name === "User 1 Barrier Name"), { timeoutMs: 5000, intervalMs: 200, label: "user1 barrier perspectiveUpdated event" });
+
             console.log(`\nUser 1 received ${user1UpdateEvents.length} update events`);
             console.log(`User 2 received ${user2UpdateEvents.length} update events`);
 
             // Each user should only see updates to their own perspectives
-            expect(user1UpdateEvents.length).to.equal(1, "User 1 should only receive updates for their own perspective");
+            expect(user1UpdateEvents.length).to.equal(2, "User 1 should only receive updates for their own perspective");
+            expect(user1UpdateEvents[1].uuid).to.equal(user1Perspective.uuid);
             expect(user2UpdateEvents.length).to.equal(1, "User 2 should only receive updates for their own perspective");
 
             expect(user1UpdateEvents[0].uuid).to.equal(user1Perspective.uuid);
@@ -2568,6 +2590,9 @@ describe("Multi-User Simple integration tests", () => {
                 user2LinkEvents.push(link);
             }]);
 
+            // Subscription-init delay (see comment above this describe)
+            await sleep(1000);
+
             // User 1 adds a link to their perspective
             console.log("\nUser 1 adding link to their perspective...");
             await client1.perspective.addLink(user1Perspective.uuid, {
@@ -2587,6 +2612,14 @@ describe("Multi-User Simple integration tests", () => {
             });
 
             await pollUntil(() => user2LinkEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 linkAdded event" });
+
+            // Barrier: user 1's next event arrives after any leaked user 2 event
+            await client1.perspective.addLink(user1Perspective.uuid, {
+                source: "test://user1-barrier",
+                target: "test://data1",
+                predicate: "test://has"
+            });
+            await pollUntil(() => user1LinkEvents.some(e => e.data.source === "test://user1-barrier"), { timeoutMs: 5000, intervalMs: 200, label: "user1 barrier linkAdded event" });
 
             console.log(`\nUser 1 received ${user1LinkEvents.length} link events`);
             console.log(`User 2 received ${user2LinkEvents.length} link events`);
@@ -2635,6 +2668,7 @@ describe("Multi-User Simple integration tests", () => {
             // Create perspectives for both users
             const user1Perspective = await client1.perspective.add("User 1 Remove Test");
             const user2Perspective = await client2.perspective.add("User 2 Remove Test");
+            const user1BarrierPerspective = await client1.perspective.add("User 1 Remove Barrier");
 
             // Track events
             const user1RemoveEvents: string[] = [];
@@ -2654,6 +2688,9 @@ describe("Multi-User Simple integration tests", () => {
             });
             client2.perspective.subscribePerspectiveRemoved();
 
+            // Subscription-init delay (see comment above this describe)
+            await sleep(1000);
+
             // User 1 removes their perspective
             console.log("\nUser 1 removing their perspective...");
             await client1.perspective.remove(user1Perspective.uuid);
@@ -2666,11 +2703,15 @@ describe("Multi-User Simple integration tests", () => {
 
             await pollUntil(() => user2RemoveEvents.length >= 1, { timeoutMs: 5000, intervalMs: 200, label: "user2 perspectiveRemoved event" });
 
+            // Barrier: user 1's next event arrives after any leaked user 2 event
+            await client1.perspective.remove(user1BarrierPerspective.uuid);
+            await pollUntil(() => user1RemoveEvents.includes(user1BarrierPerspective.uuid), { timeoutMs: 5000, intervalMs: 200, label: "user1 barrier perspectiveRemoved event" });
+
             console.log(`\nUser 1 received ${user1RemoveEvents.length} removal events`);
             console.log(`User 2 received ${user2RemoveEvents.length} removal events`);
 
             // Each user should only see removal of their own perspectives
-            expect(user1RemoveEvents.length).to.equal(1, "User 1 should only be notified about their own perspective removal");
+            expect(user1RemoveEvents).to.deep.equal([user1Perspective.uuid, user1BarrierPerspective.uuid], "User 1 should only be notified about their own perspective removals");
             expect(user2RemoveEvents.length).to.equal(1, "User 2 should only be notified about their own perspective removal");
 
             expect(user1RemoveEvents[0]).to.equal(user1Perspective.uuid);

@@ -1,7 +1,7 @@
 import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
-import { assertStaysFalse } from "../utils/utils";
-import { LinkLangConfig, publishLinkLanguage, pollUntil } from "../utils/linkLangConfig";
+import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
+import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
 import { expect } from "chai";
 
 let aliceP1: null | PerspectiveProxy = null;
@@ -137,7 +137,17 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'}, 'local')
 
-                // Negative test: actively verify the local link does NOT propagate
+                // Positive barrier: a shared link Alice adds AFTER the local one.
+                // Alice's diffs are committed and delivered in order, so once Bob
+                // sees the barrier, a wrongly-shared local link would have
+                // arrived too. The short window afterwards covers a link that
+                // lands in a later sync tick than the barrier.
+                await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://barrier', target: 'test://barrier'})
+                await pollUntil(async () => {
+                    const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://barrier'}));
+                    return links.length >= 1;
+                }, { timeoutMs: 60000, label: "bob receives alice's shared barrier link" });
+
                 await assertStaysFalse(async () => {
                     const links = await bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://root'}));
                     return links.length > 0;
@@ -168,10 +178,10 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                         && s !== PerspectiveState.NeighboudhoodCreationInitiated;
                 }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (stress)" });
 
-                // Create 1500 links as fast as possible — the batching system
-                // coalesces the burst into a small number of POSTs. No
-                // artificial throttling: this exercises the continuous-burst
-                // path end-to-end.
+                // Create 1500 links as fast as possible — the executor's own
+                // pending_diffs_loop batches them (1s inactivity / 3s max /
+                // 150 max count). No artificial throttling: this exercises
+                // the continuous-burst path end-to-end.
                 for(let i = 0; i < 1500; i++) {
                     console.log("Alice adding link ", i)
                     const link = await alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: `test://test/${i}`})
@@ -196,12 +206,9 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     expect(link.proof.valid).to.be.true
                 })
                 
-                // Wait for burst mode to expire — poll until the perspective
-                // returns to Synced state (burst mode keeps it in a different state)
-                await pollUntil(async () => {
-                    const p = await alice.perspective.byUUID(aliceP1.uuid);
-                    return p?.state === PerspectiveState.Synced;
-                }, { timeoutMs: 30000, intervalMs: 1000, label: "burst mode expires and perspective returns to Synced" });
+                // No wait for burst mode to end: the poll above means every
+                // batch was committed, and each successful pending commit
+                // resets the immediate-commit counter (perspective_instance.rs).
 
                 // Alice creates some links
                 console.log("Alice creating links...")
@@ -333,11 +340,13 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     const linkLang = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood for Telepresence");
                     const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP1.uuid, linkLang.address, new Perspective())
 
-                    // Wait for Alice's neighbourhood to reach Synced state
+                    // Wait for Alice's neighbourhood to have its link language
+                    // (same reasoning as Bob's side below).
                     await pollUntil(async () => {
                         const p = await alice.perspective.byUUID(aliceP1.uuid);
-                        return p?.state === PerspectiveState.Synced;
-                    }, { timeoutMs: 10000, label: "alice's telepresence neighbourhood synced" });
+                        return p?.state === PerspectiveState.Synced
+                            || p?.state === PerspectiveState.LinkLanguageInstalledButNotSynced;
+                    }, { timeoutMs: 10000, label: "alice's telepresence perspective has its link language" });
 
                     const bobP1Handle = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
                     const bobP1 = await bob.perspective.byUUID(bobP1Handle.uuid)
