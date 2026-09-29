@@ -165,8 +165,17 @@ export class PerspectiveClient {
                 onData(parsed)
             }
         )
-        this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
-        return unsub
+        // The returned function also drops its map entry, so callers that swap
+        // subscriptions (reconnect) and never call disposeQuerySubscription for
+        // the old id do not grow the map.
+        const release = () => {
+            if (this.#querySubscriptionUnsubscribers.get(subscriptionId) === release) {
+                this.#querySubscriptionUnsubscribers.delete(subscriptionId)
+            }
+            unsub()
+        }
+        this.#querySubscriptionUnsubscribers.set(subscriptionId, release)
+        return release
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -176,11 +185,7 @@ export class PerspectiveClient {
     }
 
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        const unsub = this.#querySubscriptionUnsubscribers.get(subscriptionId)
-        if (unsub) {
-            unsub()
-            this.#querySubscriptionUnsubscribers.delete(subscriptionId)
-        }
+        this.#querySubscriptionUnsubscribers.get(subscriptionId)?.()
         return this.#apiClient.call<boolean>(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
