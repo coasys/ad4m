@@ -1,4 +1,5 @@
 import { Link } from "../links/Links";
+import { Literal } from "../Literal";
 import type { NodeExpression } from "./NodeExpression";
 import { isNodeExpression } from "./NodeExpression";
 
@@ -348,9 +349,12 @@ export class SHACLShape {
     const obj = ({ predicate, target: t }: Link): string => {
       if (predicate === 'ad4m://identity') return 'true';
       if (predicate === 'sh://pattern') return str(t.slice('literal:'.length));
-      if (t.startsWith('literal:string:')) {
-        return str(predicate === 'sh://hasValue' ? decodeURIComponent(t.slice(15)) : t.slice(15));
+      if (predicate === 'sh://hasValue' && t.startsWith('literal:')) {
+        // A literal URL: numbers and booleans bare, anything else a string.
+        let v: unknown; try { v = Literal.fromUrl(t).get(); } catch { v = t; }
+        return typeof v === 'number' || typeof v === 'boolean' ? String(v) : str(typeof v === 'string' ? v : JSON.stringify(v));
       }
+      if (t.startsWith('literal:string:')) return str(t.slice(15));
       if (t.startsWith('literal:')) return t.slice(8).replace(/\^\^.*$/, ''); // numbers and booleans
       if (t.startsWith('sh://')) return pred(t);
       return `<${t}>`;
