@@ -210,24 +210,30 @@ export class AgentClient {
   }
 
   async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token);
+    // Share this client's transport: no second socket, and injected (embedded-mode)
+    // transports keep working. subscribe=false registers no event listeners.
+    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token, false, this.#apiClient);
 
     const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
-    const agentMe = await this.me();
+    let agent: Agent;
+    try {
+      const agentMe = await this.me();
 
-    if (agentMe.perspective) {
-      await proxyPerspective.loadSnapshot(agentMe.perspective);
-    }
+      if (agentMe.perspective) {
+        await proxyPerspective.loadSnapshot(agentMe.perspective);
+      }
 
-    for (const addition of mutations.additions) {
-      await proxyPerspective.add(addition);
-    }
-    for (const removal of mutations.removals) {
-      await proxyPerspective.remove(removal);
-    }
+      if (mutations.additions.length > 0 || mutations.removals.length > 0) {
+        await perspectiveClient.linkMutations(proxyPerspective.uuid, mutations);
+      }
 
-    const snapshot = await proxyPerspective.snapshot();
-    const agent = await this.updatePublicPerspective(snapshot);
+      const snapshot = await proxyPerspective.snapshot();
+      agent = await this.updatePublicPerspective(snapshot);
+    } catch (e) {
+      // Remove the temporary perspective, but report the original failure.
+      await perspectiveClient.remove(proxyPerspective.uuid).catch(() => {});
+      throw e;
+    }
     await perspectiveClient.remove(proxyPerspective.uuid);
     return agent;
   }
