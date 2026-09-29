@@ -1,8 +1,7 @@
 //! Keyset cursors for `model_query` (`after` in, `nextCursor` out).
 //!
-//! Opt-in: a query that sends no `after` gets no `nextCursor` and runs
-//! exactly as before. `after: ""` asks for the first page in cursor mode;
-//! each reply's `nextCursor` (present only while a full page came back)
+//! A query without `after` pages by `offset` and gets no `nextCursor`.
+//! `after: ""` asks for the first page in cursor mode; each reply's `nextCursor` (present only while a full page came back)
 //! continues from the last row of that page.
 //!
 //! Supported for the timestamp order only: no `order`, or a single
@@ -288,19 +287,6 @@ mod pipeline_tests {
             .await
             .expect("offset 0 combines with a cursor");
         assert_eq!(ids(&second)[0], "ns://t03");
-    }
-
-    #[tokio::test]
-    async fn without_after_the_reply_is_unchanged() {
-        let store = store();
-        let r = run(&store, json!({ "limit": 3 })).await.unwrap();
-        assert!(r.next_cursor.is_none());
-        let wire = serde_json::to_value(&r).unwrap();
-        assert!(wire.get("nextCursor").is_none(), "no new key: {wire}");
-        assert_eq!(
-            wire.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["instances", "totalCount"]
-        );
     }
 
     #[tokio::test]

@@ -2542,9 +2542,8 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 /// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
 /// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
 ///
-/// Optional `names: string[]`
-/// restricts the reply to those shapes. Entries keep the perspective's order;
-/// unknown names are left out. Absent or `null` = every shape, as before.
+/// Optional `names: string[]` restricts the reply to those shapes, in the
+/// perspective's order; unknown names are left out.
 async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(

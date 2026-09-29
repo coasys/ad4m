@@ -60,10 +60,10 @@ enum ChangedPredicates {
 use uuid;
 use uuid::Uuid;
 
-// Protocol v2 subscription features, split out per the planned
+// Live query subscriptions, split out per the planned
 // `perspective_instance/` layout (see perspectives/AGENTS.md).
-mod subscriptions_v2;
-pub(crate) use subscriptions_v2::result_json;
+mod subscriptions;
+pub(crate) use subscriptions::result_json;
 
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
@@ -396,7 +396,7 @@ struct SubscribedQuery {
     model_query_params: Option<ModelSubscriptionParams>,
     /// Number of updates sent so far; 0 = the subscribe reply. Each update
     /// carries the change from the previous result (see
-    /// `perspective_instance/subscriptions_v2.rs`).
+    /// `perspective_instance/subscriptions.rs`).
     revision: u64,
     /// The RPC connection (`RequestContext::connection_id`) that opened it.
     /// Only that connection receives its updates, and the subscription ends
@@ -5966,7 +5966,7 @@ impl PerspectiveInstance {
                         stored_query.revision += 1;
                         let old =
                             std::mem::replace(&mut stored_query.last_result, result_string.clone());
-                        let delta = subscriptions_v2::result_delta(
+                        let delta = subscriptions::result_delta(
                             &old,
                             &result_string,
                             stored_query.model_query_params.is_some(),

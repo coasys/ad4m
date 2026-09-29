@@ -105,6 +105,7 @@ describe('LiveQuery', () => {
         await tick();
         expect(live.id).toBe('s2');
         expect(onResult).toHaveBeenLastCalledWith(['fresh']);
+        expect(client.disposeQuerySubscription).toHaveBeenCalledWith('p', 's1');
     });
 
     it('re-opens after a reconnect and delivers the new result', async () => {
@@ -122,6 +123,23 @@ describe('LiveQuery', () => {
         update('s1', 1, ['stale']);
         update('s2', 1, ['next']);
         expect(live.result).toEqual(['new', 'next']);
+    });
+
+    it('a reconnect during the first open hands the caller the newer result', async () => {
+        const { client, reconnect } = fakeClient();
+        const first = deferred<Subscribed>();
+        const open = jest.fn()
+            .mockReturnValueOnce(first.promise)
+            .mockResolvedValueOnce({ subscriptionId: 's2', result: ['new'], revision: 0 });
+        const onResult = jest.fn();
+        const live = new LiveQuery(client as any, 'p', open, onResult);
+        const started = live.start();
+        reconnect();
+        first.resolve({ subscriptionId: 's1', result: ['old'], revision: 0 });
+        expect(await started).toEqual(['new']);
+        expect(client.disposeQuerySubscription).toHaveBeenCalledWith('p', 's1');
+        expect(onResult).not.toHaveBeenCalled();
+        expect(live.id).toBe('s2');
     });
 
     it('dispose ends the subscription and releases one that was still opening', async () => {

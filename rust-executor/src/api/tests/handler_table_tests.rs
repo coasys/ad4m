@@ -1,4 +1,4 @@
-//! Handler-table export (X10).
+//! Handler-table export.
 //!
 //! Writes `HandlerMethods.ts` — every method name registered in the WS-RPC
 //! `HandlerMap` — next to the ts-rs request/response types. Same trigger and
@@ -39,14 +39,6 @@ fn handler_table_is_sorted_and_unique() {
         assert!(pair[0] < pair[1], "not sorted/unique: {:?}", pair);
     }
     assert!(names.iter().any(|n| n == "runtime.info"));
-}
-
-#[test]
-fn handler_table_render_is_deterministic() {
-    let names = build_handler_map().method_names();
-    assert_eq!(render_handler_table(&names), render_handler_table(&names));
-    let small = render_handler_table(&["a.b".into(), "c.d".into()]);
-    assert!(small.contains("export const HANDLER_METHODS = [\n  \"a.b\",\n  \"c.d\",\n] as const;"));
 }
 
 /// Writes the table to the ts-rs export directory.

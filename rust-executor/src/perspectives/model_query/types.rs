@@ -498,8 +498,8 @@ pub struct ModelQueryInput {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Keyset cursor (opt-in): `""` for the
-    /// first page, then the previous reply's `nextCursor`. Top-level queries
+    /// Keyset cursor: `""` for the first page, then the previous reply's
+    /// `nextCursor`. Top-level queries
     /// only; see [`super::cursor`] for which orders support it.
     #[serde(default)]
     pub after: Option<String>,
@@ -590,7 +590,7 @@ pub struct ModelQueryResult {
     pub instances: Vec<Value>,
     pub total_count: usize,
     /// Only in cursor mode (`after` sent), and only while a full page came
-    /// back. Absent otherwise, so replies to other queries are unchanged.
+    /// back.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
 }

@@ -185,7 +185,6 @@ export class WakerSubscriptionManager {
       sub.query,
       this.perspectiveClient,
     );
-    proxy.isSPARQL = true;
     // Suppress unhandled rejection from proxy.initialized — QuerySubscriptionProxy
     // rejects this promise internally when subscribe() fails, and if nobody catches
     // it before the next microtask it crashes the process.

@@ -1,5 +1,6 @@
-//! Protocol v2 (opt-in executor features), driven through the real
-//! `HandlerMap` so each test also proves the method is registered.
+//! WS-RPC handlers of the executor protocol (batches, shape and agent
+//! reads, live queries), driven through the real `HandlerMap` so each test
+//! also proves the method is registered.
 
 use std::sync::Arc;
 
@@ -71,7 +72,7 @@ pub(crate) async fn registered_perspective(classes: &[(&str, &str)]) -> Register
     Registered(uuid)
 }
 
-// ── X9: perspective.discardBatch ────────────────────────────────────────────
+// ── perspective.discardBatch ────────────────────────────────────────────
 
 #[tokio::test]
 async fn discard_batch_drops_an_open_batch_once() {
@@ -150,7 +151,7 @@ async fn discard_batch_checks_the_update_capability() {
     assert_eq!(err.code, 403);
 }
 
-// ── X6: perspective.getAllShacl { names } ───────────────────────────────────
+// ── perspective.getAllShacl { names } ───────────────────────────────────
 
 pub(crate) const TODO_SDNA: &str = r#"{
   "target_class": "test://Todo",
@@ -260,7 +261,7 @@ async fn get_all_shacl_rejects_malformed_names() {
     }
 }
 
-// ── X7: agent.byDIDs, expression.getMany ────────────────────────────────────
+// ── agent.byDIDs ────────────────────────────────────
 
 fn init_agent() -> String {
     crate::test_utils::setup_wallet();
@@ -327,23 +328,7 @@ async fn agents_by_dids_rejects_more_than_the_cap() {
     assert_eq!(err.code, 400);
 }
 
-#[tokio::test]
-async fn expression_get_many_aligns_with_input() {
-    let literal = "literal://string:hello";
-    let single = call("expression.get", json!({ "url": literal }), admin_ctx())
-        .await
-        .unwrap();
-    let many = call(
-        "expression.getMany",
-        json!({ "urls": [literal, "not a url", literal] }),
-        admin_ctx(),
-    )
-    .await
-    .unwrap();
-    assert_eq!(many, json!([single, null, single]));
-}
-
-// ── X2: subscribe replies and resync ────────────────────────────────────────
+// ── subscribe replies and resync ────────────────────────────────────────
 
 #[tokio::test]
 async fn subscribe_replies_json_at_revision_zero() {

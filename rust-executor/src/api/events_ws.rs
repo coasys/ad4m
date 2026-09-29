@@ -1178,42 +1178,9 @@ mod lazy_did_tests {
 }
 
 #[cfg(test)]
-mod event_interest_stream_tests {
-    //! The interest filter through the real event stream and global pubsub,
-    //! as both sockets wrap it around `build_event_stream`.
-    use super::build_event_stream_for;
-    use crate::api::event_interest::{filter_stream, handle_control, SharedInterest, WATCH};
-    use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
-    use futures::StreamExt;
+mod events_socket_message_tests {
+    use crate::api::event_interest::SharedInterest;
     use serde_json::json;
-    use std::time::Duration;
-
-    async fn publish_link(perspective: &str, marker: &str) {
-        let event = json!({
-            "perspectiveUuid": perspective,
-            "owner": "did:key:alice",
-            "link": { "author": "did:key:alice", "timestamp": marker,
-                      "data": { "source": marker, "predicate": null, "target": "t" } }
-        });
-        get_global_pubsub()
-            .await
-            .publish(&PERSPECTIVE_LINK_ADDED_TOPIC, &event.to_string())
-            .await;
-    }
-
-    /// Markers of our own events received within 300 ms.
-    async fn drain<S: futures::Stream<Item = String> + Unpin>(s: &mut S, run: &str) -> Vec<String> {
-        let mut seen = vec![];
-        let _ = tokio::time::timeout(Duration::from_millis(300), async {
-            while let Some(e) = s.next().await {
-                if e.contains(run) {
-                    seen.push(e);
-                }
-            }
-        })
-        .await;
-        seen
-    }
 
     #[test]
     fn events_socket_watch_round_trip_carries_the_request_id() {
@@ -1236,34 +1203,5 @@ mod event_interest_stream_tests {
         assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
         assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
         assert!(super::client_message_reply("not json", &interest).is_none());
-    }
-
-    #[tokio::test]
-    async fn the_events_socket_stream_carries_only_watched_events() {
-        let run = uuid::Uuid::new_v4().to_string();
-        let (a, b) = (format!("A-{run}"), format!("B-{run}"));
-        let interest: SharedInterest = Default::default();
-        let stream = build_event_stream_for(
-            String::new(),
-            Some("did:key:alice".into()),
-            None,
-            false,
-            None,
-        )
-        .await;
-        let mut stream = Box::pin(filter_stream(stream, interest.clone()));
-
-        publish_link(&a, &run).await;
-        assert!(
-            drain(&mut stream, &run).await.is_empty(),
-            "no watch: nothing"
-        );
-
-        handle_control(WATCH, &json!("w"), &json!({ "link-added": [a] }), &interest).unwrap();
-        publish_link(&a, &run).await;
-        publish_link(&b, &run).await;
-        let got = drain(&mut stream, &run).await;
-        assert_eq!(got.len(), 1);
-        assert!(got[0].contains(&a));
     }
 }

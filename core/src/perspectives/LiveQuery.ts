@@ -65,6 +65,7 @@ export class LiveQuery {
     #started = false
     #disposed = false
     #generation = 0
+    #latest?: Promise<any>
     // Updates that arrive while a subscribe or resync reply is outstanding.
     #buffer: QueryUpdate[] | null = null
     #unlisten: () => void
@@ -84,9 +85,14 @@ export class LiveQuery {
     get id(): string | undefined { return this.#id }
     get result(): any { return this.#result }
 
-    /** Open the subscription (again) and return its initial result. */
-    async start(): Promise<any> {
-        const generation = ++this.#generation
+    /** Open the subscription (again) and return its initial result. A start
+     *  that a newer one overtakes resolves with the newer one's result. */
+    start(): Promise<any> {
+        this.#latest = this.#start(++this.#generation)
+        return this.#latest
+    }
+
+    async #start(generation: number): Promise<any> {
         this.#buffer = []
         let subscribed: Subscribed
         try {
@@ -97,7 +103,7 @@ export class LiveQuery {
         }
         if (this.#disposed || generation !== this.#generation) {
             this.#client.disposeQuerySubscription(this.#uuid, subscribed.subscriptionId).catch(() => {})
-            return this.#result
+            return this.#disposed ? this.#result : this.#latest
         }
         this.#id = subscribed.subscriptionId
         this.#replace(subscribed.revision, subscribed.result)
@@ -140,14 +146,16 @@ export class LiveQuery {
 
     #resync() {
         const generation = this.#generation
+        const id = this.#id!
         this.#buffer = []
-        this.#client.resyncSubscription(this.#uuid, this.#id!).then(
+        this.#client.resyncSubscription(this.#uuid, id).then(
             ({ revision, result }) => {
                 if (!this.#disposed && generation === this.#generation) this.#replace(revision, result)
             },
             () => {
-                // The subscription is gone: open a new one.
+                // Replace the subscription with a new one.
                 if (!this.#disposed && generation === this.#generation) {
+                    this.#client.disposeQuerySubscription(this.#uuid, id).catch(() => {})
                     this.start().catch(e => console.error('Error re-opening live query:', e))
                 }
             },
