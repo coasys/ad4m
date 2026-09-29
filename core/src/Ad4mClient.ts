@@ -87,12 +87,21 @@ export class Ad4mClient {
         return this.#aiClient
     }
 
-    /** Start event subscriptions (agent-updated, agent-status-changed, apps-changed).
-     *  Safe to call if subscriptions were deferred at construction (subscribe=false). */
+    /** Start the default event subscriptions: agent (updated, status-changed, apps-changed),
+     *  perspective (added, updated, removed) and runtime (message, exception, notification).
+     *  Use it when subscriptions were deferred at construction (subscribe=false).
+     *  Idempotent: calling it again, or on a client built with subscribe=true, does not
+     *  deliver an event twice. */
     startSubscriptions(): void {
         this.#agentClient.subscribeAgentUpdated()
         this.#agentClient.subscribeAgentStatusChanged()
         this.#agentClient.subscribeAppsChanged()
+        this.#perspectiveClient.subscribePerspectiveAdded()
+        this.#perspectiveClient.subscribePerspectiveUpdated()
+        this.#perspectiveClient.subscribePerspectiveRemoved()
+        this.#runtimeClient.subscribeMessageReceived()
+        this.#runtimeClient.subscribeExceptionOccurred()
+        this.#runtimeClient.subscribeNotificationTriggered()
     }
 
     /** Close all event connections and clear in-memory caches */

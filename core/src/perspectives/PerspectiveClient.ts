@@ -1,4 +1,5 @@
-import { ApiClient, CallOptions, RpcError } from "../apiClient";
+import { ApiClient, WsEvent, CallOptions, RpcError } from "../apiClient";
+import { subscribeChannel } from "../subscribeChannel"
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -50,6 +51,7 @@ export class PerspectiveClient {
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
     #unsubscribers: (() => void)[]
+    #channelHandlers: Map<string, (data: WsEvent) => void> = new Map()
     #linkUnsubscribers: Map<string, (() => void)[]>
     #querySubscriptionUnsubscribers: Map<string, () => void>
 
@@ -623,12 +625,12 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveAdded() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'perspective-added', (data) => {
             if (data.type === 'perspective-added') {
                 this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 
     addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback) {
@@ -636,12 +638,12 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveUpdated() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'perspective-updated', (data) => {
             if (data.type === 'perspective-updated') {
                 this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 
     addPerspectiveSyncedListener(cb: SyncStateChangeCallback) {
@@ -665,12 +667,12 @@ export class PerspectiveClient {
     }
 
     subscribePerspectiveRemoved() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'perspective-removed', (data) => {
             if (data.type === 'perspective-removed') {
                 this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid as string))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 
     async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {

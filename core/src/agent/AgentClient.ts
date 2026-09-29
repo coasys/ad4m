@@ -1,4 +1,5 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, WsEvent } from "../apiClient";
+import { subscribeChannel } from "../subscribeChannel";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -48,6 +49,7 @@ export class AgentClient {
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
   #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
   #unsubscribers: (() => void)[];
+  #channelHandlers: Map<string, (data: WsEvent) => void> = new Map();
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -272,7 +274,7 @@ export class AgentClient {
   }
 
   subscribeAgentUpdated() {
-    const unsub = this.#apiClient.subscribe((data) => {
+    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'agent-updated', (data) => {
       if (data.type === 'agent-updated') {
         const agent = (data.agent || data) as Agent;
 
@@ -288,16 +290,16 @@ export class AgentClient {
         this.#updatedCallbacks.forEach((cb) => cb(agent));
       }
     });
-    this.#unsubscribers.push(unsub);
+    if (unsub) this.#unsubscribers.push(unsub);
   }
 
   subscribeAppsChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
+    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'apps-changed', (data) => {
       if (data.type === 'apps-changed') {
         this.#appsChangedCallback.forEach((cb) => cb());
       }
     });
-    this.#unsubscribers.push(unsub);
+    if (unsub) this.#unsubscribers.push(unsub);
   }
 
   addAgentStatusChangedListener(listener: AgentStatusChangedCallback) {
@@ -305,12 +307,12 @@ export class AgentClient {
   }
 
   subscribeAgentStatusChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
+    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'agent-status-changed', (data) => {
       if (data.type === 'agent-status-changed') {
         this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
       }
     });
-    this.#unsubscribers.push(unsub);
+    if (unsub) this.#unsubscribers.push(unsub);
   }
 
   addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
@@ -318,12 +320,12 @@ export class AgentClient {
   }
 
   subscribeHostingUserInfoChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
+    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'hosting-user-info-changed', (data) => {
       if (data.type === 'hosting-user-info-changed') {
         this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
       }
     });
-    this.#unsubscribers.push(unsub);
+    if (unsub) this.#unsubscribers.push(unsub);
   }
 
   addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
@@ -331,12 +333,12 @@ export class AgentClient {
   }
 
   subscribeComputeLogUpdated() {
-    const unsub = this.#apiClient.subscribe((data) => {
+    const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'compute-log-updated', (data) => {
       if (data.type === 'compute-log-updated') {
         this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
       }
     });
-    this.#unsubscribers.push(unsub);
+    if (unsub) this.#unsubscribers.push(unsub);
   }
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {

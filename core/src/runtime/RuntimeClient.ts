@@ -1,4 +1,5 @@
-import { ApiClient } from "../apiClient"
+import { ApiClient, WsEvent } from "../apiClient"
+import { subscribeChannel } from "../subscribeChannel"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type {
@@ -38,6 +39,7 @@ export class RuntimeClient {
     #notificationTriggeredCallbacks: NotificationTriggeredCallback[]
     #notificationRequestedCallbacks: NotificationRequestedCallback[]
     #unsubscribers: (() => void)[]
+    #channelHandlers: Map<string, (data: WsEvent) => void> = new Map()
 
     constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -286,12 +288,12 @@ export class RuntimeClient {
     }
 
     subscribeNotificationTriggered() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'notification-triggered', (data) => {
             if (data.type === 'notification-triggered') {
                 this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification as TriggeredNotification))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 
     addMessageCallback(cb: MessageCallback) {
@@ -299,12 +301,12 @@ export class RuntimeClient {
     }
 
     subscribeMessageReceived() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'message-received', (data) => {
             if (data.type === 'message-received') {
                 this.#messageReceivedCallbacks.forEach(cb => cb(data.message as PerspectiveExpression))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 
     addExceptionCallback(cb: ExceptionCallback) {
@@ -312,7 +314,7 @@ export class RuntimeClient {
     }
 
     subscribeExceptionOccurred() {
-        const unsub = this.#apiClient.subscribe((data) => {
+        const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'exception-occurred', (data) => {
             if (data.type === 'exception-occurred' && data.exception) {
                 const exception = data.exception as ExceptionInfo
                 const normalizedException = {
@@ -322,6 +324,6 @@ export class RuntimeClient {
                 this.#exceptionOccurredCallbacks.forEach(cb => cb(normalizedException))
             }
         })
-        this.#unsubscribers.push(unsub)
+        if (unsub) this.#unsubscribers.push(unsub)
     }
 }

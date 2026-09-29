@@ -1240,6 +1240,70 @@ describe('Ad4mClient', () => {
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
+    test('startSubscriptions() on a subscribe=false client delivers each default event exactly once', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const added = jest.fn();
+        const updated = jest.fn();
+        const removed = jest.fn();
+        const message = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(added);
+        freshClient.perspective.addPerspectiveUpdatedListener(updated);
+        freshClient.perspective.addPerspectiveRemovedListener(removed);
+        freshClient.runtime.addMessageCallback(message);
+
+        // Called twice (as ad4m-connect does on re-auth): must not double-deliver.
+        freshClient.startSubscriptions();
+        freshClient.startSubscriptions();
+        await freshClient.agent.me(); // wait for the socket to open
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-a' } });
+        ws.emit({ type: 'perspective-updated', perspective: { uuid: 'uuid-a' } });
+        ws.emit({ type: 'perspective-removed', uuid: 'uuid-a' });
+        ws.emit({ type: 'message-received', message: { author: 'did:test:1' } });
+
+        expect(added).toHaveBeenCalledTimes(1);
+        expect(added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
+        expect(updated).toHaveBeenCalledTimes(1);
+        expect(removed).toHaveBeenCalledTimes(1);
+        expect(removed).toHaveBeenCalledWith('uuid-a');
+        expect(message).toHaveBeenCalledTimes(1);
+        freshClient.close();
+    });
+
+    test('startSubscriptions() on a subscribe=true client does not double-deliver', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', true);
+        const added = jest.fn();
+        const agentUpdated = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(added);
+        freshClient.agent.addUpdatedListener(agentUpdated);
+        freshClient.startSubscriptions();
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-b' } });
+        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:upd' } });
+
+        expect(added).toHaveBeenCalledTimes(1);
+        expect(agentUpdated).toHaveBeenCalledTimes(1);
+        freshClient.close();
+    });
+
+    test('startSubscriptions() after close() subscribes again', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const added = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(added);
+        freshClient.startSubscriptions();
+        freshClient.close();
+        freshClient.startSubscriptions();
+        await freshClient.agent.me();
+
+        lastOf(MockWebSocket.instances).emit({ type: 'perspective-added', perspective: { uuid: 'uuid-c' } });
+
+        expect(added).toHaveBeenCalledTimes(1);
+        freshClient.close();
+    });
+
     test('WS RPC message contains type and params', async () => {
         await ad4m.agent.generate('pass');
         expect(lastRpcCall!.type).toBe('agent.generate');
