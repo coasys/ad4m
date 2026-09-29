@@ -359,6 +359,59 @@ async fn t2_a_local_flow_link_can_still_be_removed() {
     assert!(!present(&p, &cache));
 }
 
+/// The store decides the status in both directions: a Shared-labelled
+/// removal (the JS client's default) of the Local cache goes, and one of a
+/// link this store does not hold is still refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn t2_link_mutations_labelled_shared_removes_a_local_flow_link() {
+    let (mut p, ctx) = fixture().await;
+    let cache = LinkExpression::from(
+        p.add_link(
+            Link {
+                source: PROPOSAL.to_string(),
+                predicate: Some(CURRENT_STATE.to_string()),
+                target: "literal:string:done".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link"),
+    );
+    let unknown = signed(
+        &TestSigner::generate(),
+        PROPOSAL,
+        TO_STATE,
+        "literal:string:x",
+    );
+
+    p.link_mutations(
+        LinkMutations {
+            additions: vec![],
+            removals: vec![as_input(&cache)],
+        },
+        LinkStatus::Shared,
+        &ctx,
+    )
+    .await
+    .expect("a Shared-labelled removal of a Local flow link goes");
+    assert!(!present(&p, &cache));
+
+    assert_monotonic_refusal(
+        p.link_mutations(
+            LinkMutations {
+                additions: vec![],
+                removals: vec![as_input(&unknown)],
+            },
+            LinkStatus::Shared,
+            &ctx,
+        )
+        .await,
+        "link_mutations (link not in the store)",
+    );
+}
+
 /// A batched `update_link` of the Local cache commits. The WS handler hands
 /// in the old link without a status, so the queued removal must carry the
 /// stored one, or the commit backstop reads it as Shared and drops the batch.
