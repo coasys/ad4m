@@ -140,6 +140,29 @@ export default function runtimeTests(testContext: TestContext) {
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).to.be.true;
         })
 
+        it("getHostRates() calls a method the server registers", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            // runtime.hostRates is registered but not implemented yet (501).
+            // An unregistered name fails with 404 "Unknown type".
+            try {
+                const rates = await ad4mClient.runtime.getHostRates()
+                expect(rates).to.be.an('array')
+            } catch (e: any) {
+                expect(e.status, e.message).to.equal(501)
+            }
+        })
+
+        it("unytSetMembraneProof() calls a method the server registers", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            // runtime.unytMembraneProof is registered but not implemented yet (501).
+            try {
+                const result = await ad4mClient.runtime.unytSetMembraneProof("proof")
+                expect(result).to.have.property('success')
+            } catch (e: any) {
+                expect(e.status, e.message).to.equal(501)
+            }
+        })
+
         it("can get runtimeInfo", async () => {
             const ad4mClient = testContext.ad4mClient!
             const runtimeInfo = await ad4mClient.runtime.info();

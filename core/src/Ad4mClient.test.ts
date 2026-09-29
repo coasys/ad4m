@@ -230,14 +230,14 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
     // ── Runtime: host rates & Unyt ──
-    'runtime.getHostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
+    'runtime.hostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
     'runtime.setHostRates': true,
     'runtime.unytAgentKey': 'unyt-agent-key-123',
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
     'runtime.unytWalletBalance': '1000.50',
     'runtime.unytWalletHistory': '[]',
     'runtime.unytVersionInfo': '{"version":"0.1.0"}',
-    'runtime.unytSetMembraneProof': { success: true, message: 'ok' },
+    'runtime.unytMembraneProof': { success: true, message: 'ok' },
     'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
     'runtime.unytSendHot': { success: true, message: 'sent' },
 };
@@ -1164,6 +1164,7 @@ describe('Multi-user and Hosting', () => {
 
     test('getHostRates() returns parsed rates', async () => {
         const rates = await ad4m.runtime.getHostRates();
+        expect(lastRpcCall!.type).toBe('runtime.hostRates');
         expect(rates).toHaveLength(1);
         expect(rates[0].description).toBe('Link write');
         expect(rates[0].priceInHOT).toBe(0.001);
@@ -1205,6 +1206,7 @@ describe('Unyt Integration', () => {
     test('unytSetMembraneProof() sets proof', async () => {
         const result = await ad4m.runtime.unytSetMembraneProof('proof-data');
         expect(result.success).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.unytMembraneProof');
         expect(lastRpcCall!.params.proof).toBe('proof-data');
     });
 

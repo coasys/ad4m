@@ -249,7 +249,7 @@ export class RuntimeClient {
     }
 
     async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
-        return this.#apiClient.call<{ success: boolean; message: string }>('runtime.unytSetMembraneProof', { proof })
+        return this.#apiClient.call<{ success: boolean; message: string }>('runtime.unytMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
@@ -273,7 +273,7 @@ export class RuntimeClient {
     }
 
     async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
-        const result = await this.#apiClient.call<string>('runtime.getHostRates')
+        const result = await this.#apiClient.call<string>('runtime.hostRates')
         try {
             return JSON.parse(result)
         } catch {
