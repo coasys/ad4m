@@ -86,8 +86,42 @@ export class ApiClient {
         return this._fetchImpl ? this._fetchImpl(url, init) : fetch(url, init)
     }
 
+    /**
+     * Set the token used to authenticate the WebSocket. The server reads the
+     * token only when the socket opens, so an open or connecting socket is
+     * replaced by one that carries the new token. Calls already sent on the
+     * old socket reject with `RpcError(503)`, as on any dropped connection;
+     * calls still waiting for the socket to open go out on the new one.
+     */
     setToken(token: string) {
+        if (token === this.token) return
         this.token = token
+
+        const old = this._ws
+        if (!old || (old.readyState !== 1 /* OPEN */ && old.readyState !== 0 /* CONNECTING */)) return
+
+        // Detach the old socket so its close cannot touch the new one.
+        old.onopen = null
+        old.onmessage = null
+        old.onclose = null
+        // Keep an error handler: closing a connecting `ws` socket emits 'error'.
+        old.onerror = () => {}
+        this._stopPing()
+        this._ws = null
+        for (const pending of this._pendingCalls.values()) {
+            clearTimeout(pending.timer)
+            pending.reject(new RpcError(503, 'WebSocket connection closed'))
+        }
+        this._pendingCalls.clear()
+        old.close()
+
+        if (this._wsReadyResolve) {
+            // Still connecting: keep the readiness promise callers are waiting on.
+            this._dial()
+        } else {
+            this._wsReady = null
+            this._ensureWs()
+        }
     }
 
     // ── WebSocket RPC core ──────────────────────────────────────────────────
@@ -133,7 +167,11 @@ export class ApiClient {
         // Nothing awaits readiness after connect()/subscribe() alone; keep a
         // close-before-open rejection from surfacing as unhandled.
         this._wsReady.catch(() => {})
+        this._dial()
+    }
 
+    /** Open a socket that settles the current readiness promise. */
+    private _dial(): void {
         const url = this._getWsUrl()
         // Fallback order: injected impl → globalThis.WebSocket (browsers, Node ≥ 22) → require('ws') (Node ≤ 20).
         // globalThis lookup avoids a ReferenceError on Node 18 where `WebSocket` is not a global.
@@ -351,6 +389,10 @@ export class ApiClient {
         const deadline = Date.now() + effectiveTimeout
         const timeoutError = () => new RpcError(408, `RPC call '${type}' timed out after ${effectiveTimeout}ms`)
         await this._readyOrAbort(signal, deadline, timeoutError)
+        // setToken() may have swapped the socket while this call waited.
+        if (this._ws?.readyState === 0 /* CONNECTING */) {
+            await this._readyOrAbort(signal, deadline, timeoutError)
+        }
 
         const id = nextId()
         // Put params under a "params" key to avoid collision with
