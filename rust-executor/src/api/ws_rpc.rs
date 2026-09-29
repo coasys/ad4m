@@ -338,8 +338,8 @@ impl Connection {
 
 /// Serve one connection until `incoming` ends: answer each client message
 /// and forward `events` that match the connection's interest. When the
-/// client is gone the event task stops, calls still in flight finish, and
-/// the connection's subscriptions end.
+/// client is gone the event task stops, the connection's subscriptions end,
+/// and calls still in flight finish.
 pub(crate) async fn serve<S>(
     conn: Connection,
     incoming: S,
@@ -366,11 +366,16 @@ pub(crate) async fn serve<S>(
     event_task.abort();
     let _ = event_task.await;
 
-    // Wait for the calls first: a subscribe still in flight would otherwise
-    // add a subscription after the cleanup.
+    // End the live queries now. A subscribe still in flight adds one after
+    // this sweep, so sweep again as each call ends.
+    let dispose = || async {
+        if let Some(connection_id) = &conn.ctx.connection_id {
+            crate::perspectives::dispose_connection_subscriptions(connection_id).await;
+        }
+    };
+    dispose().await;
     let mut calls = std::mem::take(&mut *conn.calls.lock().unwrap_or_else(|e| e.into_inner()));
-    while calls.join_next().await.is_some() {}
-    if let Some(connection_id) = &conn.ctx.connection_id {
-        crate::perspectives::dispose_connection_subscriptions(connection_id).await;
+    while calls.join_next().await.is_some() {
+        dispose().await;
     }
 }

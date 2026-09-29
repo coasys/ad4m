@@ -11,13 +11,14 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::events_ws::build_event_stream_for;
 use crate::api::tests::protocol_tests::{admin_conn_ctx, registered_perspective};
-use crate::api::ws_handler::build_handler_map;
+use crate::api::ws_handler::{build_handler_map, HandlerMap};
 use crate::api::ws_rpc::{serve, Connection};
 use crate::pubsub::{
     get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
 };
 
 const DID: &str = "did:key:alice";
+const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
 
 struct Socket {
     connection_id: String,
@@ -28,6 +29,10 @@ struct Socket {
 
 impl Socket {
     async fn open() -> Self {
+        Self::open_with(build_handler_map()).await
+    }
+
+    async fn open_with(handlers: HandlerMap) -> Self {
         let connection_id = uuid::Uuid::new_v4().to_string();
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
@@ -40,7 +45,7 @@ impl Socket {
         )
         .await;
         let ctx = admin_conn_ctx(&connection_id);
-        let conn = Connection::new(Arc::new(build_handler_map()), ctx, String::new(), tx);
+        let conn = Connection::new(Arc::new(handlers), ctx, String::new(), tx);
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
             connection_id,
@@ -106,7 +111,7 @@ impl Socket {
     async fn subscribe(&mut self, perspective: &str) -> String {
         let id = uuid::Uuid::new_v4().to_string();
         self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
-            "params": { "uuid": perspective, "query": "SELECT ?s WHERE { ?s ?p ?o }" } }));
+            "params": { "uuid": perspective, "query": QUERY } }));
         let reply = self.reply(&id).await;
         reply["result"]["subscriptionId"]
             .as_str()
@@ -218,6 +223,80 @@ async fn closing_the_socket_ends_its_subscriptions_only() {
             .is_some(),
         "the other connection keeps its subscription"
     );
+}
+
+/// Poll until `subscription` of `connection` is gone, for up to 2 s.
+async fn ended(perspective: &str, subscription: &str, connection: &str) -> bool {
+    let perspective = crate::perspectives::get_perspective(perspective).unwrap();
+    for _ in 0..40 {
+        if perspective
+            .subscription_state(subscription, connection)
+            .await
+            .is_none()
+        {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+#[tokio::test]
+async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
+    let p = registered_perspective(&[]).await;
+    let (block, late) = (
+        Arc::new(tokio::sync::Notify::new()),
+        Arc::new(tokio::sync::Notify::new()),
+    );
+    let late_id = Arc::new(std::sync::Mutex::new(None::<String>));
+    let mut handlers = build_handler_map();
+    let b = block.clone();
+    handlers.register("test.block", move |_, _| {
+        let b = b.clone();
+        async move {
+            b.notified().await;
+            Ok(json!(true))
+        }
+    });
+    let (l, slot, uuid) = (late.clone(), late_id.clone(), p.0.clone());
+    handlers.register("test.subscribeLate", move |_, ctx| {
+        let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
+        async move {
+            l.notified().await;
+            let (id, _) = crate::perspectives::get_perspective(&uuid)
+                .unwrap()
+                .subscribe_and_query(QUERY.into(), None, ctx.connection_id.clone().unwrap())
+                .await
+                .unwrap();
+            *slot.lock().unwrap() = Some(id);
+            Ok(json!(true))
+        }
+    });
+
+    let mut socket = Socket::open_with(handlers).await;
+    let early = socket.subscribe(&p.0).await;
+    socket.send(json!({ "id": "b", "type": "test.block" }));
+    socket.send(json!({ "id": "l", "type": "test.subscribeLate" }));
+    socket.input = None;
+
+    assert!(
+        ended(&p.0, &early, &socket.connection_id).await,
+        "a live query outlived its socket while a call was in flight"
+    );
+    late.notify_one();
+    let late_sub = loop {
+        if let Some(id) = late_id.lock().unwrap().clone() {
+            break id;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        ended(&p.0, &late_sub, &socket.connection_id).await,
+        "a subscribe that completed after the close kept its live query"
+    );
+
+    block.notify_one();
+    socket.close().await;
 }
 
 #[tokio::test]

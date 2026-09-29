@@ -56,7 +56,7 @@ anything that signs, bills or writes.
   the client resyncs every live query.
 - A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`):
   only that socket gets its updates (they bypass `events.watch`), and `ws_rpc::serve` ends them
-  when the socket closes. No keepalive; subscribing without a connection (REST) is a 400.
+  when the socket closes, and again as each call still in flight ends (a late subscribe). No keepalive; subscribing without a connection (REST) is a 400.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
