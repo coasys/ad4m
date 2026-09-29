@@ -105,7 +105,8 @@ pub(crate) fn result_json(result: &str) -> Value {
 ///   also defines membership), `upsert` (instances that are new or differ) and
 ///   `totalCount`.
 /// - Query results (a JSON array of rows): a row has no id, so rows are a
-///   multiset: `added` and `removed` rows.
+///   multiset: `added` and `removed` rows, or `result` when applying them
+///   would not give the new row order.
 /// - Anything else: `result`, which replaces the old result.
 pub(crate) fn result_delta(old: &str, new: &str, is_model: bool) -> Map<String, Value> {
     let (old, new) = (result_json(old), result_json(new));
@@ -164,6 +165,19 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
         .into_values()
         .flat_map(|(n, row)| std::iter::repeat_n(row, n))
         .collect();
+    // The client drops the first match of each removed row, then appends the
+    // added rows. When that does not give `new` in order (an `ORDER BY`
+    // put a row mid-list), send the whole result instead.
+    let mut expected: Vec<&Value> = old.iter().collect();
+    for row in &removed {
+        if let Some(i) = expected.iter().position(|v| v == row) {
+            expected.remove(i);
+        }
+    }
+    expected.extend(added.iter().copied());
+    if !expected.into_iter().eq(new.iter()) {
+        return None;
+    }
     Some(Map::from_iter([
         ("added".into(), json!(added)),
         ("removed".into(), json!(removed)),
@@ -254,6 +268,25 @@ mod tests {
         let mut removed = d["removed"].as_array().unwrap().clone();
         removed.sort_by_key(|r| r.to_string());
         assert_eq!(removed, vec![json!({ "s": "x" }), json!({ "s": "y" })]);
+    }
+
+    #[test]
+    fn ordered_insertion_mid_list_sends_the_whole_result() {
+        let old = json!([{ "s": "a" }, { "s": "c" }]);
+        let new = json!([{ "s": "a" }, { "s": "b" }, { "s": "c" }]);
+        let d = Value::Object(result_delta(&old.to_string(), &new.to_string(), false));
+        assert_eq!(d, json!({ "result": new }));
+    }
+
+    #[test]
+    fn appended_rows_stay_a_delta() {
+        let old = json!([{ "s": "a" }, { "s": "b" }, { "s": "c" }]);
+        let new = json!([{ "s": "a" }, { "s": "c" }, { "s": "d" }]);
+        let d = Value::Object(result_delta(&old.to_string(), &new.to_string(), false));
+        assert_eq!(
+            d,
+            json!({ "added": [{ "s": "d" }], "removed": [{ "s": "b" }] })
+        );
     }
 
     #[test]
