@@ -47,6 +47,14 @@ export interface CallOptions {
 /** Default RPC call timeout in milliseconds (30 seconds). */
 const DEFAULT_TIMEOUT_MS = 30_000
 
+/** Default timeout for calls that can run for minutes: LLM work, Holochain, publishing. */
+export const LONG_TIMEOUT_MS = 20 * 60 * 1000
+
+/** `options` with {@link LONG_TIMEOUT_MS} unless the caller set a timeout. */
+export function longCall(options?: CallOptions): CallOptions {
+    return { ...options, timeoutMs: options?.timeoutMs ?? LONG_TIMEOUT_MS }
+}
+
 /** Maximum reconnect delay in ms. */
 const MAX_RECONNECT_DELAY_MS = 30_000
 

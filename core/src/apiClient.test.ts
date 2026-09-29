@@ -394,3 +394,83 @@ describe('ApiClient retries idempotent reads once after a reconnect', () => {
         await expect(read).rejects.toMatchObject({ name: 'RpcError', status: 503 })
     })
 })
+
+describe('long calls', () => {
+    const { AIClient } = require('./ai/AIClient')
+    const { AgentClient } = require('./agent/AgentClient')
+    const { LanguageClient } = require('./language/LanguageClient')
+    const { NeighbourhoodClient } = require('./neighbourhood/NeighbourhoodClient')
+    const { PerspectiveClient } = require('./perspectives/PerspectiveClient')
+    const { RuntimeClient } = require('./runtime/RuntimeClient')
+    const { LONG_TIMEOUT_MS } = require('./apiClient')
+
+    class OpenWebSocket {
+        static last: OpenWebSocket
+        readyState = 0
+        sent: AnyMsg[] = []
+        onopen: ((ev?: unknown) => void) | null = null
+        onmessage: ((ev: { data: string }) => void) | null = null
+        onerror: ((ev: unknown) => void) | null = null
+        onclose: ((ev?: unknown) => void) | null = null
+        constructor(public url: string) {
+            OpenWebSocket.last = this
+            queueMicrotask(() => { this.readyState = 1; this.onopen?.() })
+        }
+        send(data: string) { this.sent.push(JSON.parse(data) as AnyMsg) }
+        close() { this.readyState = 3; this.onclose?.() }
+    }
+
+    const url = 'http://localhost:1234'
+    let api: ApiClient
+    beforeEach(() => {
+        jest.useFakeTimers()
+        api = new ApiClient(url, undefined, OpenWebSocket as unknown as new (url: string) => WebSocket)
+    })
+    afterEach(() => {
+        api.closeAll()
+        jest.useRealTimers()
+    })
+
+    const calls: [string, (o?: object) => Promise<unknown>][] = [
+        ['ai.prompt', (o) => new AIClient(url, undefined, false, api).prompt('t', 'p', o)],
+        ['ai.embed', (o) => new AIClient(url, undefined, false, api).embed('m', 'x', o)],
+        ['ai.addModel', (o) => new AIClient(url, undefined, false, api).addModel({ name: 'm', modelType: 'LLM' }, o)],
+        ['agent.generate', (o) => new AgentClient(url, undefined, false, api).generate('pw', o)],
+        ['agent.unlock', (o) => new AgentClient(url, undefined, false, api).unlock('pw', true, o)],
+        ['language.publish', (o) => new LanguageClient(url, undefined, api).publish('/p', { name: 'l' }, o)],
+        ['language.applyTemplate', (o) => new LanguageClient(url, undefined, api).applyTemplateAndPublish('h', '{}', o)],
+        ['neighbourhood.publish', (o) => new NeighbourhoodClient(url, undefined, api).publishFromPerspective('u', 'l', { links: [] }, o)],
+        ['neighbourhood.join', (o) => new NeighbourhoodClient(url, undefined, api).joinFromUrl('n://x', o)],
+        ['runtime.restartHolochain', (o) => new RuntimeClient(url, undefined, false, api).restartHolochain(o)],
+        ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, false, api).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
+        ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, false, api).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
+    ]
+
+    it.each(calls)('%s waits LONG_TIMEOUT_MS by default', async (type, run) => {
+        let outcome: unknown = 'pending'
+        run().then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+        await jest.advanceTimersByTimeAsync(1)
+        expect(OpenWebSocket.last.sent.map((m) => m.type)).toContain(type)
+
+        await jest.advanceTimersByTimeAsync(31_000)
+        expect(outcome).toBe('pending')
+        await jest.advanceTimersByTimeAsync(LONG_TIMEOUT_MS)
+        expect(outcome).toMatchObject({ name: 'RpcError', status: 408 })
+    })
+
+    it.each(calls)('%s takes timeoutMs and signal', async (_type, run) => {
+        const timedOut = run({ timeoutMs: 100 })
+        timedOut.catch(() => {})
+        await jest.advanceTimersByTimeAsync(100)
+        await expect(timedOut).rejects.toMatchObject({ status: 408 })
+
+        const controller = new AbortController()
+        const aborted = run({ signal: controller.signal })
+        aborted.catch(() => {})
+        await jest.advanceTimersByTimeAsync(1)
+        const sent = OpenWebSocket.last.sent.at(-1)!
+        controller.abort()
+        await expect(aborted).rejects.toMatchObject({ name: 'AbortError' })
+        expect(OpenWebSocket.last.sent.at(-1)).toMatchObject({ type: 'request.cancel', params: { targetId: sent.id } })
+    })
+})
