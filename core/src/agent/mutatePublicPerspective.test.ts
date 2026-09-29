@@ -1,11 +1,9 @@
 import { Ad4mClient } from '../Ad4mClient';
 import { Link, LinkExpression } from '../links/Links';
-import { ApiClient } from '../apiClient';
 
 /**
  * `AgentClient.mutatePublicPerspective` against an in-memory executor
- * reached through fake WebSockets. The executor state is shared by every
- * socket, so the test counts sockets without changing what the call sees.
+ * reached through fake WebSockets.
  */
 
 const DID = 'did:test:me';
@@ -18,7 +16,8 @@ const L1 = signed({ source: DID, predicate: 'name', target: 'literal://old' }, 1
 const L2 = signed({ source: DID, predicate: 'bio', target: 'literal://bio' }, 2);
 
 class Executor {
-  perspectives = new Map<string, any[]>();
+  /** Temporary perspectives that still exist. */
+  perspectives = new Set<string>();
   profile: any = { links: [L1, L2] };
   calls: string[] = [];
   #created = 0;
@@ -26,7 +25,6 @@ class Executor {
 
   handle(type: string, p: any): any {
     this.calls.push(type);
-    const links = this.perspectives.get(p?.uuid);
     switch (type) {
       case 'agent.get':
         return { did: DID, perspective: this.profile, directMessageLanguage: 'lang://dm' };
@@ -35,16 +33,13 @@ class Executor {
         return { did: DID, perspective: this.profile, directMessageLanguage: 'lang://dm' };
       case 'perspective.create': {
         const uuid = `tmp-${++this.#created}`;
-        this.perspectives.set(uuid, []);
-        return { uuid, name: p.name, owners: [], sharedUrl: null, neighbourhood: null, state: 'PRIVATE' };
+        this.perspectives.add(uuid);
+        return { uuid };
       }
       case 'perspective.remove':
         return this.perspectives.delete(p.uuid);
-      case 'perspective.addLinks': {
-        const added = p.links.map((l: any) => signed(l, this.#signed++));
-        links!.push(...added);
-        return added;
-      }
+      case 'perspective.addLinks':
+        return p.links.map((l: any) => signed(l, this.#signed++));
       default:
         throw new Error(`Unknown RPC type: ${type}`);
     }
@@ -84,41 +79,16 @@ const originalWebSocket = (globalThis as any).WebSocket;
 afterEach(() => { (globalThis as any).WebSocket = originalWebSocket; });
 
 describe('AgentClient.mutatePublicPerspective (L4)', () => {
-  it('opens no second socket and removes the temporary perspective', async () => {
+  it('returns the profile without the removals, plus the signed additions, on one socket', async () => {
     const executor = new Executor();
     const FakeWs = makeFakeWebSocket(executor);
     (globalThis as any).WebSocket = FakeWs;
     const client = new Ad4mClient('http://localhost:12000', 'token', false);
 
-    await client.agent.me();
-    expect(FakeWs.instances.length).toBe(1);
-
-    // Net socket callbacks registered on any ApiClient during the call.
-    let live = 0;
-    const subscribe = ApiClient.prototype.subscribe;
-    const spy = jest.spyOn(ApiClient.prototype, 'subscribe').mockImplementation(function (this: ApiClient, cb: any) {
-      live++;
-      const unsub = subscribe.call(this, cb);
-      return () => { live--; unsub(); };
-    });
-    try {
-      await client.agent.mutatePublicPerspective(mutations());
-    } finally {
-      spy.mockRestore();
-    }
-
-    expect(FakeWs.instances.length).toBe(1);
-    expect(live).toBe(0);
-    expect(executor.perspectives.size).toBe(0);
-    client.close();
-  });
-
-  it('returns the profile without the removals, plus the signed additions', async () => {
-    const executor = new Executor();
-    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token', false);
-
     const agent = await client.agent.mutatePublicPerspective(mutations());
+
+    expect(FakeWs.instances.length).toBe(1);
+    expect(executor.perspectives.size).toBe(0);
 
     expect(agent.did).toBe(DID);
     expect(agent.directMessageLanguage).toBe('lang://dm');

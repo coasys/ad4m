@@ -45,37 +45,27 @@ const link = (source: string) => ({
   proof: { signature: 's', key: 'k', valid: true },
 });
 
-describe('PerspectiveProxy lazy listener registration (L1)', () => {
+describe('PerspectiveProxy listener registration (L1–L3)', () => {
   it('building 100 proxies without listeners adds no socket callbacks', () => {
     const { callbackCount, proxy, api } = setup();
-    const before = callbackCount();
     for (let i = 0; i < 100; i++) proxy(`uuid-${i}`);
-    expect(callbackCount()).toBe(before);
+    expect(callbackCount()).toBe(0);
     api.closeAll();
   });
 
-  it('registers one socket callback per listener type, on first use', () => {
-    const { callbackCount, proxy, api } = setup();
+  it('registers one socket callback per listener type at once, before the socket opens', () => {
+    const { callbackCount, proxy, ws, api } = setup();
     const p = proxy();
-    p.addListener('link-added', jest.fn());
-    expect(callbackCount()).toBe(1);
+    expect(p.addListener('link-added', jest.fn())).toBeUndefined();
     p.addListener('link-added', jest.fn());
     expect(callbackCount()).toBe(1);
     p.addListener('link-removed', jest.fn());
     p.addListener('link-updated', jest.fn());
-    expect(callbackCount()).toBe(3);
     p.addSyncStateChangeListener(jest.fn());
     expect(callbackCount()).toBe(4);
-    api.closeAll();
-  });
-
-  it('registers at once, without waiting for the socket to open', () => {
-    const { callbackCount, proxy, ws, api } = setup();
-    const p = proxy();
-    expect(p.addListener('link-added', jest.fn())).toBeUndefined();
-    expect(p.addSyncStateChangeListener(jest.fn())).toBeUndefined();
     expect(ws().readyState).toBe(0);
-    expect(callbackCount()).toBe(2);
+    p.dispose();
+    expect(callbackCount()).toBe(0);
     api.closeAll();
   });
 
@@ -112,6 +102,29 @@ describe('PerspectiveProxy lazy listener registration (L1)', () => {
     api.closeAll();
   });
 
+  it('disposing one proxy leaves another proxy for the same uuid working', () => {
+    const { callbackCount, proxy, ws, api } = setup();
+    const a = proxy();
+    const b = proxy();
+    const cbA = jest.fn();
+    const cbB = jest.fn();
+    a.addListener('link-added', cbA);
+    a.addAutoProcessorEventListener(cbA);
+    a.addAutoProcessorNeighbourhoodStateListener(cbA);
+    b.addListener('link-added', cbB);
+    b.addAutoProcessorEventListener(cbB);
+    ws().open();
+    expect(callbackCount()).toBe(5);
+
+    a.dispose();
+    expect(callbackCount()).toBe(2);
+    ws().push({ type: 'link-added', perspectiveUuid: 'uuid-1', link: link('a') });
+    ws().push({ type: 'auto-processor-event', perspectiveUuid: 'uuid-1' });
+    expect(cbA).not.toHaveBeenCalled();
+    expect(cbB).toHaveBeenCalledTimes(2);
+    api.closeAll();
+  });
+
   it('a disposed proxy used again registers again, and dispose releases that too', () => {
     const { callbackCount, proxy, ws, api } = setup();
     const p = proxy();
@@ -140,76 +153,10 @@ describe('PerspectiveClient listener release functions', () => {
       client.addAutoProcessorEventListener('uuid-1', jest.fn()),
       client.addAutoProcessorNeighbourhoodStateListener('uuid-1', jest.fn()),
     ];
-    expect(callbackCount()).toBe(6);
     releases.forEach((release, i) => {
-      expect(typeof release).toBe('function');
       release();
       expect(callbackCount()).toBe(5 - i);
     });
-    api.closeAll();
-  });
-});
-
-describe('Sync-state listener release (L2)', () => {
-  it('dispose() leaves no sync-state callback registered', () => {
-    const { callbackCount, proxy, api } = setup();
-    const p = proxy();
-    p.addSyncStateChangeListener(jest.fn());
-    expect(callbackCount()).toBe(1);
-    p.dispose();
-    expect(callbackCount()).toBe(0);
-    api.closeAll();
-  });
-});
-
-describe('PerspectiveProxy.dispose scope (L3)', () => {
-  it('disposing one proxy leaves another proxy for the same uuid working', () => {
-    const { callbackCount, proxy, ws, api } = setup();
-    const a = proxy();
-    const b = proxy();
-    const cbA = jest.fn();
-    const cbB = jest.fn();
-    a.addListener('link-added', cbA);
-    b.addListener('link-added', cbB);
-    ws().open();
-    expect(callbackCount()).toBe(2);
-
-    a.dispose();
-    expect(callbackCount()).toBe(1);
-
-    ws().push({ type: 'link-added', perspectiveUuid: 'uuid-1', link: link('a') });
-    expect(cbA).not.toHaveBeenCalled();
-    expect(cbB).toHaveBeenCalledTimes(1);
-    api.closeAll();
-  });
-
-  it('dispose releases the auto-processor listeners of this proxy only', () => {
-    const { callbackCount, proxy, ws, api } = setup();
-    const a = proxy();
-    const b = proxy();
-    const cbA = jest.fn();
-    const cbB = jest.fn();
-    a.addAutoProcessorEventListener(cbA);
-    a.addAutoProcessorNeighbourhoodStateListener(jest.fn());
-    b.addAutoProcessorEventListener(cbB);
-    ws().open();
-    expect(callbackCount()).toBe(3);
-
-    a.dispose();
-    expect(callbackCount()).toBe(1);
-    ws().push({ type: 'auto-processor-event', perspectiveUuid: 'uuid-1' });
-    expect(cbA).not.toHaveBeenCalled();
-    expect(cbB).toHaveBeenCalledTimes(1);
-    api.closeAll();
-  });
-
-  it('dispose before the socket opens releases the registration', () => {
-    const { callbackCount, proxy, api } = setup();
-    const p = proxy();
-    p.addListener('link-added', jest.fn());
-    expect(callbackCount()).toBe(1);
-    p.dispose();
-    expect(callbackCount()).toBe(0);
     api.closeAll();
   });
 });

@@ -627,7 +627,6 @@ export class PerspectiveClient {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
     }
 
-    /** Calls `cb` for this event on `uuid`. Returns a function that removes the listener. */
     addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): () => void {
         return this.#apiClient.subscribe(
             (data) => {
@@ -651,7 +650,6 @@ export class PerspectiveClient {
         this.#unsubscribers.push(unsub)
     }
 
-    /** Calls `cb` for this event on `uuid`. Returns a function that removes the listener. */
     addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): () => void {
         return this.#apiClient.subscribe(
             (data) => {
@@ -662,7 +660,6 @@ export class PerspectiveClient {
         )
     }
 
-    /** Calls `cb` for this event on `uuid`. Returns a function that removes the listener. */
     addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): () => void {
         return this.#apiClient.subscribe(
             (data) => {
@@ -677,7 +674,6 @@ export class PerspectiveClient {
         )
     }
 
-    /** Calls `cb` for this event on `uuid`. Returns a function that removes the listener. */
     addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): () => void {
         return this.#apiClient.subscribe(
             (data) => {

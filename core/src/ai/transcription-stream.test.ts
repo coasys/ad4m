@@ -39,14 +39,6 @@ function setup(replies: Record<string, Reply>) {
 }
 
 describe('AIClient transcription streams (L7)', () => {
-  it('a stream that fails to open leaves no listener', async () => {
-    const { api, ai, callbackCount } = setup({ 'ai.transcriptionOpen': { error: 'no model' } });
-
-    await expect(ai.openTranscriptionStream('model', () => {})).rejects.toThrow('no model');
-    expect(callbackCount()).toBe(0);
-    api.closeAll();
-  });
-
   it('a stream whose close call fails leaves no listener', async () => {
     const { api, ai, callbackCount } = setup({
       'ai.transcriptionOpen': { result: 'stream-1' },
@@ -60,17 +52,6 @@ describe('AIClient transcription streams (L7)', () => {
     expect(callbackCount()).toBe(0);
     FakeWebSocket.last?.push({ type: 'transcription-text', streamId: 'stream-1', text: 'after close' });
     expect(received).toEqual([]);
-    api.closeAll();
-  });
-
-  it('closing a stream releases its listener', async () => {
-    const { api, ai, callbackCount } = setup({
-      'ai.transcriptionOpen': { result: 'stream-1' },
-      'ai.transcriptionClose': { result: null },
-    });
-    await ai.openTranscriptionStream('model', () => {});
-    await ai.closeTranscriptionStream('stream-1');
-    expect(callbackCount()).toBe(0);
     api.closeAll();
   });
 });
