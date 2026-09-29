@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::agent::capabilities::*;
-use crate::db::Ad4mDb;
+use crate::billing_backend::billing_backend;
 use crate::types::RequestContext;
 
 use super::types::*;
@@ -14,18 +14,15 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
     check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
+    let bb = billing_backend();
+    let global_free = bb.get_free_hosting_enabled().unwrap_or(true);
     let user_info = if let Some(user_email) = ctx.user_email.clone() {
-        let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(&user_email)).ok();
-        let hot_wallet_address =
-            Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(&user_email))
-                .ok()
-                .flatten();
+        let credits = bb.get_credits(&user_email).ok();
+        let hot_wallet_address = bb.get_user_hot_wallet(&user_email).ok().flatten();
         let free_access = if global_free {
             true
         } else {
-            Ad4mDb::with_global_instance(|db| db.get_user_free_access(&user_email)).unwrap_or(false)
+            bb.get_user_free_access(&user_email).unwrap_or(false)
         };
         Some(serde_json::json!({
             "email": user_email,
@@ -37,7 +34,8 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
         None
     };
 
-    let rates = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+    let rates = bb
+        .get_rates()
         .ok()
         .and_then(|v| serde_json::to_value(v).ok());
 
@@ -95,10 +93,28 @@ async fn request_payment(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let body: RequestPaymentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    Ok(serde_json::json!({
-        "success": true,
-        "amountHOT": body.amount_hot
-    }))
+    // Look up the user's HOT wallet agent key as the counterparty
+    let email = ctx
+        .user_email
+        .clone()
+        .ok_or_else(|| WsRpcError::forbidden("User email required for payment"))?;
+    let agent_key = billing_backend()
+        .get_user_hot_wallet(&email)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .ok_or_else(|| {
+            WsRpcError::bad_request("No HoT wallet address set — call hosting.setHotWallet first")
+        })?;
+
+    match crate::unyt_service::create_proposal(&body.amount_hot, &agent_key, None).await {
+        Ok(action_hash) => Ok(serde_json::json!({
+            "success": true,
+            "message": format!("Proposal created: {}", action_hash),
+        })),
+        Err(e) => Ok(serde_json::json!({
+            "success": false,
+            "message": e.to_string(),
+        })),
+    }
 }
 
 async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -113,7 +129,8 @@ async fn set_hot_wallet(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         .clone()
         .ok_or_else(|| WsRpcError::forbidden("User email required"))?;
 
-    Ad4mDb::with_global_instance(|db| db.set_user_hot_wallet(&email, &body.address))
+    billing_backend()
+        .set_user_hot_wallet(&email, &body.address)
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     Ok(Value::Bool(true))

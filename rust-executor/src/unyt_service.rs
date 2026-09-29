@@ -1040,7 +1040,7 @@ fn credit_and_complete(request: &crate::db::PaymentRequest) {
     };
 
     if let Err(e) =
-        Ad4mDb::with_global_instance(|db| db.add_user_credits(&request.user_email, amount))
+        crate::billing_backend::billing_backend().add_credits(&request.user_email, amount)
     {
         error!("Failed to credit user {}: {}", request.user_email, e);
         return;
@@ -1279,7 +1279,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
     // Look up user by their mHOT wallet address (= agent pubkey)
     let user_email =
-        Ad4mDb::with_global_instance(|db| db.get_user_by_hot_wallet_address(counterparty));
+        crate::billing_backend::billing_backend().get_user_by_hot_wallet_address(counterparty);
 
     match user_email {
         Ok(Some(email)) => match hot_amount.parse::<f64>() {
@@ -1308,7 +1308,7 @@ pub async fn handle_signal(payload_json: &JsonValue) {
 
                 // Credit user first, then mark completed only on success
                 if let Err(e) =
-                    Ad4mDb::with_global_instance(|db| db.add_user_credits(&email, amount_f64))
+                    crate::billing_backend::billing_backend().add_credits(&email, amount_f64)
                 {
                     error!(
                         "Failed to credit user {} with {} HOT: {}",
