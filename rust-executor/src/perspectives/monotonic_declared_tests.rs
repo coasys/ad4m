@@ -10,6 +10,7 @@
 //! T4 (role grants read back through the flow engine) is
 //! `flow_instance_e2e/roles.rs::a_declared_role_grant_ends_only_by_revocation`.
 
+use super::monotonic_tests::as_input;
 use super::*;
 use crate::agent::signatures::TestSigner;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
@@ -306,4 +307,102 @@ async fn t5_re_registering_a_class_keeps_its_declarations() {
             .expect_err("both the old and the new predicate are declared");
         assert!(format!("{err:#}").contains("is monotonic"), "{err:#}");
     }
+}
+
+/// A Local role grant owned by this agent, under `MEMBER`, which the owner
+/// (the authority of an unshared perspective) has declared monotonic.
+async fn local_grant_under_declared(
+    p: &mut PerspectiveInstance,
+    ctx: &AgentContext,
+) -> LinkExpression {
+    register(
+        p,
+        ctx,
+        serde_json::json!({
+            "target_class": "app://Role",
+            "properties": [{ "path": MEMBER, "name": "did", "min_count": 0, "monotonic": true }],
+        }),
+    )
+    .await;
+    LinkExpression::from(
+        p.add_link(
+            Link {
+                source: ROLE.to_string(),
+                predicate: Some(MEMBER.to_string()),
+                target: "did:key:someone".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            ctx,
+        )
+        .await
+        .expect("add_link"),
+    )
+}
+
+/// PR A's removal_status rule holds for a declared predicate too: the store
+/// decides in both directions. A Shared-labelled removal (the JS client's
+/// default) of a Local link under it goes; one of a link this store does not
+/// hold is still refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_link_mutations_labelled_shared_removes_a_local_declared_link() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let local = local_grant_under_declared(&mut p, &ctx).await;
+    let unknown = grant(&TestSigner::generate(), ROLE, MEMBER);
+
+    p.link_mutations(
+        LinkMutations {
+            additions: vec![],
+            removals: vec![as_input(&local)],
+        },
+        LinkStatus::Shared,
+        &ctx,
+    )
+    .await
+    .expect("a Shared-labelled removal of a Local declared link goes");
+    assert!(!present(&p, &local));
+
+    let err = p
+        .link_mutations(
+            LinkMutations {
+                additions: vec![],
+                removals: vec![as_input(&unknown)],
+            },
+            LinkStatus::Shared,
+            &ctx,
+        )
+        .await
+        .expect_err("a link this store does not hold keeps its Shared label");
+    assert!(format!("{err:#}").contains("is monotonic"), "{err:#}");
+}
+
+/// PR A's batched updateLink fix holds for a declared predicate too: the WS
+/// handler hands in the old link without a status, so the queued removal
+/// must carry the stored one, or the commit backstop reads it as Shared.
+#[tokio::test(flavor = "multi_thread")]
+async fn t5_a_batched_update_of_a_local_declared_link_commits() {
+    let (mut p, _, ctx) = setup_perspective_no_llm(&[]).await;
+    let local = local_grant_under_declared(&mut p, &ctx).await;
+    let mut old = local.clone();
+    old.status = None;
+    let next = Link {
+        source: ROLE.to_string(),
+        predicate: Some(MEMBER.to_string()),
+        target: "did:key:someone-else".to_string(),
+    };
+
+    let batch = p.create_batch().await;
+    p.update_link(old, next, Some(batch.clone()), &ctx)
+        .await
+        .expect("queue the update");
+    p.commit_batch(batch, &ctx)
+        .await
+        .expect("a batched update of a Local declared link commits");
+
+    assert!(!present(&p, &local));
+    let targets: Vec<String> = links_under(&p, MEMBER)
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    assert_eq!(targets, vec!["did:key:someone-else".to_string()]);
 }
