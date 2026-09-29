@@ -979,53 +979,6 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
 
 use crate::ai_service::{AIService, PromptResult};
 
-/// Ensure the global wallet has a "main" keypair (decode_jwt signs and
-/// verifies with it) and return a user JWT whose `sub` is `email`.
-///
-/// Mints against the *current* global "main" key. Safe under the project's
-/// single-threaded test convention (`--test-threads=1`, see package.json);
-/// a parallel test rotating the key via `test_utils::setup_wallet()`
-/// between mint and decode would break verification.
-fn user_jwt_token(email: &str) -> String {
-    use jsonwebtoken::{encode, EncodingKey, Header};
-    // Use the trait-based wallet_backend (same path as decode_jwt) so the
-    // signing and verification keys match.
-    let local = std::sync::Arc::new(crate::wallet::LocalWallet::new());
-    let _ = crate::wallet::try_init_wallet_backend(
-        local as std::sync::Arc<dyn crate::wallet::WalletBackend>,
-    );
-    crate::config::set_global_config(crate::config::Ad4mConfig::default());
-
-    let backend = crate::wallet::wallet_backend();
-    let key_name = crate::agent::capabilities::token::signing_key_name();
-    if !backend.key_exists(&key_name) {
-        backend
-            .generate_keypair(&key_name)
-            .expect("generate signing key");
-    }
-    let secret = backend
-        .get_secret_key(&key_name)
-        .expect("signing key must exist");
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    encode(
-        &Header::default(),
-        &serde_json::json!({
-            "iss": "ad4m-test",
-            "sub": email,
-            "aud": "ad4m-test",
-            "exp": now + 3600,
-            "iat": now,
-            "nonce": "test-nonce",
-            "capabilities": { "appName": "test", "appDesc": "test" },
-        }),
-        &EncodingKey::from_secret(secret.as_slice()),
-    )
-    .unwrap()
-}
-
 fn sample_prompt_result() -> PromptResult {
     PromptResult {
         text: "hello world".to_string(),
@@ -1070,21 +1023,98 @@ impl Drop for DbSettingsGuard {
     }
 }
 
+/// A user session as the `/v1` request path builds it: the user was resolved
+/// from the token when the request was authenticated, and the token has
+/// expired since.
+fn session_with_expired_token(email: &str) -> crate::api::auth::AuthContext {
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+    let auth_token = crate::test_utils::expired_user_token(email);
+    assert!(
+        crate::agent::capabilities::user_email_from_token(auth_token.clone()).is_none(),
+        "the premise of this test is a token that no longer decodes"
+    );
+    crate::api::auth::AuthContext {
+        capabilities: Ok(vec![
+            crate::agent::capabilities::AI_PROMPT_CAPABILITY.clone()
+        ]),
+        auto_permit_cap_requests: false,
+        auth_token,
+        is_admin_credential: false,
+        user_email: Some(email.to_string()),
+    }
+}
+
+// The handler used to decode the token again for its credit check, and a
+// token that had expired by then let a user without credits through.
+#[tokio::test]
+async fn embeddings_credit_check_uses_the_session_user() {
+    use crate::db::Ad4mDb;
+    use crate::types::{ModelApiInput, ModelInput, ModelType};
+
+    let email = "broke@ex.test";
+    let auth = session_with_expired_token(email);
+    // A fresh database; the guard turns multi-user mode off again on drop.
+    let _multi_user = crate::test_utils::MultiUserMode::on();
+    Ad4mDb::with_global_instance(|db| {
+        db.set_free_hosting_enabled(false)?;
+        db.add_user(email, "did:key:test", "password")?;
+        db.set_user_credits(email, 0.0)?;
+        db.add_model(&ModelInput {
+            name: "embed".to_string(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.example.org/v1".to_string(),
+                api_key: "sk-provider-secret".to_string(),
+                model: "embed".to_string(),
+                api_type: "OPEN_AI".to_string(),
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Embedding,
+        })
+    })
+    .unwrap();
+
+    let request = EmbeddingRequest {
+        model: "embed".to_string(),
+        input: EmbeddingInput::One("hello".to_string()),
+        encoding_format: None,
+        user: None,
+    };
+    let err = super::embeddings::embeddings(auth, super::errors::OpenAIJson(request))
+        .await
+        .unwrap_err();
+    // Free hosting is the default other tests in this binary rely on.
+    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(true)).unwrap();
+
+    assert_eq!(
+        err.status,
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        "got {}: {}",
+        err.status,
+        err.error.message
+    );
+}
+
 #[tokio::test]
 async fn stream_completion_bills_once_on_success() {
     init_test_db();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
 
-    // bill_prompt_if_authed needs multi-user mode on + a user JWT, and
+    // bill_prompt_if_authed needs multi-user mode on + a session user, and
     // bill_ai_operation needs a priced model. The guard restores both even
     // if an assertion below panics.
     let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
-    let token = user_jwt_token("billing-user@ex.test");
     let (tx, rx) = tokio::sync::oneshot::channel();
-    AIService::bill_and_forward_stream_result(Some(token), "gpt-4", Ok(sample_prompt_result()), tx)
-        .await;
+    AIService::bill_and_forward_stream_result(
+        Some("billing-user@ex.test".to_string()),
+        "gpt-4",
+        Ok(sample_prompt_result()),
+        tx,
+    )
+    .await;
     let forwarded = rx.await.unwrap().unwrap();
     assert_eq!(forwarded.text, "hello world");
     assert_eq!(forwarded.prompt_tokens, 10);
@@ -1122,13 +1152,13 @@ async fn stream_error_does_not_bill() {
     // even if error streams did bill.
     let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
 
-    // A valid user token is passed on purpose: the skip must come from
-    // the Err gate, not from token absence (matches prompt_messages, which
+    // A session user is passed on purpose: the skip must come from the Err
+    // gate, not from the absence of a user (matches prompt_messages, which
     // bills only after a successful prompt).
     let result: Result<PromptResult, anyhow::Error> = Err(anyhow::anyhow!("inference failed"));
     let (tx, rx) = tokio::sync::oneshot::channel();
     AIService::bill_and_forward_stream_result(
-        Some(user_jwt_token("billing-user@ex.test")),
+        Some("billing-user@ex.test".to_string()),
         "gpt-4",
         result,
         tx,
@@ -1146,7 +1176,7 @@ async fn stream_error_does_not_bill() {
 }
 
 #[tokio::test]
-async fn stream_without_token_does_not_bill() {
+async fn stream_without_a_user_does_not_bill() {
     init_test_db();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);

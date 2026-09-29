@@ -32,7 +32,7 @@ use axum::response::{sse::Event, IntoResponse, Json, Sse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::chat::{epoch_seconds, user_email};
+use super::chat::epoch_seconds;
 use super::errors::OpenAIError;
 use super::harness_bridge::structured_turns;
 use super::types::{
@@ -54,8 +54,8 @@ pub async fn chat_with_native_tools(
     tools: &[ToolDef],
     stream: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(email) = auth.user_email.as_deref() {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -73,7 +73,7 @@ pub async fn chat_with_native_tools(
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     // Billing happens inside prompt_with_tools, on success only.
     let reply = service
-        .prompt_with_tools(model_id, turns, specs, Some(auth.auth_token.clone()))
+        .prompt_with_tools(model_id, turns, specs, auth.user_email.clone())
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 

@@ -15,12 +15,19 @@ pub struct AuthContext {
     pub auto_permit_cap_requests: bool,
     pub auth_token: String,
     pub is_admin_credential: bool,
+    /// The user this request runs as, resolved from the token once, when the
+    /// request was authenticated. `None` for the node operator. Everything
+    /// that needs the user later in the request — the credit check, the
+    /// billing hook after the model call — reads it from here rather than
+    /// decoding the token again, so a token that expires during a long
+    /// request still charges the user it was issued to (#1175).
+    pub user_email: Option<String>,
 }
 
 impl AuthContext {
     /// Convert to the existing RequestContext used by internal functions.
     pub fn to_request_context(&self) -> RequestContext {
-        let user_email = user_email_from_token(self.auth_token.clone());
+        let user_email = self.user_email.clone();
         let user_did = user_email
             .as_ref()
             .and_then(|email| AgentService::get_user_did_by_email(email).ok());
@@ -77,12 +84,14 @@ where
             capabilities_from_token(auth_header.clone(), app_state.admin_credential.clone());
         let is_admin_credential =
             is_admin_credential_token(&auth_header, &app_state.admin_credential);
+        let user_email = user_email_from_token(auth_header.clone());
 
         Ok(AuthContext {
             capabilities,
             auto_permit_cap_requests: app_state.auto_permit_cap_requests,
             auth_token: auth_header,
             is_admin_credential,
+            user_email,
         })
     }
 }
