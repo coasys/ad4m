@@ -118,19 +118,12 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
-    // Class-field initialisers (`count: number = 0`) run in the constructor,
-    // so the prototype never holds them. Read them from one throwaway
-    // instance, built without a perspective; a constructor that throws
-    // without one just loses inference.
-    let fieldDefaults: any;
-    try { fieldDefaults = new target(); } catch {}
+    // Class-field initialisers (`count = 0`) run in the constructor, not on the
+    // prototype, so read them from one instance built without a perspective.
+    let instance: any;
+    try { instance = new target(); } catch {}
     const fieldValue = (propName: string): unknown => {
-        if (obj[propName] !== undefined) return obj[propName];
-        try {
-            return fieldDefaults?.[propName];
-        } catch {
-            return undefined;
-        }
+        try { return obj[propName] ?? instance?.[propName]; } catch { return undefined; }
     };
 
     // ── Convert properties to SHACL property shapes ────────────────────

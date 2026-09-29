@@ -62,11 +62,8 @@ describe("Literal", () => {
             }
         })
 
-        it("still refuses to encode undefined as a URL", () => {
+        it("treats undefined as empty", () => {
             expect(() => Literal.from(undefined).toUrl()).toThrow("Can't turn empty Literal into URL")
-        })
-
-        it("still throws on get() of an undefined literal", () => {
             expect(() => Literal.from(undefined).get()).toThrow("Can't render empty Literal")
         })
 

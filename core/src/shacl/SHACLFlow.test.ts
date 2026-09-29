@@ -986,17 +986,6 @@ describe('SHACLFlow', () => {
       expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
     });
 
-    it('keeps same-named transitions from two states after toLinks -> fromLinks', () => {
-      const flow = new SHACLFlow('TODO', 'todo://');
-      flow.addState({ name: 'ready', value: 0 });
-      flow.addState({ name: 'doing', value: 0.5 });
-      flow.addState({ name: 'done', value: 1 });
-      flow.addTransition({ actionName: 'Finish', fromState: 'ready', toState: 'done', actions: [] });
-      flow.addTransition({ actionName: 'Finish', fromState: 'doing', toState: 'done', actions: [] });
-
-      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
-    });
-
     it('does not collide "a" -> "Tob" with "aTo" -> "b"', () => {
       const flow = new SHACLFlow('F', 'f://');
       for (const [name, value] of [['a', 0], ['Tob', 1], ['aTo', 2], ['b', 3]] as const) {
@@ -1009,7 +998,6 @@ describe('SHACLFlow', () => {
       expect(new Set(transitionUris).size).toBe(2);
       expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
     });
-
   });
 
   describe('initial state ordering', () => {

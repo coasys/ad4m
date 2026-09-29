@@ -1722,8 +1722,7 @@ export class PerspectiveProxy {
         const shapes: Array<{name: string, shape: SHACLShape}> = [];
         for (const { name, shapeUri, links } of entries) {
             try {
-                const shape = SHACLShape.fromLinks(links as any, shapeUri);
-                if (shape) shapes.push({ name, shape });
+                shapes.push({ name, shape: SHACLShape.fromLinks(links as any, shapeUri) });
             } catch (e) {
                 console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
             }
