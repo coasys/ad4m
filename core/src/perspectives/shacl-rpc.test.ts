@@ -1,5 +1,6 @@
 import { PerspectiveProxy } from './PerspectiveProxy';
 import { SHACLShape } from '../shacl/SHACLShape';
+import { SHACLFlow } from '../shacl/SHACLFlow';
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -244,6 +245,55 @@ describe('addShacl', () => {
     await proxy.addShacl('Todo', new SHACLShape('shapes://TodoShape', 'todo://Todo'));
 
     expect(JSON.parse(addSdna.mock.calls[0][4]).node_shape_uri).toBe('shapes://TodoShape');
+  });
+});
+
+describe('addFlow', () => {
+  /** A client backed by an in-memory link store. */
+  function storeClient() {
+    let links: any[] = [];
+    const matches = (l: any, q: any) =>
+      (!q.source || l.data.source === q.source) && (!q.predicate || l.data.predicate === q.predicate);
+    const add = (ls: any[]) => { links.push(...ls.map((data: any, i: number) => ({ data: { ...data }, timestamp: `${links.length + i}` }))); };
+    return {
+      links: () => links,
+      add,
+      client: createMockClient({
+        queryLinks: jest.fn(async (_: string, q: any) => links.filter(l => matches(l, q))),
+        addLinks: jest.fn(async (_: string, ls: any[]) => { add(ls); return []; }),
+        linkMutations: jest.fn(async (_: string, m: any) => {
+          links = links.filter(l => !m.removals.includes(l));
+          add(m.additions);
+          return { additions: [], removals: [] };
+        }),
+      }),
+    };
+  }
+
+  const todoFlow = () => {
+    const flow = new SHACLFlow('Todo', 'todo://');
+    flow.addState({ name: 'ready', value: 0 });
+    flow.addState({ name: 'done', value: 1 });
+    flow.addTransition({ actionName: 'Complete', fromState: 'ready', toState: 'done', actions: [] });
+    return flow;
+  };
+  const transitions = (flow: SHACLFlow | null) =>
+    flow!.transitions.map(t => `${t.fromState}->${t.toState}:${t.actionName}`);
+
+  it('replaces the stored transitions when a flow is re-added', async () => {
+    const { client, add } = storeClient();
+    const proxy = createProxy(client);
+
+    // A flow stored with the old `{from}To{to}` transition URIs.
+    const legacy = todoFlow().toLinks().map(l => ({ ...l,
+      source: l.source.replace(/\.transition\/.*$/, '.readyTodone'),
+      target: l.target.replace(/\.transition\/.*$/, '.readyTodone') }));
+    add(legacy);
+    await proxy.addFlow('Todo', todoFlow());
+    expect(transitions(await proxy.getFlow('Todo'))).toEqual(['ready->done:Complete']);
+
+    await proxy.addFlow('Todo', todoFlow());
+    expect(transitions(await proxy.getFlow('Todo'))).toEqual(['ready->done:Complete']);
   });
 });
 

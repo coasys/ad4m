@@ -1766,31 +1766,21 @@ export class PerspectiveProxy {
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
-        // Serialize flow to links
-        const flowLinks = flow.toLinks();
-        
-        // Create registration and mapping links
         const flowNameLiteral = Literal.from(name).toUrl();
-        const allLinks: Link[] = [
-            ...flowLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_flow",
-                target: flowNameLiteral
-            }),
-            new Link({
-                source: flowNameLiteral,
-                predicate: "ad4m://flow_uri",
-                target: flow.flowUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        const additions = [
+            ...flow.toLinks(),
+            { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
+            { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
+        ].map(l => new Link(l));
+
+        // Re-adding a flow replaces its transitions. Their URIs may use an
+        // older scheme, so find them through the flow's hasTransition links.
+        const edges = await this.get(new LinkQuery({ source: flow.flowUri, predicate: "ad4m://hasTransition" }));
+        const transitionLinks = await Promise.all(
+            edges.map(l => this.get(new LinkQuery({ source: l.data.target })))
+        );
+
+        await this.linkMutations({ additions, removals: [...edges, ...transitionLinks.flat()] });
     }
 
     /**
