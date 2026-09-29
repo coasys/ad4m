@@ -710,12 +710,10 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Subscribe to model query changes. Builds trigger SPARQL from the model shape
-     * internally in Rust, registers a subscription, runs the initial query, and
-     * pushes updated results when relevant links change.
-     *
-     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
-     * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
+     * Open a live model query on the executor. Later changes arrive as
+     * updates; `LiveQuery` (or `ModelQueryBuilder.subscribe()`) applies them.
+     * The subscription ends with `disposeQuerySubscription()` or when the
+     * socket closes.
      *
      * @param className - The model class name
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)

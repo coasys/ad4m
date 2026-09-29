@@ -33,9 +33,8 @@ pub struct RequestContext {
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
     /// Id of the WS RPC connection the request arrived on, generated once
-    /// per socket. Subscriptions record it so `perspective.keepAliveLease`
-    /// renews only the calling connection's subscriptions. `None` outside
-    /// the WS RPC socket.
+    /// per socket. Live queries belong to it and end when it closes. `None`
+    /// outside the WS RPC socket.
     pub connection_id: Option<String>,
 }
 

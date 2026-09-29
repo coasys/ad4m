@@ -50,7 +50,8 @@ export function applyUpdate(result: any, update: QueryUpdate): any {
 /**
  * One live query on the executor. Holds the last result, applies each update
  * to it, calls `resyncSubscription` when a revision is missing, and opens a
- * new subscription after a reconnect. `onResult` gets every result after the
+ * new subscription after a reconnect (the executor ends a socket's
+ * subscriptions when it closes). `onResult` gets every result after the
  * first; `start()` returns the first.
  */
 export class LiveQuery {
@@ -68,7 +69,6 @@ export class LiveQuery {
     #buffer: QueryUpdate[] | null = null
     #unlisten: () => void
     #unreconnect: () => void
-    #keepalive?: ReturnType<typeof setInterval>
 
     constructor(client: PerspectiveClient, uuid: string, open: () => Promise<Subscribed>, onResult: (result: any) => void) {
         this.#client = client
@@ -100,7 +100,6 @@ export class LiveQuery {
             return this.#result
         }
         this.#id = subscribed.subscriptionId
-        this.#startKeepalive()
         this.#replace(subscribed.revision, subscribed.result)
         return this.#result
     }
@@ -110,17 +109,7 @@ export class LiveQuery {
         this.#generation++
         this.#unlisten()
         this.#unreconnect()
-        clearInterval(this.#keepalive)
         if (this.#id) this.#client.disposeQuerySubscription(this.#uuid, this.#id).catch(() => {})
-    }
-
-    #startKeepalive() {
-        clearInterval(this.#keepalive)
-        this.#keepalive = setInterval(() => {
-            this.#client.keepAliveQuery(this.#uuid, this.#id!).catch(() => {
-                if (!this.#disposed) this.start().catch(e => console.error('Error re-opening live query:', e))
-            })
-        }, 30_000)
     }
 
     /** Take `result` at `revision`, then apply the updates buffered meanwhile. */

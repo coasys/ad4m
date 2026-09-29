@@ -343,78 +343,6 @@ async fn expression_get_many_aligns_with_input() {
     assert_eq!(many, json!([single, null, single]));
 }
 
-// ── X3: perspective.keepAliveLease ──────────────────────────────────────────
-
-async fn subscribe(uuid: &str, connection_id: &str) -> String {
-    let reply = call(
-        "perspective.subscribeQuery",
-        json!({ "uuid": uuid, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
-        admin_conn_ctx(connection_id),
-    )
-    .await
-    .unwrap();
-    reply["subscriptionId"].as_str().unwrap().to_string()
-}
-
-#[tokio::test]
-async fn keep_alive_lease_renews_the_callers_subscriptions_in_one_perspective() {
-    let p = registered_perspective(&[]).await;
-    subscribe(&p.0, "conn-1").await;
-    let reply = call(
-        "perspective.keepAliveLease",
-        json!({ "uuid": p.0 }),
-        admin_conn_ctx("conn-1"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply, json!({ "renewed": 1 }));
-    // Another connection of the same user renews nothing here.
-    let reply = call(
-        "perspective.keepAliveLease",
-        json!({ "uuid": p.0 }),
-        admin_conn_ctx("conn-2"),
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply, json!({ "renewed": 0 }));
-}
-
-#[tokio::test]
-async fn keep_alive_lease_without_uuid_covers_every_perspective() {
-    let a = registered_perspective(&[]).await;
-    let b = registered_perspective(&[]).await;
-    let conn = uuid::Uuid::new_v4().to_string();
-    subscribe(&a.0, &conn).await;
-    subscribe(&b.0, &conn).await;
-    let reply = call(
-        "perspective.keepAliveLease",
-        json!({}),
-        admin_conn_ctx(&conn),
-    )
-    .await
-    .unwrap();
-    assert_eq!(reply, json!({ "renewed": 2 }));
-}
-
-#[tokio::test]
-async fn keep_alive_lease_checks_the_query_capability() {
-    let p = registered_perspective(&[]).await;
-    subscribe(&p.0, "conn-1").await;
-    let err = call(
-        "perspective.keepAliveLease",
-        json!({ "uuid": p.0 }),
-        no_cap_ctx(),
-    )
-    .await
-    .expect_err("no capability");
-    assert_eq!(err.code, 403);
-    // Without a uuid, perspectives the caller may not query are skipped.
-    let reply = call("perspective.keepAliveLease", json!({}), no_cap_ctx())
-        .await
-        .unwrap();
-    assert_eq!(reply, json!({ "renewed": 0 }));
-}
-
 // ── X2: subscribe replies and resync ────────────────────────────────────────
 
 #[tokio::test]
@@ -423,7 +351,7 @@ async fn subscribe_replies_json_at_revision_zero() {
     let reply = call(
         "perspective.subscribeQuery",
         json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }" }),
-        admin_ctx(),
+        admin_conn_ctx("c"),
     )
     .await
     .unwrap();
@@ -434,7 +362,7 @@ async fn subscribe_replies_json_at_revision_zero() {
     let reply = call(
         "perspective.modelSubscribe",
         json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}" }),
-        admin_ctx(),
+        admin_conn_ctx("c"),
     )
     .await
     .unwrap();
@@ -449,7 +377,7 @@ async fn resync_subscription_returns_revision_and_result() {
     let sub = call(
         "perspective.subscribeQuery",
         json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s <test://none> ?o }" }),
-        admin_ctx(),
+        admin_conn_ctx("c"),
     )
     .await
     .unwrap();
@@ -457,20 +385,22 @@ async fn resync_subscription_returns_revision_and_result() {
     let reply = call(
         "perspective.resyncSubscription",
         json!({ "uuid": p.0, "subscriptionId": id }),
-        admin_ctx(),
+        admin_conn_ctx("c"),
     )
     .await
     .unwrap();
     assert_eq!(reply, json!({ "revision": 0, "result": [] }));
 
-    let err = call(
-        "perspective.resyncSubscription",
-        json!({ "uuid": p.0, "subscriptionId": "unknown" }),
-        admin_ctx(),
-    )
-    .await
-    .expect_err("unknown subscription");
-    assert_eq!(err.code, 404);
+    for (subscription, connection) in [(json!("unknown"), "c"), (id.clone(), "other")] {
+        let err = call(
+            "perspective.resyncSubscription",
+            json!({ "uuid": p.0, "subscriptionId": subscription }),
+            admin_conn_ctx(connection),
+        )
+        .await
+        .expect_err("not this connection's subscription");
+        assert_eq!(err.code, 404);
+    }
     let err = call(
         "perspective.resyncSubscription",
         json!({ "uuid": p.0, "subscriptionId": id }),
@@ -479,4 +409,46 @@ async fn resync_subscription_returns_revision_and_result() {
     .await
     .expect_err("no capability");
     assert_eq!(err.code, 403);
+}
+
+#[tokio::test]
+async fn subscribing_needs_a_socket() {
+    let p = registered_perspective(&[("Todo", TODO_SDNA)]).await;
+    for (method, params) in [
+        (
+            "perspective.subscribeQuery",
+            json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+        ),
+        (
+            "perspective.modelSubscribe",
+            json!({ "uuid": p.0, "class_name": "Todo", "query_json": "{}" }),
+        ),
+    ] {
+        let err = call(method, params, admin_ctx())
+            .await
+            .expect_err("no connection (REST)");
+        assert_eq!(err.code, 400, "{method}");
+    }
+}
+
+#[tokio::test]
+async fn dispose_query_ends_only_this_connections_subscription() {
+    let p = registered_perspective(&[]).await;
+    let sub = call(
+        "perspective.subscribeQuery",
+        json!({ "uuid": p.0, "query": "SELECT ?s WHERE { ?s ?p ?o }" }),
+        admin_conn_ctx("c"),
+    )
+    .await
+    .unwrap();
+    let dispose = |connection: &'static str| {
+        call(
+            "perspective.disposeQuery",
+            json!({ "uuid": p.0, "subscriptionId": sub["subscriptionId"] }),
+            admin_conn_ctx(connection),
+        )
+    };
+    assert_eq!(dispose("other").await.unwrap(), json!(false));
+    assert_eq!(dispose("c").await.unwrap(), json!(true));
+    assert_eq!(dispose("c").await.unwrap(), json!(false));
 }

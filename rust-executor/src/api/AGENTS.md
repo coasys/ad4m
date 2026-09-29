@@ -54,6 +54,10 @@ anything that signs, bills or writes.
   each `query-subscription-update` carries the change (`added` / `removed` / `changed`) and
   `revision` (+1 per update). On a revision gap, call `perspective.resyncSubscription
   { uuid, subscriptionId }` → `{ revision, result }` and apply only the updates after that revision.
+- A subscription belongs to the RPC connection that opened it (`RequestContext::connection_id`):
+  only that socket gets its updates (`connectionId` on the pubsub payload, stripped by
+  `events_ws::query_update_for`), and `ws_rpc::serve` ends them when the socket closes. No
+  keepalive. Subscribing without a connection (REST) is a 400.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
   (ts-rs export dir) and fails if `core/src/generated/api/HandlerMethods.ts` is stale — regenerate
   (`pnpm run generate:api-types` in `core/`) after adding a handler.

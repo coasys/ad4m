@@ -1,50 +1,48 @@
 //! Live query subscriptions on `PerspectiveInstance`: delta updates, resync
-//! and lease renewal.
+//! and disposal. A subscription belongs to the RPC connection that opened it.
 //!
 //! A child module of `perspective_instance` so it can reach the private
 //! subscription registry without widening its visibility.
 
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
-use tokio::time::Instant;
 
-use super::PerspectiveInstance;
+use super::{PerspectiveInstance, SubscribedQuery};
+use crate::prolog_service::get_prolog_service;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
 impl PerspectiveInstance {
     /// Resync after a revision gap (`perspective.resyncSubscription`): the
     /// subscription's current revision and the result it describes, read
-    /// together under the registry lock. `None` when `subscription_id` is
-    /// unknown or belongs to another owner than `user_email` (`None` = the
-    /// main agent).
+    /// together under the registry lock. `None` unless `connection_id`
+    /// opened `subscription_id`.
     pub async fn subscription_state(
         &self,
         subscription_id: &str,
-        user_email: Option<&str>,
+        connection_id: &str,
     ) -> Option<(u64, String)> {
         let queries = self.subscribed_queries.lock().await;
-        let query = queries.get(subscription_id)?;
-        if query.user_email.as_deref() != user_email {
-            return None;
-        }
+        let query = queries
+            .get(subscription_id)
+            .filter(|q| q.connection == connection_id)?;
         Some((query.revision, query.last_result.clone()))
     }
 
     /// Publish one update on the `query-subscription-update` topic:
-    /// `{ uuid, subscriptionId, revision, added, removed, changed, ... }`.
-    /// See [`result_delta`] for the row keys.
+    /// `{ uuid, subscriptionId, revision, added, removed, changed, ... }` (see
+    /// [`result_delta`]) plus `connectionId`, which the RPC socket uses to
+    /// deliver it to the subscription's own connection only.
     pub(super) async fn send_delta_update(
         &self,
         subscription_id: String,
-        old: &str,
-        new: &str,
+        connection_id: String,
         revision: u64,
-        is_model: bool,
+        mut payload: Map<String, Value>,
     ) {
-        let mut payload = result_delta(old, new, is_model);
         payload.insert("uuid".into(), json!(self.uuid));
         payload.insert("subscriptionId".into(), json!(subscription_id));
         payload.insert("revision".into(), json!(revision));
+        payload.insert("connectionId".into(), json!(connection_id));
         get_global_pubsub()
             .await
             .publish(
@@ -54,30 +52,44 @@ impl PerspectiveInstance {
             .await;
     }
 
-    /// Lease renewal (`perspective.keepAliveLease`): reset the keepalive of
-    /// every query and model subscription in this perspective that
-    /// `connection_id` subscribed to or joined, owned by `user_email`
-    /// (`None` = the main agent). Returns how many it renewed.
-    ///
-    /// Subscriptions of the owner's other connections are left alone, so a
-    /// closed tab's subscriptions still time out.
-    pub async fn renew_subscriptions_of(
+    /// End one subscription that `connection_id` opened. `false` when there
+    /// is no such subscription.
+    pub async fn dispose_query_subscription(
         &self,
-        user_email: Option<&str>,
+        subscription_id: &str,
         connection_id: &str,
-    ) -> usize {
-        let now = Instant::now();
-        let mut queries = self.subscribed_queries.lock().await;
-        let mut renewed = 0;
-        for query in queries.values_mut() {
-            if query.user_email.as_deref() == user_email
-                && query.connections.contains(connection_id)
+    ) -> bool {
+        self.dispose_where(|id, q| id == subscription_id && q.connection == connection_id)
+            .await
+            > 0
+    }
+
+    /// End every subscription `connection_id` opened (its socket closed).
+    pub async fn dispose_connection_subscriptions(&self, connection_id: &str) -> usize {
+        self.dispose_where(|_, q| q.connection == connection_id)
+            .await
+    }
+
+    async fn dispose_where(&self, matches: impl Fn(&str, &SubscribedQuery) -> bool) -> usize {
+        let removed: Vec<SubscribedQuery> = {
+            let mut queries = self.subscribed_queries.lock().await;
+            let ids: Vec<String> = queries
+                .iter()
+                .filter(|(id, q)| matches(id, q))
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.iter().filter_map(|id| queries.remove(id)).collect()
+        };
+        for query in &removed {
+            if let Err(e) = get_prolog_service()
+                .await
+                .subscription_ended(self.uuid.clone(), query.query.clone())
+                .await
             {
-                query.last_keepalive = now;
-                renewed += 1;
+                log::warn!("Failed to notify prolog service of subscription end: {}", e);
             }
         }
-        renewed
+        removed.len()
     }
 }
 
@@ -189,124 +201,59 @@ fn rows_delta(old: &Value, new: &Value) -> Option<Map<String, Value>> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{ChangedPredicates, QUERY_SUBSCRIPTION_TIMEOUT};
-    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-    use std::time::Duration;
-    use tokio::time::Instant;
-
-    const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
-
-    /// Age a subscription past the timeout without sleeping.
-    async fn expire(p: &super::PerspectiveInstance, id: &str) {
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(QUERY_SUBSCRIPTION_TIMEOUT + 5))
-            .expect("uptime longer than the timeout");
-        p.subscribed_queries
-            .lock()
-            .await
-            .get_mut(id)
-            .unwrap()
-            .last_keepalive = past;
-    }
-
-    /// Subscribe `QUERY` as `user_email` from connection `conn`.
-    async fn subscribe_from(
-        p: &super::PerspectiveInstance,
-        query: &str,
-        user_email: Option<&str>,
-        conn: &str,
-    ) -> String {
-        p.subscribe_and_query(
-            query.into(),
-            user_email.map(str::to_string),
-            Some(conn.into()),
-        )
-        .await
-        .unwrap()
-        .0
-    }
-
-    #[tokio::test]
-    async fn lease_renews_only_the_owners_subscriptions() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let mine = subscribe_from(&p, QUERY, None, "c1").await;
-        let theirs = subscribe_from(&p, QUERY, Some("other@example.com"), "c1").await;
-        expire(&p, &mine).await;
-        expire(&p, &theirs).await;
-
-        assert_eq!(p.renew_subscriptions_of(None, "c1").await, 1);
-
-        // The renewed one survives the timeout sweep; the other owner's does not.
-        p.check_subscribed_queries(ChangedPredicates::CheckAll)
-            .await;
-        let subs = p.subscribed_queries.lock().await;
-        assert!(subs.contains_key(&mine), "renewed subscription was kept");
-        assert!(
-            !subs.contains_key(&theirs),
-            "other owner's subscription timed out"
-        );
-    }
-
-    #[tokio::test]
-    async fn lease_renews_only_the_calling_connections_subscriptions() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let live_tab = subscribe_from(&p, QUERY, None, "live").await;
-        let dead_tab = subscribe_from(&p, "SELECT ?o WHERE { ?s ?p ?o }", None, "dead").await;
-        expire(&p, &live_tab).await;
-        expire(&p, &dead_tab).await;
-
-        assert_eq!(p.renew_subscriptions_of(None, "live").await, 1);
-
-        p.check_subscribed_queries(ChangedPredicates::CheckAll)
-            .await;
-        let subs = p.subscribed_queries.lock().await;
-        assert!(subs.contains_key(&live_tab), "leased connection kept");
-        assert!(
-            !subs.contains_key(&dead_tab),
-            "the same user's other connection was not renewed and timed out"
-        );
-    }
-
-    #[tokio::test]
-    async fn lease_renews_model_subscriptions_too() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let query_sub = subscribe_from(&p, QUERY, None, "c1").await;
-        // A model subscription is the same registry entry with model params.
-        let model_sub = "model-sub".to_string();
-        {
-            let mut subs = p.subscribed_queries.lock().await;
-            let mut entry = subs.get(&query_sub).unwrap().clone();
-            entry.model_query_params = Some(super::super::ModelSubscriptionParams {
-                class_name: "Todo".into(),
-                query_json: "{}".into(),
-            });
-            subs.insert(model_sub.clone(), entry);
-        }
-        expire(&p, &query_sub).await;
-        expire(&p, &model_sub).await;
-        assert_eq!(p.renew_subscriptions_of(None, "c1").await, 2);
-    }
-
-    #[tokio::test]
-    async fn without_a_lease_subscriptions_still_time_out() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (id, _) = p
-            .subscribe_and_query(QUERY.into(), None, None)
-            .await
-            .unwrap();
-        expire(&p, &id).await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll)
-            .await;
-        assert!(!p.subscribed_queries.lock().await.contains_key(&id));
-    }
-
-    // ── Delta updates ───────────────────────────────────────────────────
-
+    use super::super::ChangedPredicates;
     use super::result_delta;
     use crate::agent::AgentContext;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
     use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
     use crate::types::{Link, LinkStatus};
     use serde_json::{json, Value};
+    use std::time::Duration;
+
+    const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
+
+    #[tokio::test]
+    async fn closing_a_connection_ends_only_its_subscriptions() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let (a1, _) = p
+            .subscribe_and_query(QUERY.into(), None, "a".into())
+            .await
+            .unwrap();
+        let (a2, _) = p
+            .subscribe_and_query(QUERY.into(), None, "a".into())
+            .await
+            .unwrap();
+        let (b, _) = p
+            .subscribe_and_query(QUERY.into(), None, "b".into())
+            .await
+            .unwrap();
+
+        assert_eq!(p.dispose_connection_subscriptions("a").await, 2);
+        assert!(p.subscription_state(&a1, "a").await.is_none());
+        assert!(p.subscription_state(&a2, "a").await.is_none());
+        assert!(
+            p.subscription_state(&b, "b").await.is_some(),
+            "b is untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_the_owning_connection_disposes_or_reads_a_subscription() {
+        let (p, _, _) = setup_perspective_no_llm(&[]).await;
+        let (id, _) = p
+            .subscribe_and_query(QUERY.into(), None, "a".into())
+            .await
+            .unwrap();
+        assert!(p.subscription_state(&id, "b").await.is_none());
+        assert!(!p.dispose_query_subscription(&id, "b").await);
+        assert!(p.dispose_query_subscription(&id, "a").await);
+        assert!(
+            !p.dispose_query_subscription(&id, "a").await,
+            "already gone"
+        );
+    }
+
+    // ── Delta updates ───────────────────────────────────────────────────
 
     #[test]
     fn model_delta_is_keyed_by_id() {
@@ -398,7 +345,7 @@ mod tests {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, initial) = p
-            .model_subscribe_and_query("Todo".into(), query.clone(), None, None)
+            .model_subscribe_and_query("Todo".into(), query.clone(), None, "c".into())
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -410,6 +357,7 @@ mod tests {
         assert_eq!(updates.len(), 1, "{updates:?}");
         let u = &updates[0];
         assert_eq!(u["revision"], json!(1));
+        assert_eq!(u["connectionId"], json!("c"), "addressed to its connection");
         assert_eq!(u["added"][0]["id"], json!("test://t1"));
         assert_eq!(u["removed"], json!([]));
         assert_eq!(u["ids"], json!(["test://t1"]));
@@ -430,14 +378,17 @@ mod tests {
     async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _) = p.subscribe_and_query(q.clone(), None, None).await.unwrap();
-        let (revision, result) = p.subscription_state(&id, None).await.unwrap();
+        let (id, _) = p
+            .subscribe_and_query(q.clone(), None, "c".into())
+            .await
+            .unwrap();
+        let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
         add(&mut p, "test://a", "test://p", "test://b").await;
         let updates = updates_after_check(&p, &id).await;
         assert_eq!(updates[0]["revision"], json!(1));
-        let (revision, result) = p.subscription_state(&id, None).await.unwrap();
+        let (revision, result) = p.subscription_state(&id, "c").await.unwrap();
         assert_eq!(revision, 1, "the revision of the last update sent");
         let rows = super::result_json(&result);
         assert_eq!(rows.as_array().unwrap().len(), 1);
@@ -448,27 +399,28 @@ mod tests {
         );
 
         assert!(
-            p.subscription_state(&id, Some("other@example.com"))
-                .await
-                .is_none(),
-            "another owner cannot read it"
+            p.subscription_state(&id, "other").await.is_none(),
+            "another connection cannot read it"
         );
-        assert!(p.subscription_state("nope", None).await.is_none());
+        assert!(p.subscription_state("nope", "c").await.is_none());
     }
 
     #[tokio::test]
     async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (first, _) = p.subscribe_and_query(q.clone(), None, None).await.unwrap();
+        let (first, _) = p
+            .subscribe_and_query(q.clone(), None, "c".into())
+            .await
+            .unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
         assert_eq!(
             updates_after_check(&p, &first).await[0]["revision"],
             json!(1)
         );
 
-        let (second, _) = p.subscribe_and_query(q, None, None).await.unwrap();
+        let (second, _) = p.subscribe_and_query(q, None, "c".into()).await.unwrap();
         assert_ne!(first, second, "not shared");
-        assert_eq!(p.subscription_state(&second, None).await.unwrap().0, 0);
+        assert_eq!(p.subscription_state(&second, "c").await.unwrap().0, 0);
     }
 }

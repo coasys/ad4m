@@ -112,6 +112,7 @@ async fn handle_ws(
         token.clone(),
         ctx.user_email.clone(),
         ctx.is_admin_credential,
+        ctx.connection_id.clone(),
     )
     .await;
     // Text frames until the socket closes or errors; pings and binary
@@ -147,6 +148,8 @@ pub(crate) struct Connection {
     tx: mpsc::UnboundedSender<String>,
     inflight: InflightRegistry,
     interest: event_interest::SharedInterest,
+    /// Dispatched calls still running.
+    calls: std::sync::Mutex<tokio::task::JoinSet<()>>,
 }
 
 impl Connection {
@@ -164,6 +167,7 @@ impl Connection {
             tx,
             inflight: Default::default(),
             interest: Default::default(),
+            calls: Default::default(),
         }
     }
 
@@ -270,7 +274,9 @@ impl Connection {
         let token = self.token.clone();
         let inflight = self.inflight.clone();
         let tx = tx.clone();
-        tokio::spawn(async move {
+        let mut calls = self.calls.lock().unwrap_or_else(|e| e.into_inner());
+        while calls.try_join_next().is_some() {}
+        calls.spawn(async move {
             // Re-check token revocation on every request so that
             // revokeToken() takes effect immediately for existing connections.
             if let Err(e) = check_token_revoked(&token) {
@@ -331,10 +337,9 @@ impl Connection {
 }
 
 /// Serve one connection until `incoming` ends: answer each client message
-/// and forward `events` that match the connection's interest. The event
-/// task is stopped before this returns, so neither it nor its broadcast
-/// receivers outlive the socket. Calls still in flight keep running and
-/// send their outcome to the writer.
+/// and forward `events` that match the connection's interest. When the
+/// client is gone the event task stops, calls still in flight finish, and
+/// the connection's subscriptions end.
 pub(crate) async fn serve<S>(
     conn: Connection,
     incoming: S,
@@ -360,4 +365,12 @@ pub(crate) async fn serve<S>(
 
     event_task.abort();
     let _ = event_task.await;
+
+    // Wait for the calls first: a subscribe still in flight would otherwise
+    // add a subscription after the cleanup.
+    let mut calls = std::mem::take(&mut *conn.calls.lock().unwrap_or_else(|e| e.into_inner()));
+    while calls.join_next().await.is_some() {}
+    if let Some(connection_id) = &conn.ctx.connection_id {
+        crate::perspectives::dispose_connection_subscriptions(connection_id).await;
+    }
 }

@@ -69,7 +69,6 @@ static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
 static IMMEDIATE_COMMITS_COUNT: usize = 20;
-static QUERY_SUBSCRIPTION_TIMEOUT: u64 = 60; // 1 minute in seconds (was 5 min)
 static QUERY_SUBSCRIPTION_CHECK_INTERVAL: u64 = 200; // 200ms
 /// How long `model_query` will poll a shared perspective for a
 /// class's SHACL to arrive over p-diff-sync before erroring — see
@@ -388,7 +387,6 @@ pub struct Parameter {
 struct SubscribedQuery {
     query: String,
     last_result: String,
-    last_keepalive: Instant,
     user_email: Option<String>,
     /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
@@ -400,10 +398,10 @@ struct SubscribedQuery {
     /// carries the change from the previous result (see
     /// `perspective_instance/subscriptions_v2.rs`).
     revision: u64,
-    /// RPC connections (`RequestContext::connection_id`) that subscribed to or
-    /// joined this subscription. `perspective.keepAliveLease` from any of
-    /// them renews it.
-    connections: HashSet<String>,
+    /// The RPC connection (`RequestContext::connection_id`) that opened it.
+    /// Only that connection receives its updates, and the subscription ends
+    /// when that socket closes.
+    connection: String,
 }
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
@@ -5689,7 +5687,7 @@ impl PerspectiveInstance {
         &self,
         query: String,
         user_email: Option<String>,
-        connection_id: Option<String>,
+        connection_id: String,
     ) -> Result<(String, String), AnyError> {
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
@@ -5717,12 +5715,11 @@ impl PerspectiveInstance {
         let subscribed_query = SubscribedQuery {
             query,
             last_result: result_string.clone(),
-            last_keepalive: Instant::now(),
             user_email,
             predicates,
             model_query_params: None,
             revision: 0,
-            connections: connection_id.into_iter().collect(),
+            connection: connection_id,
         };
 
         // Now insert the subscription
@@ -5744,7 +5741,7 @@ impl PerspectiveInstance {
         class_name: String,
         query_json: String,
         user_email: Option<String>,
-        connection_id: Option<String>,
+        connection_id: String,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
         let initial_result = self.model_query(&class_name, &query_json).await?;
@@ -5775,7 +5772,6 @@ impl PerspectiveInstance {
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
             last_result: initial_result.clone(),
-            last_keepalive: Instant::now(),
             user_email,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
@@ -5783,7 +5779,7 @@ impl PerspectiveInstance {
                 query_json,
             }),
             revision: 0,
-            connections: connection_id.into_iter().collect(),
+            connection: connection_id,
         };
 
         self.subscribed_queries
@@ -5857,49 +5853,12 @@ impl PerspectiveInstance {
         predicates
     }
 
-    pub async fn keepalive_query(&self, subscription_id: String) -> Result<(), AnyError> {
-        let mut queries = self.subscribed_queries.lock().await;
-        if let Some(query) = queries.get_mut(&subscription_id) {
-            query.last_keepalive = Instant::now();
-            Ok(())
-        } else {
-            Err(anyhow!("Subscription not found"))
-        }
-    }
-
-    pub async fn dispose_query_subscription(
-        &self,
-        subscription_id: String,
-    ) -> Result<bool, AnyError> {
-        let removed_query = {
-            let mut queries = self.subscribed_queries.lock().await;
-            queries.remove(&subscription_id)
-        };
-
-        if let Some(query) = removed_query {
-            // Notify prolog service that subscription ended
-            let uuid = self.uuid.clone();
-            if let Err(e) = get_prolog_service()
-                .await
-                .subscription_ended(uuid, query.query)
-                .await
-            {
-                log::warn!("Failed to notify prolog service of subscription end: {}", e);
-            }
-            Ok(true)
-        } else {
-            Ok(false)
-        }
-    }
-
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
-        let mut queries_to_remove = Vec::new();
         let mut query_futures: Vec<
             std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
         > = Vec::new();
-        let now = Instant::now();
 
-        // Collect only the minimal data needed: ID, query string, user_email, keepalive time, predicates,
+        // Collect only the minimal data needed: ID, query string, user_email, predicates,
         // and model_query_params (if this is a model subscription).
         // DON'T clone the potentially huge last_result string
         let queries = {
@@ -5911,7 +5870,6 @@ impl PerspectiveInstance {
                         id.clone(),
                         query.query.clone(),
                         query.user_email.clone(),
-                        query.last_keepalive,
                         query.predicates.clone(),
                         query.model_query_params.clone(),
                     )
@@ -5920,14 +5878,7 @@ impl PerspectiveInstance {
         };
 
         // Create futures for each query check
-        for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
-        {
-            // Check for timeout
-            if now.duration_since(last_keepalive).as_secs() > QUERY_SUBSCRIPTION_TIMEOUT {
-                queries_to_remove.push(id);
-                continue;
-            }
-
+        for (id, query_string, user_email, sub_predicates, model_params) in queries {
             // Skip subscription if its predicates don't overlap with changed predicates
             // sub_predicates empty => always check (variable predicate in query)
             // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
@@ -6015,13 +5966,16 @@ impl PerspectiveInstance {
                         stored_query.revision += 1;
                         let old =
                             std::mem::replace(&mut stored_query.last_result, result_string.clone());
-                        let is_model = stored_query.model_query_params.is_some();
+                        let delta = subscriptions_v2::result_delta(
+                            &old,
+                            &result_string,
+                            stored_query.model_query_params.is_some(),
+                        );
                         delta_updates.push((
                             id,
-                            old,
-                            result_string,
+                            stored_query.connection.clone(),
                             stored_query.revision,
-                            is_model,
+                            delta,
                         ));
                     } else {
                         log::trace!(
@@ -6035,35 +5989,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, old, new, revision, is_model) in delta_updates {
-            self.send_delta_update(id, &old, &new, revision, is_model)
+        for (id, connection, revision, delta) in delta_updates {
+            self.send_delta_update(id, connection, revision, delta)
                 .await;
-        }
-
-        // Remove timed out queries and notify prolog service
-        if !queries_to_remove.is_empty() {
-            let removed_queries = {
-                let mut queries = self.subscribed_queries.lock().await;
-                queries_to_remove
-                    .iter()
-                    .filter_map(|id| queries.remove(id).map(|q| (id.clone(), q.query)))
-                    .collect::<Vec<_>>()
-            };
-
-            // Notify prolog service for each timed out subscription
-            let uuid = self.uuid.clone();
-            for (_id, query) in removed_queries {
-                if let Err(e) = get_prolog_service()
-                    .await
-                    .subscription_ended(uuid.clone(), query)
-                    .await
-                {
-                    log::warn!(
-                        "Failed to notify prolog service of subscription timeout: {}",
-                        e
-                    );
-                }
-            }
         }
     }
 
@@ -6114,54 +6042,10 @@ impl PerspectiveInstance {
                 self.check_subscribed_queries(changed_preds).await;
             }
 
-            // Periodic subscription logging and proactive timeout cleanup
+            // Periodic subscription logging
             log_counter += 1;
             if log_counter >= LOG_INTERVAL {
                 log_counter = 0;
-                // Get perspective_uuid FIRST before acquiring subscribed_queries lock to avoid deadlock
-                let perspective_uuid = self.uuid.clone();
-                let mut queries = self.subscribed_queries.lock().await;
-
-                // Proactively remove timed-out subscriptions even when no
-                // trigger has fired. Without this, expired subscriptions sit
-                // in the map forever, holding their last_result strings in
-                // memory, when no new links are being added.
-                let now = Instant::now();
-                let mut removed_queries: Vec<String> = Vec::new();
-                queries.retain(|_id, q| {
-                    let keep = now.duration_since(q.last_keepalive).as_secs()
-                        <= QUERY_SUBSCRIPTION_TIMEOUT;
-                    if !keep {
-                        removed_queries.push(q.query.clone());
-                    }
-                    keep
-                });
-                // Drop the lock before async prolog calls
-                drop(queries);
-
-                if !removed_queries.is_empty() {
-                    log::info!(
-                        "🧹 🔗 cleaned up {} timed-out subscription(s) for perspective {}",
-                        removed_queries.len(),
-                        perspective_uuid
-                    );
-                    // Notify prolog service for each removed subscription,
-                    // mirroring the flow in check_subscribed_queries().
-                    for query in &removed_queries {
-                        if let Err(e) = get_prolog_service()
-                            .await
-                            .subscription_ended(perspective_uuid.clone(), query.clone())
-                            .await
-                        {
-                            log::warn!(
-                                "Failed to notify prolog service of subscription timeout: {}",
-                                e
-                            );
-                        }
-                    }
-                }
-
-                // Re-acquire for the logging section below
                 let queries = self.subscribed_queries.lock().await;
 
                 if !queries.is_empty() {
@@ -6170,7 +6054,7 @@ impl PerspectiveInstance {
                     // register/dispose event is emitted at info instead.
                     log::debug!(
                         "📊 🔗 subscriptions [{}]: {} active",
-                        perspective_uuid,
+                        self.uuid,
                         queries.len()
                     );
                     for (id, query) in queries.iter() {

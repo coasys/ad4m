@@ -32,7 +32,6 @@ function fakeClient() {
         onQueryUpdate: jest.fn((cb: (u: QueryUpdate) => void) => { listener = cb; return jest.fn(); }),
         onReconnect: jest.fn((cb: () => void) => { reconnect = cb; return jest.fn(); }),
         resyncSubscription: jest.fn(),
-        keepAliveQuery: jest.fn().mockResolvedValue(true),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>

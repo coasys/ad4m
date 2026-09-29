@@ -944,18 +944,23 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let connection_id = connection_id(&ctx)?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
-        .subscribe_and_query(
-            body.query,
-            ctx.user_email.clone(),
-            ctx.connection_id.clone(),
-        )
+        .subscribe_and_query(body.query, ctx.user_email.clone(), connection_id)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(subscribed(subscription_id, &result))
+}
+
+/// The RPC connection a subscription belongs to; a call without one (REST)
+/// cannot subscribe.
+fn connection_id(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    ctx.connection_id.clone().ok_or_else(|| {
+        WsRpcError::bad_request("Subscriptions need a WebSocket connection (/api/v1/ws)")
+    })
 }
 
 /// Reply to a subscribe call: the initial result as JSON, at revision 0.
@@ -971,8 +976,8 @@ fn subscribed(subscription_id: String, result: &str) -> Value {
 /// `{ revision, result }`: the current state of one of the caller's
 /// subscriptions. A client that sees a revision gap (an update whose
 /// `revision` is not the previous one + 1) replaces its copy with `result`
-/// and applies the updates after `revision`. 404 when the id is unknown or
-/// belongs to another user.
+/// and applies the updates after `revision`. 404 unless this connection
+/// opened the subscription.
 async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -986,7 +991,7 @@ async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
     match perspective
-        .subscription_state(&body.subscription_id, ctx.user_email.as_deref())
+        .subscription_state(&body.subscription_id, &connection_id(&ctx)?)
         .await
     {
         Some((revision, result)) => Ok(serde_json::json!({
@@ -1017,77 +1022,6 @@ async fn subscribe_sparql_query(
     ))
 }
 
-async fn keep_alive_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let uuid = params.require_str("uuid")?;
-    check_capability(
-        &ctx.capabilities,
-        &perspective_query_capability(vec![uuid.clone()]),
-    )
-    .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let body: KeepAliveQueryRequest = serde_json::from_value(params.clone())
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    perspective
-        .keepalive_query(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
-/// `perspective.keepAliveLease { uuid? }` → `{ renewed }`. One call renews
-/// every query and model subscription this connection subscribed to, instead
-/// of one `keepAliveQuery` per subscription. Only subscriptions of the
-/// caller's user (`ctx.user_email`; `None` = main agent) made on this
-/// connection (`ctx.connection_id`) are renewed, so the user's closed
-/// connections still time out. With `uuid`, only that perspective; without,
-/// every loaded perspective the caller may query (others are skipped, not an
-/// error). A caller without a connection id has nothing to renew.
-async fn keep_alive_lease(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    let body: KeepAliveLeaseRequest = serde_json::from_value(params)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let user_email = ctx.user_email.as_deref();
-    // No subscription records an empty id, so without one nothing is renewed.
-    let connection_id = ctx.connection_id.as_deref().unwrap_or_default();
-
-    let renewed = match body.uuid {
-        Some(uuid) => {
-            check_capability(
-                &ctx.capabilities,
-                &perspective_query_capability(vec![uuid.clone()]),
-            )
-            .map_err(WsRpcError::forbidden)?;
-            get_perspective_with_access(&uuid, &ctx)
-                .await?
-                .renew_subscriptions_of(user_email, connection_id)
-                .await
-        }
-        None => {
-            let mut renewed = 0;
-            for perspective in crate::perspectives::all_perspectives() {
-                let handle = perspective.persisted.lock().await.clone();
-                let may_query = check_capability(
-                    &ctx.capabilities,
-                    &perspective_query_capability(vec![handle.uuid.clone()]),
-                )
-                .is_ok()
-                    && (ctx.is_admin_credential
-                        || can_access_perspective_with_did(&ctx.user_did, &handle));
-                if may_query {
-                    renewed += perspective
-                        .renew_subscriptions_of(user_email, connection_id)
-                        .await;
-                }
-            }
-            renewed
-        }
-    };
-
-    Ok(serde_json::json!({ "renewed": renewed }))
-}
-
 async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -1099,13 +1033,13 @@ async fn dispose_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
     let body: DisposeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    perspective
-        .dispose_query_subscription(body.subscription_id)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
+    Ok(Value::Bool(
+        perspective
+            .dispose_query_subscription(&body.subscription_id, &connection_id)
+            .await,
+    ))
 }
 
 async fn create_subject(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -1361,6 +1295,7 @@ async fn model_subscribe_handler(
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
 
+    let connection_id = connection_id(&ctx)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
@@ -1368,7 +1303,7 @@ async fn model_subscribe_handler(
             class_name,
             query_json,
             ctx.user_email.clone(),
-            ctx.connection_id.clone(),
+            connection_id,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -2718,12 +2653,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.commitBatch", commit_batch);
     map.register("perspective.discardBatch", discard_batch);
     map.register("perspective.subscribeQuery", subscribe_query);
-    map.register("perspective.keepAliveQuery", keep_alive_query);
-    map.register("perspective.keepAliveLease", keep_alive_lease);
     map.register("perspective.resyncSubscription", resync_subscription);
     map.register("perspective.disposeQuery", dispose_query);
     map.register("perspective.subscribeSparql", subscribe_sparql_query);
-    map.register("perspective.keepAliveSparql", keep_alive_query);
     map.register("perspective.disposeSparql", dispose_query);
     map.register("perspective.modelQuery", model_query_handler);
     map.register("perspective.subjectClassesOf", subject_classes_of_handler);

@@ -187,7 +187,6 @@ describe('QuerySubscriptionProxy', () => {
       subscribeQuery,
       onQueryUpdate: jest.fn((cb: (u: any) => void) => { listener = cb; return jest.fn(); }),
       onReconnect: jest.fn(() => jest.fn()),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
     return { client, update: (u: any) => listener!(u) };

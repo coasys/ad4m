@@ -10,27 +10,40 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::events_ws::build_event_stream_for;
-use crate::api::tests::protocol_v2_tests::admin_ctx;
-use crate::api::ws_handler::{build_handler_map, HandlerMap};
+use crate::api::tests::protocol_v2_tests::{admin_conn_ctx, registered_perspective};
+use crate::api::ws_handler::build_handler_map;
 use crate::api::ws_rpc::{serve, Connection};
-use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
+use crate::pubsub::{
+    get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
+};
 
 const DID: &str = "did:key:alice";
 
 struct Socket {
+    connection_id: String,
     input: Option<mpsc::UnboundedSender<String>>,
     out: mpsc::UnboundedReceiver<String>,
     served: tokio::task::JoinHandle<()>,
 }
 
 impl Socket {
-    async fn open(handler_map: HandlerMap) -> Self {
+    async fn open() -> Self {
+        let connection_id = uuid::Uuid::new_v4().to_string();
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        let events = build_event_stream_for(String::new(), Some(DID.into()), None, false).await;
-        let conn = Connection::new(Arc::new(handler_map), admin_ctx(), String::new(), tx);
+        let events = build_event_stream_for(
+            String::new(),
+            Some(DID.into()),
+            None,
+            false,
+            Some(connection_id.clone()),
+        )
+        .await;
+        let ctx = admin_conn_ctx(&connection_id);
+        let conn = Connection::new(Arc::new(build_handler_map()), ctx, String::new(), tx);
         let served = tokio::spawn(serve(conn, UnboundedReceiverStream::new(incoming), events));
         Self {
+            connection_id,
             input: Some(input),
             out,
             served,
@@ -80,9 +93,25 @@ impl Socket {
         seen
     }
 
-    /// Close the client side of the socket.
-    fn close(&mut self) {
+    /// Close the client side of the socket and wait until it is served.
+    async fn close(&mut self) {
         self.input = None;
+        tokio::time::timeout(Duration::from_secs(5), &mut self.served)
+            .await
+            .expect("serve returns once the socket closes")
+            .unwrap();
+    }
+
+    /// Open a live query on `perspective`; returns its subscription id.
+    async fn subscribe(&mut self, perspective: &str) -> String {
+        let id = uuid::Uuid::new_v4().to_string();
+        self.send(json!({ "id": id, "type": "perspective.subscribeQuery",
+            "params": { "uuid": perspective, "query": "SELECT ?s WHERE { ?s ?p ?o }" } }));
+        let reply = self.reply(&id).await;
+        reply["result"]["subscriptionId"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
 }
 
@@ -108,7 +137,7 @@ async fn publish_both(a: &str, b: &str, run: &str) {
 async fn watch_limits_link_events_and_unwatch_restores_them() {
     let run = uuid::Uuid::new_v4().to_string();
     let (a, b) = (format!("A-{run}"), format!("B-{run}"));
-    let mut socket = Socket::open(build_handler_map()).await;
+    let mut socket = Socket::open().await;
 
     publish_both(&a, &b, &run).await;
     assert_eq!(
@@ -139,7 +168,7 @@ async fn watch_limits_link_events_and_unwatch_restores_them() {
 async fn malformed_watch_replies_400_and_keeps_the_old_interest() {
     let run = uuid::Uuid::new_v4().to_string();
     let (a, b) = (format!("A-{run}"), format!("B-{run}"));
-    let mut socket = Socket::open(build_handler_map()).await;
+    let mut socket = Socket::open().await;
 
     socket.send(json!({ "id": "w1", "type": "events.watch", "params": { "perspectives": [a] } }));
     socket.reply("w1").await;
@@ -154,18 +183,14 @@ async fn malformed_watch_replies_400_and_keeps_the_old_interest() {
 
 #[tokio::test]
 async fn closing_the_socket_ends_the_event_task() {
-    let mut socket = Socket::open(build_handler_map()).await;
+    let mut socket = Socket::open().await;
     socket.send(json!({ "type": "ping" }));
     assert_eq!(
         socket.next_of(|m| m["type"] == "pong").await,
         json!({ "type": "pong" })
     );
 
-    socket.close();
-    tokio::time::timeout(Duration::from_secs(5), &mut socket.served)
-        .await
-        .expect("serve returns once the socket closes")
-        .unwrap();
+    socket.close().await;
     // Every sender is gone, the event task's included: the channel closes
     // even though the event stream itself never ends.
     let rest = tokio::time::timeout(Duration::from_secs(5), async {
@@ -176,4 +201,48 @@ async fn closing_the_socket_ends_the_event_task() {
         rest.is_ok(),
         "the event task still holds the socket's sender"
     );
+}
+
+#[tokio::test]
+async fn closing_the_socket_ends_its_subscriptions_only() {
+    let p = registered_perspective(&[]).await;
+    let (mut a, mut b) = (Socket::open().await, Socket::open().await);
+    let sub_a = a.subscribe(&p.0).await;
+    let sub_b = b.subscribe(&p.0).await;
+
+    a.close().await;
+    let perspective = crate::perspectives::get_perspective(&p.0).unwrap();
+    assert!(perspective
+        .subscription_state(&sub_a, &a.connection_id)
+        .await
+        .is_none());
+    assert!(
+        perspective
+            .subscription_state(&sub_b, &b.connection_id)
+            .await
+            .is_some(),
+        "the other connection keeps its subscription"
+    );
+}
+
+#[tokio::test]
+async fn query_updates_reach_only_their_connection() {
+    let (mut a, mut b) = (Socket::open().await, Socket::open().await);
+    let sub = uuid::Uuid::new_v4().to_string();
+    let update = json!({ "uuid": "p", "subscriptionId": sub, "revision": 1,
+        "added": [], "removed": [], "changed": [], "connectionId": a.connection_id });
+    get_global_pubsub()
+        .await
+        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+        .await;
+
+    let got = a.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(got["type"], json!("query-subscription-update"));
+    assert!(got.get("connectionId").is_none(), "routing key stripped");
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(300),
+        b.next_of(|m| m["subscriptionId"] == sub),
+    )
+    .await;
+    assert!(leaked.is_err(), "another connection got the update");
 }

@@ -106,7 +106,6 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.commitBatch': { additions: [], removals: [] },
     'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
     'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
-    'perspective.keepAliveQuery': true,
     'perspective.disposeQuery': true,
 
     // ── Languages ──

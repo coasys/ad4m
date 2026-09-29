@@ -132,12 +132,6 @@ export class PerspectiveClient {
         return this.#apiClient.call('perspective.resyncSubscription', { uuid, subscriptionId })
     }
 
-    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
-    }
-
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
         return this.#apiClient.call<boolean>(
             'perspective.disposeQuery', { uuid, subscriptionId }

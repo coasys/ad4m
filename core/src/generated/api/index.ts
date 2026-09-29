@@ -29,7 +29,6 @@ export type { GetSubjectDataRequest } from "./GetSubjectDataRequest";
 export type { ImportAgentRequest } from "./ImportAgentRequest";
 export type { ImportRequest } from "./ImportRequest";
 export type { JoinNeighbourhoodRequest } from "./JoinNeighbourhoodRequest";
-export type { KeepAliveLeaseRequest } from "./KeepAliveLeaseRequest";
 export type { LinkLanguageTemplatesRequest } from "./LinkLanguageTemplatesRequest";
 export type { LockAgentRequest } from "./LockAgentRequest";
 export type { OpenLinkRequest } from "./OpenLinkRequest";
