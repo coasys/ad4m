@@ -656,8 +656,10 @@ export class PerspectiveClient {
                 }
             }
         )
-        this.#unsubscribers.push(unsub)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
+        let existing = this.#linkUnsubscribers.get(uuid as string) || []
+        existing.push(unsub)
+        this.#linkUnsubscribers.set(uuid as string, existing)
+        await this.#apiClient.waitForSubscription()
     }
 
     addPerspectiveRemovedListener(cb: UuidCallback) {

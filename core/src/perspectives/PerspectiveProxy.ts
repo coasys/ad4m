@@ -1360,7 +1360,7 @@ export class PerspectiveProxy {
      */
     async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
-        this.#register('sync-state-change')
+        await this.#register('sync-state-change')
     }
 
     /**

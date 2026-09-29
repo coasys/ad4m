@@ -134,3 +134,40 @@ describe('PerspectiveProxy lazy listener registration (L1)', () => {
     api.closeAll();
   });
 });
+
+describe('Sync-state listener release (L2)', () => {
+  it('dispose() leaves no sync-state callback registered', async () => {
+    const { callbackCount, proxy, ws, api } = setup();
+    const p = proxy();
+    const pending = p.addSyncStateChangeListener(jest.fn());
+    ws().open();
+    await pending;
+    expect(callbackCount()).toBe(1);
+    p.dispose();
+    expect(callbackCount()).toBe(0);
+    api.closeAll();
+  });
+
+  it('removeAllListeners(uuid) also removes the sync-state callback', async () => {
+    const { callbackCount, client, ws, api } = setup();
+    const pending = client.addPerspectiveSyncStateChangeListener('uuid-1', []);
+    ws().open();
+    await pending;
+    expect(callbackCount()).toBe(1);
+    client.removeAllListeners('uuid-1');
+    expect(callbackCount()).toBe(0);
+    api.closeAll();
+  });
+
+  it('addPerspectiveSyncStateChangeListener resolves once the socket is open, with no fixed delay', async () => {
+    const { client, ws, api } = setup();
+    const pending = client.addPerspectiveSyncStateChangeListener('uuid-1', []);
+    ws().open();
+    const winner = await Promise.race([
+      pending.then(() => 'registered'),
+      new Promise(resolve => setTimeout(() => resolve('timeout'), 100)),
+    ]);
+    expect(winner).toBe('registered');
+    api.closeAll();
+  });
+});
