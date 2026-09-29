@@ -150,7 +150,7 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     null,
   );
   const [unytDnaInstalled, setUnytDnaInstalled] = useState(false);
-  const [unytInstallFail, setUnytInstallFail] = useState(false);
+  const [unytInstallError, setUnytInstallError] = useState<string | null>(null);
 
   // ---- SMTP state ----
   const [smtpConfig, setSmtpConfig] = useState<{
@@ -293,17 +293,14 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
 
     // Skip if we already have the proof or DNA is installed
     try {
-      const vi = await client.runtime.unytVersionInfo();
-      if (vi) {
-        const info = JSON.parse(vi);
-        if (info.installed) {
-          console.log(
-            "Unyt DNA already installed, skipping membrane proof fetch",
-          );
-          setMembraneProofStatus("done");
-          setUnytDnaInstalled(true);
-          return;
-        }
+      const info = await client.runtime.unytVersionInfo();
+      if (info.installed) {
+        console.log(
+          "Unyt DNA already installed, skipping membrane proof fetch",
+        );
+        setMembraneProofStatus("done");
+        setUnytDnaInstalled(true);
+        return;
       }
     } catch {
       // Not installed yet, proceed
@@ -978,32 +975,33 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
     fetchMembraneProof(hostSession);
   }, [client, hostSession, freeHostingEnabled]);
 
-  // Check Unyt DNA installation status after membrane proof is stored
+  // The executor installs the Unyt DNA in the background after the membrane
+  // proof is stored; poll for the outcome.
   useEffect(() => {
-    if (!client || membraneProofStatus !== "done" || unytDnaInstalled) return;
+    if (!client || membraneProofStatus !== "done" || unytDnaInstalled || unytInstallError) return;
     let cancelled = false;
     let attempts = 0;
     const MAX_ATTEMPTS = 60; // ~5 minutes at 5s intervals
+    const stop = (error: string) => {
+      cancelled = true;
+      clearInterval(interval);
+      setUnytInstallError(error);
+    };
     const check = async () => {
       try {
-        const vi = await client.runtime.unytVersionInfo();
-        if (vi) {
-          const info = JSON.parse(vi);
-          if (info.installed && !cancelled) setUnytDnaInstalled(true);
-        }
+        const info = await client.runtime.unytVersionInfo();
+        if (cancelled) return;
+        if (info.installed) setUnytDnaInstalled(true);
+        else if (info.installError) stop(`Unyt DNA installation failed: ${info.installError}`);
       } catch {
         attempts++;
-        if (attempts >= MAX_ATTEMPTS && !cancelled) {
-          cancelled = true;
-          clearInterval(interval);
-          setUnytInstallFail(true);
-        }
+        if (attempts >= MAX_ATTEMPTS && !cancelled) stop("Unyt DNA installation timed out.");
       }
     };
     check();
     const interval = setInterval(check, 5000);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [client, membraneProofStatus, unytDnaInstalled]);
+  }, [client, membraneProofStatus, unytDnaInstalled, unytInstallError]);
 
   // Auto-populate host URL from TLS domain + port
   useEffect(() => {
@@ -1427,12 +1425,18 @@ const [userLogs, setUserLogs] = useState<Record<string, { entries: any[]; loadin
                     Earnings
                   </j-text>
                   <j-box mt="200">
-                    {unytInstallFail ? (
+                    {unytInstallError ? (
                       <j-flex direction="column" a="center" gap="300">
                         <j-text size="400" color="danger-500">
-                          Unyt DNA installation timed out.
+                          {unytInstallError}
                         </j-text>
-                        <j-button size="sm" variant="subtle" onClick={() => { setUnytInstallFail(false); setUnytDnaInstalled(false); }}>
+                        <j-button size="sm" variant="subtle" onClick={() => {
+                          // A new proof starts a new install. "none" holds the
+                          // status poll until the proof is stored again.
+                          setMembraneProofStatus("none");
+                          setUnytInstallError(null);
+                          if (hostSession) fetchMembraneProof(hostSession);
+                        }}>
                           Retry
                         </j-button>
                       </j-flex>

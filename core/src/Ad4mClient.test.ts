@@ -236,7 +236,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
     'runtime.unytWalletBalance': '1000.50',
     'runtime.unytWalletHistory': '[]',
-    'runtime.unytVersionInfo': '{"version":"0.1.0"}',
+    'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
     'runtime.setUnytMembraneProof': true,
     'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
     'runtime.unytSendHot': { success: true, message: 'sent' },
@@ -1201,9 +1201,10 @@ describe('Unyt Integration', () => {
         expect(history).toBe('[]');
     });
 
-    test('unytVersionInfo() returns version info', async () => {
+    test('unytVersionInfo() returns version info and the install error', async () => {
         const info = await ad4m.runtime.unytVersionInfo();
-        expect(info).toContain('version');
+        expect(lastRpcCall!.type).toBe('runtime.unytVersionInfo');
+        expect(info).toEqual({ installed: null, bundled: '0.61.0', installError: 'install failed' });
     });
 
     test('setUnytMembraneProof() sets proof', async () => {

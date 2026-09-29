@@ -16,7 +16,8 @@ use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessa
 use super::types::{
     AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest, HostRate,
     ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
-    OpenLinkRequest, SetHostRatesRequest, SetUnytMembraneProofRequest, VerifySignatureRequest,
+    OpenLinkRequest, SetHostRatesRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
@@ -616,6 +617,7 @@ async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 
 /// Stores the membrane proof for the Unyt alliance DNA, then installs the DNA
 /// in the background: installation waits for Holochain and can outlast the call.
+/// `runtime.unytVersionInfo` reports the outcome.
 async fn set_unyt_membrane_proof(
     params: Value,
     ctx: Arc<RequestContext>,
@@ -646,6 +648,17 @@ async fn set_unyt_membrane_proof(
     });
 
     Ok(Value::Bool(true))
+}
+
+async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let (installed, bundled) = crate::unyt_service::version_info();
+    Ok(serde_json::to_value(UnytVersionInfo {
+        installed,
+        bundled,
+        install_error: crate::unyt_service::install_error(),
+    })?)
 }
 
 // ── Stubs for unyt endpoints ──
@@ -701,12 +714,12 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("runtime.hostRates", get_host_rates);
     map.register("runtime.setHostRates", set_host_rates);
     map.register("runtime.setUnytMembraneProof", set_unyt_membrane_proof);
+    map.register("runtime.unytVersionInfo", unyt_version_info);
     // Unyt stubs
     map.register("runtime.unytAgentKey", stub_not_impl);
     map.register("runtime.unytSendHot", stub_not_impl);
     map.register("runtime.unytWalletBalance", stub_not_impl);
     map.register("runtime.unytWalletHistory", stub_not_impl);
-    map.register("runtime.unytVersionInfo", stub_not_impl);
     map.register("runtime.unytHotAgentPubkey", stub_not_impl);
     map.register("runtime.unytReinstallDna", stub_not_impl);
 }

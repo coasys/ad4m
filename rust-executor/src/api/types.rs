@@ -938,6 +938,21 @@ pub struct SetUnytMembraneProofRequest {
     pub proof: String,
 }
 
+/// The Unyt alliance DNA: installed and bundled versions, and why the last
+/// install failed. `setUnytMembraneProof` installs in the background, so this
+/// is where its outcome shows.
+#[derive(Serialize, TS, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UnytVersionInfo {
+    /// Version of the installed DNA; `null` until an install succeeds.
+    pub installed: Option<String>,
+    /// Version of the DNA bundled with this executor.
+    pub bundled: String,
+    /// Error of the last install that failed; `null` after a success or a new proof.
+    pub install_error: Option<String>,
+}
+
 // ── Hosting wallet ──
 
 #[derive(Deserialize, TS)]

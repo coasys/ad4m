@@ -14,6 +14,7 @@ import type {
     SetMultiUserRequest,
     SetFreeHostingEnabledRequest,
     HostRate,
+    UnytVersionInfo,
 } from "../generated/api"
 
 export type MessageCallback = (message: PerspectiveExpression) => null
@@ -245,11 +246,13 @@ export class RuntimeClient {
         return this.#apiClient.call<string>('runtime.unytWalletHistory', { page, perPage })
     }
 
-    async unytVersionInfo(): Promise<string> {
-        return this.#apiClient.call<string>('runtime.unytVersionInfo')
+    /** Installed and bundled DNA versions, and why the last install failed (`installError`). */
+    async unytVersionInfo(): Promise<UnytVersionInfo> {
+        return this.#apiClient.call<UnytVersionInfo>('runtime.unytVersionInfo')
     }
 
-    /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the background. */
+    /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the
+     *  background. Poll {@link unytVersionInfo} for the outcome. */
     async setUnytMembraneProof(proof: string): Promise<boolean> {
         return this.#apiClient.call<boolean>('runtime.setUnytMembraneProof', { proof })
     }

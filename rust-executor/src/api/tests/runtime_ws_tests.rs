@@ -5,7 +5,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 use crate::api::runtime_ws::{register_ws_handlers, validate_host_rates};
-use crate::api::types::HostRate;
+use crate::api::types::{HostRate, UnytVersionInfo};
 use crate::api::ws_handler::HandlerMap;
 use crate::types::RequestContext;
 
@@ -65,6 +65,27 @@ async fn host_rate_and_membrane_proof_handlers_check_access() {
     assert_eq!(
         error_code("runtime.setUnytMembraneProof", proof, false).await,
         403
+    );
+    assert_eq!(
+        error_code("runtime.unytVersionInfo", json!({}), false).await,
+        403
+    );
+}
+
+#[test]
+fn unyt_version_info_reports_the_install_error() {
+    let info = UnytVersionInfo {
+        installed: None,
+        bundled: "0.61.0".to_string(),
+        install_error: Some("Install failed after 5 attempts".to_string()),
+    };
+    assert_eq!(
+        serde_json::to_value(info).unwrap(),
+        json!({
+            "installed": null,
+            "bundled": "0.61.0",
+            "installError": "Install failed after 5 attempts",
+        })
     );
 }
 
