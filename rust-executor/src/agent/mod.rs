@@ -807,7 +807,10 @@ impl AgentService {
             // stays in the legacy format until a later save succeeds. No rewrite without a
             // backup of the legacy file, see `legacy_backup_file`.
             if self.legacy_keystore {
+                // Synced before the rewrite: after a power loss the backup must hold the
+                // legacy file whenever the agent file holds the new one.
                 match std::fs::copy(&self.file, self.legacy_backup_file())
+                    .and_then(|_| std::fs::File::open(self.legacy_backup_file())?.sync_all())
                     .map_err(AnyError::from)
                     .and_then(|_| self.try_save(&password))
                 {
@@ -1598,6 +1601,7 @@ mod tests {
         ));
         std::fs::write(&agent_file, store.to_string()).unwrap();
         assert!(crate::wallet::is_legacy_keystore(&keystore_on_disk()));
+        let legacy_file = std::fs::read(&agent_file).unwrap();
 
         AgentService::with_mutable_global_instance(|svc| {
             svc.load();
@@ -1607,6 +1611,11 @@ mod tests {
                 .expect("the legacy keystore unlocks");
         });
         assert!(!crate::wallet::is_legacy_keystore(&keystore_on_disk()));
+        assert_eq!(
+            std::fs::read(format!("{}.legacy", agent_file)).unwrap(),
+            legacy_file,
+            "the backup holds the legacy file byte for byte"
+        );
 
         AgentService::with_mutable_global_instance(|svc| {
             svc.load();
