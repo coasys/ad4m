@@ -272,6 +272,25 @@ mod pipeline_tests {
         assert_eq!(second.total_count, 11);
     }
 
+    /// The SDK sends `offset: 0` on the first page; it skips nothing, so
+    /// cursor mode accepts it on every page.
+    #[tokio::test]
+    async fn offset_zero_is_no_offset_in_cursor_mode() {
+        let store = store();
+        let first = run(&store, json!({ "after": "", "limit": 3, "offset": 0 }))
+            .await
+            .unwrap();
+        assert_eq!(ids(&first), vec!["ns://t00", "ns://t01", "ns://t02"]);
+        let cursor = first.next_cursor.expect("cursor mode: a full page has a successor");
+        let second = run(
+            &store,
+            json!({ "after": cursor, "limit": 3, "offset": 0 }),
+        )
+        .await
+        .expect("offset 0 combines with a cursor");
+        assert_eq!(ids(&second)[0], "ns://t03");
+    }
+
     #[tokio::test]
     async fn without_after_the_reply_is_unchanged() {
         let store = store();

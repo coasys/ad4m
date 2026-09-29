@@ -541,7 +541,7 @@ pub(super) async fn execute_model_query_inner(
 
     // Keyset cursor (`after`), top-level queries only: `Some(None)` = first
     // page in cursor mode, `Some(Some(c))` = continue after `c`. Only the
-    // timestamp order, fully in the store, without `offset`; see `cursor.rs`.
+    // timestamp order, fully in the store, without a non-zero `offset`; see `cursor.rs`.
     let keyset: Option<Option<KeysetCursor>> = match query_input.after.as_deref() {
         Some(after) if depth == 0 => {
             let cursor = if after.is_empty() {
@@ -549,10 +549,11 @@ pub(super) async fn execute_model_query_inner(
             } else {
                 Some(KeysetCursor::decode(after)?)
             };
+            // `offset: 0` skips nothing: the SDK sends it on page 1.
             let supported = is_timestamp_order(&query_input.order)
                 && can_push_pagination
                 && !scope_needs_phases
-                && query_input.offset.is_none();
+                && query_input.offset.unwrap_or(0) == 0;
             let direction = query_input
                 .order
                 .as_ref()
@@ -573,7 +574,7 @@ pub(super) async fn execute_model_query_inner(
                     return Err(deno_core::anyhow::anyhow!(
                         "`after` cursors need the timestamp order (no `order`, or one of \
                          timestamp/createdAt/updatedAt), a `where` the store can evaluate, \
-                         no `offset`, and no per-anchor limit or `levels`"
+                         no non-zero `offset`, and no per-anchor limit or `levels`"
                     ))
                 }
             }
