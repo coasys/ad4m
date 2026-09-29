@@ -26,6 +26,13 @@ import type {
 export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
 export type UuidCallback = (uuid: string) => null
 export type LinkCallback = (link: LinkExpression) => null
+/** Payload of a `link-updated` event: the link before and after the update. */
+export interface LinkUpdate {
+    oldLink: LinkExpression
+    newLink: LinkExpression
+}
+/** Callback for `link-updated` events. It receives `{ oldLink, newLink }`, not a single link. */
+export type LinkUpdatedCallback = (update: LinkUpdate) => void
 export type SyncStateChangeCallback = (state: PerspectiveState) => null
 
 function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
@@ -708,7 +715,7 @@ export class PerspectiveClient {
         await this.#apiClient.waitForSubscription()
     }
 
-    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
+    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkUpdatedCallback[]): Promise<void> {
         const unsub = this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
@@ -720,7 +727,7 @@ export class PerspectiveClient {
                     if (!oldLink.status) {
                         delete oldLink.status
                     }
-                    notifyListeners(cb, 'link-updated', data as unknown as LinkExpression)
+                    notifyListeners(cb, 'link-updated', data as unknown as LinkUpdate)
                 }
             }
         )

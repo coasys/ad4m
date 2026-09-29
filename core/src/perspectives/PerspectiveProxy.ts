@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { LinkCallback, LinkUpdatedCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowValidOutput,
@@ -585,7 +585,7 @@ export class PerspectiveProxy {
 
     #perspectiveLinkAddedCallbacks: LinkCallback[]
     #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
+    #perspectiveLinkUpdatedCallbacks: LinkUpdatedCallback[]
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
@@ -1314,15 +1314,22 @@ export class PerspectiveProxy {
      * perspective.addListener("link-removed", (link) => {
      *   console.log("Link removed:", link);
      * });
+     *
+     * // Listen for updated links: the callback receives { oldLink, newLink }
+     * perspective.addListener("link-updated", ({ oldLink, newLink }) => {
+     *   console.log("Link updated:", oldLink, "->", newLink);
+     * });
      * ```
      */
-    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
+    async addListener(type: "link-added" | "link-removed", cb: LinkCallback): Promise<void>
+    async addListener(type: "link-updated", cb: LinkUpdatedCallback): Promise<void>
+    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback | LinkUpdatedCallback) {
         if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb);
+            this.#perspectiveLinkAddedCallbacks.push(cb as LinkCallback);
         } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb);
+            this.#perspectiveLinkRemovedCallbacks.push(cb as LinkCallback);
         } else if (type === 'link-updated') {
-            this.#perspectiveLinkUpdatedCallbacks.push(cb);
+            this.#perspectiveLinkUpdatedCallbacks.push(cb as LinkUpdatedCallback);
         }
     }
 
@@ -1348,15 +1355,17 @@ export class PerspectiveProxy {
      * @param type - Type of change to stop listening for
      * @param cb - The callback function to remove
      */
-    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
+    async removeListener(type: "link-added" | "link-removed", cb: LinkCallback): Promise<void>
+    async removeListener(type: "link-updated", cb: LinkUpdatedCallback): Promise<void>
+    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback | LinkUpdatedCallback) {
         if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
+            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb as LinkCallback);
             if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
         } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
+            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb as LinkCallback);
             if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
         } else if (type === 'link-updated') {
-            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
+            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb as LinkUpdatedCallback);
             if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
         }
     }
