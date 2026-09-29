@@ -228,6 +228,15 @@ describe('Ad4mConnect', () => {
       expect(conn.authState).toBe('locked');
     });
 
+    it('reads a node with no agent yet as locked', async () => {
+      // isInitialized decides on its own, whatever isUnlocked says.
+      mockAgent.status.mockResolvedValueOnce(agentStatus({ isInitialized: false, isUnlocked: true }));
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      expect(mockAgent.isLocked).not.toHaveBeenCalled();
+      expect(conn.authState).toBe('locked');
+    });
+
     it('reports a locked wallet, not a bad token, when status is refused', async () => {
       // isLocked needs no capability, so it can tell the two apart where status cannot.
       mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));

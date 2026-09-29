@@ -232,6 +232,9 @@ export default class Ad4mConnect extends EventTarget {
     let statusError: any;
     try {
       const status = await client.agent.status();
+      // A node with no agent yet has nothing to authenticate against: the user must create and
+      // unlock an agent first, which is what `locked` asks for.
+      if (!status.isInitialized) return { state: 'locked' };
       return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
       if (error?.message === LOCKED_WALLET) return { state: 'locked' };
