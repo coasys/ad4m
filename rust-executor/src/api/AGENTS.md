@@ -42,8 +42,9 @@ anything that signs, bills or writes.
 
 ## Protocol v2 (opt-in features)
 
-- `protocol.rs`: `runtime.protocol` → `{ version: 2, features }`. `PROTOCOL_FEATURES` is the one list;
-  append to it for every new opt-in RPC or parameter. Clients fall back to v1 when a feature is absent.
+- Every v2 feature is opt-in per call (a new method, or a new parameter such as `delta: true`), so
+  a client that does not use it sees v1 behaviour. There is no feature discovery: clients are built
+  against the executor they talk to.
 - `event_interest.rs`: `events.watch` / `events.unwatch`, handled inline on both sockets (per-connection
   state, like `request.cancel`). No watch = every event.
 - `ws_rpc::serve` runs one RPC connection over any text stream: `Connection::handle_text` answers

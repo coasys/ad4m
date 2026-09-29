@@ -584,8 +584,6 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("runtime.info", get_runtime_info);
-    // No capability check: clients read the feature list before they hold a token.
-    map.register("runtime.protocol", super::protocol::get_protocol);
     map.register("runtime.quit", quit_runtime);
     map.register("runtime.setStatus", set_status);
     map.register("runtime.openLink", open_link);

@@ -6,7 +6,6 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 
 use crate::agent::capabilities::ALL_CAPABILITY;
-use crate::api::protocol::{PROTOCOL_FEATURES, PROTOCOL_VERSION};
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
 use crate::types::RequestContext;
 
@@ -50,39 +49,6 @@ pub(crate) async fn call(
     ctx: Arc<RequestContext>,
 ) -> Result<Value, WsRpcError> {
     build_handler_map().dispatch(method, params, ctx).await
-}
-
-// ── X1: runtime.protocol ────────────────────────────────────────────────────
-
-#[tokio::test]
-async fn runtime_protocol_reports_version_and_features() {
-    let reply = call("runtime.protocol", json!({}), admin_ctx())
-        .await
-        .expect("runtime.protocol must be registered");
-    assert_eq!(reply["version"], json!(PROTOCOL_VERSION));
-    assert_eq!(reply["version"], json!(2));
-    let features: Vec<&str> = reply["features"]
-        .as_array()
-        .expect("features must be an array")
-        .iter()
-        .map(|f| f.as_str().expect("feature names are strings"))
-        .collect();
-    assert_eq!(features, PROTOCOL_FEATURES);
-    assert!(features.contains(&"runtime.protocol"));
-}
-
-#[tokio::test]
-async fn runtime_protocol_needs_no_capability() {
-    let reply = call("runtime.protocol", json!({}), no_cap_ctx()).await;
-    assert!(reply.is_ok(), "clients probe before they hold a token");
-}
-
-#[test]
-fn protocol_features_are_unique() {
-    let mut seen = std::collections::HashSet::new();
-    for f in PROTOCOL_FEATURES {
-        assert!(seen.insert(*f), "duplicate feature {f}");
-    }
 }
 
 // ── Perspective fixture ─────────────────────────────────────────────────────
@@ -585,8 +551,15 @@ async fn run(target: ReplyTarget, method: &str, cancel: CancellationToken) -> Va
         .lock()
         .await
         .insert(target.key().to_string(), cancel.clone());
+    let mut map = build_handler_map();
+    map.register(
+        "test.ok",
+        |_params: Value, _ctx: Arc<RequestContext>| async {
+            Ok::<Value, WsRpcError>(json!({ "ok": true }))
+        },
+    );
     run_call(
-        Arc::new(build_handler_map()),
+        Arc::new(map),
         admin_ctx(),
         String::new(),
         inflight.clone(),
@@ -608,12 +581,12 @@ async fn run(target: ReplyTarget, method: &str, cancel: CancellationToken) -> Va
 async fn a_request_still_gets_its_reply() {
     let reply = run(
         ReplyTarget::Request("r1".into()),
-        "runtime.protocol",
+        "test.ok",
         CancellationToken::new(),
     )
     .await;
     assert_eq!(reply["id"], json!("r1"));
-    assert_eq!(reply["result"]["version"], json!(2));
+    assert_eq!(reply["result"]["ok"], json!(true));
     assert_eq!(reply.as_object().unwrap().len(), 2);
 }
 
@@ -621,13 +594,13 @@ async fn a_request_still_gets_its_reply() {
 async fn an_operation_completes_as_an_event() {
     let event = run(
         ReplyTarget::Operation("op-1".into()),
-        "runtime.protocol",
+        "test.ok",
         CancellationToken::new(),
     )
     .await;
     assert_eq!(event["type"], json!("operation-completed"));
     assert_eq!(event["operationId"], json!("op-1"));
-    assert_eq!(event["result"]["version"], json!(2));
+    assert_eq!(event["result"]["ok"], json!(true));
 
     let failed = run(
         ReplyTarget::Operation("op-2".into()),
@@ -642,12 +615,7 @@ async fn an_operation_completes_as_an_event() {
 async fn a_cancelled_operation_reports_499() {
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let event = run(
-        ReplyTarget::Operation("op-3".into()),
-        "runtime.protocol",
-        cancel,
-    )
-    .await;
+    let event = run(ReplyTarget::Operation("op-3".into()), "test.ok", cancel).await;
     assert_eq!(event["operationId"], json!("op-3"));
     assert_eq!(event["error"]["code"], json!(499));
 }

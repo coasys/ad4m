@@ -972,8 +972,8 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     })?)
 }
 
-/// Optional `delta` param of `subscribeQuery` / `modelSubscribe` (protocol
-/// feature `subscriptions.delta`): absent or `false` = whole-result updates.
+/// Optional `delta` param of `subscribeQuery` / `modelSubscribe`: absent or
+/// `false` = whole-result updates.
 fn delta_param(params: &Value) -> Result<bool, WsRpcError> {
     Ok(params.opt_bool("delta")?.unwrap_or(false))
 }
@@ -2633,7 +2633,7 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 /// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
 /// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
 ///
-/// Optional `names: string[]` (protocol feature `perspective.getAllShacl.names`)
+/// Optional `names: string[]`
 /// restricts the reply to those shapes. Entries keep the perspective's order;
 /// unknown names are left out. Absent or `null` = every shape, as before.
 async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {

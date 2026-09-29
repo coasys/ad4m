@@ -398,7 +398,7 @@ struct SubscribedQuery {
     /// When set, this subscription was registered via `model_subscribe_and_query`.
     /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
     model_query_params: Option<ModelSubscriptionParams>,
-    /// `Some(revision)` for a delta subscription (protocol v2, see
+    /// `Some(revision)` for a delta subscription (see
     /// `perspective_instance/subscriptions_v2.rs`); `None` sends the whole
     /// result string on every change, as before.
     delta: Option<u64>,

@@ -29,7 +29,7 @@ impl PerspectiveInstance {
         Some((query.delta?, query.last_result.clone()))
     }
 
-    /// Publish one delta update (protocol feature `subscriptions.delta`) on
+    /// Publish one delta update (opt-in with `delta: true`) on
     /// the usual `query-subscription-update` topic:
     /// `{ uuid, subscriptionId, delta: true, revision, added, removed, changed, ... }`.
     /// See [`result_delta`] for the row keys.

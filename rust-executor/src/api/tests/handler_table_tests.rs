@@ -38,7 +38,7 @@ fn handler_table_is_sorted_and_unique() {
     for pair in names.windows(2) {
         assert!(pair[0] < pair[1], "not sorted/unique: {:?}", pair);
     }
-    assert!(names.iter().any(|n| n == "runtime.protocol"));
+    assert!(names.iter().any(|n| n == "runtime.info"));
 }
 
 #[test]
@@ -83,30 +83,4 @@ fn committed_sdk_handler_table_is_current() {
         render_handler_table(&build_handler_map().method_names()),
         "core/src/generated/api/{FILE_NAME} is stale: run `pnpm run generate:api-types` in core/"
     );
-}
-
-/// Protocol features that name a parameter, an event mechanism or a reply
-/// mode rather than a `HandlerMap` method.
-const NON_METHOD_FEATURES: &[&str] = &[
-    "perspective.getAllShacl.names",
-    "events.watch",
-    "modelQuery.cursor",
-    "subscriptions.delta",
-    "operations.async",
-];
-
-/// A feature named after a method must be a registered method, so a client
-/// that sees the feature can call it.
-#[test]
-fn method_features_are_registered_handlers() {
-    let names = build_handler_map().method_names();
-    for feature in crate::api::protocol::PROTOCOL_FEATURES {
-        if NON_METHOD_FEATURES.contains(feature) {
-            continue;
-        }
-        assert!(
-            names.iter().any(|n| n == feature),
-            "PROTOCOL_FEATURES lists `{feature}`, but no handler has that name"
-        );
-    }
 }

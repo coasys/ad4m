@@ -1,4 +1,4 @@
-//! Operation handles for long calls (protocol feature `operations.async`).
+//! Operation handles for long calls (opt-in with `async: true`).
 //!
 //! A call to one of [`ASYNC_METHODS`] with `params.async === true` is answered
 //! at once with `{ operationId }`. The handler keeps running; when it ends the

@@ -142,7 +142,6 @@ export const HANDLER_METHODS = [
   "runtime.notifications",
   "runtime.openLink",
   "runtime.outbox",
-  "runtime.protocol",
   "runtime.quit",
   "runtime.removeFriends",
   "runtime.removeLinkLanguageTemplates",

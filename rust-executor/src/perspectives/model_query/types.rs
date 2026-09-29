@@ -498,7 +498,7 @@ pub struct ModelQueryInput {
     pub offset: Option<usize>,
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Keyset cursor (protocol feature `modelQuery.cursor`): `""` for the
+    /// Keyset cursor (opt-in): `""` for the
     /// first page, then the previous reply's `nextCursor`. Top-level queries
     /// only; see [`super::cursor`] for which orders support it.
     #[serde(default)]
