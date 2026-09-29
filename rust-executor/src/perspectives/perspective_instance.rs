@@ -501,6 +501,11 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// Receipt verdicts this perspective has already taken, keyed by
+    /// `(receipt URI, flow DNA hash)` so a DNA change can never be served a
+    /// stale answer — see `flow_instance::verify::memo` (#1177).
+    pub(crate) receipt_verdict_memo:
+        Arc<crate::perspectives::flow_instance::verify::memo::VerdictMemo>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -578,6 +583,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            receipt_verdict_memo: Arc::new(Default::default()),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),

@@ -160,6 +160,27 @@ pub const FLOW_RECEIPT_CONTENT_PREDICATE: &str = "ad4m://flow/receipt_content";
 /// Receipt URIs are `ad4m://flow/receipt/{sha256 of the content}`.
 pub const RECEIPT_URI_PREFIX: &str = "ad4m://flow/receipt/";
 
+/// Is `uri` a receipt URI in the one spelling [`FlowReceipt::uri`] writes:
+/// [`RECEIPT_URI_PREFIX`] followed by exactly 64 **lowercase** hex
+/// characters?
+///
+/// The index that finds receipts is writable by anyone (#1177), so this is
+/// the cheap first filter on an index entry: a target that cannot be a
+/// content hash is dismissed before any store read. Uppercase is rejected
+/// explicitly rather than folded, so two index links cannot alias one
+/// receipt under two spellings — the receipt's own `uri()` is lowercase,
+/// and a body under an uppercase alias would fail the content check anyway;
+/// refusing the alias here keeps that from costing a read.
+pub fn is_canonical_receipt_uri(uri: &str) -> bool {
+    let Some(hash) = uri.strip_prefix(RECEIPT_URI_PREFIX) else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// Hard cap on a serialised receipt. A completion whose receipt exceeds it is
 /// logged and **not minted**: there is no spill/fetch protocol, and a receipt
 /// that cannot be carried whole is not a receipt. Expected size is a few KB —
@@ -274,6 +295,49 @@ impl FlowReceipt {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    /// The candidate filter admits one spelling and nothing near it: the
+    /// minted URI passes; its uppercase alias, a hash one character short or
+    /// long, a non-hex character and another prefix all fail. Uppercase is
+    /// the case that matters (#1177): a filter that folded case would let two
+    /// index links alias one receipt.
+    ///
+    /// Red if the lowercase rule is loosened to `is_ascii_hexdigit`, the
+    /// length is not pinned, or the prefix is matched loosely.
+    #[test]
+    fn only_the_canonical_lowercase_spelling_is_a_receipt_candidate() {
+        let uri = FlowReceipt::mint(
+            &two_state_flow(),
+            completed(),
+            outs(&[OUTPUT]),
+            vec![delivered()],
+        )
+        .expect("mints")
+        .uri()
+        .expect("uri");
+        let hash = uri.strip_prefix(RECEIPT_URI_PREFIX).expect("prefix");
+        assert_eq!(hash.len(), 64, "precondition: a SHA-256 in hex");
+        assert!(is_canonical_receipt_uri(&uri), "the minted URI: {uri}");
+
+        let rejected = [
+            format!("{RECEIPT_URI_PREFIX}{}", hash.to_uppercase()),
+            format!(
+                "{RECEIPT_URI_PREFIX}{}{}",
+                &hash[..63],
+                hash[63..].to_uppercase()
+            ),
+            format!("{RECEIPT_URI_PREFIX}{}", &hash[..63]),
+            format!("{RECEIPT_URI_PREFIX}{hash}0"),
+            format!("{RECEIPT_URI_PREFIX}{}g", &hash[..63]),
+            format!("{RECEIPT_URI_PREFIX}-junk-0000"),
+            format!("ad4m://flow/receipts/{hash}"),
+            hash.to_string(),
+            String::new(),
+        ];
+        for uri in rejected {
+            assert!(!is_canonical_receipt_uri(&uri), "must reject `{uri}`");
+        }
+    }
     /// `evidence_hash` frames the guard's class names into the digest before
     /// the items, and a negative guard (`count: { max: 0 }`) is satisfied by
     /// zero matches — so a class name can be part of a seal with no item

@@ -657,8 +657,9 @@ async fn fixture_minted_receipt(
         proposer,
         nonce,
     );
-    let signed =
-        |predicate: &str, target: &str| signed_link(&uri, predicate, target, "alice", true, None, T1);
+    let signed = |predicate: &str, target: &str| {
+        signed_link(&uri, predicate, target, "alice", true, None, T1)
+    };
     let links = vec![
         signed(PROPOSER_PREDICATE, proposer),
         signed(FLOW_INSTANCE_PREDICATE, &instance_uri),
@@ -789,7 +790,10 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
     };
     let canonical = |hex: String| {
         assert!(
-            hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            hex.len() == 64
+                && hex
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
             "fixture: `{hex}` must look canonical"
         );
         format!("{RECEIPT_URI_PREFIX}{hex}")
@@ -816,7 +820,10 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
         links.push(index(target.clone()));
         links.push(body(target, honest_body.clone()));
         // 3. Body-less.
-        links.push(index(canonical(format!("{:0>64}", format!("b0d1e55{i:04}")))));
+        links.push(index(canonical(format!(
+            "{:0>64}",
+            format!("b0d1e55{i:04}")
+        ))));
         // 4. Bodies that do not hash to their URI.
         let mut forged = honest.clone();
         forged.outputs[0].id = format!("ad4m://task/forged-{i:04}");
@@ -831,7 +838,10 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
         links.push(index(other_uri.clone()));
         links.push(body(other_uri, receipt_body(&other)));
         // 6. Junk under the honest URI itself.
-        links.push(body(honest_uri.clone(), literal(&format!("not a receipt {i}"))));
+        links.push(body(
+            honest_uri.clone(),
+            literal(&format!("not a receipt {i}")),
+        ));
         links.push(body(honest_uri.clone(), receipt_body(&forged)));
     }
     let ctx = f.ctx.clone();
@@ -864,4 +874,74 @@ async fn a_flood_of_junk_index_entries_is_skipped_and_the_genuine_receipt_still_
     .await;
     assert_eq!(ids, vec![TASK.to_string()]);
     assert_eq!(total, 1);
+}
+
+/// The perspective's own memo, end to end (#1177): the first enumeration
+/// verifies the honest receipt, the second re-verifies nothing, and a DNA
+/// edit written to the graph — a consensus rule on a state — misses the
+/// memo and excludes the receipt as `DnaChanged`, on the enumeration and on
+/// the verdict surface alike. Then the memo holds the new verdict too: a
+/// third read under the new DNA re-verifies nothing either.
+///
+/// Red if `flow_valid_outputs` does not go through the perspective's memo
+/// (the count keeps growing), or if the memo key ignores the DNA (the
+/// receipt keeps answering after the edit).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_perspectives_memo_saves_re_verification_and_follows_the_dna() {
+    use crate::perspectives::flow_instance::produced::{flow_valid_outputs, verify_flow_receipt};
+    use crate::perspectives::flow_instance::verify::ReceiptVerdict;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    let honest = mint_honest_task_receipt(&mut f).await;
+    let flow = f.flow_uri.clone();
+    let memo = f.perspective.receipt_verdict_memo.clone();
+    let before = memo.verifications();
+
+    let first = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("valid outputs");
+    assert_eq!(first.len(), 1);
+    assert_eq!(
+        memo.verifications(),
+        before + 1,
+        "the first read verifies the one receipt through the perspective's memo"
+    );
+
+    let second = flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("valid outputs");
+    assert_eq!(second, first);
+    assert_eq!(
+        memo.verifications(),
+        before + 1,
+        "the second read of an unchanged set re-verifies nothing"
+    );
+
+    // The DNA edit: a quorum rule on a state is part of the definition, so
+    // the held hash moves and every receipt minted before it stops verifying.
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    assert!(
+        flow_valid_outputs(&f.perspective, &flow, None)
+            .await
+            .expect("valid outputs")
+            .is_empty(),
+        "after the DNA changed the memoised Verified must not be served"
+    );
+    let verdict = verify_flow_receipt(&f.perspective, &honest)
+        .await
+        .expect("verify");
+    assert!(
+        matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
+        "the same receipt reads DnaChanged, got: {verdict}"
+    );
+    assert_eq!(
+        memo.verifications(),
+        before + 2,
+        "the changed DNA is a new key: verified once more, then memoised"
+    );
+    flow_valid_outputs(&f.perspective, &flow, None)
+        .await
+        .expect("valid outputs");
+    assert_eq!(memo.verifications(), before + 2);
 }
