@@ -1,5 +1,6 @@
 import { ApiClient, WsEvent } from "../apiClient"
 import { subscribeChannel } from "../subscribeChannel"
+import { notifyListeners } from "../notifyListeners"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type {
@@ -290,7 +291,7 @@ export class RuntimeClient {
     subscribeNotificationTriggered() {
         const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'notification-triggered', (data) => {
             if (data.type === 'notification-triggered') {
-                this.#notificationTriggeredCallbacks.forEach(cb => cb(data.notification as TriggeredNotification))
+                notifyListeners(this.#notificationTriggeredCallbacks, 'notification-triggered', data.notification as TriggeredNotification)
             }
         })
         if (unsub) this.#unsubscribers.push(unsub)
@@ -303,7 +304,7 @@ export class RuntimeClient {
     subscribeMessageReceived() {
         const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'message-received', (data) => {
             if (data.type === 'message-received') {
-                this.#messageReceivedCallbacks.forEach(cb => cb(data.message as PerspectiveExpression))
+                notifyListeners(this.#messageReceivedCallbacks, 'message-received', data.message as PerspectiveExpression)
             }
         })
         if (unsub) this.#unsubscribers.push(unsub)
@@ -321,7 +322,7 @@ export class RuntimeClient {
                     ...exception,
                     type: normalizeExceptionType(exception.type),
                 }
-                this.#exceptionOccurredCallbacks.forEach(cb => cb(normalizedException))
+                notifyListeners(this.#exceptionOccurredCallbacks, 'exception-occurred', normalizedException)
             }
         })
         if (unsub) this.#unsubscribers.push(unsub)

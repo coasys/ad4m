@@ -1304,6 +1304,38 @@ describe('Ad4mClient', () => {
         freshClient.close();
     });
 
+    test('a throwing listener does not stop later listeners for the same event', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', true);
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const first = jest.fn();
+        const third = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(first);
+        freshClient.perspective.addPerspectiveAddedListener(() => { throw new Error('listener bug'); });
+        freshClient.perspective.addPerspectiveAddedListener(third);
+        const linkThird = jest.fn();
+        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
+            () => { throw new Error('link listener bug'); },
+            linkThird,
+        ]);
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-d' } });
+        ws.emit({
+            type: 'link-added',
+            perspectiveUuid: 'uuid-1',
+            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
+        });
+
+        expect(first).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledWith({ uuid: 'uuid-d' });
+        expect(linkThird).toHaveBeenCalledTimes(1);
+        expect(errorSpy).toHaveBeenCalled();
+        errorSpy.mockRestore();
+        freshClient.close();
+    });
+
     test('WS RPC message contains type and params', async () => {
         await ad4m.agent.generate('pass');
         expect(lastRpcCall!.type).toBe('agent.generate');

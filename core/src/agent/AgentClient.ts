@@ -1,5 +1,6 @@
 import { ApiClient, WsEvent } from "../apiClient";
 import { subscribeChannel } from "../subscribeChannel";
+import { notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -287,7 +288,7 @@ export class AgentClient {
           this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
         }
 
-        this.#updatedCallbacks.forEach((cb) => cb(agent));
+        notifyListeners(this.#updatedCallbacks, 'agent-updated', agent);
       }
     });
     if (unsub) this.#unsubscribers.push(unsub);
@@ -296,7 +297,7 @@ export class AgentClient {
   subscribeAppsChanged() {
     const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'apps-changed', (data) => {
       if (data.type === 'apps-changed') {
-        this.#appsChangedCallback.forEach((cb) => cb());
+        notifyListeners(this.#appsChangedCallback, 'apps-changed');
       }
     });
     if (unsub) this.#unsubscribers.push(unsub);
@@ -309,7 +310,7 @@ export class AgentClient {
   subscribeAgentStatusChanged() {
     const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'agent-status-changed', (data) => {
       if (data.type === 'agent-status-changed') {
-        this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
+        notifyListeners(this.#agentStatusChangedCallbacks, 'agent-status-changed', (data.agent || data) as Agent);
       }
     });
     if (unsub) this.#unsubscribers.push(unsub);
@@ -322,7 +323,7 @@ export class AgentClient {
   subscribeHostingUserInfoChanged() {
     const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'hosting-user-info-changed', (data) => {
       if (data.type === 'hosting-user-info-changed') {
-        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
+        notifyListeners(this.#hostingUserInfoChangedCallbacks, 'hosting-user-info-changed', (data.info || data) as HostingUserInfo);
       }
     });
     if (unsub) this.#unsubscribers.push(unsub);
@@ -335,7 +336,7 @@ export class AgentClient {
   subscribeComputeLogUpdated() {
     const unsub = subscribeChannel(this.#apiClient, this.#channelHandlers, 'compute-log-updated', (data) => {
       if (data.type === 'compute-log-updated') {
-        this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
+        notifyListeners(this.#computeLogUpdatedCallbacks, 'compute-log-updated', (data.entry || data) as ComputeLogEntry);
       }
     });
     if (unsub) this.#unsubscribers.push(unsub);

@@ -225,3 +225,30 @@ describe('ApiClient AbortSignal support', () => {
         FakeWebSocket.last = null
     })
 })
+
+describe('ApiClient event dispatch', () => {
+    beforeEach(() => {
+        FakeWebSocket.last = null
+    })
+
+    it('keeps delivering an event to later subscribers when one subscriber throws', async () => {
+        const client = new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            FakeWebSocket as unknown as new (url: string) => WebSocket,
+        )
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const received: string[] = []
+        client.subscribe(() => { received.push('first') })
+        client.subscribe(() => { throw new Error('boom') })
+        client.subscribe(() => { received.push('third') })
+        await flushMicrotasks()
+
+        FakeWebSocket.last!.serverPush({ type: 'perspective-added', perspective: { uuid: 'u' } })
+
+        expect(received).toEqual(['first', 'third'])
+        expect(errorSpy).toHaveBeenCalled()
+        errorSpy.mockRestore()
+        client.closeAll()
+    })
+})

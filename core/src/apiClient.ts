@@ -199,7 +199,11 @@ export class ApiClient {
             }
 
             // Server-push event (no id, or id not in pending) → route to subscribers
-            for (const cb of this._wsCallbacks) cb(parsed)
+            for (const cb of this._wsCallbacks) {
+                try { cb(parsed) } catch (e) {
+                    console.error('Error in WebSocket event callback:', e)
+                }
+            }
         }
 
         ws.onerror = (e) => {
