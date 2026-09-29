@@ -10,6 +10,7 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
+use crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S;
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
 use crate::types::*;
 use crate::utils::constant_time_eq;
@@ -36,10 +37,28 @@ lazy_static! {
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 
 /// Minimum interval (seconds) between two `users.last_seen` writes for the same
-/// user, so an active user's `last_seen` can be this stale. The auto-processor
-/// supervisor's online window depends on it
-/// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
-pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
+/// user, so an active user's `last_seen` can be this stale. Derived from the
+/// auto-processor supervisor's online window, never set on its own: an active
+/// user's `last_seen` is up to `throttle + request gap` old, and a throttle
+/// equal to the window reaped every active user once per window (#1070). A
+/// third of the window leaves two thirds for the gap between requests.
+pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = MANAGED_USER_ONLINE_WINDOW_S / 3;
+
+/// A stored `last_seen` further than this in the future is treated as stale and
+/// rewritten; anything closer is accepted as clock skew.
+const LAST_SEEN_CLOCK_SKEW_S: i64 = 60;
+
+/// Whether a request at `now` must write `users.last_seen`, given the stored
+/// value. The single write decision for both the cache and the DB path of
+/// [`track_last_seen_from_token`], kept pure so the supervisor's online window
+/// can be tested against it.
+pub fn last_seen_write_due(last_seen: Option<i64>, now: i64) -> bool {
+    match last_seen {
+        None => true,
+        Some(ls) if ls > now + LAST_SEEN_CLOCK_SKEW_S => true,
+        Some(ls) => ls < now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S),
+    }
+}
 
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
@@ -145,12 +164,11 @@ pub async fn track_last_seen_from_token(token: String) {
                 let cache_age = now - entry.last_checked;
                 if cache_age < CACHE_TTL_SECONDS {
                     // Cache is fresh, check if update is needed based on cached value
-                    let time_since_last_seen = now - entry.last_seen_value;
-                    if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
+                    if !last_seen_write_due(Some(entry.last_seen_value), now) {
                         // Still inside the throttle period, no need to update
                         log::trace!(
                             "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                            user_email, entry.last_seen_value, time_since_last_seen
+                            user_email, entry.last_seen_value, now - entry.last_seen_value
                         );
                         return;
                     }
@@ -165,22 +183,16 @@ pub async fn track_last_seen_from_token(token: String) {
             Ad4mDb::with_global_instance(|db| {
                 if let Ok(user) = db.get_user(&user_email_clone) {
                     if let Some(last_seen) = user.last_seen {
-                        let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
-
-                        // Handle unrealistic future timestamps by treating them as stale
-                        // (allow some clock skew tolerance of 1 minute)
-                        let should_update = if last_seen > now + 60 {
+                        if last_seen > now + LAST_SEEN_CLOCK_SKEW_S {
                             log::warn!(
                                 "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
                                 user_email_clone, last_seen
                             );
-                            true
-                        } else {
-                            last_seen < throttle_cutoff
-                        };
+                        }
+                        let should_update = last_seen_write_due(Some(last_seen), now);
 
-                        log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                            user_email_clone, last_seen, throttle_cutoff, should_update);
+                        log::trace!("last_seen tracking for {}: last_seen={}, should_update={}",
+                            user_email_clone, last_seen, should_update);
                         (should_update, Some(last_seen))
                     } else {
                         log::debug!(
@@ -409,6 +421,27 @@ pub fn gen_request_key(request_id: &str, rand: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The write decision shared by the cache and DB paths of
+    /// `track_last_seen_from_token`: never seen, far-future and throttle-old
+    /// values are rewritten; fresh values and small clock skew are not.
+    #[test]
+    fn last_seen_write_due_boundaries() {
+        let now = 1_000_000_i64;
+        let t = LAST_SEEN_WRITE_THROTTLE_S;
+        assert!(last_seen_write_due(None, now));
+        assert!(!last_seen_write_due(Some(now), now));
+        assert!(!last_seen_write_due(Some(now - t), now));
+        assert!(last_seen_write_due(Some(now - t - 1), now));
+        assert!(!last_seen_write_due(
+            Some(now + LAST_SEEN_CLOCK_SKEW_S),
+            now
+        ));
+        assert!(last_seen_write_due(
+            Some(now + LAST_SEEN_CLOCK_SKEW_S + 1),
+            now
+        ));
+    }
 
     #[test]
     fn all_capability_is_expected() {

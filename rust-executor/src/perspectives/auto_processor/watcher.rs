@@ -16,7 +16,6 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
-use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -433,11 +432,11 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
 }
 
 /// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. `last_seen` is written at most
-/// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
-/// by a margin for the gap between requests; otherwise an active user ages out
-/// right before their `last_seen` is refreshed and their loop flaps (#1070).
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
+/// auto-processor loop supervision purposes. This is the policy value;
+/// [`crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S`] is derived from
+/// it (a third), so an active user's `last_seen` is always refreshed well
+/// before it ages out and their loop cannot flap (#1070).
+pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 600;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
@@ -1159,6 +1158,7 @@ pub(crate) async fn write_mint_scope_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::capabilities::{last_seen_write_due, LAST_SEEN_WRITE_THROTTLE_S};
     use crate::perspectives::auto_processor::claim::{batch_key, write_claim};
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 
@@ -1335,24 +1335,76 @@ mod tests {
     }
 
     /// The online window must leave room for the `last_seen` write-throttle
-    /// plus the gap between requests (#1070).
+    /// plus the gap between requests (#1070). An active user's `last_seen` can
+    /// be up to `throttle + gap` old; this pins at least two throttles of slack
+    /// for the gap, so the two constants can never again be complements.
     #[test]
-    fn online_window_exceeds_last_seen_write_throttle() {
+    fn last_seen_write_throttle_leaves_margin_inside_online_window() {
+        // Runtime bindings, not a `const` assert: a regression should fail
+        // this test by name rather than stop the crate from compiling.
+        let throttle = LAST_SEEN_WRITE_THROTTLE_S;
+        let window = MANAGED_USER_ONLINE_WINDOW_S;
+        assert!(throttle > 0);
         assert!(
-            MANAGED_USER_ONLINE_WINDOW_S >= 2 * LAST_SEEN_WRITE_THROTTLE_S,
-            "`last_seen` is only rewritten once it is {LAST_SEEN_WRITE_THROTTLE_S}s old, so a \
-             {MANAGED_USER_ONLINE_WINDOW_S}s window without margin reaps every active user just \
-             before their `last_seen` is refreshed and respawns their loop (#1070)"
+            window - throttle >= 2 * throttle,
+            "`last_seen` is only rewritten once it is {throttle}s old, so a {window}s window \
+             leaves only {}s for the gap between an active user's requests (#1070)",
+            window - throttle
         );
-        let now = 1_000_000_i64;
-        let stale_but_active = (
-            "u@x".to_string(),
-            Some(now - LAST_SEEN_WRITE_THROTTLE_S - 1),
-        );
-        assert_eq!(
-            select_online_managed_users(vec![stale_but_active], now, MANAGED_USER_ONLINE_WINDOW_S),
-            vec!["u@x"]
-        );
+    }
+
+    /// Behavioural pin for #1070: drive the real `last_seen` writer decision
+    /// ([`last_seen_write_due`]) with a user who sends an authenticated request
+    /// every `gap` seconds, and check the real reader
+    /// ([`select_online_managed_users`]) every second, before that second's
+    /// request lands (the order in which the flap happened). A continuously
+    /// active user must never be classified offline, and must be classified
+    /// offline once they stop.
+    #[test]
+    fn continuously_active_user_is_never_classified_offline() {
+        // Longest pause between requests that still counts as "continuously
+        // active". A fixed literal, not derived from the constants under test.
+        const MAX_ACTIVE_GAP_S: i64 = 300;
+        const START: i64 = 1_000_000;
+        let run_s = 4 * MANAGED_USER_ONLINE_WINDOW_S;
+        let online_at = |last_seen: Option<i64>, now: i64| {
+            !select_online_managed_users(
+                vec![("u@x".to_string(), last_seen)],
+                now,
+                MANAGED_USER_ONLINE_WINDOW_S,
+            )
+            .is_empty()
+        };
+
+        for gap in 1..=MAX_ACTIVE_GAP_S {
+            let mut last_seen = None;
+            let mut last_request = START;
+            for now in START..START + run_s {
+                let is_request = (now - START) % gap == 0;
+                if now > START {
+                    assert!(
+                        online_at(last_seen, now),
+                        "user requesting every {gap}s classified offline at t+{}s \
+                         (last_seen {}s old)",
+                        now - START,
+                        now - last_seen.unwrap_or(START)
+                    );
+                }
+                if is_request {
+                    last_request = now;
+                    if last_seen_write_due(last_seen, now) {
+                        last_seen = Some(now);
+                    }
+                }
+            }
+            let reaped_by = last_request + MANAGED_USER_ONLINE_WINDOW_S + 1;
+            assert!(
+                !online_at(last_seen, reaped_by),
+                "user who stopped at t+{}s still online at t+{}s",
+                last_request - START,
+                reaped_by - START
+            );
+        }
     }
 
     // ---- WatcherState -------------------------------------------------------
