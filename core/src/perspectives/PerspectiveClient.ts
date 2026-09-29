@@ -22,17 +22,15 @@ import type {
     FlowReceiptVerdict, FlowValidOutput,
 } from "./FlowInstance";
 
-export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
-export type UuidCallback = (uuid: string) => null
-export type LinkCallback = (link: LinkExpression) => null
-/** Payload of a `link-updated` event: the link before and after the update. */
+export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => void
+export type UuidCallback = (uuid: string) => void
+export type LinkCallback = (link: LinkExpression) => void
 export interface LinkUpdate {
     oldLink: LinkExpression
     newLink: LinkExpression
 }
-/** Callback for `link-updated` events. It receives `{ oldLink, newLink }`, not a single link. */
 export type LinkUpdatedCallback = (update: LinkUpdate) => void
-export type SyncStateChangeCallback = (state: PerspectiveState) => null
+export type SyncStateChangeCallback = (state: PerspectiveState) => void
 
 function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw

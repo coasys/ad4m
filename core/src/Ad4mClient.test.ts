@@ -687,7 +687,7 @@ describe('PerspectiveClient', () => {
 
     test('runtime exception subscriptions normalize PascalCase exception types', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
-        const callback = jest.fn(() => null);
+        const callback = jest.fn();
         freshClient.runtime.addExceptionCallback(callback);
 
         const ws = lastOf(MockWebSocket.instances);

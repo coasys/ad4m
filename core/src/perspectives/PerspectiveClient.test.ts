@@ -142,9 +142,9 @@ describe('PerspectiveClient RPC operations', () => {
 
     it('adding a lifecycle listener subscribes one shared event handler', () => {
         const client = new PerspectiveClient('http://localhost:12000', 'token')
-        client.addPerspectiveAddedListener(() => null)
-        client.addPerspectiveUpdatedListener(() => null)
-        client.addPerspectiveRemovedListener(() => null)
+        client.addPerspectiveAddedListener(() => {})
+        client.addPerspectiveUpdatedListener(() => {})
+        client.addPerspectiveRemovedListener(() => {})
 
         // ApiClient keeps handlers in a Set: the same handler every time adds nothing.
         const handlers = new Set(mockSubscribe.mock.calls.map(([cb]) => cb))
@@ -171,7 +171,7 @@ describe('PerspectiveClient RPC operations', () => {
 
         const client = new PerspectiveClient('http://localhost:12000', 'token')
         const received: PerspectiveHandle[] = []
-        client.addPerspectiveAddedListener((h) => { received.push(h); return null })
+        client.addPerspectiveAddedListener((h) => { received.push(h) })
 
         // Simulate server push event to all subscribers (like real WS dispatch)
         const handle = makeHandle('uuid-event', 'EventPerspective')

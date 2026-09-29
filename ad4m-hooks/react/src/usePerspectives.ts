@@ -78,11 +78,8 @@ export function usePerspectives(client: Ad4mClient) {
 
         fetchPerspectives();
 
-        // @ts-ignore
         client.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedListener);
-         // @ts-ignore
         client.perspective.addPerspectiveAddedListener(perspectiveAddedListener);
-         // @ts-ignore
         client.perspective.addPerspectiveRemovedListener(perspectiveRemovedListener);
 
         return () => {

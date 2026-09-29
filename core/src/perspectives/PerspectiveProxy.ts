@@ -510,7 +510,12 @@ export class QuerySubscriptionProxy {
     }
 }
 
-type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
+/** Callback type of each link event. */
+export interface LinkListeners {
+    "link-added": LinkCallback
+    "link-removed": LinkCallback
+    "link-updated": LinkUpdatedCallback
+}
 
 export type LinkStatus = "shared" | "local"
 interface Parameter {
@@ -583,10 +588,8 @@ export class PerspectiveProxy {
     /** @internal Exposed for ModelQueryBuilder subscription management */
     get client(): PerspectiveClient { return this.#client; }
 
-    #perspectiveLinkAddedCallbacks: LinkCallback[]
-    #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #perspectiveLinkUpdatedCallbacks: LinkUpdatedCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #linkListeners: { [K in keyof LinkListeners]: LinkListeners[K][] } = { "link-added": [], "link-removed": [], "link-updated": [] }
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[] = []
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -596,10 +599,6 @@ export class PerspectiveProxy {
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
-        this.#perspectiveLinkUpdatedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
@@ -608,9 +607,9 @@ export class PerspectiveProxy {
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;
-        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
-        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
-        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
+        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#linkListeners["link-added"])
+        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#linkListeners["link-removed"])
+        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#linkListeners["link-updated"])
         this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
     }
 
@@ -1321,16 +1320,8 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async addListener(type: "link-added" | "link-removed", cb: LinkCallback): Promise<void>
-    async addListener(type: "link-updated", cb: LinkUpdatedCallback): Promise<void>
-    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback | LinkUpdatedCallback) {
-        if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb as LinkCallback);
-        } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb as LinkCallback);
-        } else if (type === 'link-updated') {
-            this.#perspectiveLinkUpdatedCallbacks.push(cb as LinkUpdatedCallback);
-        }
+    async addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]) {
+        this.#linkListeners[type].push(cb)
     }
 
     /**
@@ -1355,19 +1346,10 @@ export class PerspectiveProxy {
      * @param type - Type of change to stop listening for
      * @param cb - The callback function to remove
      */
-    async removeListener(type: "link-added" | "link-removed", cb: LinkCallback): Promise<void>
-    async removeListener(type: "link-updated", cb: LinkUpdatedCallback): Promise<void>
-    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback | LinkUpdatedCallback) {
-        if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb as LinkCallback);
-            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
-        } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb as LinkCallback);
-            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
-        } else if (type === 'link-updated') {
-            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb as LinkUpdatedCallback);
-            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
-        }
+    async removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]) {
+        const listeners = this.#linkListeners[type]
+        const index = listeners.indexOf(cb)
+        if (index >= 0) listeners.splice(index, 1)
     }
 
     /** Clean up all subscriptions registered by this proxy.
@@ -1375,9 +1357,7 @@ export class PerspectiveProxy {
      *  After calling dispose(), the proxy should not be used. */
     dispose(): void {
         this.#client.removeAllListeners(this.#handle.uuid)
-        this.#perspectiveLinkAddedCallbacks.length = 0
-        this.#perspectiveLinkRemovedCallbacks.length = 0
-        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        for (const listeners of Object.values(this.#linkListeners)) listeners.length = 0
         this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 

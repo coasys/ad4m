@@ -321,7 +321,7 @@ describe("Authentication integration tests", () => {
 
         it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
             let excpetions: ExceptionInfo[] = [];
-            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e); return null; })
+            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e) })
             
             await sleep(1000);
 

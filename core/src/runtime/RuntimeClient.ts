@@ -16,9 +16,9 @@ import type {
     SetFreeHostingEnabledRequest,
 } from "../generated/api"
 
-export type MessageCallback = (message: PerspectiveExpression) => null
-export type ExceptionCallback = (info: ExceptionInfo) => null
-export type NotificationTriggeredCallback = (notification: TriggeredNotification) => null
+export type MessageCallback = (message: PerspectiveExpression) => void
+export type ExceptionCallback = (info: ExceptionInfo) => void
+export type NotificationTriggeredCallback = (notification: TriggeredNotification) => void
 
 function normalizeExceptionType(type: ExceptionInfo['type'] | string): ExceptionInfo['type'] {
     if (typeof type !== 'string' || type === type.toUpperCase()) {
