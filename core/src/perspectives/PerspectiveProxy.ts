@@ -589,6 +589,8 @@ export class PerspectiveProxy {
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     /** Socket listeners this proxy registered, by event type. */
     #registrations = new Map<string, Promise<unknown>>()
+    /** Release functions of the socket listeners this proxy registered. */
+    #releases: (() => void)[] = []
     #disposed = false
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
@@ -620,7 +622,7 @@ export class PerspectiveProxy {
         let registration = this.#registrations.get(type)
         if (!registration) {
             const uuid = this.#handle.uuid
-            registration = Promise.resolve(
+            registration = this.#own(
                 type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#perspectiveLinkAddedCallbacks)
                 : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#perspectiveLinkRemovedCallbacks)
                 : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#perspectiveLinkUpdatedCallbacks)
@@ -629,6 +631,20 @@ export class PerspectiveProxy {
             this.#registrations.set(type, registration)
         }
         return registration
+    }
+
+    /** Records a registration's release function so `dispose()` releases it (and only it).
+     *  A registration that settles after `dispose()` is released at once. */
+    #own<T>(registration: T | Promise<T>): Promise<T> {
+        const settled = Promise.resolve(registration)
+        if (!this.#disposed) {
+            settled.then(release => {
+                if (typeof release !== 'function') return
+                if (this.#disposed) release()
+                else this.#releases.push(release as () => void)
+            }, () => {})
+        }
+        return settled
     }
 
     /** Update the proxy's internal handle and public fields in-place.
@@ -973,7 +989,7 @@ export class PerspectiveProxy {
 
     /** Subscribe to this perspective's auto-processor step signals. */
     async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
-        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+        await this.#own(this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -986,7 +1002,7 @@ export class PerspectiveProxy {
     async addAutoProcessorNeighbourhoodStateListener(
         cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
     ): Promise<void> {
-        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
+        await this.#own(this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -1382,12 +1398,13 @@ export class PerspectiveProxy {
         }
     }
 
-    /** Clean up all subscriptions registered by this proxy.
+    /** Clean up all subscriptions registered by this proxy. Other proxies for the
+     *  same perspective keep their listeners.
      *  Call this when the proxy is no longer needed to prevent subscription leaks.
      *  After calling dispose(), the proxy should not be used. */
     dispose(): void {
         this.#disposed = true
-        this.#client.removeAllListeners(this.#handle.uuid)
+        for (const release of this.#releases.splice(0)) release()
         this.#perspectiveLinkAddedCallbacks.length = 0
         this.#perspectiveLinkRemovedCallbacks.length = 0
         this.#perspectiveLinkUpdatedCallbacks.length = 0

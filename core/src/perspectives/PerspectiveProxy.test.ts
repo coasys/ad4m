@@ -54,9 +54,13 @@ describe('PerspectiveProxy.removeListener', () => {
 });
 
 describe('PerspectiveProxy.dispose', () => {
-  it('calls removeAllListeners on the client and clears local callbacks', async () => {
+  it('releases only the registrations this proxy made', async () => {
+    const releaseAdded = jest.fn();
+    const releaseRemoved = jest.fn();
     const mockClient = {
       ...createMockPerspectiveClient(),
+      addPerspectiveLinkAddedListener: jest.fn().mockResolvedValue(releaseAdded),
+      addPerspectiveLinkRemovedListener: jest.fn().mockResolvedValue(releaseRemoved),
       removeAllListeners: jest.fn(),
     };
     const proxy = createProxy(mockClient);
@@ -68,20 +72,25 @@ describe('PerspectiveProxy.dispose', () => {
 
     proxy.dispose();
 
-    expect(mockClient.removeAllListeners).toHaveBeenCalledWith('test-uuid');
+    expect(releaseAdded).toHaveBeenCalledTimes(1);
+    expect(releaseRemoved).toHaveBeenCalledTimes(1);
+    expect(mockClient.removeAllListeners).not.toHaveBeenCalled();
+    expect(mockClient.addPerspectiveLinkUpdatedListener).not.toHaveBeenCalled();
   });
 
-  it('is safe to call dispose() multiple times', () => {
+  it('is safe to call dispose() multiple times', async () => {
+    const release = jest.fn();
     const mockClient = {
       ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
+      addPerspectiveLinkAddedListener: jest.fn().mockResolvedValue(release),
     };
     const proxy = createProxy(mockClient);
+    await proxy.addListener('link-added', jest.fn());
 
     proxy.dispose();
     proxy.dispose(); // should not throw
 
-    expect(mockClient.removeAllListeners).toHaveBeenCalledTimes(2);
+    expect(release).toHaveBeenCalledTimes(1);
   });
 });
 
