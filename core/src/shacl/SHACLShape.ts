@@ -433,6 +433,15 @@ export class SHACLShape {
       });
     }
 
+    // Parent shapes (model inheritance)
+    for (const parentUri of this.parentShapes) {
+      links.push({
+        source: this.nodeShapeUri,
+        predicate: "sh://node",
+        target: parentUri
+      });
+    }
+
     // Constructor actions — always emit, even for an empty array.
     // An empty `[]` tells the executor the shape is valid but has no
     // required initial links (all-optional model with no @Flag).
@@ -726,6 +735,12 @@ export class SHACLShape {
     );
     
     const shape = new SHACLShape(shapeUri, targetClassLink?.target);
+
+    for (const parentLink of links.filter(l =>
+      l.source === shapeUri && l.predicate === "sh://node"
+    )) {
+      shape.addParentShape(parentLink.target);
+    }
 
     // Find constructor actions
     const constructorLink = links.find(l =>

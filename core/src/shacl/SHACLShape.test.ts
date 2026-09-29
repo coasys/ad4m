@@ -242,6 +242,28 @@ describe('SHACLShape', () => {
     });
   });
 
+  describe('parentShapes round-trip', () => {
+    it('preserves parentShapes through toLinks -> fromLinks', () => {
+      const original = new SHACLShape('test://Child');
+      original.addParentShape('test://BaseShape');
+      original.addParentShape('test://MixinShape');
+      original.addProperty({ name: 'field', path: 'test://field' });
+
+      const links = original.toLinks();
+      expect(links).toContainEqual({ source: 'test://ChildShape', predicate: 'sh://node', target: 'test://BaseShape' });
+
+      const reconstructed = SHACLShape.fromLinks(links, 'test://ChildShape');
+      expect(reconstructed.parentShapes).toEqual(['test://BaseShape', 'test://MixinShape']);
+      expect(reconstructed.toLinks()).toEqual(links);
+    });
+
+    it('reads no parents for a shape without parent links', () => {
+      const original = new SHACLShape('test://Solo');
+      const reconstructed = SHACLShape.fromLinks(original.toLinks(), 'test://SoloShape');
+      expect(reconstructed.parentShapes).toEqual([]);
+    });
+  });
+
   describe('edge cases', () => {
     it('handles empty shape', () => {
       const shape = new SHACLShape('test://Empty');
