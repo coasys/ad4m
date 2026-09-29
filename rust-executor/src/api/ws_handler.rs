@@ -143,6 +143,14 @@ impl HandlerMap {
     pub fn len(&self) -> usize {
         self.handlers.len()
     }
+
+    /// Registered message types, sorted. Source of the exported handler
+    /// table (`HandlerMethods.ts`, see `api::tests::handler_table_tests`).
+    pub fn method_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.handlers.keys().cloned().collect();
+        names.sort();
+        names
+    }
 }
 
 // ── Build the handler map ───────────────────────────────────────────────────
