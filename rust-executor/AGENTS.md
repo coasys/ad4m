@@ -52,7 +52,9 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   Subject classes, flows and model queries run on SHACL + SPARQL (`perspectives/model_query`).
 - **Tokio vs std locks** are both used; check the import before assuming `.lock()` is async.
 - **JS ↔ Rust bridge**: `#[op2]` extensions in `js_core/*_extension.rs`, `holochain_service/`,
-  `runtime_service/`, `entanglement_service/`; JS side in the sibling `.js` file and `js_core/host.js`.
+  `runtime_service/`; JS side in the sibling `.js` file and `js_core/host.js`. Every JS runtime is a
+  language runtime, so third-party language code reaches every op: an op that signs must sign as
+  `get_runtime_agent_context()`, never as the node directly.
   Languages are called by building JS source strings and evaluating them (`languages/mod.rs`).
 - **Capabilities**: every WS handler checks `check_capability(&ctx.capabilities, &X_CAPABILITY)`
   itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
