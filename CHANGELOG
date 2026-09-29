@@ -6,6 +6,12 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: SDK event listeners subscribe on registration** [#1187](https://github.com/coasys/ad4m/pull/1187)
+  - `new Ad4mClient(url, token, subscribe)` and every client constructor lose the `subscribe` parameter. `Ad4mClient.startSubscriptions()` and the eleven `subscribeX()` methods are removed. A client opens its event subscription when its first listener is added.
+  - Every `add…Listener(...)` on the agent, perspective and runtime clients returns a function that removes the listener.
+  - Listener callback types return `void`, not `null`. `addListener('link-updated', cb)` passes `{ oldLink, newLink }`.
+  - Removed: `addPerspectiveSyncedListener()` (it never fired), `NotificationRequestedCallback` (unused), `addComputeLogUpdatedListener()` and `ComputeLogUpdatedCallback`. The executor never sent `compute-log-updated` to a socket; poll `agent.computeLog()` instead.
+  - Exception events pass through as the executor sends them. The SDK no longer converts old exception type names.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
   - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.
@@ -34,6 +40,13 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- **SDK event and signal delivery** [#1187](https://github.com/coasys/ad4m/pull/1187)
+  - A neighbourhood signal reaches only the handlers of its own perspective. Before, it reached every subscribed perspective.
+  - Clients built by ad4m-connect receive perspective and runtime events. Agent events no longer arrive twice after a second `startSubscriptions()`.
+  - A listener that throws no longer stops later listeners, in the SDK clients and in `ApiClient`'s routing to other subscribers.
+  - The waker's mention-parent lookup reads the flat rows `querySparql` returns. Before, every mention wake reported no parents.
+  - React `usePerspectives` no longer throws on unmount. Vue `usePerspectives` delivers removed links to `onLinkRemoved`.
+  - ad4m-connect keeps one credit listener across `startCreditSubscription()` calls.
 - Holochain zome calls no longer queue behind each other node-wide [#1133](https://github.com/coasys/ad4m/issues/1133)
   - The Holochain service loop awaited every request to completion, so a cheap telepresence `send_broadcast` waited behind every other space's `sync()`/`pull`, and presence, call signalling and cursors stalled for 10–30 s. Requests are now dispatched concurrently (bounded at 32 in flight); only `InstallApp`/`RemoveApp`/`EnableApp`/`Shutdown` serialize, and they wait for in-flight calls and hold back new ones for their duration only.
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).
