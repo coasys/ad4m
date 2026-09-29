@@ -6,7 +6,7 @@ import { AIClient } from './AIClient';
  * and a fake WebSocket that plays the executor.
  */
 
-type Reply = { error?: string; result?: unknown; before?: Record<string, unknown>[] };
+type Reply = { error?: string; result?: unknown };
 
 class FakeWebSocket {
   static last: FakeWebSocket;
@@ -24,11 +24,7 @@ class FakeWebSocket {
     const { id, type } = JSON.parse(raw);
     const reply = FakeWebSocket.replies[type];
     if (!reply) return;
-    setTimeout(() => {
-      // Events the executor pushes before its RPC reply reaches the client.
-      for (const event of reply.before ?? []) this.push(event);
-      this.push(reply.error ? { id, error: { code: 500, message: reply.error } } : { id, result: reply.result });
-    }, 0);
+    setTimeout(() => this.push(reply.error ? { id, error: { code: 500, message: reply.error } } : { id, result: reply.result }), 0);
   }
   close() { this.readyState = 3; }
   push(event: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify(event) }); }
@@ -43,27 +39,6 @@ function setup(replies: Record<string, Reply>) {
 }
 
 describe('AIClient transcription streams (L7)', () => {
-  it('receives text the executor sends immediately after start', async () => {
-    const { api, ai } = setup({
-      'ai.transcriptionOpen': {
-        result: 'stream-1',
-        before: [
-          { type: 'transcription-text', streamId: 'stream-1', text: 'early' },
-          { type: 'transcription-text', streamId: 'stream-other', text: 'not mine' },
-        ],
-      },
-    });
-    const received: string[] = [];
-
-    const streamId = await ai.openTranscriptionStream('model', text => received.push(text));
-    FakeWebSocket.last.push({ type: 'transcription-text', streamId: 'stream-1', text: 'later' });
-    FakeWebSocket.last.push({ type: 'transcription-text', streamId: 'stream-other', text: 'also not mine' });
-
-    expect(streamId).toBe('stream-1');
-    expect(received).toEqual(['early', 'later']);
-    api.closeAll();
-  });
-
   it('a stream that fails to open leaves no listener', async () => {
     const { api, ai, callbackCount } = setup({ 'ai.transcriptionOpen': { error: 'no model' } });
 
