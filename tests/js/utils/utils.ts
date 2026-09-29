@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { configureSharedStores } from './sharedStores';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -221,8 +222,10 @@ export async function startExecutor(dataPath: string,
     // Off by default, matching the executor's default: only the static
     // instance_* surface is advertised.
     dynamicClassTools: boolean = false,
+    runHolochain: boolean = true,
+    sharedStores: boolean = true,
 ): Promise<ChildProcess> {
-    if (!proxyUrl || !bootstrapUrl) {
+    if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
         proxyUrl = services.proxyUrl!;
         bootstrapUrl = services.bootstrapUrl!;
@@ -247,6 +250,13 @@ export async function startExecutor(dataPath: string,
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
 
+    // Shared mode for the local language-language and neighbourhood store,
+    // so executors see each other's published languages and neighbourhoods
+    // (see sharedStores.ts). Off only for tests of the default KV mode.
+    if (sharedStores) {
+        configureSharedStores(effectiveDataPath, bootstrapSeedPath);
+    }
+
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
     // reference the original path (e.g. injectPublishingAgent.js) still work.
     if (effectiveDataPath !== dataPath) {
@@ -269,17 +279,23 @@ export async function startExecutor(dataPath: string,
         'run',
         '--app-data-path', effectiveDataPath,
         '--port', String(apiPort),
-        '--hc-admin-port', String(hcAdminPort),
-        '--hc-app-port', String(hcAppPort),
-        '--hc-proxy-url', proxyUrl,
-        '--hc-bootstrap-url', bootstrapUrl,
-        '--hc-use-bootstrap', 'true',
-        '--hc-use-proxy', 'true',
-        '--hc-use-local-proxy', 'true',
-        '--hc-use-mdns', 'true',
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
+    if (runHolochain) {
+        args.push(
+            '--hc-admin-port', String(hcAdminPort),
+            '--hc-app-port', String(hcAppPort),
+            '--hc-proxy-url', proxyUrl!,
+            '--hc-bootstrap-url', bootstrapUrl!,
+            '--hc-use-bootstrap', 'true',
+            '--hc-use-proxy', 'true',
+            '--hc-use-local-proxy', 'true',
+            '--hc-use-mdns', 'true',
+        );
+    } else {
+        args.push('--run-holochain', 'false');
+    }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }

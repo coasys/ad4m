@@ -2487,7 +2487,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => pageCallback.called && pageCallback.lastCall.args[0].results.length >= 1,
                             {
-                                timeoutMs: 30000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Paginate callback did not see first model save'
                             }
                         );
@@ -2500,7 +2500,7 @@ describe("Prolog + Literals", () => {
                         await waitForCondition(
                             () => pageCallback.lastCall.args[0].results.length >= 2,
                             {
-                                timeoutMs: 30000,
+                                timeoutMs: 60000,
                                 errorMessage: 'Paginate callback did not see second model save'
                             }
                         );

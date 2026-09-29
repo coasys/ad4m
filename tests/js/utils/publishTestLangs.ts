@@ -5,6 +5,7 @@ import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
 import { baseUrl, sleep, startExecutor, runHcLocalServices } from "./utils";
+import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,12 +17,9 @@ const publishingBootstrapSeedPath = path.resolve(__dirname, '..', 'publishBootst
 const bootstrapSeedPath = path.resolve(__dirname, '..', 'bootstrapSeed.json');
 const perspectiveDiffSyncHashPath = path.resolve(__dirname, '..', 'scripts', 'perspective-diff-sync-hash');
 const serverLinkLanguageHashPath = path.resolve(__dirname, '..', 'scripts', 'server-link-language-hash');
-// Allow env-var override so concurrent CI jobs can each use a unique port range
-// and avoid stomping on each other during the setup phase.
-// Defaults: 15700/15701/15702 (used by integration-tests-js / test-main)
-const apiPort = parseInt(process.env.AD4M_SETUP_API_PORT || '15700', 10);
-const hcAdminPort = parseInt(process.env.AD4M_SETUP_HC_ADMIN_PORT || '15701', 10);
-const hcAppPort = parseInt(process.env.AD4M_SETUP_HC_APP_PORT || '15702', 10);
+// Local mode: skip Holochain when preparing local-only test environments.
+// Set LOCAL_MODE=true in the prepare-test-local npm scripts.
+const localMode = process.env.LOCAL_MODE === 'true';
 
 //Update this as new languages are needed within testing code
 const languagesToPublish = {
@@ -82,23 +80,30 @@ function injectLangAliasHashes() {
 }
 
 async function publish() {
+    // Allocate random free ports to avoid collisions with stale executors
+    // from previous CI jobs on the same self-hosted runner.
+    const [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     const setupPorts = [apiPort, hcAdminPort, hcAppPort];
+    console.log(`Setup ports: ${setupPorts.join('/')}`);
 
-    // Pre-clean: kill any orphaned executor from a previous CI job that may be
-    // squatting on our ports. Self-hosted runners reuse workdirs between jobs
-    // and don't clean up automatically.
-    console.log(`Pre-cleaning ports ${setupPorts.join('/')} before starting executor...`);
-    killExecutorPorts(setupPorts);
-    await sleep(500);
+    // Register with the port cleanup registry so cleanup.js can kill the
+    // executor if this process is killed ungracefully (SIGKILL, runner cancel).
+    registerPorts(setupPorts);
 
     createTestingAgent();
 
-    // Publishing setup runs a temporary LOCAL kitsune2-bootstrap-srv so the
-    // setup executor never talks to dev-test-bootstrap2 (super old). See
+    const runHolochain = !localMode;
+    console.log(`Publishing executor: runHolochain=${runHolochain}${localMode ? ' (LOCAL_MODE)' : ''}`);
+
+    // When running with Holochain, start a temporary LOCAL kitsune2-bootstrap-srv
+    // so the setup executor never talks to dev-test-bootstrap2 (super old). See
     // Nico's 2026-08-26 voice note + utils.ts:startExecutor comment.
-    const localServices = await runHcLocalServices();
-    if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
-        throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+    let localServices: { bootstrapUrl?: string; proxyUrl?: string; process?: any } = {};
+    if (runHolochain) {
+        localServices = await runHcLocalServices();
+        if (!localServices.bootstrapUrl || !localServices.proxyUrl) {
+            throw new Error("publishTestLangs: runHcLocalServices did not yield bootstrap/proxy URLs");
+        }
     }
     const executorProcess = await startExecutor(
         appDataPath,
@@ -108,8 +113,15 @@ async function publish() {
         undefined,
         localServices.proxyUrl,
         localServices.bootstrapUrl,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        runHolochain,
     );
-    (executorProcess as any).__localServicesProcess = localServices.process;
+    if (localServices.process) {
+        (executorProcess as any).__localServicesProcess = localServices.process;
+    }
 
     try {
         const ad4mClient = new Ad4mClient(baseUrl(apiPort));
@@ -138,41 +150,13 @@ async function publish() {
         }
         injectSystemLanguages();
         injectLangAliasHashes();
-
-        // Copy published language bundles to a shared directory so test executors
-        // with different data paths can find them on disk. In HC mode the HC DHT
-        // handles distribution; in local mode there is no shared network, so we
-        // use a filesystem copy instead.
-        //
-        // Strategy: copy from the SOURCE bundles using the published hashes as
-        // directory names. This avoids depending on where the executor stores
-        // its internal data (which may differ from appDataPath due to the
-        // temp-dir hashing in startExecutor).
-        const sharedLangsDir = path.resolve(TEST_DIR, "published-languages");
-        const langFolderToHash: Record<string, keyof typeof languageHashes> = {
-            "agent-expression-store": "agentLanguage",
-            "neighbourhood-store": "neighbourhoodLanguage",
-            "perspective-diff-sync": "perspectiveDiffSync",
-            "perspective-language": "perspectiveLanguage",
-            "server-link-language": "serverLinkLanguage",
-        };
-        for (const [langFolder, hashKey] of Object.entries(langFolderToHash)) {
-            const srcBundle = path.join(publishLanguagesPath, langFolder, "build", "bundle.js");
-            const hash = languageHashes[hashKey];
-            if (hash && fs.existsSync(srcBundle)) {
-                const destDir = path.join(sharedLangsDir, hash);
-                fs.ensureDirSync(destDir);
-                fs.copySync(srcBundle, path.join(destDir, "bundle.js"), { overwrite: true });
-                console.log(`Published ${langFolder} → ${destDir}/bundle.js`);
-            }
-        }
-        console.log(`Published languages staged in ${sharedLangsDir}`);
     } finally {
         // Always kill the executor on the way out — success or failure.
         // Uses TCP:LISTEN filter so we only kill the listening server (the executor),
         // NOT this node process which has an outbound connection to that port.
         console.log(`Killing executor on ports ${setupPorts.join('/')}...`);
         killExecutorPorts(setupPorts);
+        deregisterPorts(setupPorts);
         await sleep(1000);
     }
 
