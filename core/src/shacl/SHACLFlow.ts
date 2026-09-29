@@ -768,7 +768,7 @@ export class SHACLFlow {
     if (inputTypesLink) {
       try {
         const jsonStr = inputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -786,7 +786,7 @@ export class SHACLFlow {
     if (outputTypesLink) {
       try {
         const jsonStr = outputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -823,7 +823,7 @@ export class SHACLFlow {
     if (contextLink) {
       try {
         const jsonStr = contextLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -844,7 +844,7 @@ export class SHACLFlow {
     if (consensusRuleLink) {
       try {
         const jsonStr = consensusRuleLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -910,7 +910,7 @@ export class SHACLFlow {
       if (requiresLink) {
         try {
           const jsonStr = requiresLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -948,7 +948,7 @@ export class SHACLFlow {
       if (stateConsensusLink) {
         try {
           const jsonStr = stateConsensusLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -1013,7 +1013,7 @@ export class SHACLFlow {
       let actions: AD4MAction[] = [];
       if (actionsLink) {
         try {
-          const jsonStr = actionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          const jsonStr = actionsLink.target.replace(/^literal:string:/, '');
           actions = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors

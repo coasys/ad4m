@@ -757,24 +757,16 @@ pub fn parse_flow_to_links(flow_json: &str, flow_name: &str) -> Result<Vec<Link>
 // flows are declared on the perspective without a JS/RPC round-trip.
 // ---------------------------------------------------------------------------
 
-/// Strip a `literal:string:` / `literal://string:` prefix and url-decode
-/// the tail. Returns `None` when the target isn't a string literal or
-/// when the url-decoded tail isn't valid UTF-8.
+/// Strip a `literal:string:` prefix and url-decode the tail. Returns `None`
+/// when the target isn't a string literal or the tail isn't valid UTF-8.
 fn decode_literal_string(target: &str) -> Option<String> {
-    let payload = target
-        .strip_prefix("literal://string:")
-        .or_else(|| target.strip_prefix("literal:string:"))?;
+    let payload = target.strip_prefix("literal:string:")?;
     urlencoding::decode(payload).ok().map(|c| c.into_owned())
 }
 
-/// Strip a `literal:number:` / `literal://number:` prefix and parse
-/// the tail as f64. Both prefix shapes are accepted so wire-format
-/// migration doesn't require reprocessing every flow node.
+/// Strip a `literal:number:` prefix and parse the tail as f64.
 fn decode_literal_number(target: &str) -> Option<f64> {
-    let payload = target
-        .strip_prefix("literal://number:")
-        .or_else(|| target.strip_prefix("literal:number:"))?;
-    payload.parse().ok()
+    target.strip_prefix("literal:number:")?.parse().ok()
 }
 
 /// How much of an offending literal a warning quotes. Flow literals are
@@ -2257,7 +2249,7 @@ mod tests {
         // Note: ad4m://has_subject_class link is NOT created here - it's created by add_sdna()
         assert!(links.len() >= 11);
 
-        // Check for key links (note: ad4m://self -> literal://string:Recipe is NOT here)
+        // Check for key links (note: ad4m://self -> literal:string:Recipe is NOT here)
         assert!(links.iter().any(|l| l.source == "recipe://RecipeShape"
             && l.predicate == Some("sh://targetClass".to_string())));
         assert!(links
@@ -2362,8 +2354,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://constructor".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing constructor action link"
         );
 
@@ -2371,8 +2362,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://RecipeShape"
                 && l.predicate == Some("ad4m://destructor".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing destructor action link"
         );
 
@@ -2380,8 +2370,7 @@ mod tests {
         assert!(
             links.iter().any(|l| l.source == "recipe://Recipe.name"
                 && l.predicate == Some("ad4m://setter".to_string())
-                && l.target.starts_with("literal://string:")
-                || l.target.starts_with("literal:string:")),
+                && l.target.starts_with("literal:string:")),
             "Missing setter action link"
         );
 
@@ -2391,8 +2380,7 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://adder".to_string())
-                    && l.target.starts_with("literal://string:")
-                    || l.target.starts_with("literal:string:")),
+                    && l.target.starts_with("literal:string:")),
             "Missing adder action link"
         );
 
@@ -2402,8 +2390,7 @@ mod tests {
                 .iter()
                 .any(|l| l.source == "recipe://Recipe.ingredients"
                     && l.predicate == Some("ad4m://remover".to_string())
-                    && l.target.starts_with("literal://string:")
-                    || l.target.starts_with("literal:string:")),
+                    && l.target.starts_with("literal:string:")),
             "Missing remover action link"
         );
     }
