@@ -9,7 +9,6 @@ pub mod event_interest;
 pub mod events_ws;
 pub mod internal;
 pub mod openai_compat;
-pub mod operations;
 pub mod types;
 pub mod ws_rpc;
 

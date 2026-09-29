@@ -30,7 +30,6 @@ use crate::types::RequestContext;
 
 use super::auth::AppState;
 use super::event_interest;
-use super::operations;
 use super::ws_handler::HandlerMap;
 
 /// Per-connection registry of in-flight request ids → cancellation
@@ -39,7 +38,7 @@ use super::ws_handler::HandlerMap;
 ///   "params": {"targetId": "<original-request-id>"}}`.
 /// The dispatcher cancels the matching token; the handler races its
 /// work against `token.cancelled()` and returns early.
-pub(crate) type InflightRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
+type InflightRegistry = Arc<Mutex<HashMap<String, CancellationToken>>>;
 
 // ── Auth query param ────────────────────────────────────────────────────────
 #[derive(Deserialize, Default)]
@@ -255,42 +254,79 @@ impl Connection {
             return;
         }
 
-        // An async call (`operations.rs`) is acknowledged now and reports
-        // its outcome later as an `operation-completed` event; every other
-        // call replies to its request id, as before.
-        let target = if operations::is_async_call(&msg_type, &params) {
-            operations::ReplyTarget::Operation(uuid::Uuid::new_v4().to_string())
-        } else {
-            operations::ReplyTarget::Request(id.clone())
-        };
-
         // Allocate a CancellationToken for this request and stash it in
-        // the registry under the request id (the operation id for an async
-        // call).  The handler races its work against
-        // `cancel_token.cancelled()`; if the client sends `request.cancel`,
-        // the racing future fires immediately and we reply with an
-        // `AbortError` (code 499).
+        // the registry under the request id.  The handler races its
+        // work against `cancel_token.cancelled()`; if the client sends
+        // `request.cancel`, the racing future fires immediately and we
+        // reply with an `AbortError` (code 499).
         let cancel_token = CancellationToken::new();
         {
             let mut guard = self.inflight.lock().await;
-            guard.insert(target.key().to_string(), cancel_token.clone());
-        }
-        // Acknowledge only once the operation id can be cancelled.
-        if let operations::ReplyTarget::Operation(operation_id) = &target {
-            let _ = tx.send(operations::accepted(&id, operation_id));
+            guard.insert(id.clone(), cancel_token.clone());
         }
 
-        tokio::spawn(run_call(
-            self.handler_map.clone(),
-            self.ctx.clone(),
-            self.token.clone(),
-            self.inflight.clone(),
-            tx.clone(),
-            target,
-            msg_type,
-            params,
-            cancel_token,
-        ));
+        let handler_map = self.handler_map.clone();
+        let base_ctx = self.ctx.clone();
+        let token = self.token.clone();
+        let inflight = self.inflight.clone();
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            // Re-check token revocation on every request so that
+            // revokeToken() takes effect immediately for existing connections.
+            if let Err(e) = check_token_revoked(&token) {
+                // Remove the inflight entry BEFORE sending the terminal
+                // reply — same ordering as the normal-completion path
+                // below, and for the same reason: a `request.cancel`
+                // landing in the gap between send and remove would find
+                // the token, cancel it, and report `cancelled: true` for
+                // a request that already got its (401) answer.
+                let mut guard = inflight.lock().await;
+                guard.remove(&id);
+                drop(guard);
+                let _ =
+                    tx.send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                return;
+            }
+            // Refresh last_seen on every RPC dispatch so long-lived
+            // connections don't appear stale. Internally throttled to one
+            // DB write per 5 minutes per user.
+            track_last_seen_from_token(token.clone()).await;
+
+            // Build a per-request context that carries the cancel token,
+            // so handlers can clone it into long-running operations.
+            let mut req_ctx = (*base_ctx).clone();
+            req_ctx.cancel_token = Some(cancel_token.clone());
+            let req_ctx = Arc::new(req_ctx);
+
+            // Race the handler against cancellation.  On cancel, we
+            // drop the handler future — the work it was doing (e.g.
+            // a `spawn_blocking` SPARQL eval inside Oxigraph) will
+            // continue to run because Rust can't cancel arbitrary
+            // CPU-bound work, but the network reply is skipped and
+            // the next select arm fires first.
+            let response = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    // 499 mirrors nginx's "Client Closed Request" status —
+                    // the OpenAPI SDKs and most HTTP clients recognise it.
+                    json!({"id": id, "error": {"code": 499, "message": "Request cancelled by client"}})
+                }
+                result = handler_map.dispatch(&msg_type, params, req_ctx) => {
+                    match result {
+                        Ok(val) => json!({"id": id, "result": val}),
+                        Err(e) => json!({"id": id, "error": {"code": e.code, "message": e.message}}),
+                    }
+                }
+            };
+            // Clean up the registry entry BEFORE sending the response —
+            // otherwise a late `request.cancel` arriving between the send
+            // and the remove would find the token, cancel it, and report
+            // success even though the response already left.
+            let mut guard = inflight.lock().await;
+            guard.remove(&id);
+            drop(guard);
+            let _ = tx.send(response.to_string());
+        });
     }
 }
 
@@ -324,74 +360,4 @@ pub(crate) async fn serve<S>(
 
     event_task.abort();
     let _ = event_task.await;
-}
-
-/// Run one dispatched call to completion and send its outcome to `target`
-/// (the request's reply, or an `operation-completed` event).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_call(
-    handler_map: Arc<HandlerMap>,
-    ctx: Arc<RequestContext>,
-    token: String,
-    inflight: InflightRegistry,
-    tx: mpsc::UnboundedSender<String>,
-    target: operations::ReplyTarget,
-    msg_type: String,
-    params: Value,
-    cancel_token: CancellationToken,
-) {
-    // Re-check token revocation on every request so that
-    // revokeToken() takes effect immediately for existing connections.
-    if let Err(e) = check_token_revoked(&token) {
-        // Remove the inflight entry BEFORE sending the terminal
-        // reply — same ordering as the normal-completion path
-        // below, and for the same reason: a `request.cancel`
-        // landing in the gap between send and remove would find
-        // the token, cancel it, and report `cancelled: true` for
-        // a request that already got its (401) answer.
-        let mut guard = inflight.lock().await;
-        guard.remove(target.key());
-        drop(guard);
-        let _ = tx.send(target.error(401, e));
-        return;
-    }
-    // Refresh last_seen on every RPC dispatch so long-lived
-    // connections don't appear stale. Internally throttled to one
-    // DB write per 5 minutes per user.
-    track_last_seen_from_token(token.clone()).await;
-
-    // Build a per-request context that carries the cancel token,
-    // so handlers can clone it into long-running operations.
-    let mut req_ctx = (*ctx).clone();
-    req_ctx.cancel_token = Some(cancel_token.clone());
-    let req_ctx = Arc::new(req_ctx);
-
-    // Race the handler against cancellation.  On cancel, we
-    // drop the handler future — the work it was doing (e.g.
-    // a `spawn_blocking` SPARQL eval inside Oxigraph) will
-    // continue to run because Rust can't cancel arbitrary
-    // CPU-bound work, but the network reply is skipped and
-    // the next select arm fires first.
-    let response = tokio::select! {
-        biased;
-        _ = cancel_token.cancelled() => {
-            // 499 mirrors nginx's "Client Closed Request" status —
-            // the OpenAPI SDKs and most HTTP clients recognise it.
-            target.error(499, "Request cancelled by client")
-        }
-        result = handler_map.dispatch(&msg_type, params, req_ctx) => {
-            match result {
-                Ok(val) => target.result(val),
-                Err(e) => target.error(e.code, e.message),
-            }
-        }
-    };
-    // Clean up the registry entry BEFORE sending the response —
-    // otherwise a late `request.cancel` arriving between the send
-    // and the remove would find the token, cancel it, and report
-    // success even though the response already left.
-    let mut guard = inflight.lock().await;
-    guard.remove(target.key());
-    drop(guard);
-    let _ = tx.send(response);
 }
