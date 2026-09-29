@@ -2148,11 +2148,16 @@ impl PerspectiveInstance {
                 )))
             }
         };
-        // The old link is a removal.
-        refuse_monotonic_removal(&link, &link_status, &*self.monotonic_declared().await?)?;
-
         let new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
+        // The old link is a removal. A flag the new link writes counts for
+        // it, as it will on every peer that receives both in one diff.
+        let shared_new: &[LinkExpression] = match link_status {
+            LinkStatus::Shared => std::slice::from_ref(&new_link_expression),
+            LinkStatus::Local => &[],
+        };
+        let declared = self.monotonic_declared().await?.with_incoming(shared_new);
+        refuse_monotonic_removal(&link, &link_status, &declared)?;
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
