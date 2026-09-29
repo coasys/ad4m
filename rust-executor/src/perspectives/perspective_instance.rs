@@ -2137,7 +2137,11 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
+            // Queue the stored link with its stored status: the caller's
+            // `old_link` may carry none, which the commit reads as Shared.
+            let mut stored_old = link.clone();
+            stored_old.status = Some(link_status.clone());
+            diff.removals.push(stored_old);
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
@@ -2146,7 +2150,7 @@ impl PerspectiveInstance {
         } else {
             let mut stored_new = new_link_expression.clone();
             stored_new.status = Some(link_status.clone());
-            let mut stored_old = old_link.clone();
+            let mut stored_old = link.clone();
             stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
