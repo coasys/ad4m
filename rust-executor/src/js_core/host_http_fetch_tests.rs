@@ -94,6 +94,24 @@ async fn http_fetch_times_out_when_the_server_never_sends_headers() {
     assert!(elapsed < SETTLE_BOUND, "took {elapsed:?}");
 }
 
+/// The timeout error reaches the executor log and clients, so it names the
+/// host and path but never the URL's credentials or query string.
+#[tokio::test]
+async fn http_fetch_timeout_error_redacts_credentials_and_query() {
+    let (js, _dir) = language_isolate().await;
+    let (url, _hold) = serve_once(Reply::Nothing);
+    let secret_url = format!(
+        "{}?token=SECRET",
+        url.replacen("http://", "http://user:hunter2@", 1)
+    );
+    let (result, _) = fetch(&js, &secret_url).await;
+    assert_timed_out(&result, &url);
+    assert!(
+        !result.contains("hunter2") && !result.contains("SECRET"),
+        "timeout error leaks URL credentials or query: {result}"
+    );
+}
+
 #[tokio::test]
 async fn http_fetch_times_out_when_the_body_stalls() {
     let (js, _dir) = language_isolate().await;

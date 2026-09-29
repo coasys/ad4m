@@ -123,6 +123,22 @@ export async function holochainCallAsync(dnaNick, zome, fnName, params) {
 
 var HTTP_FETCH_TIMEOUT_MS = 10000;
 
+// The URL as it may appear in an error: fetch sends `user:pass@` as Basic
+// auth and query strings often carry tokens, and these errors reach the
+// executor log and clients. Keeps scheme, host, port and path.
+function redactUrl(url) {
+    try {
+        var u = new URL(url);
+        u.username = "";
+        u.password = "";
+        if (u.search) u.search = "?redacted";
+        u.hash = "";
+        return u.href;
+    } catch (_) {
+        return "<unparseable url>";
+    }
+}
+
 async function httpFetchImpl(url, method, headersJson, body) {
     var headers = {};
     if (headersJson && headersJson.length > 0) {
@@ -145,7 +161,7 @@ async function httpFetchImpl(url, method, headersJson, body) {
     } catch (e) {
         if (signal.aborted) {
             throw new Error(
-                "httpFetch " + init.method + " " + url + " timed out after " +
+                "httpFetch " + init.method + " " + redactUrl(url) + " timed out after " +
                 HTTP_FETCH_TIMEOUT_MS + " ms"
             );
         }
