@@ -637,13 +637,13 @@ export class PerspectiveClient {
     #onEvent = (data: WsEvent): void => {
         switch (data.type) {
             case 'perspective-added':
-                notifyListeners(this.#perspectiveAddedCallbacks, 'perspective-added', data.perspective as PerspectiveHandle)
+                notifyListeners(this.#perspectiveAddedCallbacks, data.perspective as PerspectiveHandle)
                 break
             case 'perspective-updated':
-                notifyListeners(this.#perspectiveUpdatedCallbacks, 'perspective-updated', data.perspective as PerspectiveHandle)
+                notifyListeners(this.#perspectiveUpdatedCallbacks, data.perspective as PerspectiveHandle)
                 break
             case 'perspective-removed':
-                notifyListeners(this.#perspectiveRemovedCallbacks, 'perspective-removed', data.uuid as string)
+                notifyListeners(this.#perspectiveRemovedCallbacks, data.uuid as string)
                 break
         }
     }
@@ -652,7 +652,7 @@ export class PerspectiveClient {
         const unsub = this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'sync-state-change' && data.uuid === uuid) {
-                    notifyListeners(cb, 'sync-state-change', data.state as PerspectiveState)
+                    notifyListeners(cb, data.state as PerspectiveState)
                 }
             }
         )
@@ -666,7 +666,7 @@ export class PerspectiveClient {
         const unsub = this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
-                    notifyListeners(cb, 'link-added', data.link as LinkExpression)
+                    notifyListeners(cb, data.link as LinkExpression)
                 }
             }
         )
@@ -684,7 +684,7 @@ export class PerspectiveClient {
                     if (!link.status) {
                         delete link.status
                     }
-                    notifyListeners(cb, 'link-removed', link)
+                    notifyListeners(cb, link)
                 }
             }
         )
@@ -706,7 +706,7 @@ export class PerspectiveClient {
                     if (!oldLink.status) {
                         delete oldLink.status
                     }
-                    notifyListeners(cb, 'link-updated', data as unknown as LinkUpdate)
+                    notifyListeners(cb, data as unknown as LinkUpdate)
                 }
             }
         )

@@ -294,20 +294,20 @@ export class AgentClient {
       case 'agent-updated': {
         const agent = data.agent as Agent;
         this.#cacheAgent(agent);
-        notifyListeners(this.#updatedCallbacks, 'agent-updated', agent);
+        notifyListeners(this.#updatedCallbacks, agent);
         break;
       }
       case 'agent-status-changed':
-        notifyListeners(this.#agentStatusChangedCallbacks, 'agent-status-changed', data.agent as Agent);
+        notifyListeners(this.#agentStatusChangedCallbacks, data.agent as Agent);
         break;
       case 'apps-changed':
-        notifyListeners(this.#appsChangedCallback, 'apps-changed');
+        notifyListeners(this.#appsChangedCallback);
         break;
       case 'hosting-user-info-changed':
-        notifyListeners(this.#hostingUserInfoChangedCallbacks, 'hosting-user-info-changed', data as unknown as HostingUserInfo);
+        notifyListeners(this.#hostingUserInfoChangedCallbacks, data as unknown as HostingUserInfo);
         break;
       case 'compute-log-updated':
-        notifyListeners(this.#computeLogUpdatedCallbacks, 'compute-log-updated', data as unknown as ComputeLogEntry);
+        notifyListeners(this.#computeLogUpdatedCallbacks, data as unknown as ComputeLogEntry);
         break;
     }
   };

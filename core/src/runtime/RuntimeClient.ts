@@ -283,13 +283,13 @@ export class RuntimeClient {
     #onEvent = (data: WsEvent): void => {
         switch (data.type) {
             case 'notification-triggered':
-                notifyListeners(this.#notificationTriggeredCallbacks, 'notification-triggered', data.notification as TriggeredNotification)
+                notifyListeners(this.#notificationTriggeredCallbacks, data.notification as TriggeredNotification)
                 break
             case 'message-received':
-                notifyListeners(this.#messageReceivedCallbacks, 'message-received', data.message as PerspectiveExpression)
+                notifyListeners(this.#messageReceivedCallbacks, data.message as PerspectiveExpression)
                 break
             case 'exception-occurred':
-                notifyListeners(this.#exceptionOccurredCallbacks, 'exception-occurred', data.exception as ExceptionInfo)
+                notifyListeners(this.#exceptionOccurredCallbacks, data.exception as ExceptionInfo)
                 break
         }
     }

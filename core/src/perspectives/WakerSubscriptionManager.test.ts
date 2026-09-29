@@ -16,7 +16,6 @@ describe('WakerSubscriptionManager', () => {
     debug: () => {},
   });
 
-  // querySparql returns a flat array of rows, as the executor does.
   const perspectiveClient = {
     querySparql: () => Promise.resolve([]),
   };
@@ -196,7 +195,6 @@ describe('WakerSubscriptionManager', () => {
       };
     };
     const queries: string[] = [];
-    // The executor's row shape: one object per solution, variables as plain strings.
     const client = {
       querySparql: (_uuid: string, query: string) => {
         queries.push(query);
