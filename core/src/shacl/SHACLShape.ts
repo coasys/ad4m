@@ -51,7 +51,7 @@ function escapeTurtleString(value: string): string {
     .replace(/\n/g, '\\n')       // Newlines
     .replace(/\r/g, '\\r')       // Carriage returns
     .replace(/\t/g, '\\t')       // Tabs
-    .replace(/\b/g, '\\b')       // Backspace
+    .replace(/\x08/g, '\\b')     // Backspace (not /\b/, which matches word boundaries)
     .replace(/\f/g, '\\f');      // Form feed
 }
 
@@ -355,6 +355,26 @@ export class SHACLShape {
     for (const parentUri of this.parentShapes) {
       turtle += `  sh:node <${parentUri}> ;\n`;
     }
+
+    // Values toLinks() stores as `literal:string:` are written as Turtle strings.
+    const str = (value: string) => `"${escapeTurtleString(value)}"`;
+
+    if (this.constructor_actions) {
+      turtle += `  ad4m:constructor ${str(JSON.stringify(this.constructor_actions))} ;\n`;
+    }
+
+    if (this.destructor_actions) {
+      turtle += `  ad4m:destructor ${str(JSON.stringify(this.destructor_actions))} ;\n`;
+    }
+
+    if (this.interpretationHint) {
+      turtle += `  ad4m:interpretation_hint ${str(this.interpretationHint)} ;\n`;
+    }
+
+    // A shape without properties ends its last statement here.
+    if (this.properties.length === 0) {
+      turtle = turtle.slice(0, -2) + '.\n';
+    }
     
     // Add property shapes
     for (let i = 0; i < this.properties.length; i++) {
@@ -363,6 +383,16 @@ export class SHACLShape {
       
       turtle += `  sh:property [\n`;
       turtle += `    sh:path <${prop.path}> ;\n`;
+
+      // toLinks() carries the name in the property shape URI; a blank node
+      // cannot, so Turtle states it with sh:name.
+      if (prop.name) {
+        turtle += `    sh:name ${str(prop.name)} ;\n`;
+      }
+
+      if (prop.ordering) {
+        turtle += `    ad4m:ordering ${str(prop.ordering)} ;\n`;
+      }
       
       if (prop.datatype) {
         turtle += `    sh:datatype <${prop.datatype}> ;\n`;
@@ -411,6 +441,68 @@ export class SHACLShape {
       // (CodeRabbit #881 review).
       if (prop.identity !== undefined) {
         turtle += `    ad4m:identity ${prop.identity} ;\n`;
+      }
+
+      if (prop.resolveLanguage != null) {
+        turtle += `    ad4m:resolveLanguage ${str(prop.resolveLanguage)} ;\n`;
+      }
+
+      if (prop.setter && prop.setter.length > 0) {
+        turtle += `    ad4m:setter ${str(JSON.stringify(prop.setter))} ;\n`;
+      }
+
+      if (prop.adder && prop.adder.length > 0) {
+        turtle += `    ad4m:adder ${str(JSON.stringify(prop.adder))} ;\n`;
+      }
+
+      if (prop.remover && prop.remover.length > 0) {
+        turtle += `    ad4m:remover ${str(JSON.stringify(prop.remover))} ;\n`;
+      }
+
+      if (prop.getter) {
+        turtle += `    ad4m:getter ${str(prop.getter)} ;\n`;
+      }
+
+      if (prop.conformanceConditions && prop.conformanceConditions.length > 0) {
+        turtle += `    ad4m:conformanceConditions ${str(JSON.stringify(prop.conformanceConditions))} ;\n`;
+      }
+
+      if (prop.class) {
+        turtle += `    sh:class <${prop.class}> ;\n`;
+      }
+
+      // Standard SHACL list of the values; ad4m:in keeps the sh://in link's JSON (with labels).
+      if (prop.in && prop.in.length > 0) {
+        turtle += `    sh:in ( ${prop.in.map(v => str(v.value)).join(' ')} ) ;\n`;
+        turtle += `    ad4m:in ${str(JSON.stringify(prop.in))} ;\n`;
+      }
+
+      if (prop.relationKind) {
+        turtle += `    ad4m:relationKind ${str(prop.relationKind)} ;\n`;
+      }
+
+      if (prop.targetClassName) {
+        turtle += `    ad4m:targetClassName ${str(prop.targetClassName)} ;\n`;
+      }
+
+      if (prop.whereFilter !== undefined && prop.whereFilter !== null) {
+        turtle += `    ad4m:whereFilter ${str(JSON.stringify(prop.whereFilter))} ;\n`;
+      }
+
+      if (prop.wherePredicates && Object.keys(prop.wherePredicates).length > 0) {
+        turtle += `    ad4m:wherePredicates ${str(JSON.stringify(prop.wherePredicates))} ;\n`;
+      }
+
+      if (prop.filter !== undefined) {
+        turtle += `    ad4m:filter ${prop.filter} ;\n`;
+      }
+
+      if (prop.transform && typeof prop.transform === 'object') {
+        turtle += `    ad4m:transform ${str(JSON.stringify(prop.transform))} ;\n`;
+      }
+
+      if (prop.interpretationHint) {
+        turtle += `    ad4m:interpretation_hint ${str(prop.interpretationHint)} ;\n`;
       }
 
       // Remove trailing semicolon and close bracket

@@ -264,6 +264,97 @@ describe('SHACLShape', () => {
     });
   });
 
+  describe('toTurtle()', () => {
+    const fullShape = () => {
+      const shape = new SHACLShape('test://Full');
+      shape.addParentShape('test://BaseShape');
+      shape.interpretationHint = 'A "full" shape';
+      shape.setConstructorActions([{ action: 'addLink', source: 'this', predicate: 'rdf://type', target: 'test://Full' }]);
+      shape.setDestructorActions([{ action: 'removeLink', source: 'this', predicate: 'rdf://type', target: 'test://Full' }]);
+      shape.addProperty({
+        name: 'field',
+        path: 'test://field',
+        ordering: 'linkedList',
+        datatype: 'xsd://string',
+        nodeKind: 'Literal',
+        minCount: 1,
+        maxCount: 5,
+        pattern: '^[a-z]+$',
+        minInclusive: 0,
+        maxInclusive: 100,
+        hasValue: 'fixed value',
+        local: true,
+        writable: true,
+        resolveLanguage: 'literal',
+        setter: [{ action: 'setSingleTarget', source: 'this', predicate: 'test://field', target: 'value' }],
+        adder: [{ action: 'addLink', source: 'this', predicate: 'test://field', target: 'value' }],
+        remover: [{ action: 'removeLink', source: 'this', predicate: 'test://field', target: 'value' }],
+        getter: 'SELECT ?target WHERE { <Base> <test://field> ?target }',
+        conformanceConditions: [{ type: 'flag', predicate: 'test://kind', value: 'test://x' }],
+        class: 'test://OtherShape',
+        in: [{ value: 'a', label: 'A' }, { value: 'b' }],
+        relationKind: 'hasMany',
+        targetClassName: 'Other',
+        whereFilter: { status: 'open' },
+        wherePredicates: { status: 'test://status' },
+        filter: false,
+        transform: literal('x'),
+        interpretationHint: 'the field',
+        identity: true,
+      });
+      return shape;
+    };
+
+    const prefixed = (predicate: string) => {
+      if (predicate === 'rdf://type') return 'a';
+      const m = predicate.match(/^(sh|ad4m):\/\/(.+)$/);
+      if (!m) throw new Error(`unexpected predicate ${predicate}`);
+      return `${m[1]}:${m[2]}`;
+    };
+
+    // Every "..." Turtle string literal, unescaped.
+    const turtleStrings = (turtle: string) =>
+      [...turtle.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m =>
+        m[1].replace(/\\(.)/g, (_, c) => ({ n: '\n', r: '\r', t: '\t', b: '\b', f: '\f' } as any)[c] ?? c)
+      );
+
+    it('emits every predicate and value that toLinks() emits', () => {
+      const shape = fullShape();
+      const turtle = shape.toTurtle();
+      const strings = turtleStrings(turtle);
+
+      for (const link of shape.toLinks()) {
+        if (link.predicate === 'sh://property') continue; // a `sh:property [ ... ]` block in Turtle
+        expect(turtle).toContain(`${prefixed(link.predicate!)} `);
+
+        const stringValue = link.target.match(/^literal:string:([\s\S]*)$/);
+        if (link.predicate === 'ad4m://identity') {
+          expect(turtle).toContain('ad4m:identity true'); // Turtle boolean, as before
+        } else if (stringValue) {
+          expect(strings).toContain(stringValue[1]);
+        } else if (!link.target.startsWith('literal:') && !link.target.startsWith('sh://')) {
+          expect(turtle).toContain(`<${link.target}>`);
+        }
+      }
+      expect(strings).toContain('field'); // sh:name, carried by the URI in toLinks()
+      expect(turtle).toContain('sh:in ( "a" "b" ) ;'); // an RDF list, as SHACL requires
+    });
+
+    it('does not corrupt string literals at word boundaries', () => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'p', path: 'test://p', pattern: 'abc def', hasValue: 'x' });
+      const turtle = shape.toTurtle();
+      expect(turtle).toContain('sh:pattern "abc def"');
+      expect(turtle).toContain('sh:hasValue "x"');
+      expect(turtle).not.toContain('\\b');
+    });
+
+    it('terminates a shape without properties', () => {
+      const turtle = new SHACLShape('test://Empty').toTurtle();
+      expect(turtle.trimEnd().endsWith('.')).toBe(true);
+    });
+  });
+
   describe('edge cases', () => {
     it('handles empty shape', () => {
       const shape = new SHACLShape('test://Empty');
