@@ -23,6 +23,9 @@
 //! subscribers would otherwise see a removal event for a link that still
 //! exists. Local links (the engine's `ad4m://flow/current_state` cache, the
 //! `resolved_as` marks) are private to this replica and are not affected.
+//! The stored link's status decides, not the caller's label (see
+//! [`PerspectiveInstance::removal_status`]), and a removal of a Local flow
+//! link is never committed ([`committable`]).
 //!
 //! # Retraction
 //!
@@ -77,6 +80,7 @@ use crate::perspectives::model_query::utils::parse_literal_value;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{
     DecoratedLinkExpression, DecoratedPerspectiveDiff, Link, LinkExpression, LinkStatus,
+    PerspectiveDiff,
 };
 use ad4m_client::literal::Literal;
 use deno_core::error::AnyError;
@@ -200,6 +204,22 @@ pub fn drop_monotonic_removals(
             keep
         })
         .collect()
+}
+
+/// The part of a local diff that may be committed to the link language: no
+/// removal under a monotonic predicate. One that got this far passed
+/// [`refuse_monotonic_removal`] on its stored status, so it ends a Local link
+/// that peers never held; sending it would break "never sends one".
+pub fn committable(diff: &PerspectiveDiff, declared: &MonotonicDeclared) -> PerspectiveDiff {
+    PerspectiveDiff {
+        additions: diff.additions.clone(),
+        removals: diff
+            .removals
+            .iter()
+            .filter(|l| !is_monotonic(l.data.predicate.as_deref(), declared))
+            .cloned()
+            .collect(),
+    }
 }
 
 /// The tombstone that ends `link`. Its author must write it: a tombstone signed
@@ -376,17 +396,17 @@ impl PerspectiveInstance {
 
     /// The status a removal of `link` would take from this store: the stored
     /// link's own, else `requested`. `link_mutations` carries its caller's
-    /// status rather than the stored one, and a Local-labelled removal of a
-    /// Shared link must not slip past the refusal.
+    /// status rather than the stored one, so under a monotonic predicate the
+    /// store decides in both directions: a Local-labelled removal of a Shared
+    /// link is refused, a Shared-labelled removal of a Local link goes. A link
+    /// this store does not hold keeps `requested`, so Shared stays refused.
     pub(crate) fn removal_status(
         &self,
         link: &LinkExpression,
         requested: &LinkStatus,
         declared: &MonotonicDeclared,
     ) -> Result<LinkStatus, AnyError> {
-        if *requested == LinkStatus::Shared
-            || !is_monotonic(link.data.predicate.as_deref(), declared)
-        {
+        if !is_monotonic(link.data.predicate.as_deref(), declared) {
             return Ok(requested.clone());
         }
         let stored = self.sparql_store.get_link(
@@ -486,5 +506,41 @@ mod tests {
         assert!(!is_retractable(Some(ROLE_GRANT_REVOKED_PREDICATE)));
         assert!(!is_retractable(Some(MONOTONIC_FLAG_PREDICATE)));
         assert!(!is_retractable(Some("test://likes")));
+    }
+
+    #[test]
+    fn monotonic_removals_are_never_committed() {
+        let link = |predicate: &str| LinkExpression {
+            data: Link {
+                source: "s".into(),
+                predicate: Some(predicate.into()),
+                target: "t".into(),
+            },
+            author: "did:key:a".into(),
+            timestamp: "t0".into(),
+            proof: Default::default(),
+            status: Some(LinkStatus::Shared),
+        };
+        let diff = PerspectiveDiff {
+            additions: vec![link("ad4m://flow/current_state")],
+            removals: vec![
+                link("ad4m://flow/current_state"),
+                link("app://member"),
+                link("test://likes"),
+            ],
+        };
+        let declared = MonotonicDeclared {
+            authority: Some("did:key:a".into()),
+            predicates: HashSet::from(["app://member".to_string()]),
+        };
+
+        let committed = committable(&diff, &declared);
+
+        assert_eq!(committed.additions.len(), 1);
+        assert_eq!(committed.removals.len(), 1);
+        assert_eq!(
+            committed.removals[0].data.predicate.as_deref(),
+            Some("test://likes")
+        );
     }
 }

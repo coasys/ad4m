@@ -20,6 +20,7 @@ const ACCEPTED_BY: &str = "ad4m://acceptedBy";
 const TO_STATE: &str = "ad4m://flow/to_state";
 const CURRENT_STATE: &str = "ad4m://flow/current_state";
 const RETRACTED: &str = "ad4m://flow/retracted";
+const ROLE_GRANT_REVOKED: &str = "ad4m://flow/role_grant_revoked";
 const PLAIN: &str = "test://likes";
 
 async fn fixture() -> (PerspectiveInstance, AgentContext) {
@@ -358,6 +359,106 @@ async fn t2_a_local_flow_link_can_still_be_removed() {
     assert!(!present(&p, &cache));
 }
 
+/// The store decides the status in both directions: a Shared-labelled
+/// removal (the JS client's default) of the Local cache goes, and one of a
+/// link this store does not hold is still refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn t2_link_mutations_labelled_shared_removes_a_local_flow_link() {
+    let (mut p, ctx) = fixture().await;
+    let cache = LinkExpression::from(
+        p.add_link(
+            Link {
+                source: PROPOSAL.to_string(),
+                predicate: Some(CURRENT_STATE.to_string()),
+                target: "literal:string:done".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link"),
+    );
+    let unknown = signed(
+        &TestSigner::generate(),
+        PROPOSAL,
+        TO_STATE,
+        "literal:string:x",
+    );
+
+    p.link_mutations(
+        LinkMutations {
+            additions: vec![],
+            removals: vec![as_input(&cache)],
+        },
+        LinkStatus::Shared,
+        &ctx,
+    )
+    .await
+    .expect("a Shared-labelled removal of a Local flow link goes");
+    assert!(!present(&p, &cache));
+
+    assert_monotonic_refusal(
+        p.link_mutations(
+            LinkMutations {
+                additions: vec![],
+                removals: vec![as_input(&unknown)],
+            },
+            LinkStatus::Shared,
+            &ctx,
+        )
+        .await,
+        "link_mutations (link not in the store)",
+    );
+}
+
+/// A batched `update_link` of the Local cache commits. The WS handler hands
+/// in the old link without a status, so the queued removal must carry the
+/// stored one, or the commit backstop reads it as Shared and drops the batch.
+#[tokio::test(flavor = "multi_thread")]
+async fn t2_a_batched_update_of_a_local_flow_link_commits() {
+    let (mut p, ctx) = fixture().await;
+    let cache = LinkExpression::from(
+        p.add_link(
+            Link {
+                source: PROPOSAL.to_string(),
+                predicate: Some(CURRENT_STATE.to_string()),
+                target: "literal:string:done".to_string(),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("add_link"),
+    );
+    let mut old = cache.clone();
+    old.status = None;
+    let next = Link {
+        source: PROPOSAL.to_string(),
+        predicate: Some(CURRENT_STATE.to_string()),
+        target: "literal:string:next".to_string(),
+    };
+
+    let batch = p.create_batch().await;
+    p.update_link(old, next, Some(batch.clone()), &ctx)
+        .await
+        .expect("queue the update");
+    p.commit_batch(batch, &ctx)
+        .await
+        .expect("a batched update of a Local flow link commits");
+
+    assert!(!present(&p, &cache));
+    let targets: Vec<String> = p
+        .sparql_store
+        .query_links(Some(PROPOSAL), Some(CURRENT_STATE), None, None, None, None)
+        .unwrap()
+        .into_iter()
+        .map(|l| l.data.target)
+        .collect();
+    assert_eq!(targets, vec!["literal:string:next".to_string()]);
+}
+
 // ---------------------------------------------------------------------------
 // T3: the author's signed retraction ends the link
 // ---------------------------------------------------------------------------
@@ -435,4 +536,49 @@ async fn t3_a_retraction_that_arrives_first_still_ends_the_link() {
     )
     .await;
     assert!(!present(&p, &other), "both in one diff");
+}
+
+/// Tombstones are not retractable: a self-retraction of a revocation would
+/// reopen the grant.
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_revocation_cannot_be_retracted() {
+    let (p, _) = fixture().await;
+    let alice = TestSigner::generate();
+    let revoked = signed(
+        &alice,
+        "ad4m://role/grant1",
+        ROLE_GRANT_REVOKED,
+        "did:key:zBob",
+    );
+    sync_in(&p, vec![revoked.clone()], vec![]).await;
+
+    sync_in(&p, vec![retraction_of(&alice, &revoked)], vec![]).await;
+
+    assert!(present(&p, &revoked), "a revocation stays");
+}
+
+/// Only a Shared tombstone counts: a Local one is private to this replica and
+/// never reaches the peers that hold the link.
+#[tokio::test(flavor = "multi_thread")]
+async fn t3_a_local_tombstone_ends_nothing() {
+    let (mut p, ctx) = fixture().await;
+    let vote = own_shared(&mut p, &ctx, ACCEPTED_BY, "did:key:me").await;
+    let target = Literal::from_string(vote.proof.signature.clone())
+        .to_url()
+        .expect("encode signature");
+
+    p.add_link(
+        Link {
+            source: PROPOSAL.to_string(),
+            predicate: Some(RETRACTED.to_string()),
+            target,
+        },
+        LinkStatus::Local,
+        None,
+        &ctx,
+    )
+    .await
+    .expect("add the Local tombstone");
+
+    assert!(present(&p, &vote), "a Local tombstone ends nothing");
 }

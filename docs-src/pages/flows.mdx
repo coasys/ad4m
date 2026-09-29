@@ -267,7 +267,7 @@ A Shared link whose predicate starts with `ad4m://flow/`, or is `ad4m://accepted
 
 - **Removals from peers are dropped.** A removal of such a link arriving through the link language is ignored, with a warning in the executor log.
 - **Local removals are refused.** `removeLink`, `removeLinks`, `updateLink` (its old link is a removal), `linkMutations` and a batch commit fail with `<predicate> is monotonic; retract with a tombstone (ad4m://flow/retracted) …` before anything is written or sent. This includes your own links, and deleting a model instance that carries such links.
-- **Local links are not affected.** The engine's `currentState` cache and `resolved_as` marks are `Local` and are replaced by removal as before.
+- **Local links are not affected.** The engine's `currentState` cache and `resolved_as` marks are `Local` and are replaced by removal as before. The executor goes by the status the link is stored with, not the one a call names: `linkMutations` with its default `shared` status still removes a Local flow link, a `local`-labelled removal of a Shared one is still refused, and a Shared-labelled removal of a link the executor does not hold is refused. A removal of a Local flow link is never sent to peers.
 
 The one way to end such a link is a signed tombstone from its **author**:
 
@@ -275,7 +275,7 @@ The one way to end such a link is a signed tombstone from its **author**:
 <link.source> --ad4m://flow/retracted--> literal:string:<link.proof.signature>
 ```
 
-Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, or whose signature does not verify, does nothing. `rejectProposal` writes these for you. A tombstone cannot itself be retracted, and neither can a role revocation (`ad4m://flow/role_grant_revoked`), so role history is kept. Readers see a retracted link gone, exactly as after a removal: `model_query`, raw SPARQL and the flow derivation all read the links present now.
+Every replica applies it the same way: the link that tombstone names (same source, same author, that signature) is removed from its store, and a copy of the link that arrives later is not stored, so the order the two sync in does not matter. A tombstone signed by anyone else, whose signature does not verify, or that is itself `Local`, does nothing. `rejectProposal` writes these for you. A tombstone cannot itself be retracted, and neither can a role revocation (`ad4m://flow/role_grant_revoked`), so role history is kept. Readers see a retracted link gone, exactly as after a removal: `model_query`, raw SPARQL and the flow derivation all read the links present now.
 
 An executor from before this rule still applies removals and stores tombstones as ordinary links. Until every member upgrades, the two versions can disagree about these links, always in the same direction: the newer one keeps the link.
 

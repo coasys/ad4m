@@ -2,8 +2,8 @@ use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
 use super::monotonic::{
-    drop_monotonic_removals, is_monotonic, refuse_monotonic_removal, MonotonicDeclared,
-    MONOTONIC_FLAG_PREDICATE,
+    committable, drop_monotonic_removals, is_monotonic, refuse_monotonic_removal,
+    MonotonicDeclared, MONOTONIC_FLAG_PREDICATE,
 };
 use super::sdna::{generic_link_fact, is_sdna_link};
 use super::shacl_parser::parse_shacl_to_links;
@@ -2066,7 +2066,7 @@ impl PerspectiveInstance {
         self.pubsub_publish_diff(decorated_diff.clone()).await;
 
         if status == LinkStatus::Shared {
-            self.spawn_commit_and_handle_error(&store_diff);
+            self.spawn_commit_and_handle_error(&committable(&store_diff, &declared));
             // Reset fallback sync interval when new shared links are added
             self.reset_fallback_sync_interval().await;
         }
@@ -2149,7 +2149,11 @@ impl PerspectiveInstance {
                 .ok_or(anyhow!("Batch not found"))?;
             let diff = &mut batch.diff;
 
-            diff.removals.push(old_link.clone());
+            // Queue the stored link with its stored status: the caller's
+            // `old_link` may carry none, which the commit reads as Shared.
+            let mut stored_old = link.clone();
+            stored_old.status = Some(link_status.clone());
+            diff.removals.push(stored_old);
             let mut new_link_expr = new_link_expression.clone();
             new_link_expr.status = Some(link_status.clone());
             diff.additions.push(new_link_expr.clone());
@@ -2158,7 +2162,7 @@ impl PerspectiveInstance {
         } else {
             let mut stored_new = new_link_expression.clone();
             stored_new.status = Some(link_status.clone());
-            let mut stored_old = old_link.clone();
+            let mut stored_old = link.clone();
             stored_old.status = Some(link_status.clone());
             let diff = PerspectiveDiff::from(vec![stored_new], vec![stored_old]);
             let decorated_new_link_expression =
