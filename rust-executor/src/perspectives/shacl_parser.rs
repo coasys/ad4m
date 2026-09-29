@@ -16,6 +16,10 @@ pub struct AD4MAction {
 /// SHACL Shape structure (from TypeScript)
 #[derive(Debug, Deserialize, Serialize)]
 pub struct SHACLShape {
+    /// The shape's own URI (`SHACLShape.nodeShapeUri` in the SDK). Defaults
+    /// to `{namespace}{ClassName}Shape`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_shape_uri: Option<String>,
     pub target_class: String,
     pub properties: Vec<PropertyShape>,
     /// Natural-language hint describing what this class represents, used to steer
@@ -1450,7 +1454,21 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
     let namespace = extract_namespace(&shape.target_class)?;
-    let shape_uri = format!("{}{}Shape", namespace, class_name);
+    // Shape actions are found by the `{ClassName}Shape` suffix
+    // (`get_shape_actions_from_shacl`), so a given URI must keep it.
+    let shape_suffix = format!("{}Shape", class_name);
+    let shape_uri = match shape.node_shape_uri.take() {
+        Some(uri) if !uri.ends_with(&shape_suffix) => {
+            return Err(anyhow::anyhow!(
+                "node_shape_uri `{}` must end with `{}` for class `{}`",
+                uri,
+                shape_suffix,
+                class_name
+            ));
+        }
+        Some(uri) => uri,
+        None => format!("{}{}", namespace, shape_suffix),
+    };
 
     // Create name mapping for class lookup (needed by isSubjectInstance)
     let name_mapping = format!("literal:string:shacl://{}", class_name);
@@ -2190,6 +2208,45 @@ mod tests {
         assert!(!no_parents
             .iter()
             .any(|l| l.predicate.as_deref() == Some("sh://node")));
+    }
+
+    #[test]
+    fn parse_shacl_to_links_keeps_the_given_node_shape_uri() {
+        let links = parse_shacl_to_links(
+            r#"{"node_shape_uri": "shapes://DogShape", "target_class": "zoo://Dog",
+                "properties": [{"path": "zoo://name", "name": "name"}]}"#,
+            "Dog",
+        )
+        .unwrap();
+        let has = |source: &str, predicate: &str, target: &str| {
+            links.iter().any(|l| {
+                l.source == source
+                    && l.predicate.as_deref() == Some(predicate)
+                    && l.target == target
+            })
+        };
+        assert!(has(
+            "literal:string:shacl://Dog",
+            "ad4m://shacl_shape_uri",
+            "shapes://DogShape"
+        ));
+        assert!(has("zoo://Dog", "ad4m://shape", "shapes://DogShape"));
+        assert!(has("shapes://DogShape", "sh://targetClass", "zoo://Dog"));
+        assert!(has("shapes://DogShape", "sh://property", "zoo://Dog.name"));
+        assert!(!links.iter().any(|l| l.source == "zoo://DogShape"));
+    }
+
+    #[test]
+    fn parse_shacl_to_links_refuses_a_node_shape_uri_without_the_class_suffix() {
+        let err = parse_shacl_to_links(
+            r#"{"node_shape_uri": "zoo://MemoShape", "target_class": "zoo://Memo", "properties": []}"#,
+            "Note",
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("must end with `NoteShape`"),
+            "{err}"
+        );
     }
 
     /// Contract with the SDK: `fixtures/shacl_writer_golden.json` holds

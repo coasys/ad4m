@@ -1653,8 +1653,8 @@ export class PerspectiveProxy {
      * **Recommended way to add SDNA schemas.**
      * 
      * Store a SHACL shape in this Perspective. The executor writes it as links, as it
-     * does for `@Model` classes. The shape needs a `targetClass`; its URI becomes
-     * `{namespace}{name}Shape`.
+     * does for `@Model` classes. The shape needs a `targetClass` and keeps its
+     * `nodeShapeUri`, which must end with `{name}Shape`.
      * 
      * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
      * @param shape - SHACLShape instance defining the schema

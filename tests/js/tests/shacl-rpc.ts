@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import {
     SHACLShape,
+    LinkQuery,
     Ad4mModel,
     Flag,
     HasMany,
@@ -181,6 +182,24 @@ export default function shaclRpcTests(testContext: TestContext) {
                         expect(Object.keys(byName).sort()).to.deep.equal(["tags", "text"]);
                         expect(byName.tags.collection).to.equal(true);
                         expect(byName.text.collection).to.equal(false);
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
+                });
+
+                it("addShacl() keeps the shape URI, and an all-optional class can be instantiated", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-shape-uri");
+                    try {
+                        const shape = new SHACLShape("shapes://MemoShape", "memo://Memo");
+                        shape.addProperty({
+                            name: "body", path: "memo://body", maxCount: 1,
+                            setter: [{ action: "setSingleTarget", source: "this", predicate: "memo://body", target: "value" }],
+                        });
+                        await perspective.addShacl("Memo", shape);
+
+                        expect((await perspective.getShacl("Memo"))!.nodeShapeUri).to.equal("shapes://MemoShape");
+                        await perspective.createSubject("Memo", "memo://1", { body: "hi" });
+                        expect(await perspective.get(new LinkQuery({ source: "memo://1", predicate: "memo://body" }))).to.have.length(1);
                     } finally {
                         await testContext.ad4mClient.perspective.remove(perspective.uuid);
                     }

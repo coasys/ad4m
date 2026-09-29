@@ -236,6 +236,15 @@ describe('addShacl', () => {
 
     expect(addSdna).toHaveBeenCalledWith('test-uuid', 'Todo', '', 'subject_class', JSON.stringify(shape.toJSON()));
   });
+
+  it("sends the shape's own URI, which the executor keeps", async () => {
+    const addSdna = jest.fn().mockResolvedValue(true);
+    const proxy = createProxy(createMockClient({ addSdna }));
+
+    await proxy.addShacl('Todo', new SHACLShape('shapes://TodoShape', 'todo://Todo'));
+
+    expect(JSON.parse(addSdna.mock.calls[0][4]).node_shape_uri).toBe('shapes://TodoShape');
+  });
 });
 
 describe('SHACLShape.fromLinks round-trip with RPC link format', () => {
