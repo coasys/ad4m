@@ -108,7 +108,7 @@ fn assert_monotonic_refusal<T: std::fmt::Debug>(result: Result<T, AnyError>, pat
     );
 }
 
-fn as_input(link: &LinkExpression) -> LinkExpressionInput {
+pub(super) fn as_input(link: &LinkExpression) -> LinkExpressionInput {
     LinkExpressionInput {
         author: link.author.clone(),
         data: LinkInput {

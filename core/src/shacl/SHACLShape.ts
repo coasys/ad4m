@@ -1,4 +1,5 @@
 import { Link } from "../links/Links";
+import { Literal } from "../Literal";
 import type { NodeExpression } from "./NodeExpression";
 import { isNodeExpression } from "./NodeExpression";
 
@@ -156,6 +157,13 @@ export interface SHACLPropertyShape {
 
   /** AD4M-specific: Local-only property */
   local?: boolean;
+
+  /**
+   * AD4M-specific: Shared links under `path` end only by tombstone (#1176).
+   * `fromLinks` reports the flag naming `path`; whether it declares anything
+   * is the executor's call (author-gated), not this field's.
+   */
+  monotonic?: boolean;
 
   /** AD4M-specific: Writable property */
   writable?: boolean;
@@ -574,6 +582,16 @@ export class SHACLShape {
           target: `literal:${prop.local}`
         });
       }
+
+      // The flag names the predicate itself, not a boolean: see the
+      // executor's `monotonic.rs`.
+      if (prop.monotonic) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://monotonic",
+          target: Literal.from(prop.path).toUrl()
+        });
+      }
       
       if (prop.writable !== undefined) {
         links.push({
@@ -879,6 +897,14 @@ export class SHACLShape {
         if (val.startsWith('boolean:')) val = val.substring(8);
         prop.local = val === 'true';
       }
+
+      const monotonicLink = prop.path && links.find(l =>
+        l.source === propShapeId && l.predicate === "ad4m://monotonic"
+          && l.target === Literal.from(prop.path).toUrl()
+      );
+      if (monotonicLink) {
+        prop.monotonic = true;
+      }
       
       const writableLink = links.find(l =>
         l.source === propShapeId && l.predicate === "ad4m://writable"
@@ -1099,6 +1125,7 @@ export class SHACLShape {
         pattern: p.pattern,
         has_value: p.hasValue,
         local: p.local,
+        monotonic: p.monotonic,
         writable: p.writable,
         resolve_language: p.resolveLanguage,
         setter: p.setter,
@@ -1156,6 +1183,7 @@ export class SHACLShape {
         pattern: p.pattern,
         hasValue: p.has_value,
         local: p.local,
+        monotonic: p.monotonic,
         writable: p.writable,
         resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
         setter: p.setter,

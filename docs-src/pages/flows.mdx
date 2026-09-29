@@ -322,6 +322,50 @@ Each vote is gated **as of its own timestamp**. A voter who held the role when t
 
 One convention follows for Social DNA authors: **role instances are add-only, and membership ends only through tombstones.** The role query runs against the current graph — only the instance's existence is windowed in time — so a query keyed on a mutable property (`where: { active: true }`) reopens the deletion problem: flipping the property would remove the instance from historical verdicts and un-settle edges its votes once settled. State that changes belongs in new instances, not in edited ones.
 
+### Role grants that cannot be removed: `monotonic`
+
+The convention above is enforced when the role class declares `monotonic` on **every link that makes an instance match the role query**, not only the DID. A `fromRole` gate matches role *instances*, and an instance drops out of the query as soon as any of these links is gone. So a member who cannot remove a grant could still un-grant it by removing the instance's flag, or a property the rule's `where` filters on. Declare:
+
+- the DID property,
+- every property the role rule's `where` filters on,
+- every flag and required property of the role class,
+- if the class has no required property: its first property with an initial value. The role query then matches instances by that property instead, so it is in the same position as a flag.
+
+```typescript
+@Model({ name: "HandoverReviewerRole" })
+class HandoverReviewerRole extends Ad4mModel {
+  @Flag({ through: "handover://reviewer_role", value: "handover://reviewer", monotonic: true })
+  kind: string = "";
+
+  @Property({ through: "handover://domain", monotonic: true })
+  domain: string = "";
+
+  @Property({ through: "handover://agent", monotonic: true })
+  agent: string = "";
+}
+```
+
+Give a declared flag a predicate of its own. The declaration is per predicate (see below), so a flag predicate shared with other classes, such as a generic `rdf://type`, would make the instances of all of them undeletable.
+
+Relations (`@HasMany`, `@HasOne`, and so on) do not take `monotonic` yet. A rule that filters through a relation, such as a `linkedTo` parent link, cannot be protected this way for now.
+
+The role **class** itself is not protected yet. The gate loads the class's SHACL definition, and its links are ordinary Shared links: any member can remove one, with no role and no authority. What happens depends on the link:
+
+- **The gate halts.** Removing `<class> ad4m://shape <shape>`, or the `sh://property` or `sh://path` link of the DID property (and, by reasoning, of a `where` field's property), makes the role query return an error, so every flow gated on that role stops deriving.
+- **The role widens.** Removing the flag's `sh://property`, `sh://path`, `sh://hasValue` or `sh://minCount`, or a required property's `sh://property`, `sh://path` or `sh://minCount`, drops that condition from the role query, so nodes of other classes that carry the role's remaining predicates count as role instances. That can grant the role to a DID that does not hold it: an `ns://owner` link the admin wrote on a node of another class grants the role to the DID it names, even under `where: { author: <admin> }`.
+
+Until this is fixed ([#1195](https://github.com/coasys/ad4m/issues/1195)), protect a role against the widening with both of these: give its DID property a predicate that no other class writes, and put an author condition on the role rule. A widened query still needs a link under the DID predicate, and the author condition counts only the ones the admin wrote, so a node of another class matches only where the admin wrote the role's own predicate. Without the author condition anyone can write that predicate on any node, which is the plain `fromRole` hole described in the warning below.
+
+A Shared link under a declared predicate is then handled like a flow link (see [Flow links end only by tombstone](#flow-links-end-only-by-tombstone)): a peer's removal is dropped on arrival, and your own `removeLink`, `updateLink`, setter or instance delete that would remove it fails with `<predicate> is monotonic`. Membership ends only through `ad4m://flow/role_grant_revoked`. The generic `ad4m://flow/retracted` tombstone does not apply to declared predicates, not even from the grant's author, because the role history is what every replica's vote gating reads. A Local link under a declared predicate stays removable, by the same rule as a Local flow link: the executor goes by the stored status, not the one a call names, and never sends that removal to peers.
+
+The rules for the declaration:
+
+- **Only the neighbourhood author's declaration counts.** The class registration writes `<property shape> --ad4m://monotonic--> literal:string:<predicate>`. An executor honours it only if the link is Shared, its signature verifies and its author is the neighbourhood author (the owner, while the perspective is not shared). The same link written by any other member declares nothing, so no member can freeze a predicate for everyone.
+- **A declaration protects removals in the same sync, call or batch.** When a peer's diff carries both the author's declaration and a removal under that predicate, the removal is dropped, just as it would be if they arrived separately. When the author writes the declaration and removes a Shared link under it in one `linkMutations` call or one batch, or turns the link into the declaration with `updateLink`, the call fails, because peers receive both in one diff and would keep the link.
+- **The link names the predicate itself.** It does not depend on the property shape's `sh://path` link: removing or adding a path changes nothing about what is declared.
+- **A declaration stays once made.** The `ad4m://monotonic` link is itself a flow-vocabulary link and cannot be removed. Registering the class again keeps it. If you change `through`, the new predicate is declared as well and the old one stays declared.
+- **It is per predicate, not per class.** Any other class that uses the same predicate URI gets the same treatment. The link stays, which is the safe side.
+
 <Callout type="warning" emoji="⚠️">
   Plain `fromRole` matches the role **instance**. Anyone who can write a
   matching instance passes the gate. Part 3 of the handover test asserts this
@@ -510,6 +554,7 @@ The refusals a developer will meet, what each one means, and what to do:
 | `proposeTransition` with `outputs` different from the open proposal's | refusal (neither joined nor twinned) | co-signing would sign outputs you did not name; a twin would split the final edge's commitment | co-sign or reject the open proposal, or agree on the outputs |
 | `rejectProposal` on a proposal you never signed | error | there is nothing of yours to withdraw; a link that merely *names* your DID is not yours | nothing — only signers can retract |
 | `removeLink` / `removeLinks` / `updateLink` / `linkMutations` / a batch removing a Shared flow link | error: `… is monotonic; retract with a tombstone` | flow links end only by their author's tombstone | `rejectProposal` for your own proposal links; otherwise leave the link |
+| the same, or a setter or instance delete, on a Shared link under a property the neighbourhood author declared `monotonic` | error: `… is monotonic` | declared predicates end only by `ad4m://flow/role_grant_revoked` | revoke the grant with a tombstone; add a new instance instead of editing one |
 | `mintFlowReceipt` on a run that has not settled | error: `no settled edge` | the fold found no completed final transition, so there is nothing to freeze | reach quorum on the final transition first |
 | `flowValidOutputs` / the `producedByFlow` filter / a `fromRole` with `producedByFlow` naming a flow this replica does not hold | error, never `[]` | "I cannot check" must not read as "there are none" | sync the flow definition (the Social DNA) first |
 | a query or role gate on a flow whose receipt index holds more than 256 candidates | error: `ReceiptBudgetExceeded` | anyone can write index links, so over the budget the read refuses rather than truncates — a truncated read could hide the one genuine receipt | nothing you can remove: index links are flow links, so the refusal lasts until the flood's authors retract their links (one signed `ad4m://flow/retracted` per link). It affects only this flow, and the error names the flow and the count. A remedy is tracked in [#1177](https://github.com/coasys/ad4m/issues/1177) |

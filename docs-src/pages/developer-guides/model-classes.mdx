@@ -245,6 +245,7 @@ class Recipe extends Ad4mModel {
 | `resolveLanguage` | `string` | `"literal"` | Language used to resolve the stored value. Use `"literal"` for simple values, or a Language address for richer content |
 | `initial` | `any` | — | Default value written on creation. When `required: true` with no `initial`, the framework uses a sentinel value (`"literal:string:uninitialized"`) |
 | `local` | `boolean` | `false` | Store locally only — not synced to the network. Useful for user preferences or draft state |
+| `monotonic` | `boolean` | `false` | Shared links under `through` can never be removed, by you or by any peer; they end only through a signed tombstone. Counts only when the neighbourhood author registered the class. For add-only data such as role grants: see [Role grants that cannot be removed](../flows#role-grants-that-cannot-be-removed-monotonic) |
 | `getter` | `string` | — | SPARQL SELECT expression for computed values. `<Base>` is replaced with the instance's URI at query time. Mutually exclusive with regular storage |
 | `transform` | `NodeExpression` | — | Declarative post-retrieval transform expressed as a SHACL-AF Node Expression. Evaluated in the Rust model query engine, not in JavaScript. See [Transforms](#the-transform-option) |
 
@@ -456,6 +457,8 @@ type: string = "";
 ```
 
 Attempting to update a flag after creation throws an error.
+
+`@Flag` also takes `monotonic: true`, as `@Property` does: a peer can then no longer remove the flag link, so the instance cannot drop out of a query keyed on it. Role classes use it (see [Role grants that cannot be removed](../flows#role-grants-that-cannot-be-removed-monotonic)). The declaration is per predicate, so give such a flag a predicate of its own rather than a shared `ad4m://type`, or the instances of every class flagged through it become undeletable.
 
 ## How It Works Under the Hood
 
