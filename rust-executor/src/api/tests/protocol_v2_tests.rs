@@ -333,6 +333,26 @@ async fn agents_by_dids_checks_params_and_capability() {
 }
 
 #[tokio::test]
+async fn agents_by_dids_rejects_more_than_the_cap() {
+    use crate::api::agent_ws::MAX_AGENTS_BY_DIDS;
+    init_agent();
+    let at_cap: Vec<String> = (0..MAX_AGENTS_BY_DIDS)
+        .map(|i| format!("did:key:unknown-{i}"))
+        .collect();
+    let reply = call("agent.byDIDs", json!({ "dids": at_cap }), admin_ctx())
+        .await
+        .expect("the cap itself is allowed");
+    assert_eq!(reply.as_array().unwrap().len(), MAX_AGENTS_BY_DIDS);
+
+    // Duplicates count toward the cap: it bounds the reply, not the lookups.
+    let over: Vec<&str> = vec!["did:key:same"; MAX_AGENTS_BY_DIDS + 1];
+    let err = call("agent.byDIDs", json!({ "dids": over }), admin_ctx())
+        .await
+        .expect_err("over the cap");
+    assert_eq!(err.code, 400);
+}
+
+#[tokio::test]
 async fn expression_get_many_aligns_with_input() {
     let literal = "literal://string:hello";
     let single = call("expression.get", json!({ "url": literal }), admin_ctx())

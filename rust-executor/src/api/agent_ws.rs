@@ -123,20 +123,40 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     agent_by_did(&did).await
 }
 
+/// Most DIDs one `agent.byDIDs` call may name.
+pub(crate) const MAX_AGENTS_BY_DIDS: usize = 200;
+
 /// `agent.byDIDs { dids }` → one entry per input DID, in input order: the
 /// agent as `agent.byDid` returns it, or `null` when unknown or on error.
+/// Each distinct DID is looked up once. More than [`MAX_AGENTS_BY_DIDS`]
+/// DIDs → 400.
 async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)?;
 
     let body: AgentsByDidsRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.dids.len() > MAX_AGENTS_BY_DIDS {
+        return Err(WsRpcError::bad_request(format!(
+            "`dids` holds {} entries; the limit is {}",
+            body.dids.len(),
+            MAX_AGENTS_BY_DIDS
+        )));
+    }
 
-    let agents = futures::future::join_all(body.dids.iter().map(|did| agent_by_did(did))).await;
+    let mut unique: Vec<&str> = Vec::new();
+    for did in &body.dids {
+        if !unique.contains(&did.as_str()) {
+            unique.push(did);
+        }
+    }
+    let found = futures::future::join_all(unique.iter().map(|did| agent_by_did(did))).await;
+    let by_did: std::collections::HashMap<&str, Value> = unique
+        .into_iter()
+        .zip(found)
+        .map(|(did, r)| (did, r.unwrap_or(Value::Null)))
+        .collect();
     Ok(Value::Array(
-        agents
-            .into_iter()
-            .map(|r| r.unwrap_or(Value::Null))
-            .collect(),
+        body.dids.iter().map(|did| by_did[did.as_str()].clone()).collect(),
     ))
 }
 
