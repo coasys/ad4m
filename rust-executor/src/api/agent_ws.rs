@@ -120,6 +120,30 @@ async fn get_agent_by_did(params: Value, ctx: Arc<RequestContext>) -> Result<Val
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let did = params.require_str("did")?;
+    agent_by_did(&did).await
+}
+
+/// `agent.byDIDs { dids }` → one entry per input DID, in input order: the
+/// agent as `agent.byDid` returns it, or `null` when unknown or on error.
+async fn get_agents_by_dids(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let body: AgentsByDidsRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let agents = futures::future::join_all(body.dids.iter().map(|did| agent_by_did(did))).await;
+    Ok(Value::Array(
+        agents
+            .into_iter()
+            .map(|r| r.unwrap_or(Value::Null))
+            .collect(),
+    ))
+}
+
+/// Shared body of `agent.byDid` and `agent.byDIDs`.
+async fn agent_by_did(did: &str) -> Result<Value, WsRpcError> {
+    let did = did.to_string();
 
     // Check if DID matches main agent
     let did_match = {
@@ -831,6 +855,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("agent.get", get_agent);
     map.register("agent.getApps", get_apps);
     map.register("agent.byDid", get_agent_by_did);
+    map.register("agent.byDIDs", get_agents_by_dids);
     map.register("agent.updateProfile", update_profile);
     map.register("agent.generate", generate_agent);
     map.register("agent.import", import_agent);

@@ -261,3 +261,66 @@ async fn get_all_shacl_rejects_malformed_names() {
         assert_eq!(err.code, 400);
     }
 }
+
+// ── X7: agent.byDIDs, expression.getMany ────────────────────────────────────
+
+fn init_agent() -> String {
+    crate::test_utils::setup_wallet();
+    crate::perspectives::interpretation_test_support::ensure_db_init();
+    crate::agent::AgentService::init_global_test_instance();
+    crate::agent::did()
+}
+
+#[tokio::test]
+async fn agents_by_dids_aligns_with_input_and_matches_by_did() {
+    let me = init_agent();
+    let single = call("agent.byDid", json!({ "did": me }), admin_ctx())
+        .await
+        .unwrap();
+    // The test agent has a DID but no stored profile, so `single` may be
+    // `null`; the point is that each entry equals the single-item reply.
+
+    let many = call(
+        "agent.byDIDs",
+        json!({ "dids": [me, "did:key:unknown", me] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(many, json!([single, null, single]));
+    assert_eq!(many.as_array().unwrap().len(), 3);
+
+    let empty = call("agent.byDIDs", json!({ "dids": [] }), admin_ctx())
+        .await
+        .unwrap();
+    assert_eq!(empty, json!([]));
+}
+
+#[tokio::test]
+async fn agents_by_dids_checks_params_and_capability() {
+    init_agent();
+    let err = call("agent.byDIDs", json!({}), admin_ctx())
+        .await
+        .expect_err("dids is required");
+    assert_eq!(err.code, 400);
+    let err = call("agent.byDIDs", json!({ "dids": [] }), no_cap_ctx())
+        .await
+        .expect_err("no capability");
+    assert_eq!(err.code, 403);
+}
+
+#[tokio::test]
+async fn expression_get_many_aligns_with_input() {
+    let literal = "literal://string:hello";
+    let single = call("expression.get", json!({ "url": literal }), admin_ctx())
+        .await
+        .unwrap();
+    let many = call(
+        "expression.getMany",
+        json!({ "urls": [literal, "not a url", literal] }),
+        admin_ctx(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(many, json!([single, null, single]));
+}

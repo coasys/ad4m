@@ -22,6 +22,9 @@ pub const PROTOCOL_FEATURES: &[&str] = &[
     "runtime.protocol",
     "perspective.discardBatch",
     "perspective.getAllShacl.names",
+    "agent.byDIDs",
+    // Registered before v2; listed so v2 clients need not probe for it.
+    "expression.getMany",
 ];
 
 /// `runtime.protocol` → `{ version, features }`.

@@ -14,6 +14,13 @@ pub use crate::agent::capabilities::user_email_from_token;
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+pub struct AgentsByDidsRequest {
+    pub dids: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct GenerateAgentRequest {
     pub passphrase: String,
 }

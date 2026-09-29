@@ -4,6 +4,7 @@
 export const HANDLER_METHODS = [
   "agent.addEntanglementProofs",
   "agent.addTrustedAgents",
+  "agent.byDIDs",
   "agent.byDid",
   "agent.deleteEntanglementProofs",
   "agent.deleteTrustedAgents",

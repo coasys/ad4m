@@ -9,6 +9,7 @@ export type { AddLinkExpressionRequest } from "./AddLinkExpressionRequest";
 export type { AddLinkRequest } from "./AddLinkRequest";
 export type { AddLinksBulkRequest } from "./AddLinksBulkRequest";
 export type { AddSdnaRequest } from "./AddSdnaRequest";
+export type { AgentsByDidsRequest } from "./AgentsByDidsRequest";
 export type { ApplyTemplateRequest } from "./ApplyTemplateRequest";
 export type { CommitBatchRequest } from "./CommitBatchRequest";
 export type { CreateExpressionRequest } from "./CreateExpressionRequest";
