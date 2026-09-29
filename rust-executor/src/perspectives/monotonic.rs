@@ -66,7 +66,9 @@
 //! so. From anyone else it declares nothing, so no member can freeze a
 //! predicate for everyone. A flag in an incoming diff counts for the
 //! removals in that same diff ([`MonotonicDeclared::with_incoming`]), so
-//! replicas agree however the link language batches.
+//! replicas agree however the link language batches. The author's side
+//! matches: a Shared flag written in one `link_mutations` call or batch
+//! counts for that call's removals, which peers receive in the same diff.
 //!
 //! The check is per predicate, not per class: another class using the same
 //! predicate URI is monotonic too, which fails safe (the link stays). A
@@ -140,8 +142,9 @@ impl MonotonicDeclared {
     }
 
     /// This set plus what the flags among `links` declare, under the same
-    /// authority and checks. For an incoming diff, whose flags are not in
-    /// the store yet: `links` arrive as Shared.
+    /// authority and checks. For a diff whose flags are not in the store
+    /// yet: `links` count as Shared (pulled links often carry no status), so
+    /// a local caller passes only its Shared additions.
     pub fn with_incoming(&self, links: &[LinkExpression]) -> Self {
         let mut declared = Self::from_flags(
             self.authority.clone(),

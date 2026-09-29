@@ -2024,7 +2024,16 @@ impl PerspectiveInstance {
             .into_iter()
             .map(LinkExpression::try_from)
             .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
-        let declared = self.monotonic_declared().await?;
+        // A flag written in this call counts for its removals, as it will on
+        // every peer that receives both in one diff.
+        let shared_additions: &[LinkExpression] = match status {
+            LinkStatus::Shared => &additions,
+            LinkStatus::Local => &[],
+        };
+        let declared = self
+            .monotonic_declared()
+            .await?
+            .with_incoming(shared_additions);
         for link in &removals {
             let removal_status = self.removal_status(link, &status, &declared)?;
             refuse_monotonic_removal(link, &removal_status, &declared)?;
@@ -6706,9 +6715,31 @@ impl PerspectiveInstance {
                 None => return Err(anyhow!("No batch found with given UUID")),
             }
         };
+        // Sign the additions first: a flag queued in this batch counts for its
+        // removals, as it will on every peer that receives both in one diff,
+        // and a flag counts only once its signature verifies.
+        let signed_additions = diff
+            .additions
+            .into_iter()
+            .map(|link| {
+                let status = link.status.unwrap_or(LinkStatus::Shared);
+                let signed_expr = create_signed_expression(link.data.normalize(), context)?;
+                let mut stored = LinkExpression::from(signed_expr);
+                stored.status = Some(status);
+                Ok(stored)
+            })
+            .collect::<Result<Vec<LinkExpression>, AnyError>>()?;
+        let shared_additions: Vec<LinkExpression> = signed_additions
+            .iter()
+            .filter(|l| l.status == Some(LinkStatus::Shared))
+            .cloned()
+            .collect();
         // Backstop for a removal queued past the refusing entry points; the
         // batch is dropped whole, as on any other commit error.
-        let declared = self.monotonic_declared().await?;
+        let declared = self
+            .monotonic_declared()
+            .await?
+            .with_incoming(&shared_additions);
         for link in &diff.removals {
             let status = link.status.as_ref().unwrap_or(&LinkStatus::Shared);
             refuse_monotonic_removal(link, status, &declared)?;
@@ -6730,11 +6761,8 @@ impl PerspectiveInstance {
         let mut persist_diff = PerspectiveDiff::empty();
 
         // Process additions
-        for link in diff.additions {
-            let status = link.status.unwrap_or(LinkStatus::Shared);
-            let signed_expr = create_signed_expression(link.data.normalize(), context)?;
-            let mut stored = LinkExpression::from(signed_expr);
-            stored.status = Some(status.clone());
+        for stored in signed_additions {
+            let status = stored.status.clone().unwrap_or(LinkStatus::Shared);
             persist_diff.additions.push(stored.clone());
             let decorated = DecoratedLinkExpression::from((stored, status.clone()));
 
