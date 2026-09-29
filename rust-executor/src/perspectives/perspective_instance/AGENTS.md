@@ -6,7 +6,7 @@ that module, files here can use the instance's private fields.
 
 | File | Role |
 |---|---|
-| `subscriptions_v2.rs` | Protocol v2 subscription features: lease renewal (`perspective.keepAliveLease`), delta updates (`delta: true`), resync state (`perspective.resyncSubscription`) |
+| `subscriptions_v2.rs` | Live query subscriptions: lease renewal (`perspective.keepAliveLease`), delta updates, resync state (`perspective.resyncSubscription`) |
 
 Invariants: same lock order as the parent (`batch_store` → `persisted`); never hold
 `subscribed_queries` across an await that takes another instance lock.

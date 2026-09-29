@@ -1268,6 +1268,13 @@ describe("Lightweight fingerprint optimization", () => {
 
 
 
+/** Turn a LiveQuery's update listener into `push(result)`: each push sends the
+ *  next revision of `subscriptionId` as a whole-result reset. */
+function updatesFor(subscriptionId: string, listener: (update: any) => void) {
+  let revision = 0;
+  return (result: any) => listener({ subscriptionId, revision: ++revision, reset: true, result });
+}
+
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
@@ -1280,12 +1287,14 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        updateCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        updateCallback = updatesFor(mockSubscriptionId, cb);
         return () => {}; // unsubscribe function
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1339,11 +1348,13 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+      onQueryUpdate: jest.fn().mockImplementation((_cb: any) => {
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1394,12 +1405,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1462,12 +1475,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1531,12 +1546,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1602,12 +1619,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       const mockClient = {
         modelSubscribe: jest.fn().mockResolvedValue({
           subscriptionId: mockSubscriptionId,
+          revision: 0,
           result: { instances: [], totalCount: 0 },
         }),
-        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-          capturedCallback = cb;
+        onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+          capturedCallback = updatesFor(mockSubscriptionId, cb);
           return () => {};
         }),
+        onReconnect: jest.fn(() => () => {}),
         keepAliveQuery: jest.fn().mockResolvedValue(true),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
       };
@@ -1673,12 +1692,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockResolvedValue(true),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
@@ -1768,12 +1789,14 @@ describe("ModelQueryBuilder keepalive recovery", () => {
         modelSubscribeCallCount++;
         return {
           subscriptionId: `sub-${modelSubscribeCallCount}`,
+          revision: 0,
           result: { instances: [], totalCount: 0 },
         };
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+      onQueryUpdate: jest.fn().mockImplementation((_cb: any) => {
         return () => {};
       }),
+      onReconnect: jest.fn(() => () => {}),
       keepAliveQuery: jest.fn().mockImplementation(async () => {
         keepaliveCallCount++;
         if (keepaliveCallCount > failAfter) {

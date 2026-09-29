@@ -16,6 +16,7 @@ export * from "./Literal";
 export * from "./perspectives/Perspective";
 export * from "./perspectives/PerspectiveHandle";
 export * from "./perspectives/PerspectiveProxy";
+export * from "./perspectives/LiveQuery";
 export * from "./perspectives/AutoProcessor";
 export * from "./perspectives/InterpretationModels";
 export * from "./perspectives/FlowModels";

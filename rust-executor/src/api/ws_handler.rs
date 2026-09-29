@@ -186,9 +186,6 @@ pub trait ParamExt {
     /// Get an optional array of strings as a set: `None` when absent or
     /// `null`, 400 when present but not an array of strings.
     fn opt_str_set(&self, key: &str) -> Result<Option<HashSet<String>>, WsRpcError>;
-    /// Get an optional boolean: `None` when absent or `null`, 400 when
-    /// present but not a boolean.
-    fn opt_bool(&self, key: &str) -> Result<Option<bool>, WsRpcError>;
 }
 
 impl ParamExt for Value {
@@ -225,17 +222,6 @@ impl ParamExt for Value {
             Some(_) => Err(invalid()),
         }
     }
-
-    fn opt_bool(&self, key: &str) -> Result<Option<bool>, WsRpcError> {
-        match self.get(key) {
-            None | Some(Value::Null) => Ok(None),
-            Some(Value::Bool(b)) => Ok(Some(*b)),
-            Some(_) => Err(WsRpcError::bad_request(format!(
-                "`{}` must be a boolean",
-                key
-            ))),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -256,19 +242,5 @@ mod param_ext_tests {
             assert_eq!(err.code, 400);
             assert_eq!(err.message, format!("`{key}` must be an array of strings"));
         }
-    }
-
-    #[test]
-    fn opt_bool_reads_an_optional_boolean() {
-        let p = json!({ "t": true, "f": false, "n": null, "bad": "yes" });
-        assert_eq!(p.opt_bool("t").unwrap(), Some(true));
-        assert_eq!(p.opt_bool("f").unwrap(), Some(false));
-        assert_eq!(p.opt_bool("n").unwrap(), None);
-        assert_eq!(p.opt_bool("missing").unwrap(), None);
-        let err = p.opt_bool("bad").unwrap_err();
-        assert_eq!(
-            (err.code, err.message.as_str()),
-            (400, "`bad` must be a boolean")
-        );
     }
 }

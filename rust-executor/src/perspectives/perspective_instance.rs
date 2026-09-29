@@ -20,14 +20,12 @@ use crate::prolog_service::{PrologMode, PROLOG_MODE};
 use crate::pubsub::{
     get_global_pubsub, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
     PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
-    PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
-    RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+    PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
 };
 use crate::types::{
     DecoratedPerspectiveDiff, LinkMutations, LinkQuery, LinkStatus, NeighbourhoodSignalFilter,
     OnlineAgent, PerspectiveExpression, PerspectiveHandle, PerspectiveLinkUpdatedWithOwner,
-    PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter, PerspectiveState,
-    PerspectiveStateFilter,
+    PerspectiveLinkWithOwner, PerspectiveState, PerspectiveStateFilter,
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
@@ -398,10 +396,10 @@ struct SubscribedQuery {
     /// When set, this subscription was registered via `model_subscribe_and_query`.
     /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
     model_query_params: Option<ModelSubscriptionParams>,
-    /// `Some(revision)` for a delta subscription (see
-    /// `perspective_instance/subscriptions_v2.rs`); `None` sends the whole
-    /// result string on every change, as before.
-    delta: Option<u64>,
+    /// Number of updates sent so far; 0 = the subscribe reply. Each update
+    /// carries the change from the previous result (see
+    /// `perspective_instance/subscriptions_v2.rs`).
+    revision: u64,
     /// RPC connections (`RequestContext::connection_id`) that subscribed to or
     /// joined this subscription. `perspective.keepAliveLease` from any of
     /// them renews it.
@@ -5683,77 +5681,16 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
-    async fn send_subscription_update(
-        &self,
-        subscription_id: String,
-        result: String,
-        delay: Option<Duration>,
-    ) {
-        let uuid = self.uuid.clone();
-        tokio::spawn(async move {
-            if let Some(delay) = delay {
-                sleep(delay).await;
-            }
-            let filter = PerspectiveQuerySubscriptionFilter {
-                uuid,
-                subscription_id,
-                result,
-            };
-            get_global_pubsub()
-                .await
-                .publish(
-                    &PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC,
-                    &serde_json::to_string(&filter).unwrap(),
-                )
-                .await;
-        });
-    }
-
-    /// Subscribe to a SPARQL/Prolog query; updates carry the whole result
-    /// string (the v1 behaviour).
+    /// Subscribe to a SPARQL/Prolog query. Returns the subscription id and
+    /// the initial result (revision 0); every change after that is published
+    /// as a delta update (`send_delta_update`). Each call makes a new
+    /// subscription, so every subscriber counts revisions from 0.
     pub async fn subscribe_and_query(
         &self,
         query: String,
         user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        self.subscribe_and_query_mode(query, user_email, None, false)
-            .await
-    }
-
-    pub(crate) async fn subscribe_and_query_mode(
-        &self,
-        query: String,
-        user_email: Option<String>,
         connection_id: Option<String>,
-        delta: bool,
     ) -> Result<(String, String), AnyError> {
-        // Check if we already have a subscription with the same query and user.
-        // A delta subscription is never shared: its revisions start at 0.
-        let existing_subscription = if delta {
-            None
-        } else {
-            let queries = self.subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| q.query == query && q.user_email == user_email && q.delta.is_none())
-                .map(|(id, _)| id.clone())
-        };
-
-        // Return existing subscription if found
-        if let Some(existing_id) = existing_subscription {
-            let existing_result = {
-                let mut queries = self.subscribed_queries.lock().await;
-                queries.get_mut(&existing_id).map(|q| {
-                    q.connections.extend(connection_id.clone());
-                    q.last_result.clone()
-                })
-            };
-
-            if let Some(last_result) = existing_result {
-                return Ok((existing_id, last_result));
-            }
-        }
-
         let subscription_id = uuid::Uuid::new_v4().to_string();
 
         // Execute prolog query with user context
@@ -5784,7 +5721,7 @@ impl PerspectiveInstance {
             user_email,
             predicates,
             model_query_params: None,
-            delta: delta.then_some(0),
+            revision: 0,
             connections: connection_id.into_iter().collect(),
         };
 
@@ -5797,29 +5734,17 @@ impl PerspectiveInstance {
         Ok((subscription_id, result_string))
     }
 
-    /// Subscribe to a model query; updates carry the whole result string
-    /// (the v1 behaviour).
+    /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
+    /// registers a subscription, and runs the initial model query — all in one call.
+    /// When link changes match the trigger predicates, `execute_model_query` is
+    /// re-run in Rust and the change is pushed to the client as a delta
+    /// update. Each call makes a new subscription (revision 0).
     pub async fn model_subscribe_and_query(
         &self,
         class_name: String,
         query_json: String,
         user_email: Option<String>,
-    ) -> Result<(String, String), AnyError> {
-        self.model_subscribe_and_query_mode(class_name, query_json, user_email, None, false)
-            .await
-    }
-
-    /// Subscribe to model query changes. Builds trigger SPARQL from the model shape,
-    /// registers a subscription, and runs the initial model query — all in one call.
-    /// When link changes match the trigger predicates, `execute_model_query` is
-    /// re-run in Rust and the updated results are pushed to the client.
-    pub(crate) async fn model_subscribe_and_query_mode(
-        &self,
-        class_name: String,
-        query_json: String,
-        user_email: Option<String>,
         connection_id: Option<String>,
-        delta: bool,
     ) -> Result<(String, String), AnyError> {
         // 1. Run the initial model query
         let initial_result = self.model_query(&class_name, &query_json).await?;
@@ -5845,43 +5770,7 @@ impl PerspectiveInstance {
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
 
-        // 3. Check for existing subscription with same params (never for a
-        // delta subscription: its revisions start at 0)
-        let existing_subscription = if delta {
-            None
-        } else {
-            let queries = self.subscribed_queries.lock().await;
-            queries
-                .iter()
-                .find(|(_, q)| {
-                    if let Some(ref params) = q.model_query_params {
-                        params.class_name == class_name
-                            && params.query_json == query_json
-                            && q.user_email == user_email
-                            && q.delta.is_none()
-                    } else {
-                        false
-                    }
-                })
-                .map(|(id, _)| id.clone())
-        };
-
-        if let Some(existing_id) = existing_subscription {
-            // Update last_result and trigger metadata with fresh data
-            {
-                let mut queries = self.subscribed_queries.lock().await;
-                if let Some(q) = queries.get_mut(&existing_id) {
-                    q.query = trigger_sparql.clone();
-                    q.predicates = predicate_set.clone();
-                    q.last_result = initial_result.clone();
-                    q.last_keepalive = Instant::now();
-                    q.connections.extend(connection_id);
-                }
-            }
-            return Ok((existing_id, initial_result));
-        }
-
-        // 4. Register new subscription
+        // 3. Register the subscription
         let subscription_id = uuid::Uuid::new_v4().to_string();
         let subscribed_query = SubscribedQuery {
             query: trigger_sparql,
@@ -5893,7 +5782,7 @@ impl PerspectiveInstance {
                 class_name,
                 query_json,
             }),
-            delta: delta.then_some(0),
+            revision: 0,
             connections: connection_id.into_iter().collect(),
         };
 
@@ -6110,32 +5999,30 @@ impl PerspectiveInstance {
         let results = future::join_all(query_futures).await;
 
         // Single lock acquisition to compare and update all results
-        let mut updates_to_send = Vec::new();
         let mut delta_updates = Vec::new();
         {
             let mut queries = self.subscribed_queries.lock().await;
             for result in results.into_iter().flatten() {
                 let (id, result_string) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
-                    let changed = result_string != stored_query.last_result;
-                    if let (true, Some(rev)) = (changed, stored_query.delta.as_mut()) {
-                        *rev += 1;
-                        let revision = *rev;
-                        let old =
-                            std::mem::replace(&mut stored_query.last_result, result_string.clone());
-                        let is_model = stored_query.model_query_params.is_some();
-                        delta_updates.push((id, old, result_string, revision, is_model));
-                    } else if changed {
-                        let old_len = stored_query.last_result.len();
-                        let new_len = result_string.len();
+                    if result_string != stored_query.last_result {
                         log::debug!(
                             "📤 🔗 subscription {} result changed (old_len={}, new_len={})",
                             id,
-                            old_len,
-                            new_len
+                            stored_query.last_result.len(),
+                            result_string.len()
                         );
-                        stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        stored_query.revision += 1;
+                        let old =
+                            std::mem::replace(&mut stored_query.last_result, result_string.clone());
+                        let is_model = stored_query.model_query_params.is_some();
+                        delta_updates.push((
+                            id,
+                            old,
+                            result_string,
+                            stored_query.revision,
+                            is_model,
+                        ));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6148,9 +6035,6 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
-        }
         for (id, old, new, revision, is_model) in delta_updates {
             self.send_delta_update(id, &old, &new, revision, is_model)
                 .await;

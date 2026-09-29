@@ -945,45 +945,34 @@ async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     let body: SubscribeQueryRequest = serde_json::from_value(params.clone())
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let delta = delta_param(&params)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let (subscription_id, result) = perspective
-        .subscribe_and_query_mode(
+        .subscribe_and_query(
             body.query,
             ctx.user_email.clone(),
             ctx.connection_id.clone(),
-            delta,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    if delta {
-        return Ok(serde_json::json!({
-            "subscriptionId": subscription_id,
-            "result": result_json(&result),
-            "revision": 0,
-        }));
-    }
-
-    Ok(serde_json::to_value(SubscribeQueryResponse {
-        subscription_id,
-        result,
-    })?)
+    Ok(subscribed(subscription_id, &result))
 }
 
-/// Optional `delta` param of `subscribeQuery` / `modelSubscribe`: absent or
-/// `false` = whole-result updates.
-fn delta_param(params: &Value) -> Result<bool, WsRpcError> {
-    Ok(params.opt_bool("delta")?.unwrap_or(false))
+/// Reply to a subscribe call: the initial result as JSON, at revision 0.
+fn subscribed(subscription_id: String, result: &str) -> Value {
+    serde_json::json!({
+        "subscriptionId": subscription_id,
+        "result": result_json(result),
+        "revision": 0,
+    })
 }
 
 /// `perspective.resyncSubscription { uuid, subscriptionId }` →
-/// `{ revision, result }`: the current state of one of the caller's delta
+/// `{ revision, result }`: the current state of one of the caller's
 /// subscriptions. A client that sees a revision gap (an update whose
 /// `revision` is not the previous one + 1) replaces its copy with `result`
-/// and applies the updates after `revision`. 404 when the id is unknown,
-/// names a whole-result subscription, or belongs to another user.
+/// and applies the updates after `revision`. 404 when the id is unknown or
+/// belongs to another user.
 async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -997,7 +986,7 @@ async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
     match perspective
-        .delta_subscription_state(&body.subscription_id, ctx.user_email.as_deref())
+        .subscription_state(&body.subscription_id, ctx.user_email.as_deref())
         .await
     {
         Some((revision, result)) => Ok(serde_json::json!({
@@ -1005,7 +994,7 @@ async fn resync_subscription(params: Value, ctx: Arc<RequestContext>) -> Result<
             "result": result_json(&result),
         })),
         None => Err(WsRpcError::not_found(format!(
-            "No delta subscription {} on this perspective",
+            "No subscription {} on this perspective",
             body.subscription_id
         ))),
     }
@@ -1372,33 +1361,18 @@ async fn model_subscribe_handler(
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
 
-    let delta = delta_param(&params)?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
-    let user_email = ctx.user_email.clone();
-    let (subscription_id, result_string) = perspective
-        .model_subscribe_and_query_mode(
+    let (subscription_id, result) = perspective
+        .model_subscribe_and_query(
             class_name,
             query_json,
-            user_email,
+            ctx.user_email.clone(),
             ctx.connection_id.clone(),
-            delta,
         )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    if delta {
-        return Ok(serde_json::json!({
-            "subscription_id": subscription_id,
-            "result": result_json(&result_string),
-            "revision": 0,
-        }));
-    }
-
-    Ok(serde_json::to_value(serde_json::json!({
-        "subscription_id": subscription_id,
-        "result": result_string,
-    }))?)
+    Ok(subscribed(subscription_id, &result))
 }
 
 async fn run_interpretation_handler(

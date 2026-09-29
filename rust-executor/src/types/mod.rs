@@ -17,7 +17,7 @@ pub use domain::{
     LinkExpressionUpdated, LinkInput, LinkMutations, LinkQuery, LinkStatus, LinkUpdated,
     LocalModelInput, ModelApiInput, ModelInput, NeighbourhoodSignalFilter, NotificationInput,
     OnlineAgent, PaymentRequestResult, PerspectiveExpression, PerspectiveHandle, PerspectiveInput,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
+    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner,
     PerspectiveRemovedWithOwner, PerspectiveState, PerspectiveStateFilter,
     PerspectiveUnsignedInput, PerspectiveWithOwner, PromptOutput, QuerySubscription,
     ReadinessStatus, RequestContext, Resource, ResourceInput, RuntimeInfo, SentMessage,

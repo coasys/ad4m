@@ -50,10 +50,10 @@ anything that signs, bills or writes.
 - `ws_rpc::serve` runs one RPC connection over any text stream: `Connection::handle_text` answers
   each client message, and the event task is aborted when the stream ends. `tests/connection_tests.rs`
   drives it through channels in place of a WebSocket.
-- Delta subscriptions (`subscribeQuery` / `modelSubscribe` with `delta: true`): each update carries
-  `revision` (+1 per update, 0 = the subscribe reply). On a revision gap, call
-  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }` and apply only
-  the updates after that revision.
+- Subscriptions: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision: 0 }`;
+  each `query-subscription-update` carries the change (`added` / `removed` / `changed`) and
+  `revision` (+1 per update). On a revision gap, call `perspective.resyncSubscription
+  { uuid, subscriptionId }` → `{ revision, result }` and apply only the updates after that revision.
 - Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
   (ts-rs export dir) and fails if `core/src/generated/api/HandlerMethods.ts` is stale — regenerate
   (`pnpm run generate:api-types` in `core/`) after adding a handler.

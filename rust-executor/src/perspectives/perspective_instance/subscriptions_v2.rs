@@ -1,4 +1,5 @@
-//! Protocol v2 subscription features on `PerspectiveInstance`.
+//! Live query subscriptions on `PerspectiveInstance`: delta updates, resync
+//! and lease renewal.
 //!
 //! A child module of `perspective_instance` so it can reach the private
 //! subscription registry without widening its visibility.
@@ -12,11 +13,11 @@ use crate::pubsub::{get_global_pubsub, PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC};
 
 impl PerspectiveInstance {
     /// Resync after a revision gap (`perspective.resyncSubscription`): the
-    /// delta subscription's current revision and the result it describes,
-    /// read together under the registry lock. `None` when `subscription_id`
-    /// is unknown, is not a delta subscription, or belongs to another owner
-    /// than `user_email` (`None` = the main agent).
-    pub async fn delta_subscription_state(
+    /// subscription's current revision and the result it describes, read
+    /// together under the registry lock. `None` when `subscription_id` is
+    /// unknown or belongs to another owner than `user_email` (`None` = the
+    /// main agent).
+    pub async fn subscription_state(
         &self,
         subscription_id: &str,
         user_email: Option<&str>,
@@ -26,12 +27,11 @@ impl PerspectiveInstance {
         if query.user_email.as_deref() != user_email {
             return None;
         }
-        Some((query.delta?, query.last_result.clone()))
+        Some((query.revision, query.last_result.clone()))
     }
 
-    /// Publish one delta update (opt-in with `delta: true`) on
-    /// the usual `query-subscription-update` topic:
-    /// `{ uuid, subscriptionId, delta: true, revision, added, removed, changed, ... }`.
+    /// Publish one update on the `query-subscription-update` topic:
+    /// `{ uuid, subscriptionId, revision, added, removed, changed, ... }`.
     /// See [`result_delta`] for the row keys.
     pub(super) async fn send_delta_update(
         &self,
@@ -44,7 +44,6 @@ impl PerspectiveInstance {
         let mut payload = result_delta(old, new, is_model);
         payload.insert("uuid".into(), json!(self.uuid));
         payload.insert("subscriptionId".into(), json!(subscription_id));
-        payload.insert("delta".into(), json!(true));
         payload.insert("revision".into(), json!(revision));
         get_global_pubsub()
             .await
@@ -96,8 +95,7 @@ pub(crate) fn result_json(result: &str) -> Value {
 /// - Query results (a JSON array of bindings): a binding row has no id, so the
 ///   row itself is its key (multiset). `added` / `removed` carry rows;
 ///   `changed` is always empty.
-/// - Anything else (a result that is not in either form): `reset: true` with
-///   the whole `result` as JSON.
+/// - Anything else: `reset: true` with the whole `result`.
 pub(crate) fn result_delta(old: &str, new: &str, is_model: bool) -> Map<String, Value> {
     let (old_v, new_v) = (result_json(old), result_json(new));
     let delta = if is_model {
@@ -218,11 +216,10 @@ mod tests {
         user_email: Option<&str>,
         conn: &str,
     ) -> String {
-        p.subscribe_and_query_mode(
+        p.subscribe_and_query(
             query.into(),
             user_email.map(str::to_string),
             Some(conn.into()),
-            false,
         )
         .await
         .unwrap()
@@ -271,17 +268,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_shared_legacy_subscription_is_renewed_from_any_sharing_connection() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let first = subscribe_from(&p, QUERY, None, "a").await;
-        let second = subscribe_from(&p, QUERY, None, "b").await;
-        assert_eq!(first, second, "legacy dedup shares the subscription");
-        expire(&p, &first).await;
-        assert_eq!(p.renew_subscriptions_of(None, "b").await, 1);
-        assert_eq!(p.renew_subscriptions_of(None, "c").await, 0);
-    }
-
-    #[tokio::test]
     async fn lease_renews_model_subscriptions_too() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let query_sub = subscribe_from(&p, QUERY, None, "c1").await;
@@ -304,14 +290,17 @@ mod tests {
     #[tokio::test]
     async fn without_a_lease_subscriptions_still_time_out() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (id, _) = p.subscribe_and_query(QUERY.into(), None).await.unwrap();
+        let (id, _) = p
+            .subscribe_and_query(QUERY.into(), None, None)
+            .await
+            .unwrap();
         expire(&p, &id).await;
         p.check_subscribed_queries(ChangedPredicates::CheckAll)
             .await;
         assert!(!p.subscribed_queries.lock().await.contains_key(&id));
     }
 
-    // ── X2: delta subscriptions ─────────────────────────────────────────
+    // ── Delta updates ───────────────────────────────────────────────────
 
     use super::result_delta;
     use crate::agent::AgentContext;
@@ -394,7 +383,6 @@ mod tests {
         p.check_subscribed_queries(ChangedPredicates::CheckAll)
             .await;
         let mut out = vec![];
-        // Legacy updates are published from a spawned task; give it a moment.
         let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
         while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
             let v: Value = serde_json::from_str(&msg).unwrap();
@@ -406,11 +394,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delta_model_subscription_sends_keyed_changes_with_revisions() {
+    async fn model_subscription_sends_keyed_changes_with_revisions() {
         let (mut p, _, _) = setup_perspective_no_llm(&[("Todo", TODO_SDNA)]).await;
         let query = r#"{"includeUnverified": true}"#.to_string();
         let (id, initial) = p
-            .model_subscribe_and_query_mode("Todo".into(), query.clone(), None, None, true)
+            .model_subscribe_and_query("Todo".into(), query.clone(), None, None)
             .await
             .unwrap();
         let initial: Value = serde_json::from_str(&initial).unwrap();
@@ -421,7 +409,6 @@ mod tests {
         let updates = updates_after_check(&p, &id).await;
         assert_eq!(updates.len(), 1, "{updates:?}");
         let u = &updates[0];
-        assert_eq!(u["delta"], json!(true));
         assert_eq!(u["revision"], json!(1));
         assert_eq!(u["added"][0]["id"], json!("test://t1"));
         assert_eq!(u["removed"], json!([]));
@@ -440,20 +427,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resync_state_matches_the_last_delta_update() {
+    async fn resync_state_matches_the_last_update() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (id, _) = p
-            .subscribe_and_query_mode(q.clone(), None, None, true)
-            .await
-            .unwrap();
-        let (revision, result) = p.delta_subscription_state(&id, None).await.unwrap();
+        let (id, _) = p.subscribe_and_query(q.clone(), None, None).await.unwrap();
+        let (revision, result) = p.subscription_state(&id, None).await.unwrap();
         assert_eq!((revision, super::result_json(&result)), (0, json!([])));
 
         add(&mut p, "test://a", "test://p", "test://b").await;
         let updates = updates_after_check(&p, &id).await;
         assert_eq!(updates[0]["revision"], json!(1));
-        let (revision, result) = p.delta_subscription_state(&id, None).await.unwrap();
+        let (revision, result) = p.subscription_state(&id, None).await.unwrap();
         assert_eq!(revision, 1, "the revision of the last update sent");
         let rows = super::result_json(&result);
         assert_eq!(rows.as_array().unwrap().len(), 1);
@@ -464,58 +448,27 @@ mod tests {
         );
 
         assert!(
-            p.delta_subscription_state(&id, Some("other@example.com"))
+            p.subscription_state(&id, Some("other@example.com"))
                 .await
                 .is_none(),
             "another owner cannot read it"
         );
-        let (legacy, _) = p.subscribe_and_query(q, None).await.unwrap();
-        assert!(
-            p.delta_subscription_state(&legacy, None).await.is_none(),
-            "whole-result subscriptions have no revision"
-        );
-        assert!(p.delta_subscription_state("nope", None).await.is_none());
+        assert!(p.subscription_state("nope", None).await.is_none());
     }
 
     #[tokio::test]
-    async fn legacy_subscription_still_gets_the_whole_result_string() {
+    async fn each_subscriber_gets_its_own_subscription_from_revision_zero() {
         let (mut p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let (legacy, _) = p.subscribe_and_query(q.clone(), None).await.unwrap();
-        let (delta, _) = p
-            .subscribe_and_query_mode(q.clone(), None, None, true)
-            .await
-            .unwrap();
-        assert_ne!(legacy, delta, "a delta subscription is never shared");
-        let (again, _) = p.subscribe_and_query(q, None).await.unwrap();
-        assert_eq!(again, legacy, "legacy dedup unchanged");
-
+        let (first, _) = p.subscribe_and_query(q.clone(), None, None).await.unwrap();
         add(&mut p, "test://a", "test://p", "test://b").await;
-        let mut rx = get_global_pubsub()
-            .await
-            .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
-            .await;
-        p.check_subscribed_queries(ChangedPredicates::CheckAll)
-            .await;
-        let (mut legacy_updates, mut delta_updates) = (vec![], vec![]);
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
-        while let Ok(Ok(msg)) = tokio::time::timeout_at(deadline, rx.recv()).await {
-            let v: Value = serde_json::from_str(&msg).unwrap();
-            if v["subscriptionId"] == legacy {
-                legacy_updates.push(v);
-            } else if v["subscriptionId"] == delta {
-                delta_updates.push(v);
-            }
-        }
-        let l = &legacy_updates[0];
         assert_eq!(
-            l.as_object().unwrap().keys().collect::<Vec<_>>(),
-            vec!["uuid", "subscriptionId", "result"],
-            "v1 payload shape"
+            updates_after_check(&p, &first).await[0]["revision"],
+            json!(1)
         );
-        assert!(l["result"].is_string());
-        let d = &delta_updates[0];
-        assert_eq!(d["revision"], json!(1));
-        assert_eq!(d["added"].as_array().unwrap().len(), 1);
+
+        let (second, _) = p.subscribe_and_query(q, None, None).await.unwrap();
+        assert_ne!(first, second, "not shared");
+        assert_eq!(p.subscription_state(&second, None).await.unwrap().0, 0);
     }
 }
