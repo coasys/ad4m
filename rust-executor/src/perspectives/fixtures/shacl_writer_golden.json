@@ -44,7 +44,7 @@
       {
         "path": "zoo://mood",
         "name": "mood",
-        "has_value": "very happy"
+        "has_value": "very happy (it's ok)!*"
       },
       {
         "path": "zoo://toy",
@@ -107,7 +107,7 @@
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.mood"},
     {"source": "zoo://Dog.mood", "predicate": "rdf://type", "target": "sh://PropertyShape"},
     {"source": "zoo://Dog.mood", "predicate": "sh://path", "target": "zoo://mood"},
-    {"source": "zoo://Dog.mood", "predicate": "sh://hasValue", "target": "literal:string:very%20happy"},
+    {"source": "zoo://Dog.mood", "predicate": "sh://hasValue", "target": "literal:string:very%20happy%20%28it%27s%20ok%29%21%2A"},
     {"source": "zoo://DogShape", "predicate": "sh://property", "target": "zoo://Dog.toys"},
     {"source": "zoo://Dog.toys", "predicate": "rdf://type", "target": "ad4m://CollectionShape"},
     {"source": "zoo://Dog.toys", "predicate": "sh://path", "target": "zoo://toy"},

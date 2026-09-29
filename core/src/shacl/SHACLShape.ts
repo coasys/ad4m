@@ -546,12 +546,13 @@ export class SHACLShape {
       }
       
       if (prop.hasValue) {
-        // Same encoding as the executor: URIs and literal URLs as they are.
+        // As the executor writes it: URIs and literal URLs as they are, other
+        // strings as an RFC 3986-encoded string literal.
         const v = prop.hasValue;
         links.push({
           source: propShapeId,
           predicate: "sh://hasValue",
-          target: v.includes('://') || v.startsWith('literal:') ? v : `literal:string:${encodeURIComponent(v)}`
+          target: v.includes('://') || v.startsWith('literal:') ? v : Literal.from(v).toUrl()
         });
       }
       
