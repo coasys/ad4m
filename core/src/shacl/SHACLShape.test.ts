@@ -136,6 +136,25 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].minCount).toBe(1);
     });
 
+    it('reads counts and flags the executor wrote from 2026-02-02 to 2026-02-17, after migration', () => {
+      // a84f2f178 wrote `literal://number:N` / `literal://boolean:B`; the
+      // storage migration only turns `literal://` into `literal:`.
+      const shapeUri = 'recipe://RecipeShape';
+      const prop = 'recipe://Recipe.name';
+      const links = [
+        { source: shapeUri, predicate: 'sh://targetClass', target: 'recipe://Recipe' },
+        { source: shapeUri, predicate: 'sh://property', target: prop },
+        { source: prop, predicate: 'sh://path', target: 'recipe://name' },
+        { source: prop, predicate: 'sh://minCount', target: 'literal:number:1' },
+        { source: prop, predicate: 'sh://maxCount', target: 'literal:number:1' },
+        { source: prop, predicate: 'ad4m://writable', target: 'literal:boolean:true' },
+        { source: prop, predicate: 'ad4m://local', target: 'literal:boolean:true' },
+      ];
+
+      const [p] = SHACLShape.fromLinks(links, shapeUri).properties;
+      expect([p.minCount, p.maxCount, p.writable, p.local]).toEqual([1, 1, true, true]);
+    });
+
     it('handles multiple properties', () => {
       const originalShape = new SHACLShape('recipe://Recipe');
       originalShape.addProperty({

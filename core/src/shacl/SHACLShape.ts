@@ -707,12 +707,16 @@ export class SHACLShape {
     // `literal:string:<text>` (not URL-encoded) and `literal:<value>` targets.
     const str = (source: string, predicate: string) => target(source, predicate)?.replace(/^literal:string:/, '');
     const plain = (source: string, predicate: string) => target(source, predicate)?.replace(/^literal:/, '');
+    // Counts and flags: the executor wrote `literal://number:N` and
+    // `literal://boolean:B` from 2026-02-02 to 2026-02-17, and its storage
+    // migration only rewrites them to `literal:number:N` / `literal:boolean:B`.
+    // The executor's own reader (model_query/shape.rs) still accepts both.
     const bool = (source: string, predicate: string) => {
-      const v = plain(source, predicate);
+      const v = plain(source, predicate)?.replace(/^boolean:/, '');
       return v === undefined ? undefined : v === 'true';
     };
     const num = (source: string, predicate: string, parse: (v: string) => number) => {
-      const v = plain(source, predicate);
+      const v = plain(source, predicate)?.replace(/^number:/, '');
       return v === undefined ? undefined : parse(v.replace(/\^\^.*$/, ''));
     };
     // JSON payloads that fail to parse are dropped.
