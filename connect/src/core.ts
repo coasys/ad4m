@@ -162,20 +162,28 @@ export default class Ad4mConnect extends EventTarget {
     // turn a wrong URL into a readable error, and awaiting it before opening the socket cost every
     // successful connect an extra round trip. Its answer still decides: when it fails, its error is
     // thrown at once, without waiting for the auth read (which can hang on an unreachable socket).
-    const client = new Ad4mClient(this.baseUrl, this.token, false);
-    const authRead: Promise<AuthReading> = this.readAuth(client)
-      .catch((error) => ({ state: 'unauthenticated' as const, error }));
+    //
+    // The token rides in the socket URL, so it goes out early only to the URL it was last accepted
+    // at. A different URL gets no socket, and no token, until its health check passes.
+    const open = () => {
+      const client = new Ad4mClient(this.baseUrl, this.token, false);
+      const auth: Promise<AuthReading> = this.readAuth(client)
+        .catch((error) => ({ state: 'unauthenticated' as const, error }));
+      return { client, auth };
+    };
+    let session = getLocal("ad4m-url") === this.url ? open() : undefined;
     try {
       await checkConnection(this.baseUrl);
     } catch (error) {
-      client.close();
+      session?.client.close();
       console.error('[Ad4m Connect] Connection failed:', error);
       this.notifyConnectionChange("error");
       throw error;
     }
-    const auth = await authRead;
+    if (!session) session = open();
+    const auth = await session.auth;
     setLocal("ad4m-url", this.url);
-    this.adoptClient(client);
+    this.adoptClient(session.client);
     this.applyAuth(auth);
     return this.ad4mClient;
   }

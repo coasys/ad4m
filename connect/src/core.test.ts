@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import Ad4mConnect from './core';
 import { setLocal, getLocal } from './utils';
-import { AgentStatus } from '@coasys/ad4m';
+import { AgentStatus, Ad4mClient } from '@coasys/ad4m';
 
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
@@ -87,6 +87,7 @@ describe('Ad4mConnect', () => {
     mockAgent.loginUser.mockClear();
     mockAgent.createUser.mockClear();
     mockClientInstance.close.mockClear();
+    (Ad4mClient as any).mockClear();
     mockClientInstance.startSubscriptions.mockClear();
     mockRuntime.info.mockClear();
     mockRuntime.multiUserEnabled.mockClear();
@@ -189,6 +190,7 @@ describe('Ad4mConnect', () => {
       check now runs beside the auth read, and an unlocked session answers in one call.
     */
     it('asks for status without waiting on the health check', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
       const { checkConnection } = await import('./utils');
       let releaseHealth!: () => void;
       (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
@@ -249,6 +251,7 @@ describe('Ad4mConnect', () => {
     });
 
     it('applies nothing from the auth read when the health check fails', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
       const { checkConnection } = await import('./utils');
       (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
       mockAgent.status.mockRejectedValueOnce(new Error('InvalidSignature'));
@@ -264,6 +267,7 @@ describe('Ad4mConnect', () => {
     });
 
     it('throws the health error without waiting for an auth read that never settles', async () => {
+      setLocal('ad4m-url', 'http://localhost:12000');
       const { checkConnection } = await import('./utils');
       (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
       // An unreachable socket: the auth read hangs.
@@ -272,6 +276,54 @@ describe('Ad4mConnect', () => {
 
       await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
       expect(conn.connectionState).toBe('error');
+    });
+  });
+
+  describe('connect() — token and unchecked URLs', () => {
+    // ApiClient puts the token in the socket URL, so it must not reach a URL /health has not accepted.
+    it('opens no socket to a URL other than the stored one until /health accepts it', async () => {
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      setLocal('ad4m-token', 'remote-jwt');
+      setLocal('ad4m-url', 'https://remote.example');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'http://localhost:12000' });
+
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(checkConnection).toHaveBeenCalledWith('http://localhost:12000'));
+      expect(Ad4mClient).not.toHaveBeenCalled();
+
+      releaseHealth();
+      await connecting;
+      expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'remote-jwt', false);
+      expect(getLocal('ad4m-url')).toBe('http://localhost:12000');
+      expect(conn.authState).toBe('authenticated');
+    });
+
+    it('never opens a socket to an unchecked URL that fails /health', async () => {
+      const { checkConnection } = await import('./utils');
+      (checkConnection as any).mockRejectedValueOnce(new Error('Not an AD4M executor'));
+      setLocal('ad4m-token', 'remote-jwt');
+      const conn = new Ad4mConnect({ ...defaultOptions, url: 'http://localhost:12000' });
+
+      await expect(conn.connect()).rejects.toThrow('Not an AD4M executor');
+      expect(Ad4mClient).not.toHaveBeenCalled();
+      expect(getLocal('ad4m-url')).toBeFalsy();
+    });
+
+    it('opens the socket beside the health check for the stored URL', async () => {
+      const { checkConnection } = await import('./utils');
+      let releaseHealth!: () => void;
+      (checkConnection as any).mockImplementationOnce(() => new Promise<void>((resolve) => (releaseHealth = resolve)));
+      setLocal('ad4m-token', 'local-jwt');
+      setLocal('ad4m-url', 'http://localhost:12000');
+      const conn = new Ad4mConnect(defaultOptions);
+
+      const connecting = conn.connect();
+      await vi.waitFor(() => expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'local-jwt', false));
+      releaseHealth();
+      await connecting;
+      expect(conn.authState).toBe('authenticated');
     });
   });
 
