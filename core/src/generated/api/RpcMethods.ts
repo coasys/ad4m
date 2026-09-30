@@ -1,0 +1,195 @@
+// Auto-generated from the executor's WS-RPC HandlerMap (rust-executor/src/api/ws_handler.rs).
+// Do NOT edit manually — regenerate with: pnpm run generate:api-types
+
+import type { CreateExpressionRequest } from "./CreateExpressionRequest";
+import type { ExpressionGetRequest } from "./ExpressionGetRequest";
+import type { ExpressionGetResult } from "./ExpressionGetResult";
+import type { ExpressionInteractRequest } from "./ExpressionInteractRequest";
+import type { ExpressionManyRequest } from "./ExpressionManyRequest";
+import type { ExpressionRendered } from "./ExpressionRendered";
+import type { ExpressionUrlRequest } from "./ExpressionUrlRequest";
+import type { InteractionMeta } from "./InteractionMeta";
+
+/** Every executor RPC method: its params and result. */
+export interface RpcMethods {
+  "agent.addEntanglementProofs": { params: any; result: any };
+  "agent.addTrustedAgents": { params: any; result: any };
+  "agent.byDid": { params: any; result: any };
+  "agent.deleteEntanglementProofs": { params: any; result: any };
+  "agent.deleteTrustedAgents": { params: any; result: any };
+  "agent.entanglementProofPreflight": { params: any; result: any };
+  "agent.generate": { params: any; result: any };
+  "agent.generateJwt": { params: any; result: any };
+  "agent.get": { params: any; result: any };
+  "agent.getApps": { params: any; result: any };
+  "agent.getEntanglementProofs": { params: any; result: any };
+  "agent.getTrustedAgents": { params: any; result: any };
+  "agent.import": { params: any; result: any };
+  "agent.isLocked": { params: any; result: any };
+  "agent.lock": { params: any; result: any };
+  "agent.permitCapability": { params: any; result: any };
+  "agent.removeApp": { params: any; result: any };
+  "agent.requestCapability": { params: any; result: any };
+  "agent.revokeToken": { params: any; result: any };
+  "agent.sign": { params: any; result: any };
+  "agent.status": { params: any; result: any };
+  "agent.unlock": { params: any; result: any };
+  "agent.updateProfile": { params: any; result: any };
+  "ai.addModel": { params: any; result: any };
+  "ai.addTask": { params: any; result: any };
+  "ai.discoverModels": { params: any; result: any };
+  "ai.embed": { params: any; result: any };
+  "ai.getDefaultModel": { params: any; result: any };
+  "ai.modelLoadingStatus": { params: any; result: any };
+  "ai.models": { params: any; result: any };
+  "ai.prompt": { params: any; result: any };
+  "ai.removeModel": { params: any; result: any };
+  "ai.removeTask": { params: any; result: any };
+  "ai.setDefaultModel": { params: any; result: any };
+  "ai.tasks": { params: any; result: any };
+  "ai.transcriptionClose": { params: any; result: any };
+  "ai.transcriptionOpen": { params: any; result: any };
+  "ai.updateModel": { params: any; result: any };
+  "ai.updateTask": { params: any; result: any };
+  "expression.create": { params: CreateExpressionRequest; result: string };
+  "expression.get": { params: ExpressionGetRequest; result: ExpressionGetResult | null };
+  "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionRendered | null> };
+  "expression.interact": { params: ExpressionInteractRequest; result: string };
+  "expression.interactions": { params: ExpressionUrlRequest; result: Array<InteractionMeta> };
+  "hosting.info": { params: any; result: any };
+  "hosting.requestPayment": { params: any; result: any };
+  "hosting.setHotWallet": { params: any; result: any };
+  "hosting.wallet": { params: any; result: any };
+  "hosting.walletHistory": { params: any; result: any };
+  "language.all": { params: any; result: any };
+  "language.applyTemplate": { params: any; result: any };
+  "language.get": { params: any; result: any };
+  "language.meta": { params: any; result: any };
+  "language.publish": { params: any; result: any };
+  "language.remove": { params: any; result: any };
+  "language.source": { params: any; result: any };
+  "language.writeSettings": { params: any; result: any };
+  "neighbourhood.hasTelepresence": { params: any; result: any };
+  "neighbourhood.join": { params: any; result: any };
+  "neighbourhood.onlineAgents": { params: any; result: any };
+  "neighbourhood.otherAgents": { params: any; result: any };
+  "neighbourhood.publish": { params: any; result: any };
+  "neighbourhood.sendBroadcast": { params: any; result: any };
+  "neighbourhood.sendSignal": { params: any; result: any };
+  "neighbourhood.setOnlineStatus": { params: any; result: any };
+  "perspective.acceptFlowProposal": { params: any; result: any };
+  "perspective.acceptInterpretation": { params: any; result: any };
+  "perspective.addAutoProcessor": { params: any; result: any };
+  "perspective.addLink": { params: any; result: any };
+  "perspective.addLinkExpression": { params: any; result: any };
+  "perspective.addLinks": { params: any; result: any };
+  "perspective.addSdna": { params: any; result: any };
+  "perspective.all": { params: any; result: any };
+  "perspective.commitBatch": { params: any; result: any };
+  "perspective.create": { params: any; result: any };
+  "perspective.createBatch": { params: any; result: any };
+  "perspective.createSubject": { params: any; result: any };
+  "perspective.disposeQuery": { params: any; result: any };
+  "perspective.disposeSparql": { params: any; result: any };
+  "perspective.evaluateGetters": { params: any; result: any };
+  "perspective.executeCommands": { params: any; result: any };
+  "perspective.flowValidOutputs": { params: any; result: any };
+  "perspective.get": { params: any; result: any };
+  "perspective.getAllShacl": { params: any; result: any };
+  "perspective.getShacl": { params: any; result: any };
+  "perspective.getShaclNames": { params: any; result: any };
+  "perspective.getShaclTargetClass": { params: any; result: any };
+  "perspective.getSubjectData": { params: any; result: any };
+  "perspective.interpretationOverlays": { params: any; result: any };
+  "perspective.keepAliveQuery": { params: any; result: any };
+  "perspective.keepAliveSparql": { params: any; result: any };
+  "perspective.linkMutations": { params: any; result: any };
+  "perspective.mintFlowReceipt": { params: any; result: any };
+  "perspective.modelQuery": { params: any; result: any };
+  "perspective.modelSubscribe": { params: any; result: any };
+  "perspective.proposeFlowTransition": { params: any; result: any };
+  "perspective.publishSnapshot": { params: any; result: any };
+  "perspective.queryLinks": { params: any; result: any };
+  "perspective.queryProlog": { params: any; result: any };
+  "perspective.querySparql": { params: any; result: any };
+  "perspective.rejectFlowProposal": { params: any; result: any };
+  "perspective.rejectInterpretation": { params: any; result: any };
+  "perspective.remove": { params: any; result: any };
+  "perspective.removeAutoProcessor": { params: any; result: any };
+  "perspective.removeLink": { params: any; result: any };
+  "perspective.removeLinks": { params: any; result: any };
+  "perspective.runInterpretation": { params: any; result: any };
+  "perspective.runInterpretationWithHarness": { params: any; result: any };
+  "perspective.snapshot": { params: any; result: any };
+  "perspective.subjectClassesOf": { params: any; result: any };
+  "perspective.subscribeQuery": { params: any; result: any };
+  "perspective.subscribeSparql": { params: any; result: any };
+  "perspective.update": { params: any; result: any };
+  "perspective.updateLink": { params: any; result: any };
+  "perspective.verifyFlowReceipt": { params: any; result: any };
+  "runtime.addFriends": { params: any; result: any };
+  "runtime.addHcAgentInfos": { params: any; result: any };
+  "runtime.addLinkLanguageTemplates": { params: any; result: any };
+  "runtime.computeLog": { params: any; result: any };
+  "runtime.createNotification": { params: any; result: any };
+  "runtime.deleteNotification": { params: any; result: any };
+  "runtime.exportData": { params: any; result: any };
+  "runtime.freeHostingEnabled": { params: any; result: any };
+  "runtime.friendStatus": { params: any; result: any };
+  "runtime.friends": { params: any; result: any };
+  "runtime.grantNotification": { params: any; result: any };
+  "runtime.hcAgentInfos": { params: any; result: any };
+  "runtime.hostRates": { params: any; result: any };
+  "runtime.importData": { params: any; result: any };
+  "runtime.inbox": { params: any; result: any };
+  "runtime.info": { params: any; result: any };
+  "runtime.linkLanguageTemplates": { params: any; result: any };
+  "runtime.networkMetrics": { params: any; result: any };
+  "runtime.notifications": { params: any; result: any };
+  "runtime.openLink": { params: any; result: any };
+  "runtime.outbox": { params: any; result: any };
+  "runtime.quit": { params: any; result: any };
+  "runtime.removeFriends": { params: any; result: any };
+  "runtime.removeLinkLanguageTemplates": { params: any; result: any };
+  "runtime.restartHolochain": { params: any; result: any };
+  "runtime.sendFriendMessage": { params: any; result: any };
+  "runtime.setFreeHostingEnabled": { params: any; result: any };
+  "runtime.setHostRates": { params: any; result: any };
+  "runtime.setStatus": { params: any; result: any };
+  "runtime.tlsDomain": { params: any; result: any };
+  "runtime.unytAgentKey": { params: any; result: any };
+  "runtime.unytHotAgentPubkey": { params: any; result: any };
+  "runtime.unytMembraneProof": { params: any; result: any };
+  "runtime.unytReinstallDna": { params: any; result: any };
+  "runtime.unytSendHot": { params: any; result: any };
+  "runtime.unytVersionInfo": { params: any; result: any };
+  "runtime.unytWalletBalance": { params: any; result: any };
+  "runtime.unytWalletHistory": { params: any; result: any };
+  "runtime.updateNotification": { params: any; result: any };
+  "runtime.verifySignature": { params: any; result: any };
+  "user.create": { params: any; result: any };
+  "user.credits": { params: any; result: any };
+  "user.emailTest": { params: any; result: any };
+  "user.freeAccess": { params: any; result: any };
+  "user.list": { params: any; result: any };
+  "user.login": { params: any; result: any };
+  "user.multiUserEnabled": { params: any; result: any };
+  "user.requestVerification": { params: any; result: any };
+  "user.setMultiUserEnabled": { params: any; result: any };
+  "user.verifyEmail": { params: any; result: any };
+  "user.wallet": { params: any; result: any };
+}
+
+export type RpcMethod = keyof RpcMethods;
+
+/** Idempotent reads: the client resends one once after a reconnect. */
+export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "expression.get",
+  "expression.getMany",
+  "expression.interactions",
+]);
+
+/** Calls that can run for minutes: the client's default timeout is its long one. */
+export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
+  "expression.create",
+]);

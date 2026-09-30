@@ -189,9 +189,23 @@ async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("expression.get", get_expression);
-    map.register("expression.getMany", get_many_expressions);
-    map.register("expression.create", create_expression);
-    map.register("expression.interactions", get_interactions);
-    map.register("expression.interact", interact_expression);
+    map.method::<ExpressionGetRequest, Option<ExpressionGetResult>>(
+        "expression.get",
+        get_expression,
+    )
+    .read();
+    map.method::<ExpressionManyRequest, Vec<Option<ExpressionRendered>>>(
+        "expression.getMany",
+        get_many_expressions,
+    )
+    .read();
+    map.method::<CreateExpressionRequest, String>("expression.create", create_expression)
+        .long();
+    map.method::<ExpressionUrlRequest, Vec<InteractionMeta>>(
+        "expression.interactions",
+        get_interactions,
+    )
+    .read();
+    // The interaction's result, JSON-encoded (`"null"` when it returns nothing).
+    map.method::<ExpressionInteractRequest, String>("expression.interact", interact_expression);
 }

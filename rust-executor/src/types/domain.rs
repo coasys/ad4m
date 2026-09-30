@@ -34,7 +34,7 @@ pub struct RequestContext {
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Agent {
     pub did: String,
@@ -42,14 +42,14 @@ pub struct Agent {
     pub perspective: Option<Perspective>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSignature {
     pub public_key: String,
     pub signature: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentStatus {
     pub did: Option<String>,
@@ -59,7 +59,7 @@ pub struct AgentStatus {
     pub is_unlocked: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Apps {
     pub auth: AuthInfo,
@@ -89,7 +89,7 @@ pub struct CapabilityInput {
     pub with: ResourceInput,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 // The javascript `Date` as string. pub struct represents date and time as the ISO Date string.
 pub struct DateTime(chrono::DateTime<chrono::Utc>);
@@ -106,7 +106,7 @@ impl From<chrono::DateTime<chrono::Utc>> for DateTime {
     }
 }
 
-#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProof {
     pub device_key: String,
@@ -117,7 +117,7 @@ pub struct EntanglementProof {
     pub did_signing_key_id: String,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct EntanglementProofInput {
     pub device_key: String,
@@ -128,7 +128,7 @@ pub struct EntanglementProofInput {
     pub did_signing_key_id: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionInfo {
     pub addon: Option<String>,
@@ -137,7 +137,7 @@ pub struct ExceptionInfo {
     pub r#type: ExceptionType,
 }
 
-#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ExceptionType {
     #[serde(alias = "LANGUAGE_IS_NOT_LOADED")]
@@ -176,7 +176,7 @@ pub struct ExpressionProofInput {
     pub valid: Option<bool>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ExpressionRendered {
     pub author: String,
@@ -187,20 +187,20 @@ pub struct ExpressionRendered {
     pub timestamp: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Icon {
     pub code: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionCall {
     pub name: String,
     pub parameters_stringified: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionMeta {
     pub label: String,
@@ -208,14 +208,14 @@ pub struct InteractionMeta {
     pub parameters: Vec<InteractionParameter>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct InteractionParameter {
     pub name: String,
     pub type_: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageHandle {
     pub address: String,
@@ -226,7 +226,7 @@ pub struct LanguageHandle {
     pub settings_icon: Option<Icon>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase", default)]
 pub struct LanguageMeta {
     pub address: String,
@@ -257,21 +257,21 @@ pub struct LanguageMetaInput {
     pub source_code_link: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageLanguageInput {
     pub bundle: String,
     pub meta: LanguageMeta,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageRef {
     pub address: String,
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, TS)]
 pub struct Language {
     pub name: String,
 }
@@ -308,7 +308,7 @@ pub struct LinkExpressionInput {
     pub status: Option<LinkStatus>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkExpressionUpdated {
     pub new_link: DecoratedLinkExpression,
@@ -324,7 +324,7 @@ pub struct LinkInput {
     pub target: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkQuery {
     pub from_date: Option<DateTime>,
@@ -343,7 +343,7 @@ pub struct LinkMutations {
     pub removals: Vec<LinkExpressionInput>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedPerspectiveDiff {
     pub additions: Vec<DecoratedLinkExpression>,
@@ -376,14 +376,14 @@ impl DecoratedPerspectiveDiff {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DecoratedNeighbourhoodExpression {
     pub author: String,
@@ -392,14 +392,14 @@ pub struct DecoratedNeighbourhoodExpression {
     pub timestamp: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OnlineAgent {
     pub did: String,
     pub status: PerspectiveExpression,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
@@ -448,7 +448,7 @@ impl TryFrom<LinkExpressionInput> for DecoratedLinkExpression {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveExpression {
     pub author: String,
@@ -497,7 +497,7 @@ impl PerspectiveExpression {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PerspectiveState {
     #[default]
@@ -515,7 +515,7 @@ pub enum PerspectiveState {
     Synced,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveHandle {
     pub uuid: String,
@@ -610,19 +610,19 @@ impl PerspectiveHandle {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveInput {
     pub links: Vec<LinkExpressionInput>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveUnsignedInput {
     pub links: Vec<LinkInput>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationInput {
     pub description: String,
@@ -635,7 +635,7 @@ pub struct NotificationInput {
     pub webhook_auth: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
@@ -650,7 +650,7 @@ pub struct ResourceInput {
     pub pointers: Vec<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub ad4m_executor_version: String,
@@ -661,7 +661,7 @@ pub struct RuntimeInfo {
 /// Readiness status returned by the `runtimeReadiness` query.
 /// Each field indicates whether a subsystem has completed initialization.
 /// Test harnesses should poll this instead of using `sleep()`.
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadinessStatus {
     /// REST server is accepting requests (always true if you can call this query)
@@ -674,7 +674,7 @@ pub struct ReadinessStatus {
     pub languages_loaded: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SentMessage {
     pub message: PerspectiveExpression,
@@ -684,7 +684,7 @@ pub struct SentMessage {
 // Public UserInfo struct for REST API - only contains non-sensitive fields
 // Note: last_seen uses f64 for JSON compatibility
 // f64 can safely represent integer timestamps up to 2^53 without precision loss
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,
@@ -712,7 +712,7 @@ impl From<crate::types::UserInfo> for UserInfo {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserCreationResult {
     pub did: String,
@@ -720,7 +720,7 @@ pub struct UserCreationResult {
     pub error: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserStatistics {
     pub email: String,
@@ -732,7 +732,7 @@ pub struct UserStatistics {
     pub hot_wallet_address: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VerificationRequestResult {
     pub success: bool,
@@ -741,7 +741,7 @@ pub struct VerificationRequestResult {
     pub is_existing_user: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct HostingUserInfo {
     pub email: String,
@@ -750,14 +750,14 @@ pub struct HostingUserInfo {
     pub free_access: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PaymentRequestResult {
     pub success: bool,
     pub message: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeLogEntry {
     pub id: i32,
@@ -769,7 +769,7 @@ pub struct ComputeLogEntry {
     pub credits_after: f64,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 pub struct NeighbourhoodSignalFilter {
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
@@ -777,7 +777,7 @@ pub struct NeighbourhoodSignalFilter {
 }
 
 // Wrapper for link events with owner filtering (for multi-user isolation)
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkWithOwner {
     pub perspective_uuid: String,
@@ -786,7 +786,7 @@ pub struct PerspectiveLinkWithOwner {
 }
 
 // Wrapper for link updated events with owner filtering (for multi-user isolation)
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveLinkUpdatedWithOwner {
     pub perspective_uuid: String,
@@ -795,21 +795,21 @@ pub struct PerspectiveLinkUpdatedWithOwner {
     pub owner: String, // DID of the owner
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkUpdated {
     pub new_link: DecoratedLinkExpression,
     pub old_link: DecoratedLinkExpression,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveStateFilter {
     pub state: PerspectiveState,
     pub perspective: PerspectiveHandle,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApiInput {
     pub base_url: String,
@@ -821,7 +821,7 @@ pub struct ModelApiInput {
     pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamplesInput {
     pub input: String,
@@ -846,7 +846,7 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelInput {
     pub file_name: String,
@@ -855,7 +855,7 @@ pub struct LocalModelInput {
     pub revision: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSourceInput {
     pub repo: String,
@@ -863,7 +863,7 @@ pub struct TokenizerSourceInput {
     pub file_name: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInput {
     pub name: String,
@@ -873,7 +873,7 @@ pub struct ModelInput {
     pub model_type: ModelType,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AITaskInput {
     pub name: String,
@@ -905,13 +905,13 @@ impl From<AITaskInput> for AITask {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptOutput {
     pub result: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionTextFilter {
     pub stream_id: String,
@@ -1116,7 +1116,7 @@ impl GetFilter for PerspectiveHandle {
 }
 
 // Wrapper type for perspective subscriptions that includes owner for filtering
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveWithOwner {
     pub perspective: PerspectiveHandle,
@@ -1138,7 +1138,7 @@ impl GetFilter for PerspectiveWithOwner {
 }
 
 // Wrapper type for perspective removed subscriptions that includes owner for filtering
-#[derive(Default, Debug, Deserialize, Serialize)]
+#[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveRemovedWithOwner {
     pub uuid: String,
@@ -1223,7 +1223,7 @@ impl GetFilter for TriggeredNotification {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIModelLoadingStatus {
     pub model: String,
@@ -1277,7 +1277,7 @@ impl GetFilter for ComputeLogEntry {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VoiceActivityParamsInput {
     pub start_threshold: Option<f64>,
@@ -1299,7 +1299,7 @@ impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
     }
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, TS)]
 pub struct ImportStats {
     pub total: i32,
     pub imported: i32,
@@ -1308,7 +1308,7 @@ pub struct ImportStats {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub perspectives: ImportStats,
@@ -1368,13 +1368,13 @@ impl ImportResult {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
 pub struct QuerySubscription {
     pub subscription_id: String,
     pub result: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveQuerySubscriptionFilter {
     pub uuid: String,

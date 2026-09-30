@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::types::{
-    AuthInfoInput, DecoratedLinkExpression, InteractionCall, LanguageMetaInput, LinkExpression,
-    LinkExpressionInput, LinkInput, LinkMutations, ModelType,
+    AuthInfoInput, DecoratedLinkExpression, ExpressionRendered, InteractionCall, LanguageMetaInput,
+    LinkExpression, LinkExpressionInput, LinkInput, LinkMutations, ModelType,
 };
 
 // Re-export for use in handler files
@@ -249,6 +249,40 @@ pub struct CreateExpressionRequest {
 #[ts(export)]
 pub struct ExpressionManyRequest {
     pub urls: Vec<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionGetRequest {
+    pub url: String,
+    /// Return the stored expression as a JSON string instead of rendering it.
+    #[ts(optional)]
+    pub raw: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionUrlRequest {
+    pub url: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct ExpressionInteractRequest {
+    pub url: String,
+    pub interaction_call: InteractionCall,
+}
+
+/// `expression.get`: the rendered expression, or with `raw` its stored JSON as a string.
+#[derive(Serialize, Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum ExpressionGetResult {
+    Rendered(ExpressionRendered),
+    Raw(String),
 }
 
 // ── Languages ──

@@ -50,5 +50,5 @@ export type { UpdateLinkRequest } from "./UpdateLinkRequest";
 export type { UpdatePerspectiveRequest } from "./UpdatePerspectiveRequest";
 export type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export type { WriteSettingsRequest } from "./WriteSettingsRequest";
-export { HANDLER_METHODS } from "./HandlerMethods";
-export type { HandlerMethod } from "./HandlerMethods";
+export { READ_METHODS, LONG_METHODS } from "./RpcMethods";
+export type { RpcMethods, RpcMethod } from "./RpcMethods";

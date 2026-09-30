@@ -4,6 +4,7 @@
 //! Each domain module (agent, perspectives, runtime, etc.) registers its
 //! handlers via `register_ws_handlers(&mut HandlerMap)` — no central route map.
 
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -89,6 +90,181 @@ pub type WsHandler = Box<
         + Sync,
 >;
 
+/// An async handler body: `(params, ctx) -> Result<Value, WsRpcError>`.
+pub trait WsFn: Send + Sync + 'static {
+    fn call(
+        &self,
+        params: Value,
+        ctx: Arc<RequestContext>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, WsRpcError>> + Send>>;
+}
+
+impl<F, Fut> WsFn for F
+where
+    F: Fn(Value, Arc<RequestContext>) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<Value, WsRpcError>> + Send + 'static,
+{
+    fn call(
+        &self,
+        params: Value,
+        ctx: Arc<RequestContext>,
+    ) -> Pin<Box<dyn Future<Output = Result<Value, WsRpcError>> + Send>> {
+        Box::pin(self(params, ctx))
+    }
+}
+
+// ── Method contract ─────────────────────────────────────────────────────────
+
+/// The params type of a method that takes none. Accepts any params (`{}`,
+/// `null` or absent) and is `Record<string, never>` in TypeScript.
+pub struct NoParams;
+
+impl<'de> serde::Deserialize<'de> for NoParams {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        serde::de::IgnoredAny::deserialize(d).map(|_| NoParams)
+    }
+}
+
+impl ts_rs::TS for NoParams {
+    type WithoutGenerics = Self;
+    type OptionInnerType = Self;
+    fn name(_: &ts_rs::Config) -> String {
+        "Record<string, never>".into()
+    }
+    fn inline(cfg: &ts_rs::Config) -> String {
+        Self::name(cfg)
+    }
+}
+
+/// A TypeScript type of a method contract: its expression and the exported
+/// types it reaches.
+pub struct TsType {
+    /// The type expression, e.g. `Array<LinkExpression>` or `Agent | null`.
+    pub name: String,
+    /// `(ts name, path under the export dir)` of every exported type it
+    /// reaches, directly or through fields and generic arguments.
+    pub deps: Vec<(String, std::path::PathBuf)>,
+    /// Writes those types to the export dir.
+    pub export: fn(&ts_rs::Config) -> Result<(), ts_rs::ExportError>,
+    /// Those types whose file under `dir` differs from what ts-rs renders.
+    pub stale: fn(&ts_rs::Config, &std::path::Path) -> Vec<String>,
+}
+
+impl TsType {
+    fn of<T: ts_rs::TS + 'static + ?Sized>() -> Self {
+        let cfg = ts_rs::Config::from_env();
+        let mut deps: Vec<(String, std::path::PathBuf)> = Reached::of::<T>(&cfg)
+            .0
+            .into_iter()
+            .map(|t| (t.name, t.path))
+            .collect();
+        deps.sort();
+        Self {
+            name: T::name(&cfg),
+            deps,
+            export: |cfg| {
+                for t in Reached::of::<T>(cfg).0 {
+                    (t.export)(cfg)?;
+                }
+                Ok(())
+            },
+            stale: |cfg, dir| {
+                Reached::of::<T>(cfg)
+                    .0
+                    .into_iter()
+                    .filter(|t| {
+                        let have = std::fs::read_to_string(dir.join(&t.path)).ok();
+                        (t.render)(cfg).ok() != have
+                    })
+                    .map(|t| t.path.display().to_string())
+                    .collect()
+            },
+        }
+    }
+}
+
+/// An exported type reached from a contract type.
+struct ReachedType {
+    name: String,
+    path: std::path::PathBuf,
+    export: fn(&ts_rs::Config) -> Result<(), ts_rs::ExportError>,
+    render: fn(&ts_rs::Config) -> Result<String, ts_rs::ExportError>,
+}
+
+/// Every exported type reachable from `T`, through fields and generic
+/// arguments (`Option<Agent>` reaches `Agent`).
+struct Reached<'a>(
+    Vec<ReachedType>,
+    std::collections::HashSet<std::any::TypeId>,
+    &'a ts_rs::Config,
+);
+
+impl<'a> Reached<'a> {
+    fn of<T: ts_rs::TS + 'static + ?Sized>(cfg: &'a ts_rs::Config) -> Self {
+        let mut r = Reached(Vec::new(), std::collections::HashSet::new(), cfg);
+        ts_rs::TypeVisitor::visit::<T>(&mut r);
+        r
+    }
+}
+
+impl ts_rs::TypeVisitor for Reached<'_> {
+    fn visit<T: ts_rs::TS + 'static + ?Sized>(&mut self) {
+        if !self.1.insert(std::any::TypeId::of::<T>()) {
+            return;
+        }
+        if let Some(path) = T::output_path() {
+            self.0.push(ReachedType {
+                name: T::ident(self.2),
+                path,
+                export: |cfg| T::export(cfg),
+                render: |cfg| T::export_to_string(cfg),
+            });
+        }
+        T::visit_dependencies(self);
+        T::visit_generics(self);
+    }
+}
+
+/// What the SDK needs to know about a method: its name, the TypeScript
+/// types of its params and result, and how the client should call it.
+pub struct MethodSpec {
+    pub name: String,
+    pub params: TsType,
+    pub result: TsType,
+    /// An idempotent read: the client may resend it once after a reconnect.
+    pub read: bool,
+    /// Can run for minutes (LLM work, Holochain, publishing): the client's
+    /// default timeout is its long one.
+    pub long: bool,
+}
+
+type Check = fn(&Value) -> Result<(), String>;
+
+fn check<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
+    T::deserialize(v).map(|_| ()).map_err(|e| e.to_string())
+}
+
+struct Entry {
+    handler: WsHandler,
+    params: Option<Check>,
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    result: Option<Check>,
+}
+
+/// Returned by [`HandlerMap::method`] to mark a method `read` or `long`.
+pub struct MethodFlags<'a>(&'a mut MethodSpec);
+
+impl MethodFlags<'_> {
+    pub fn read(self) -> Self {
+        self.0.read = true;
+        self
+    }
+    pub fn long(self) -> Self {
+        self.0.long = true;
+        self
+    }
+}
+
 // ── Handler map ─────────────────────────────────────────────────────────────
 
 /// Registry of message-type → handler mappings.
@@ -96,14 +272,63 @@ pub type WsHandler = Box<
 /// Built at startup by calling each module's `register_ws_handlers()`.
 /// Used by the WS dispatcher to route incoming RPC messages.
 pub struct HandlerMap {
-    handlers: HashMap<String, WsHandler>,
+    handlers: HashMap<String, Entry>,
+    specs: Vec<MethodSpec>,
 }
 
 impl HandlerMap {
     pub fn new() -> Self {
         Self {
             handlers: HashMap::new(),
+            specs: Vec::new(),
         }
+    }
+
+    /// Register `handler` for `name` with its contract: dispatch rejects
+    /// params that do not deserialize into `P` (400), and debug builds log a
+    /// result that does not deserialize into `R`. The contract is exported
+    /// to the SDK (`core/src/generated/rpc.ts`).
+    pub fn method<P, R>(&mut self, name: &str, handler: impl WsFn) -> MethodFlags<'_>
+    where
+        P: DeserializeOwned + ts_rs::TS + 'static,
+        R: DeserializeOwned + ts_rs::TS + 'static,
+    {
+        self.insert(name, handler, Some(check::<P>), Some(check::<R>));
+        self.specs.push(MethodSpec {
+            name: name.to_string(),
+            params: TsType::of::<P>(),
+            result: TsType::of::<R>(),
+            read: false,
+            long: false,
+        });
+        MethodFlags(self.specs.last_mut().expect("just pushed"))
+    }
+
+    fn insert(
+        &mut self,
+        name: &str,
+        handler: impl WsFn,
+        params: Option<Check>,
+        result: Option<Check>,
+    ) {
+        if self.handlers.contains_key(name) {
+            panic!("Duplicate WS handler registration for '{}'", name);
+        }
+        self.handlers.insert(
+            name.to_string(),
+            Entry {
+                handler: Box::new(move |params, ctx| handler.call(params, ctx)),
+                params,
+                result,
+            },
+        );
+    }
+
+    /// The contracts of the methods registered with [`Self::method`], sorted by name.
+    pub fn specs(&self) -> Vec<&MethodSpec> {
+        let mut specs: Vec<&MethodSpec> = self.specs.iter().collect();
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        specs
     }
 
     /// Register a handler for a message type (e.g. `"agent.get"`).
@@ -115,14 +340,7 @@ impl HandlerMap {
         F: Fn(Value, Arc<RequestContext>) -> Fut + Send + Sync + 'static,
         Fut: Future<Output = Result<Value, WsRpcError>> + Send + 'static,
     {
-        let msg_type = msg_type.to_string();
-        if self.handlers.contains_key(&msg_type) {
-            panic!("Duplicate WS handler registration for '{}'", msg_type);
-        }
-        self.handlers.insert(
-            msg_type,
-            Box::new(move |params, ctx| Box::pin(handler(params, ctx))),
-        );
+        self.insert(msg_type, handler, None, None);
     }
 
     /// Dispatch an RPC message to the appropriate handler.
@@ -132,11 +350,23 @@ impl HandlerMap {
         params: Value,
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
-        let handler = self
+        let entry = self
             .handlers
             .get(msg_type)
             .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))?;
-        handler(params, ctx).await
+        if let Some(check) = entry.params {
+            check(&params).map_err(|e| {
+                WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
+            })?;
+        }
+        let result = (entry.handler)(params, ctx).await?;
+        #[cfg(debug_assertions)]
+        if let Some(check) = entry.result {
+            if let Err(e) = check(&result) {
+                log::error!("{} returned a result outside its contract: {}", msg_type, e);
+            }
+        }
+        Ok(result)
     }
 
     /// Number of registered handlers (useful for logging at startup).
