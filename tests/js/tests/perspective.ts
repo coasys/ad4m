@@ -155,17 +155,22 @@ export default function perspectiveTests(testContext: TestContext) {
             it('test local perspective links - time query', async () => {
                 const ad4mClient = testContext.ad4mClient!
 
+                // The queries below cut at `addLink2.timestamp - 1`, so consecutive
+                // links need more than 1 ms between timestamps. Waiting only until
+                // Date.now() passed the previous timestamp gave exactly 1 ms at times,
+                // and link 1 then fell inside the "from link 2" window (5 instead of 4).
+                const LINK_GAP_MS = 10;
                 const create = await ad4mClient!.perspective.add("test-links-time");
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink" });
+                await pollUntil(() => Date.now() >= new Date(addLink.timestamp).getTime() + LINK_GAP_MS, { timeoutMs: 1000, intervalMs: 1, label: "addLink + LINK_GAP_MS" });
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink2.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink2" });
+                await pollUntil(() => Date.now() >= new Date(addLink2.timestamp).getTime() + LINK_GAP_MS, { timeoutMs: 1000, intervalMs: 1, label: "addLink2 + LINK_GAP_MS" });
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink3.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink3" });
+                await pollUntil(() => Date.now() >= new Date(addLink3.timestamp).getTime() + LINK_GAP_MS, { timeoutMs: 1000, intervalMs: 1, label: "addLink3 + LINK_GAP_MS" });
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink4.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink4" });
+                await pollUntil(() => Date.now() >= new Date(addLink4.timestamp).getTime() + LINK_GAP_MS, { timeoutMs: 1000, intervalMs: 1, label: "addLink4 + LINK_GAP_MS" });
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
