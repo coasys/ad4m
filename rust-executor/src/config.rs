@@ -150,6 +150,11 @@ impl Ad4mConfig {
     }
 
     pub fn prepare(&mut self) {
+        // An empty credential is no credential. Normalised here, once, so
+        // every reader after prepare() (the startup check, REST/WS
+        // capabilities, the MCP bind host and auth) agrees on it.
+        self.admin_credential = non_empty_credential(self.admin_credential.take());
+
         // Read shared-backend config from environment variables when not set
         // programmatically. This allows Docker containers to configure the
         // executor via standard `environment:` directives without CLI flags.
@@ -251,15 +256,11 @@ impl Ad4mConfig {
 
     /// Secure by default: an executor without an admin credential serves every
     /// caller as the operator, so it only starts that way when the testing
-    /// flag says so. `Some("")` counts as no credential, on every listener
-    /// (loopback included). Called by `run()` before any service starts, so
-    /// every entry point (CLI, launcher, library) goes through it.
+    /// flag says so. Called by `run()` after `prepare()`, which has already
+    /// turned `Some("")` into `None`, and before any service starts, so every
+    /// entry point (CLI, launcher, library) goes through it.
     pub fn check_admin_credential(&self) -> Result<(), String> {
-        let has_credential = self
-            .admin_credential
-            .as_deref()
-            .is_some_and(|credential| !credential.is_empty());
-        if has_credential || self.insecure_no_admin_credential == Some(true) {
+        if self.admin_credential.is_some() || self.insecure_no_admin_credential == Some(true) {
             return Ok(());
         }
         Err(NO_ADMIN_CREDENTIAL_ERROR.to_string())
@@ -268,6 +269,13 @@ impl Ad4mConfig {
     pub fn get_json(&self) -> String {
         serde_json::to_string(self).expect("Could not convert config to json")
     }
+}
+
+/// `Some("")` is no credential: an empty environment variable (a compose
+/// `${VAR}` with `VAR` unset) must not become a credential the empty token
+/// matches.
+pub fn non_empty_credential(credential: Option<String>) -> Option<String> {
+    credential.filter(|credential| !credential.is_empty())
 }
 
 /// Why `run` refused to start; names both ways out.
@@ -411,12 +419,13 @@ mod tests {
 
     #[test]
     fn empty_admin_credential_counts_as_none() {
-        assert!(with_credential(Some(""), None)
-            .check_admin_credential()
-            .is_err());
-        assert!(with_credential(Some(""), Some(true))
-            .check_admin_credential()
-            .is_ok());
+        let prepared = |flag| {
+            let mut config = with_credential(Some(""), flag);
+            config.prepare();
+            config
+        };
+        assert!(prepared(None).check_admin_credential().is_err());
+        assert!(prepared(Some(true)).check_admin_credential().is_ok());
     }
 
     /// `prepare()` turns an empty credential into `None`, so every reader after
@@ -432,6 +441,18 @@ mod tests {
         let mut config = with_credential(Some("secret"), Some(true));
         config.prepare();
         assert_eq!(config.admin_credential.as_deref(), Some("secret"));
+    }
+
+    /// The interpretation pass reads AD4M_ADMIN_CREDENTIAL itself, through
+    /// this helper, so an empty variable is no credential there too.
+    #[test]
+    fn non_empty_credential_drops_only_the_empty_string() {
+        assert_eq!(non_empty_credential(Some(String::new())), None);
+        assert_eq!(non_empty_credential(None), None);
+        assert_eq!(
+            non_empty_credential(Some(" ".to_string())).as_deref(),
+            Some(" ")
+        );
     }
 
     #[test]

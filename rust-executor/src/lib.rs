@@ -501,12 +501,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig"),
     );
 
-    if config
-        .admin_credential
-        .as_deref()
-        .map(|s| s.is_empty())
-        .unwrap_or(true)
-    {
+    if config.admin_credential.is_none() {
         // Only reachable with insecure_no_admin_credential (checked above).
         warn!("╔══════════════════════════════════════════════════════════════╗");
         warn!("║  SECURITY WARNING: --insecure-no-admin-credential is set     ║");
