@@ -31,16 +31,23 @@ one as an argument.
 | Source | `~/ad4m-staging-src`, a detached worktree of `~/nico/ad4m` |
 | Email | none: SMTP is off, accounts sign up with a password (see "Accounts") |
 
-Every 10 minutes `update.sh` fetches `origin/staging`. When it has moved, the
-script builds it, stops the executor, snapshots the data directory, points
-`current` at the new build, runs `ad4m-executor init`, starts the executor and
-waits up to 180 s for `/health` and an unlocked agent. If the new build does
-not get there, the script stops it, restores the snapshot, points `current`
-back at `previous` and starts that again. A commit that failed to build or
+Every 10 minutes `update.sh` fetches the head of the `staging` branch (by
+its full ref name; a tag called `origin/staging` does not count). When it has
+moved, the script builds it, stops the executor, snapshots the data
+directory, points `current` at the new build, runs `ad4m-executor init`,
+starts the executor and waits up to 180 s for `/health` and an unlocked
+agent. A node that never had an agent passes on `/health` alone; once an
+agent has been unlocked, a build that finds none fails. If the new build
+does not get there, the script stops it, restores the snapshot, points
+`current` back at the build that ran before and starts that again. If a step
+between the stop and the start fails (a full disk during the snapshot, say),
+the build that ran before is started again. A commit that failed to build or
 failed that check is not tried again until `staging` moves on.
 
 Anyone who can merge to `staging` can run code on this box as `marvin`.
-`staging` is protected (one approving review) for that reason.
+`staging` is protected (one approving review) for that reason. As of this
+writing the protection still allows force pushes and does not apply to
+admins; both are Nico's to change.
 
 ## First-time setup
 
@@ -69,8 +76,9 @@ service user without root.
    curl -fsS https://staging.ad4m.dev/status.json
    ```
 
-   Expected: a JSON object (before the first deploy
-   `{"deployed_sha":null,"last_result":"not deployed yet"}`).
+   Expected: a JSON object. Before `update.sh` first ran, it is whatever was
+   put there by hand; afterwards it has `deployed_sha` (`null` until the
+   first deploy) and `last_result`.
 
 3. **Lingering**, so the user's units run without a login session:
 
@@ -240,7 +248,9 @@ service user without root.
    Expected: only `127.0.0.1:…` and `[::1]:…` addresses.
 
 6. A caller without the credential gets no operator access through nginx
-   (an empty token only reaches sign-up and login):
+   (an empty token only reaches sign-up and login). `agent.mjs` refuses to
+   send a real credential anywhere but 127.0.0.1, because the token travels
+   in the URL and nginx logs URLs; this check sends an empty one:
 
    ```bash
    AD4M_URL=https://staging.ad4m.dev AD4M_ADMIN_CREDENTIAL_FILE=/dev/null node ~/.local/share/ad4m-staging/bin/agent.mjs status
@@ -274,10 +284,11 @@ outcome.
 |---|---|
 | `deployed` / `deployed (no agent yet)` | The new build passed the check and runs |
 | `building <sha>` | A build is running |
-| `build failed for <sha> (log: …)` | The old build keeps running; read the log |
+| `build failed for <sha> (logs/build-<sha>.log in the state directory)` | The old build keeps running; read `~/.local/share/ad4m-staging/logs/build-<sha>.log` |
 | `rolled_back: <sha> failed the gate; <previous> runs again` | The new build did not get healthy and unlocked in 180 s; the previous build runs on the data from before the deploy |
 | `waiting: origin/staging lacks #1215 PR1 (--config)` | `staging` cannot run this unit yet; nothing deployed |
-| `error: …` | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
+| `error: deploying <sha> failed before its check; <old sha> runs again` | A step after the stop failed (the snapshot, for example); the old build was started again; `journalctl --user -u ad4m-staging-update` has the error |
+| `error: …` (other) | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
 
 `update.sh` does not build a commit again that failed. After fixing what
 made it fail (for example freeing disk space), build it again with:
@@ -333,15 +344,21 @@ the previous SHA and `last_result` =
 `rolled_back by hand: <new sha>; <previous sha> runs again`.
 `error: no previous build to roll back to` means there is only one build
 (the first deploy, or a second rollback in a row).
+`error: no snapshot of the data of <previous sha>; …` means the snapshot is
+missing; the previous build would start on data a newer build may have
+migrated. Only if that is acceptable, run the same command with
+`-E AD4M_STAGING_KEEP_DATA=1` after `--pipe`.
 
 What it does: stops the executor, moves the data directory to
 `~/.ad4m-staging.failed` (replacing an older one), restores the snapshot
 taken when the new build replaced the previous one, points `current` at the
 previous build, starts it and checks it. **Everything written to staging
 since that deploy is lost** (it stays readable in `~/.ad4m-staging.failed`).
-The rolled-back SHA counts as failed, so the timer does not deploy it again;
-the next commit on `staging` deploys normally. There is one step back: after
-a rollback, `previous` is gone. Restart the timer when you are done:
+The head of `staging` counts as failed, so the timer does not deploy it
+again; the next commit on `staging` deploys normally. There is one step
+back: after a rollback, `previous` is gone. Snapshots of failed deploys do
+not push out the one a rollback needs: the newest snapshot of the running
+build and of the one before it are kept. Restart the timer when you are done:
 
 ```bash
 systemctl --user start ad4m-staging-update.timer

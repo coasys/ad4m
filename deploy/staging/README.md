@@ -25,7 +25,7 @@ Paths at runtime:
 |---|---|
 | `~/ad4m-staging-src` | detached worktree of `~/nico/ad4m` (never of a CI workdir), own `target/` |
 | `~/.local/share/ad4m-staging/releases/<sha>/` | `ad4m-executor` and `ad4m` of a build; `current` and `previous` link here |
-| `~/.local/share/ad4m-staging/snapshots/` | the data dir before each of the last two deploys |
+| `~/.local/share/ad4m-staging/snapshots/` | data dir snapshots, `<time>-<sha>`: the newest of the running build and of the one before it |
 | `~/.local/share/ad4m-staging/status.json` | deployed commit and last result; copied to `/var/www/ad4m-staging/status.json` |
 | `~/.config/ad4m-staging/secrets/` | `admin-credential`, `unlock-passphrase` (dir 0700, files 0600) |
 | `~/.ad4m-staging` | executor data dir |

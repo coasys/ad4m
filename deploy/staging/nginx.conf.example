@@ -1,10 +1,14 @@
-# Copy of /etc/nginx/sites-available/staging-ad4m-dev on marvin (enabled via
-# sites-enabled). Installing it needs root; see docs-src/headless-executor.md.
+# The vhost of /etc/nginx/sites-available/staging-ad4m-dev on marvin (enabled
+# via sites-enabled). Installing it needs root; see docs-src/headless-executor.md.
+# Differs from the live file in the #1179 comment below and the /internal/
+# block, which were added in review and still need applying there.
 # staging.ad4m.dev: staging ad4m executor for the team (coasys/ad4m #1215). Tracks origin/staging,
 # redeployed by the ad4m-staging-update.timer (systemd --user, marvin). The executor listens on
 # 127.0.0.1:12400 only; MCP is not exposed. The admin credential is required.
-# The X-Forwarded-*/X-Real-IP headers are deliberate: with #1179 they mark every request through
-# this proxy as a network caller, so the loopback empty-token operator never applies here.
+# The X-Forwarded-*/X-Real-IP headers are deliberate: once #1179 lands they mark every request
+# through this proxy as a network caller, so the loopback empty-token operator never applies here.
+# (Until then the executor ignores them; with the admin credential set, an empty token is not
+# the operator anyway.)
 # /status.json = deployed commit, written by deploy/staging/update.sh to /var/www/ad4m-staging.
 server {
     listen 80;
@@ -24,6 +28,11 @@ server {
         add_header Cache-Control "no-cache";
         add_header Access-Control-Allow-Origin "*";
         add_header X-Robots-Tag "noindex, nofollow" always;
+    }
+
+    # The executor's platform-internal routes are not for the internet.
+    location /internal/ {
+        return 404;
     }
 
     location / {
