@@ -68,9 +68,11 @@ service user without root.
    installed as `/etc/nginx/sites-available/staging-ad4m-dev` and linked
    from `sites-enabled/`; `/var/www/ad4m-staging/` exists and belongs to the
    service user, who writes `status.json` there. The vhost proxies `/` with
-   WebSocket upgrade to `127.0.0.1:12400`, sets `X-Forwarded-*` so the
-   executor sees every proxied request as a network caller, sends
-   `X-Robots-Tag: noindex`, and does not expose MCP. Check:
+   WebSocket upgrade to `127.0.0.1:12400`, sets `X-Forwarded-*` (once
+   coasys/ad4m#1179 lands, they make the executor see every proxied request
+   as a network caller; until then it ignores them, which does not matter
+   here because the admin credential is set), returns 404 for `/internal/`,
+   sends `X-Robots-Tag: noindex`, and does not expose MCP. Check:
 
    ```bash
    curl -fsS https://staging.ad4m.dev/status.json
@@ -288,6 +290,8 @@ outcome.
 | `rolled_back: <sha> failed the gate; <previous> runs again` | The new build did not get healthy and unlocked in 180 s; the previous build runs on the data from before the deploy |
 | `waiting: origin/staging lacks #1215 PR1 (--config)` | `staging` cannot run this unit yet; nothing deployed |
 | `error: deploying <sha> failed before its check; <old sha> runs again` | A step after the stop failed (the snapshot, for example); the old build was started again; `journalctl --user -u ad4m-staging-update` has the error |
+| `rolled_back: the deploy of <sha> was interrupted; <previous> runs again` | An update was killed during the check of `<sha>` (a reboot, the OOM killer, a stopped update service); the next run rolled it back as if it had failed the check |
+| `error: could not restore the data of <sha>; staging is stopped` | A rollback could not move the data directory aside or copy the snapshot back (a full disk, most likely). Nothing runs, `current` is removed, and the timer deploys nothing until the data is restored by hand; see "Roll back" |
 | `error: …` (other) | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
 
 `update.sh` does not build a commit again that failed. After fixing what
@@ -322,20 +326,31 @@ new one; JWTs that users got by logging in stay valid.
 
 **Unlock passphrase.** The passphrase encrypts the agent's keys, and the
 executor has no call to change it, so replacing the file alone makes every
-start fail to unlock. On staging, rotating it means a new, empty agent:
-stop the service (`systemctl --user stop ad4m-staging`), move
-`~/.ad4m-staging` aside, write a new passphrase file as in setup step 8,
-run `ad4m-executor init` from `current/`, start the service and repeat setup
-step 13. All staging data and accounts are gone after that. On a
-production node, keep the passphrase.
+start fail to unlock. On staging, rotating it means a new, empty agent, and
+no deploy may run in between: until step 13 has run again, `status.json`
+still says an agent was unlocked, so a deploy would fail its check, and so
+would its rollback.
+
+1. Stop the timer and wait for a running update to end (or stop it):
+   `systemctl --user stop ad4m-staging-update.timer ad4m-staging-update.service`
+2. Stop the executor: `systemctl --user stop ad4m-staging`.
+3. Move `~/.ad4m-staging` aside, write a new passphrase file as in setup
+   step 8, and run `~/.local/share/ad4m-staging/current/ad4m-executor init --data-path ~/.ad4m-staging`.
+4. Start the executor and repeat setup step 13.
+5. Start the timer again: `systemctl --user start ad4m-staging-update.timer`.
+
+All staging data and accounts are gone after that. On a production node,
+keep the passphrase.
 
 ## Roll back
 
 A failed deploy rolls back by itself. To go back to the previous build when
-the new one passed the check but misbehaves:
+the new one passed the check but misbehaves, stop the timer and any update
+that is running (stopping the timer alone leaves a running build alone, and
+`rollback` then fails with `another update is running`), then roll back:
 
 ```bash
-systemctl --user stop ad4m-staging-update.timer && systemd-run --user --wait --collect --pipe -p EnvironmentFile="$HOME/.config/ad4m-staging/update.env" "$HOME/.local/share/ad4m-staging/bin/update.sh" rollback
+systemctl --user stop ad4m-staging-update.timer ad4m-staging-update.service && systemd-run --user --wait --collect --pipe -p EnvironmentFile="$HOME/.config/ad4m-staging/update.env" "$HOME/.local/share/ad4m-staging/bin/update.sh" rollback
 ```
 
 Expected, at the end: `update: <previous sha> runs again` and
@@ -348,6 +363,22 @@ the previous SHA and `last_result` =
 missing; the previous build would start on data a newer build may have
 migrated. Only if that is acceptable, run the same command with
 `-E AD4M_STAGING_KEEP_DATA=1` after `--pipe`.
+`error: could not restore the data of <sha>; staging is stopped` (also
+written by an automatic rollback) means the data directory could not be
+moved aside or the snapshot could not be copied back, most likely because
+the disk is full. Nothing runs and `current` is gone, so neither a reboot
+nor the timer starts a build on a half-copied data directory. The failed
+build's data is in `~/.ad4m-staging.failed` (unless the move failed, then
+it is still in `~/.ad4m-staging`), and the snapshot of `<sha>` is kept.
+Free space, then restore by hand:
+
+```bash
+S=~/.local/share/ad4m-staging; sha=<sha>; snap=$(ls -d "$S"/snapshots/*-"$sha" | tail -n 1); [ ! -e ~/.ad4m-staging ] || mv ~/.ad4m-staging ~/.ad4m-staging.failed.2; cp -a --reflink=auto "$snap" ~/.ad4m-staging && ln -sfn "releases/$sha" "$S/current" && systemctl --user start ad4m-staging
+```
+
+Then run health check 3. If `<sha>` is not the `deployed_sha` in
+`status.json` (a rollback by hand), also set it:
+`jq --arg s "$sha" '.deployed_sha = $s | .previous_sha = null' "$S/status.json" > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
 
 What it does: stops the executor, moves the data directory to
 `~/.ad4m-staging.failed` (replacing an older one), restores the snapshot

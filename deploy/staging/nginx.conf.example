@@ -1,7 +1,7 @@
 # The vhost of /etc/nginx/sites-available/staging-ad4m-dev on marvin (enabled
 # via sites-enabled). Installing it needs root; see docs-src/headless-executor.md.
-# Differs from the live file in the #1179 comment below and the /internal/
-# block, which were added in review and still need applying there.
+# Below this header the live file matches this one line for line, the
+# /internal/ block included (applied 2026-09-30).
 # staging.ad4m.dev: staging ad4m executor for the team (coasys/ad4m #1215). Tracks origin/staging,
 # redeployed by the ad4m-staging-update.timer (systemd --user, marvin). The executor listens on
 # 127.0.0.1:12400 only; MCP is not exposed. The admin credential is required.
