@@ -1,5 +1,8 @@
 use crate::encryption::{decrypt_password, encrypt_password};
 use dirs::home_dir;
+use rust_executor::config_file::{
+    ExecutorConfigFile, MultiUserSettings, SmtpSettings, TlsSettings,
+};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fmt;
@@ -16,13 +19,8 @@ pub struct AgentConfigDir {
     pub bootstrap: Option<PathBuf>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct TlsConfig {
-    pub enabled: bool,
-    pub cert_file_path: String,
-    pub key_file_path: String,
-    pub tls_port: Option<u16>, // Port for HTTPS/WSS server (defaults to main_port + 1)
-}
+/// The shared shape of `tls_config`; the TLS port defaults to main port + 1.
+pub type TlsConfig = TlsSettings;
 
 #[derive(Clone)]
 pub struct SmtpConfig {
@@ -64,6 +62,18 @@ impl SmtpConfig {
             username,
             password,
             from_address,
+        }
+    }
+
+    /// The shared SMTP settings; the password travels separately.
+    pub fn settings(&self) -> SmtpSettings {
+        SmtpSettings {
+            enabled: self.enabled,
+            host: self.host.clone(),
+            port: self.port,
+            username: self.username.clone(),
+            from_address: self.from_address.clone(),
+            password_file: None,
         }
     }
 
@@ -252,12 +262,10 @@ impl<'de> Deserialize<'de> for HostRegistration {
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct MultiUserConfig {
-    pub enabled: bool,
-    pub smtp_config: Option<SmtpConfig>,
-    pub tls_config: Option<TlsConfig>,
-}
+/// The shared `multi_user_config` shape, with the launcher's SMTP config
+/// (password keyring-encrypted on disk) in place of the config file's
+/// `password_file`.
+pub type MultiUserConfig = MultiUserSettings<SmtpConfig>;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct LauncherState {
@@ -325,6 +333,52 @@ impl LauncherState {
         Ok(state)
     }
 
+    /// The executor settings this state describes, for the selected agent's
+    /// `app_path` on `port`, plus the plain SMTP password. The deprecated
+    /// top-level `tls_config` counts only when there is no
+    /// `multi_user_config`. The plain port binds to loopback unless TLS is on
+    /// (with TLS the executor keeps it on loopback anyway).
+    pub fn executor_config(
+        &self,
+        app_path: String,
+        port: u16,
+    ) -> (ExecutorConfigFile, Option<String>) {
+        let (multi_user_config, smtp_password) = match &self.multi_user_config {
+            Some(multi_user) => (
+                MultiUserSettings {
+                    enabled: multi_user.enabled,
+                    smtp_config: multi_user.smtp_config.as_ref().map(SmtpConfig::settings),
+                    tls_config: multi_user.tls_config.clone(),
+                },
+                multi_user.smtp_config.as_ref().map(|s| s.password.clone()),
+            ),
+            None => (
+                MultiUserSettings {
+                    enabled: false,
+                    smtp_config: None,
+                    tls_config: self.tls_config.clone(),
+                },
+                None,
+            ),
+        };
+        let tls_enabled = multi_user_config
+            .tls_config
+            .as_ref()
+            .is_some_and(|tls| tls.enabled);
+        let file = ExecutorConfigFile {
+            app_data_path: Some(app_path),
+            port: Some(port),
+            localhost: Some(!tls_enabled),
+            run_dapp_server: Some(true),
+            multi_user_config: Some(multi_user_config),
+            log_config: self.log_config.clone(),
+            mcp_enabled: self.mcp_enabled,
+            mcp_port: self.mcp_port,
+            ..Default::default()
+        };
+        (file, smtp_password)
+    }
+
     pub fn add_agent(&mut self, agent: AgentConfigDir) {
         if !self.is_agent_taken(&agent.name, &agent.path) {
             self.agent_list.push(agent);
@@ -340,5 +394,168 @@ impl LauncherState {
         self.agent_list
             .iter()
             .any(|agent| agent.name == new_name && (&agent.path == new_path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_executor::config_file::ExecutorSecrets;
+
+    /// The shape `launcher-state.json` has on a running team node today:
+    /// `smtp_config` from before its `enabled` key, the deprecated top-level
+    /// `tls_config` beside `multi_user_config.tls_config`, no
+    /// `host_registration`. Values are made up; `__ENCRYPTED__` is replaced
+    /// by the test key's ciphertext of "smtp-secret".
+    const LAUNCHER_STATE: &str = r#"{
+        "agent_list": [
+            {"name": "Main Net", "path": "/home/op/.ad4m", "bootstrap": null},
+            {"name": "Test", "path": "/home/op/.ad4m-test", "bootstrap": null}
+        ],
+        "selected_agent": {"name": "Main Net", "path": "/home/op/.ad4m", "bootstrap": null},
+        "log_config": {
+            "rust_executor": "info", "wasmer_compiler_cranelift": "warn",
+            "warp::server": "info", "holochain": "warn"
+        },
+        "tls_config": {
+            "enabled": true, "cert_file_path": "/etc/ssl/legacy.pem",
+            "key_file_path": "/etc/ssl/legacy.key", "tls_port": 12100
+        },
+        "multi_user_config": {
+            "enabled": true,
+            "smtp_config": {
+                "host": "smtp.example.org", "port": 465, "username": "ad4m@example.org",
+                "password": "__ENCRYPTED__", "from_address": "ad4m@example.org"
+            },
+            "tls_config": {
+                "enabled": true, "cert_file_path": "/etc/ssl/node.pem",
+                "key_file_path": "/etc/ssl/node.key", "tls_port": 12100
+            }
+        },
+        "mcp_enabled": true,
+        "mcp_port": 3001
+    }"#;
+
+    fn fixture() -> String {
+        LAUNCHER_STATE.replace(
+            "__ENCRYPTED__",
+            &encrypt_password("smtp-secret").expect("test key encrypts"),
+        )
+    }
+
+    #[test]
+    fn todays_launcher_state_still_loads_and_round_trips() {
+        let state: LauncherState = serde_json::from_str(&fixture()).expect("fixture parses");
+        let multi_user = state.multi_user_config.as_ref().unwrap();
+        let smtp = multi_user.smtp_config.as_ref().unwrap();
+        assert!(multi_user.enabled);
+        assert!(smtp.enabled, "a missing smtp enabled key means enabled");
+        assert_eq!(smtp.password, "smtp-secret");
+        assert_eq!(smtp.host, "smtp.example.org");
+        let tls = multi_user.tls_config.as_ref().unwrap();
+        assert_eq!(
+            (tls.cert_file_path.as_str(), tls.tls_port),
+            ("/etc/ssl/node.pem", Some(12100))
+        );
+        assert_eq!(
+            state.tls_config.as_ref().unwrap().cert_file_path,
+            "/etc/ssl/legacy.pem"
+        );
+        assert_eq!(
+            (state.mcp_enabled, state.mcp_port),
+            (Some(true), Some(3001))
+        );
+        assert_eq!(state.agent_list.len(), 2);
+
+        // Written back, every key the file had keeps its value (the password
+        // is re-encrypted with a fresh nonce, so it is compared decrypted).
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        let mut original: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+        let written_password = written["multi_user_config"]["smtp_config"]["password"]
+            .as_str()
+            .unwrap();
+        assert_eq!(decrypt_password(written_password).unwrap(), "smtp-secret");
+        original["multi_user_config"]["smtp_config"]["password"] = written_password.into();
+        for (key, value) in original.as_object().unwrap() {
+            if key == "multi_user_config" {
+                for (inner, value) in value.as_object().unwrap() {
+                    if inner == "smtp_config" {
+                        for (field, value) in value.as_object().unwrap() {
+                            assert_eq!(&written[key][inner][field], value, "{key}.{inner}.{field}");
+                        }
+                    } else {
+                        assert_eq!(&written[key][inner], value, "{key}.{inner}");
+                    }
+                }
+            } else {
+                assert_eq!(&written[key], value, "{key}");
+            }
+        }
+        let reloaded: LauncherState = serde_json::from_value(written).unwrap();
+        assert_eq!(
+            reloaded
+                .multi_user_config
+                .unwrap()
+                .smtp_config
+                .unwrap()
+                .password,
+            "smtp-secret"
+        );
+    }
+
+    #[test]
+    fn launcher_state_maps_to_the_executor_config_the_launcher_starts() {
+        let state: LauncherState = serde_json::from_str(&fixture()).unwrap();
+        let (file, smtp_password) = state.executor_config("/home/op/.ad4m".into(), 12005);
+        let config = file
+            .to_ad4m_config(&ExecutorSecrets {
+                admin_credential: Some("uuid".into()),
+                smtp_password,
+                unlock_passphrase: None,
+            })
+            .unwrap();
+        let tls = config.tls.as_ref().unwrap();
+        assert_eq!(
+            (tls.cert_file_path.as_str(), tls.tls_port),
+            ("/etc/ssl/node.pem", 12100),
+            "multi_user_config.tls_config wins over the deprecated key"
+        );
+        let smtp = config.smtp_config.as_ref().unwrap();
+        assert_eq!(
+            (smtp.host.as_str(), smtp.password.as_str()),
+            ("smtp.example.org", "smtp-secret")
+        );
+        assert_eq!(config.enable_multi_user, Some(true));
+        assert_eq!(config.localhost, Some(false));
+        assert_eq!(config.port, Some(12005));
+        assert_eq!(config.app_data_path.as_deref(), Some("/home/op/.ad4m"));
+        assert_eq!(
+            (config.enable_mcp, config.mcp_port),
+            (Some(true), Some(3001))
+        );
+        assert_eq!(config.admin_credential.as_deref(), Some("uuid"));
+        assert_eq!(config.run_dapp_server, Some(true));
+        assert_eq!(config.auto_permit_cap_requests, None);
+
+        // Without multi_user_config the deprecated tls_config applies, and
+        // its port defaults to the main port + 1.
+        let mut legacy = state.clone();
+        legacy.multi_user_config = None;
+        legacy.tls_config.as_mut().unwrap().tls_port = None;
+        let (file, smtp_password) = legacy.executor_config("/home/op/.ad4m".into(), 12005);
+        let config = file
+            .to_ad4m_config(&ExecutorSecrets {
+                smtp_password,
+                ..Default::default()
+            })
+            .unwrap();
+        let tls = config.tls.unwrap();
+        assert_eq!(
+            (tls.cert_file_path.as_str(), tls.tls_port),
+            ("/etc/ssl/legacy.pem", 12006)
+        );
+        assert!(config.smtp_config.is_none());
+        assert_ne!(config.enable_multi_user, Some(true));
     }
 }
