@@ -74,7 +74,7 @@ if ! flock -n 9; then
   exit 0
 fi
 
-[[ -s $STATUS ]] || echo '{}' >"$STATUS"
+[[ -s $STATUS ]] || echo '{"deployed_sha":null,"subject":null,"deployed_at":null,"previous_sha":null,"last_result":null,"last_failed_sha":null}' >"$STATUS"
 field() { jq -r --arg k "$1" '.[$k] // empty' "$STATUS"; }
 
 # set_status key value [key value ...]: merges into status.json and copies it
