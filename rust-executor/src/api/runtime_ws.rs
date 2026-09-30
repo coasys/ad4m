@@ -1,7 +1,9 @@
 //! Runtime WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentService;
@@ -9,6 +11,7 @@ use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
+use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
@@ -17,7 +20,7 @@ use super::types::{
     ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
     OpenLinkRequest, VerifySignatureRequest,
 };
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let info = AgentService::with_global_instance(|agent_service| {
@@ -610,56 +613,183 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("runtime.info", get_runtime_info);
-    map.register("runtime.quit", quit_runtime);
-    map.register("runtime.setStatus", set_status);
-    map.register("runtime.openLink", open_link);
-    map.register("runtime.exportData", export_data);
-    map.register("runtime.importData", import_data);
-    map.register("runtime.restartHolochain", restart_holochain);
-    map.register("runtime.verifySignature", verify_signature);
-    map.register("runtime.tlsDomain", get_tls_domain);
-    map.register("runtime.computeLog", get_compute_log);
+    map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
+        .read();
+    map.method::<NoParams, bool>("runtime.quit", quit_runtime);
+    // Always errors: status updates have no implementation yet.
+    map.method::<NoParams, ()>("runtime.setStatus", set_status);
+    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
+    map.method::<ExportRequest, bool>("runtime.exportData", export_data);
+    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
+    map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
+        .long();
+    map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
+        .read();
+    map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
+        .read();
+    map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
+        "runtime.computeLog",
+        get_compute_log,
+    )
+    .read();
     // Friends & messages
-    map.register("runtime.friends", list_friends);
-    map.register("runtime.addFriends", add_friends);
-    map.register("runtime.removeFriends", remove_friends);
-    map.register("runtime.friendStatus", get_friend_status);
-    map.register("runtime.sendFriendMessage", send_friend_message);
-    map.register("runtime.inbox", get_inbox);
-    map.register("runtime.outbox", get_outbox);
+    map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
+        .read();
+    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
+    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
+    // Always errors: friend status has no implementation yet.
+    map.method::<RuntimeFriendStatusParams, ()>("runtime.friendStatus", get_friend_status)
+        .read();
+    map.method::<RuntimeSendFriendMessageParams, bool>(
+        "runtime.sendFriendMessage",
+        send_friend_message,
+    );
+    map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
+        .read();
+    map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
+        .read();
     // Notifications
-    map.register("runtime.notifications", list_notifications);
-    map.register("runtime.createNotification", create_notification);
-    map.register("runtime.updateNotification", update_notification);
-    map.register("runtime.grantNotification", grant_notification);
-    map.register("runtime.deleteNotification", delete_notification);
+    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
+        .read();
+    map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
+    map.method::<RuntimeUpdateNotificationParams, bool>(
+        "runtime.updateNotification",
+        update_notification,
+    );
+    map.method::<RuntimeGrantNotificationParams, bool>(
+        "runtime.grantNotification",
+        grant_notification,
+    );
+    map.method::<RuntimeNotificationIdParams, bool>(
+        "runtime.deleteNotification",
+        delete_notification,
+    );
     // Link language templates
-    map.register("runtime.linkLanguageTemplates", get_link_language_templates);
-    map.register(
+    map.method::<NoParams, Vec<String>>(
+        "runtime.linkLanguageTemplates",
+        get_link_language_templates,
+    )
+    .read();
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
     );
-    map.register(
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
     );
     // Holochain
-    map.register("runtime.hcAgentInfos", get_hc_agent_infos);
-    map.register("runtime.addHcAgentInfos", add_hc_agent_infos);
-    map.register("runtime.networkMetrics", get_network_metrics);
+    map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
+        .read();
+    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
+    map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
+        .read();
     // Hosting flags
-    map.register("runtime.freeHostingEnabled", get_free_hosting_enabled);
-    map.register("runtime.setFreeHostingEnabled", set_free_hosting_enabled);
-    map.register("runtime.hostRates", get_host_rates);
-    map.register("runtime.setHostRates", set_host_rates);
-    // Unyt stubs
-    map.register("runtime.unytAgentKey", stub_not_impl);
-    map.register("runtime.unytSendHot", stub_not_impl);
-    map.register("runtime.unytWalletBalance", stub_not_impl);
-    map.register("runtime.unytWalletHistory", stub_not_impl);
-    map.register("runtime.unytVersionInfo", stub_not_impl);
-    map.register("runtime.unytHotAgentPubkey", stub_not_impl);
-    map.register("runtime.unytMembraneProof", stub_not_impl);
-    map.register("runtime.unytReinstallDna", stub_not_impl);
+    map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
+        .read();
+    map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
+        "runtime.setFreeHostingEnabled",
+        set_free_hosting_enabled,
+    );
+    // Always error: host rates and the unyt endpoints have no implementation yet.
+    map.method::<NoParams, ()>("runtime.hostRates", get_host_rates)
+        .read();
+    map.method::<NoParams, ()>("runtime.setHostRates", set_host_rates);
+    map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytSendHot", stub_not_impl);
+    map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytWalletHistory", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytVersionInfo", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytMembraneProof", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeComputeLogParams {
+    /// Defaults to the caller's own email.
+    #[ts(optional)]
+    pub user_email: Option<String>,
+    /// ISO 8601; only entries after this timestamp.
+    #[ts(optional)]
+    pub since: Option<String>,
+    /// Defaults to 100.
+    #[ts(optional, type = "number")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeFriendStatusParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSendFriendMessageParams {
+    pub did: String,
+    pub message: PerspectiveExpression,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUpdateNotificationParams {
+    pub id: String,
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub notification: NotificationInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeGrantNotificationParams {
+    pub id: String,
+    pub granted: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeNotificationIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSetFreeHostingEnabledParams {
+    pub enabled: bool,
+}
+
+/// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum RuntimeImportResult {
+    Db(ImportResult),
+    Perspective(RuntimeImportPerspectiveResult),
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeImportPerspectiveResult {
+    pub success: bool,
+    // The file's raw contents: import does not validate the snapshot shape.
+    #[ts(type = "any")]
+    pub snapshot: Value,
 }

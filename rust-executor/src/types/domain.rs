@@ -401,6 +401,7 @@ pub struct OnlineAgent {
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(rename = "DecoratedPerspective")]
 pub struct Perspective {
     pub links: Vec<DecoratedLinkExpression>,
 }
@@ -1299,7 +1300,7 @@ impl From<VoiceActivityParamsInput> for crate::ai_service::VoiceActivityParams {
     }
 }
 
-#[derive(Debug, serde::Serialize, TS)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, TS)]
 pub struct ImportStats {
     pub total: i32,
     pub imported: i32,
@@ -1308,7 +1309,7 @@ pub struct ImportStats {
     pub errors: Vec<String>,
 }
 
-#[derive(Debug, serde::Serialize, TS)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub perspectives: ImportStats,

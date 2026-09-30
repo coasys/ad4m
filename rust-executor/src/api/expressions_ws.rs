@@ -12,12 +12,25 @@ use crate::types::*;
 use super::types::*;
 use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
 
+/// `expression.get`: the rendered expression, or `null` when unknown.
 async fn get_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    read_expression(params, ctx, false).await
+}
+
+/// `expression.getRaw`: the stored expression as a JSON string, or `null` when unknown.
+async fn get_raw_expression(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    read_expression(params, ctx, true).await
+}
+
+async fn read_expression(
+    params: Value,
+    ctx: Arc<RequestContext>,
+    raw: bool,
+) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &EXPRESSION_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
     let url = params.require_str("url")?;
-    let raw = params.get("raw").and_then(|v| v.as_bool()).unwrap_or(false);
 
     let decoded_url = urlencoding::decode(&url)
         .map(|s| s.into_owned())
@@ -189,11 +202,13 @@ async fn interact_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<ExpressionGetRequest, Option<ExpressionGetResult>>(
+    map.method::<ExpressionUrlRequest, Option<ExpressionRendered>>(
         "expression.get",
         get_expression,
     )
     .read();
+    map.method::<ExpressionUrlRequest, Option<String>>("expression.getRaw", get_raw_expression)
+        .read();
     map.method::<ExpressionManyRequest, Vec<Option<ExpressionRendered>>>(
         "expression.getMany",
         get_many_expressions,

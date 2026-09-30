@@ -304,6 +304,23 @@ impl HandlerMap {
         MethodFlags(self.specs.last_mut().expect("just pushed"))
     }
 
+    /// Record the contract of a method the socket reader handles itself
+    /// (`events.watch`, `events.unwatch`), so the SDK gets its types. It is
+    /// not dispatched through the map.
+    pub fn inline<P, R>(&mut self, name: &str)
+    where
+        P: ts_rs::TS + 'static,
+        R: ts_rs::TS + 'static,
+    {
+        self.specs.push(MethodSpec {
+            name: name.to_string(),
+            params: TsType::of::<P>(),
+            result: TsType::of::<R>(),
+            read: false,
+            long: false,
+        });
+    }
+
     fn insert(
         &mut self,
         name: &str,
@@ -329,18 +346,6 @@ impl HandlerMap {
         let mut specs: Vec<&MethodSpec> = self.specs.iter().collect();
         specs.sort_by(|a, b| a.name.cmp(&b.name));
         specs
-    }
-
-    /// Register a handler for a message type (e.g. `"agent.get"`).
-    ///
-    /// Panics if the type is already registered (catches duplicate registrations at startup).
-    /// This is intentional — duplicates are programming errors and should fail fast.
-    pub fn register<F, Fut>(&mut self, msg_type: &str, handler: F)
-    where
-        F: Fn(Value, Arc<RequestContext>) -> Fut + Send + Sync + 'static,
-        Fut: Future<Output = Result<Value, WsRpcError>> + Send + 'static,
-    {
-        self.insert(msg_type, handler, None, None);
     }
 
     /// Dispatch an RPC message to the appropriate handler.
@@ -399,6 +404,11 @@ pub fn build_handler_map() -> HandlerMap {
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
+    // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
+    map.inline::<std::collections::HashMap<String, Option<Vec<String>>>, bool>(
+        super::event_interest::WATCH,
+    );
+    map.inline::<NoParams, bool>(super::event_interest::UNWATCH);
     log::info!("WS RPC: registered {} handlers", map.len());
     map
 }

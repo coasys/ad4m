@@ -343,8 +343,8 @@ pub type Address = String;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct LanguageRef {
-    pub name: String,
     pub address: Address,
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]

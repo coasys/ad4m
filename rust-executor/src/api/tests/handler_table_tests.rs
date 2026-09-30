@@ -24,7 +24,6 @@ fn quoted(names: impl Iterator<Item = String>) -> String {
 /// Deterministic render: methods sorted by name, imports sorted, fixed header.
 pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
     let specs = map.specs();
-    let typed: BTreeSet<&str> = specs.iter().map(|s| s.name.as_str()).collect();
     // Import only the types a contract names; the others reach it through those.
     let named = |name: &str| {
         let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).unwrap();
@@ -52,20 +51,10 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
         ));
     }
     out.push_str("\n/** Every executor RPC method: its params and result. */\nexport interface RpcMethods {\n");
-    let mut all: Vec<(String, String, String)> = specs
-        .iter()
-        .map(|s| (s.name.clone(), s.params.name.clone(), s.result.name.clone()))
-        .collect();
-    for name in map.method_names() {
-        if !typed.contains(name.as_str()) {
-            all.push((name, "any".into(), "any".into()));
-        }
-    }
-    all.sort();
-    for (name, params, result) in &all {
+    for s in &specs {
         out.push_str(&format!(
             "  \"{}\": {{ params: {}; result: {} }};\n",
-            name, params, result
+            s.name, s.params.name, s.result.name
         ));
     }
     out.push_str("}\n\nexport type RpcMethod = keyof RpcMethods;\n\n");
