@@ -843,14 +843,20 @@ fn matches_auto_processor_pass_owner_with(
 /// unknown perspective. Waits for the handle: a `try_lock` here dropped every
 /// event published while a write held it, so live queries missed updates.
 async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
-    use crate::perspectives::get_perspective;
-    match get_perspective(uuid) {
-        Some(instance) => {
-            let handle = instance.persisted.lock().await;
-            handle.is_unowned() || handle.is_owned_by(did)
-        }
-        None => false,
-    }
+    let Some(instance) = crate::perspectives::get_perspective(uuid) else {
+        return false;
+    };
+    let did = did.to_string();
+    // Spawned so the runtime polls the lock, not the socket's event stream. The
+    // tokio Mutex hands the permit to the first waiter, which keeps it until it
+    // is polled; a stream parked behind a slow socket send would hold the
+    // handle, and stall every writer of the perspective.
+    tokio::spawn(async move {
+        let handle = instance.persisted.lock().await;
+        handle.is_unowned() || handle.is_owned_by(&did)
+    })
+    .await
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1100,11 +1106,17 @@ mod perspective_is_owned_by_tests {
     //! registered (CodeRabbit #903), and waits for a perspective whose handle
     //! a write holds instead of failing: a failed `try_lock` here used to drop
     //! live-query updates published during writes.
-    use super::{matches_query_subscription_owner, perspective_is_owned_by};
+    use super::{
+        handle_broadcast_result, matches_auto_processor_neighbourhood_state_reader,
+        matches_auto_processor_pass_owner, matches_query_subscription_owner,
+        perspective_is_owned_by, wrap_event,
+    };
     use crate::perspectives::perspective_instance::PerspectiveInstance;
     use crate::perspectives::{register_perspective, unregister_perspective};
     use crate::types::PerspectiveHandle;
+    use futures::StreamExt;
     use std::time::Duration;
+    use tokio_stream::wrappers::BroadcastStream;
 
     #[tokio::test]
     async fn missing_perspective_returns_false_for_any_did() {
@@ -1139,6 +1151,61 @@ mod perspective_is_owned_by_tests {
         );
 
         assert!(!perspective_is_owned_by(&uuid, "did:key:bob").await);
+        unregister_perspective(&uuid);
+    }
+
+    #[tokio::test]
+    async fn a_parked_check_does_not_keep_the_handle_after_the_write() {
+        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
+        let uuid = handle.uuid.clone();
+        let instance = PerspectiveInstance::new(handle, None);
+        let persisted = instance.persisted.clone();
+        register_perspective(uuid.clone(), instance);
+        let (tx, rx) = tokio::sync::broadcast::channel::<String>(16);
+        // The same chain as `owned_stream!`.
+        let mut stream = Box::pin(
+            BroadcastStream::new(rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| async move {
+                    let msg = result.ok()?;
+                    matches_query_subscription_owner(&msg, Some("did:key:bob"))
+                        .await
+                        .then(|| wrap_event("query-subscription-update", &msg))
+                }),
+        );
+        let write = persisted.lock().await;
+        let update = serde_json::json!({ "uuid": uuid, "subscriptionId": "s", "result": "[]" });
+        tx.send(update.to_string()).unwrap();
+        assert!(futures::poll!(stream.next()).is_pending());
+        drop(write);
+        // The socket loop is busy in `socket.send` and does not poll the stream.
+        let next_writer = tokio::time::timeout(Duration::from_millis(300), persisted.lock()).await;
+        let parked = next_writer.is_err();
+        drop(next_writer);
+        unregister_perspective(&uuid);
+        assert!(
+            !parked,
+            "a parked ownership check holds the handle after the write released it"
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_processor_filters_refuse_a_non_owner() {
+        let handle = PerspectiveHandle::new_with_owner("p".into(), "did:key:alice".into());
+        let uuid = handle.uuid.clone();
+        register_perspective(uuid.clone(), PerspectiveInstance::new(handle, None));
+        let state = serde_json::json!({ "perspectiveUuid": uuid }).to_string();
+        let pass = serde_json::json!({ "perspectiveUuid": uuid, "agentDid": "did:key:bob" });
+        let pass = pass.to_string();
+        assert!(
+            matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:alice"), false)
+                .await
+        );
+        assert!(
+            !matches_auto_processor_neighbourhood_state_reader(&state, Some("did:key:bob"), false)
+                .await
+        );
+        assert!(!matches_auto_processor_pass_owner(&pass, Some("did:key:bob"), false).await);
         unregister_perspective(&uuid);
     }
 }
