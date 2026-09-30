@@ -1,4 +1,4 @@
-import { ApiClient, WsEvent } from "../apiClient"
+import { ApiClient, CallOptions, WsEvent, longCall } from "../apiClient"
 import { addListener, notifyListeners } from "../notifyListeners"
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
@@ -93,8 +93,8 @@ export class RuntimeClient {
         return this.#apiClient.call<string>('runtime.networkMetrics')
     }
 
-    async restartHolochain(): Promise<boolean> {
-        return this.#apiClient.call<boolean>('runtime.restartHolochain')
+    async restartHolochain(options?: CallOptions): Promise<boolean> {
+        return this.#apiClient.call<boolean>('runtime.restartHolochain', {}, longCall(options))
     }
 
     async hcAddAgentInfos(agentInfos: string[]): Promise<boolean> {
