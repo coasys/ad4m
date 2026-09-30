@@ -18,7 +18,8 @@
 # run rolls that build back first, as if it had failed the gate. An
 # unfinished rollback by hand (in_flight: rollback, from its first step on),
 # or a `current` that status.json does not account for, is left to the
-# operator.
+# operator. `rollback` itself refuses to start while `current` is not
+# deployed_sha, or while an unfinished one holds the newer data aside.
 #
 # Every outcome is written to status.json in the state dir and copied to
 # $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),

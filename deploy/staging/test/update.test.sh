@@ -5,7 +5,8 @@
 # recover from a failed step after the stop, ignore a tag named like the branch,
 # start nothing when a restore fails, clean up after a deploy killed in its gate,
 # leave a lost status.json, a failed status write or an unfinished rollback by
-# hand (killed in its gate, in its restore or before it) to the operator.
+# hand (killed in its gate, in its restore or before it) to the operator, and
+# refuse a rollback by hand over any of these.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 

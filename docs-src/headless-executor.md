@@ -293,7 +293,7 @@ outcome.
 | `rolled_back: the deploy of <sha> was interrupted; <previous> runs again` | An update was killed during the check of `<sha>` (a reboot, the OOM killer, a stopped update service); the next run rolled it back as if it had failed the check |
 | `error: current is <sha>, but status.json names no deployed build (an interrupted first deploy, or a lost status.json); left to the operator` | `status.json` has no `deployed_sha`, but `current` names a build. Nothing was stopped, moved or built, and every run stops here until this is resolved by hand; see "Roll back" |
 | `rolling back by hand from <new sha> to <previous sha>` | A rollback by hand is running |
-| `rolled_back by hand: <new sha>; <previous sha> failed the gate too (agent: …)` / `error: the rollback by hand from <new sha> to <previous sha> was interrupted; left to the operator` | A rollback by hand failed its check or was killed. After a failed check or a kill during it, `<previous sha>` is current, on its restored data; after a kill before that, `current` is still `<new sha>`, staging is stopped, and the data directory may be half a snapshot. The timer deploys nothing until this is resolved by hand; see "Roll back" |
+| `rolled_back by hand: <new sha>; <previous sha> failed the gate too (agent: …)` / `error: the rollback by hand from <new sha> to <previous sha> was interrupted; left to the operator` | A rollback by hand failed its check or was killed. After a failed check or a kill during it, `<previous sha>` is current, on its restored data; after a kill before that, `current` is still `<new sha>`, staging may be stopped, and the data directory may be half a snapshot. The timer deploys nothing until this is resolved by hand; see "Roll back" |
 | `error: could not restore the data of <sha>; staging is stopped` | A rollback could not move the data directory aside or copy the snapshot back (a full disk, most likely). Nothing runs, `current` is removed, and the timer deploys nothing until the data is restored by hand; see "Roll back" |
 | `error: …` (other) | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
 
@@ -362,6 +362,13 @@ the previous SHA and `last_result` =
 `rolled_back by hand: <new sha>; <previous sha> runs again`.
 `error: no previous build to roll back to` means there is only one build
 (the first deploy, or a second rollback in a row).
+`error: current is <…>, not the deployed <sha>; …` means a deploy or
+rollback did not finish, or a restore failed; `rollback` changes nothing
+then. After a deploy killed in its check, start the timer again: its next
+run rolls that deploy back. Otherwise see the cases below.
+`error: the unfinished rollback by hand keeps the data of <sha> in …`
+means an earlier rollback moved the newer build's data aside and did not
+finish; `rollback` changes nothing until it is resolved as below.
 `error: no snapshot of the data of <previous sha>; …` means the snapshot is
 missing; the previous build would start on data a newer build may have
 migrated. Only if that is acceptable, run the same command with
@@ -402,18 +409,22 @@ S=~/.local/share/ad4m-staging; readlink "$S/current"; jq -r .failed_data "$S/sta
   `ln -sfn "releases/<new sha>" "$S/current"`, start `ad4m-staging`, and
   run
   `jq '.in_flight = null' "$S/status.json" > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
+  `rollback` refuses in this state, because `current` is not `deployed_sha`.
 - `current` is `releases/<new sha>` and `failed_data` is `<new sha>`: the
-  rollback was killed while it copied the snapshot back. Staging is
-  stopped, `~/.ad4m-staging` may be half a snapshot, and the newer build's
-  data is in `~/.ad4m-staging.failed`. Go forward again as above, without
-  the `ln` step. Do not run `rollback` before `~/.ad4m-staging.failed` is
-  back in place: it replaces that directory.
+  rollback was killed after it moved the data aside, most likely while it
+  copied the snapshot back. Staging is stopped, `~/.ad4m-staging` is half a
+  snapshot or missing, and the newer build's data is in
+  `~/.ad4m-staging.failed`. Go forward again as above, without the `ln`
+  step (move `~/.ad4m-staging` aside only if it exists). `rollback` refuses
+  until `in_flight` is cleared, because it would replace
+  `~/.ad4m-staging.failed`; after going forward it can run again.
 - `current` is `releases/<new sha>` and `failed_data` is `null`: the
-  rollback was killed before it moved the data aside. Staging is stopped;
-  `~/.ad4m-staging` is the newer build's data, whole (if it is missing, the
-  kill came right after the move: move `~/.ad4m-staging.failed` back
-  first). A `~/.ad4m-staging.failed` next to it is from an earlier
-  rollback. Start `ad4m-staging` and clear `in_flight` as in the first
+  rollback was killed before it moved the data aside. Staging may be
+  stopped (a kill before the stop leaves it running); `~/.ad4m-staging` is
+  the newer build's data, whole (if it is missing, the kill came right
+  after the move: move `~/.ad4m-staging.failed` back first). A
+  `~/.ad4m-staging.failed` next to it is from an earlier rollback. Start
+  `ad4m-staging` if it is not running and clear `in_flight` as in the first
   case, or run the rollback command again.
 
 After going forward, the timer deploys the next commit on `staging` again.
