@@ -47,6 +47,8 @@ const url = 'http://localhost:1234'
 const socket = (i: number) => TestSocket.instances[i]
 const flush = () => new Promise((r) => setTimeout(r, 0))
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+/** Starts a connection the way an event subscriber does. */
+const open = () => { client.subscribe(() => {}) }
 
 let client: ApiClient
 beforeEach(() => {
@@ -178,14 +180,12 @@ describe('ApiClient connect-phase failures', () => {
 
     it("a replaced socket's late onclose does not fail the call on its successor", async () => {
         TestSocket.asyncClose = true
-        client.waitForSubscription()
+        open()
         socket(0).open()
         client.closeAll() // socket 0's onclose arrives 5 ms later
         const promise = call<string>('x')
-        const ready = client.waitForSubscription()
         await sleep(10)
         socket(1).open()
-        await expect(ready).resolves.toBeUndefined()
         socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
         await expect(promise).resolves.toBe('ok')
     })
@@ -237,7 +237,9 @@ describe('ApiClient connect-phase failures', () => {
         expect(socket(0).readyState).toBe(3)
         expect(TestSocket.instances).toHaveLength(2)
         socket(1).open()
-        await expect(client.waitForSubscription()).resolves.toBeUndefined()
+        const promise = call('agent.get')
+        socket(1).reply({ id: socket(1).sent.at(-1)!.id, result: 1 })
+        await expect(promise).resolves.toBe(1)
     })
 
     it('rejects callers waiting to connect when the client is closed', async () => {
@@ -305,7 +307,7 @@ describe('ApiClient.onReconnect', () => {
     /** Drop the open socket, if any, and open socket `i`. */
     function connect(i: number) {
         if (socket(i - 1)?.readyState === 1) socket(i - 1).drop()
-        client.waitForSubscription()
+        open()
         socket(i).open()
     }
 

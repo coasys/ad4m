@@ -93,6 +93,8 @@ interface PendingCall {
     failedConnects: number
     /** True while a retryable read has its one retry left. */
     retry: boolean
+    /** An `events.watch`: it serves the subscribers, so it does not keep the socket open. */
+    watch: boolean
     resolve: (value: unknown) => void
     reject: (reason: unknown) => void
 }
@@ -319,6 +321,7 @@ export class ApiClient {
                 sent: false,
                 failedConnects: 0,
                 retry: RETRYABLE_READS.has(type),
+                watch: type === 'events.watch',
                 resolve: (value) => settle(() => resolve(value as T)),
                 reject: (reason) => settle(() => reject(reason)),
             }
@@ -358,7 +361,8 @@ export class ApiClient {
         return () => {
             this._wsCallbacks.delete(cb)
             if (this._eventInterests.delete(cb)) this._scheduleWatch()
-            if (this._wsCallbacks.size === 0 && this._pendingCalls.size === 0) {
+            if (this._wsCallbacks.size === 0 && [...this._pendingCalls.values()].every(p => p.watch)) {
+                for (const pending of this._pendingCalls.values()) pending.reject(closedError())
                 this._closeWs()
             }
         }

@@ -653,9 +653,9 @@ describe('PerspectiveClient', () => {
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
 
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
-        await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
-        await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
+        freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
+        freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
@@ -714,14 +714,15 @@ describe('PerspectiveClient', () => {
             // Lets each events.watch go out and get its reply.
             const settle = async () => { for (let i = 0; i < 3; i++) await jest.advanceTimersByTimeAsync(10); };
 
-            freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+            const releaseAddedA = freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
             freshClient.perspective.addPerspectiveLinkAddedListener('B', [jest.fn()]);
-            freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
+            const releaseRemovedA = freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
             await settle();
             const ws = lastOf(MockWebSocket.instances);
             expect(lastOf(watches(ws))).toEqual(expect.objectContaining({ 'link-added': ['A', 'B'], 'link-removed': ['A'] }));
 
-            freshClient.perspective.removeAllListeners('A');
+            releaseAddedA();
+            releaseRemovedA();
             await settle();
             expect(lastOf(watches(ws))).toEqual(expect.objectContaining({ 'link-added': ['B'] }));
             expect(lastOf(watches(ws))).not.toHaveProperty('link-removed');
@@ -1367,6 +1368,18 @@ describe('Ad4mClient', () => {
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
+    test('calls go through the injected webSocketImpl', async () => {
+        class InjectedWebSocket extends MockWebSocket {}
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', { webSocketImpl: InjectedWebSocket as any });
+
+        const agent = await freshClient.agent.me();
+
+        expect(agent.did).toBeDefined();
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+        for (const ws of MockWebSocket.instances) expect(ws).toBeInstanceOf(InjectedWebSocket);
+        freshClient.close();
+    });
+
     test('a listener on a new client receives each default event exactly once', async () => {
         const freshClient = newClient();
         const listeners = {
@@ -1460,7 +1473,7 @@ describe('Ad4mClient', () => {
         freshClient.perspective.addPerspectiveAddedListener(() => { throw new Error('listener bug'); });
         freshClient.perspective.addPerspectiveAddedListener(third);
         const linkThird = jest.fn();
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
+        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
             () => { throw new Error('link listener bug'); },
             linkThird,
         ]);

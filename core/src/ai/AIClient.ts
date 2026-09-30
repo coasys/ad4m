@@ -138,11 +138,10 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
-
-        const unsub = this.#transcriptionUnsubscribers.get(streamId);
-        if (unsub) {
-            unsub();
+        try {
+            await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
+        } finally {
+            this.#transcriptionUnsubscribers.get(streamId)?.();
             this.#transcriptionUnsubscribers.delete(streamId);
         }
     }

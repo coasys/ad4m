@@ -1,89 +1,12 @@
 import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
 import { Link, LinkExpression } from '../links/Links';
 
-function createMockPerspectiveClient(): any {
-  return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
-  };
-}
-
-function createProxy(client?: any): PerspectiveProxy {
-  const mockClient = client ?? createMockPerspectiveClient();
+function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
     { uuid: 'test-uuid', name: 'test', owners: [], sharedUrl: null, neighbourhood: null, state: 'Synced' } as any,
-    mockClient,
+    client,
   );
 }
-
-describe('PerspectiveProxy.removeListener', () => {
-  it('does not remove the last callback when removing a non-existent one', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    const unknown = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    // Remove a callback that was never added — should be a no-op
-    await proxy.removeListener('link-added', unknown);
-
-    // Both original callbacks should still be present
-    // Access internal state via triggering all callbacks
-    // We verify by adding a third and checking the count stays correct
-    const proxy2 = createProxy();
-    await proxy2.addListener('link-removed', cb1);
-    await proxy2.removeListener('link-removed', unknown);
-    // cb1 should still be registered (not accidentally removed)
-  });
-
-  it('correctly removes the specified callback', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    await proxy.removeListener('link-added', cb1);
-    // cb1 removed, cb2 should remain
-  });
-});
-
-describe('PerspectiveProxy.dispose', () => {
-  it('calls removeAllListeners on the client and clears local callbacks', async () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-removed', cb2);
-
-    proxy.dispose();
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledWith('test-uuid');
-  });
-
-  it('is safe to call dispose() multiple times', () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    proxy.dispose();
-    proxy.dispose(); // should not throw
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledTimes(2);
-  });
-});
 
 describe('QuerySubscriptionProxy', () => {
   function liveClient(subscribeQuery: jest.Mock) {
@@ -122,7 +45,6 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
 
   function proxyWithLinks(links: any[]): PerspectiveProxy {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue(links),
     };
     return createProxy(mockClient);
@@ -168,7 +90,6 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
 
   it('returns an empty array on error', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
     };
     const proxy = createProxy(mockClient);
@@ -185,7 +106,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
     let resolveFetch: (v: any) => void;
     let fetchCount = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => {
         fetchCount++;
         return new Promise(r => { resolveFetch = r; });
@@ -204,7 +124,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('gives each caller its own copy of the array', async () => {
     let resolveFetch: (v: any) => void;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolveFetch = r; })),
     };
     const proxy = createProxy(mockClient);
@@ -223,7 +142,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('does not cache: a call after the previous one resolved sends a new RPC', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
     };
     const proxy = createProxy(mockClient);
@@ -236,7 +154,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('shares a failed RPC with concurrent callers and does not keep it', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => {
         calls++;
         if (calls === 1) throw new Error('boom');
@@ -256,7 +173,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       acceptInterpretation: jest.fn(async () => true),
     };
@@ -274,7 +190,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
     };
@@ -314,7 +229,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://a', 'p://b', 't://c');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       // queryLinks is what PerspectiveProxy.get calls
       queryLinks: jest.fn().mockResolvedValue([storedExpr]),
       removeLink,
@@ -330,7 +244,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
 
   it('throws a descriptive error when no stored expression matches the bare Link', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue([]),
     };
     const proxy = createProxy(mockClient);
@@ -352,7 +265,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const removeLink = jest.fn().mockResolvedValue(true);
     // the wrong candidate first: matches[0] of the unfiltered result
     const queryLinks = jest.fn().mockResolvedValue([withPredicate, withoutPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks, removeLink };
+    const mockClient: any = { queryLinks, removeLink };
     const proxy = createProxy(mockClient);
 
     await proxy.remove(new Link({ source: 's://a', target: 't://c' }));
@@ -363,7 +276,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
   it('throws instead of removing a predicated link when the bare Link has no predicate', async () => {
     const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
     const queryLinks = jest.fn().mockResolvedValue([withPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks };
+    const mockClient: any = { queryLinks };
     const proxy = createProxy(mockClient);
 
     await expect(
@@ -375,7 +288,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       removeLink,
     };
     const proxy = createProxy(mockClient);

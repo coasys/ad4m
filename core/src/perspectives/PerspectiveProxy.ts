@@ -198,6 +198,10 @@ export class PerspectiveProxy {
 
     #linkListeners: { [K in keyof LinkListeners]: LinkListeners[K][] } = { "link-added": [], "link-removed": [], "link-updated": [] }
     #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[] = []
+    /** Release of the one socket listener per type that feeds a callback array. */
+    #typeReleases = new Map<keyof LinkListeners | 'sync-state-change', () => void>()
+    /** Releases of the auto-processor listeners; each call adds one. */
+    #autoProcessorReleases: (() => void)[] = []
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -215,10 +219,19 @@ export class PerspectiveProxy {
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;
-        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#linkListeners["link-added"])
-        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#linkListeners["link-removed"])
-        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#linkListeners["link-updated"])
-        this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
+    }
+
+    /** Registers the socket listener that feeds one callback array on first use,
+     *  so a proxy with no listeners holds no socket callbacks. */
+    #register(type: keyof LinkListeners | 'sync-state-change'): void {
+        if (this.#typeReleases.has(type)) return
+        const uuid = this.#handle.uuid
+        this.#typeReleases.set(type,
+            type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#linkListeners['link-added'])
+            : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#linkListeners['link-removed'])
+            : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#linkListeners['link-updated'])
+            : this.#client.addPerspectiveSyncStateChangeListener(uuid, this.#perspectiveSyncStateChangeCallbacks)
+        )
     }
 
     /** Update the proxy's internal handle and public fields in-place.
@@ -568,9 +581,9 @@ export class PerspectiveProxy {
         return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
-    /** Subscribe to this perspective's auto-processor step signals. */
-    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
-        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    /** Subscribe to this perspective's auto-processor step signals until `dispose()`. */
+    addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): void {
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -580,10 +593,10 @@ export class PerspectiveProxy {
      * auto-processing this" without receiving the batch payload. See
      * `AutoProcessorNeighbourhoodStateEvent`.
      */
-    async addAutoProcessorNeighbourhoodStateListener(
+    addAutoProcessorNeighbourhoodStateListener(
         cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): Promise<void> {
-        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
+    ): void {
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -933,8 +946,9 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]) {
+    addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
         this.#linkListeners[type].push(cb)
+        this.#register(type)
     }
 
     /**
@@ -949,8 +963,9 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
+    addSyncStateChangeListener(cb: SyncStateChangeCallback): void {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
+        this.#register('sync-state-change')
     }
 
     /**
@@ -959,17 +974,19 @@ export class PerspectiveProxy {
      * @param type - Type of change to stop listening for
      * @param cb - The callback function to remove
      */
-    async removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]) {
+    removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
         const listeners = this.#linkListeners[type]
         const index = listeners.indexOf(cb)
         if (index >= 0) listeners.splice(index, 1)
     }
 
-    /** Clean up all subscriptions registered by this proxy.
-     *  Call this when the proxy is no longer needed to prevent subscription leaks.
-     *  After calling dispose(), the proxy should not be used. */
+    /** Removes every listener this proxy registered. Other proxies for the same
+     *  perspective keep theirs. */
     dispose(): void {
-        this.#client.removeAllListeners(this.#handle.uuid)
+        this.#typeReleases.forEach(release => release())
+        this.#typeReleases.clear()
+        this.#autoProcessorReleases.forEach(release => release())
+        this.#autoProcessorReleases = []
         for (const listeners of Object.values(this.#linkListeners)) listeners.length = 0
         this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
