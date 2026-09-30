@@ -48,6 +48,18 @@ lazy_static! {
     /// other on one source chain: the per-signal `handle_signal` tasks and the poll loop
     /// (`check_pending_payments` / `check_pending_sends`) both commit and accept.
     static ref ALLIANCE_CALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
+    /// Why the last install of the alliance DNA failed. Cleared by a successful
+    /// install and by a new membrane proof. Read by `runtime.unytVersionInfo`.
+    static ref INSTALL_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+}
+
+/// Why the last install of the alliance DNA failed, if it did.
+pub fn install_error() -> Option<String> {
+    INSTALL_ERROR.lock().unwrap().clone()
+}
+
+fn set_install_error(error: Option<String>) {
+    *INSTALL_ERROR.lock().unwrap() = error;
 }
 
 /// Check if a cell_id_key (hex dna_hash:hex agent_key) belongs to the alliance DNA.
@@ -138,6 +150,12 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 
+    let result = install_with_retries(&mut installed).await;
+    set_install_error(result.as_ref().err().map(|e| e.to_string()));
+    result
+}
+
+async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
     // Resolve data path from Ad4mConfig
     let data_path = {
         let config = crate::config::get_global_config();
@@ -502,6 +520,8 @@ pub fn version_info() -> (Option<String>, String) {
 /// from the hosting API / joining server.
 pub fn set_membrane_proof(proof_base64: &str) -> Result<(), AnyError> {
     Ad4mDb::with_global_instance(|db| db.set_setting("unyt_membrane_proof", proof_base64))?;
+    // The next install uses this proof; an earlier failure no longer applies.
+    set_install_error(None);
     info!(
         "Stored Unyt membrane proof ({} bytes encoded)",
         proof_base64.len()
