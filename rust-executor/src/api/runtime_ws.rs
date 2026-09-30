@@ -17,9 +17,9 @@ use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::types::{
-    AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest, HostRate,
-    ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
-    OpenLinkRequest, SetHostRatesRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
+    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
+    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
     VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
@@ -278,16 +278,18 @@ async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let did = params.require_str("did")?;
-    let body: FriendSendMessageRequest = serde_json::from_value(params.clone())
+    let body: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    let message_expr: PerspectiveExpression = serde_json::from_value(body.message)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid message format: {}", e)))?;
+    // The agent signs the perspective; the SDK sends bare signed links.
+    let agent_context = crate::agent::AgentContext::from_auth_token(ctx.auth_token.clone());
+    let perspective = crate::types::domain::Perspective::from(body.message);
+    let signed = crate::agent::create_signed_expression(perspective, &agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
     RuntimeService::with_global_instance(|runtime| {
         runtime.add_message_to_outbox(SentMessage {
-            message: message_expr,
-            recipient: did.clone(),
+            message: PerspectiveExpression::from(signed),
+            recipient: body.did,
         });
     });
 
@@ -703,8 +705,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
         .read();
     map.method::<NoParams, bool>("runtime.quit", quit_runtime);
-    // Always errors: status updates have no implementation yet.
-    map.method::<NoParams, ()>("runtime.setStatus", set_status);
+    // Always errors: status updates have no implementation yet. The contract
+    // is the SDK's call.
+    map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status);
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
     map.method::<ExportRequest, bool>("runtime.exportData", export_data);
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
@@ -725,12 +728,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
     map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
     // Always errors: friend status has no implementation yet.
-    map.method::<RuntimeFriendStatusParams, ()>("runtime.friendStatus", get_friend_status)
-        .read();
+    map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
+        "runtime.friendStatus",
+        get_friend_status,
+    )
+    .read();
     map.method::<RuntimeSendFriendMessageParams, bool>(
         "runtime.sendFriendMessage",
         send_friend_message,
     );
+    // Always empty: the inbox has no implementation yet.
     map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
         .read();
     map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
@@ -790,10 +797,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     // Always error: the remaining unyt endpoints have no implementation yet.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
         .read();
-    map.method::<NoParams, ()>("runtime.unytSendHot", stub_not_impl);
+    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
     map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
         .read();
-    map.method::<NoParams, ()>("runtime.unytWalletHistory", stub_not_impl)
+    map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
         .read();
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
         .read();
@@ -801,6 +808,24 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 }
 
 // ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytWalletHistoryParams {
+    #[ts(optional)]
+    pub page: Option<u32>,
+    #[ts(optional)]
+    pub per_page: Option<u32>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytSendHotParams {
+    pub recipient: String,
+    pub amount: String,
+}
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -829,7 +854,9 @@ pub struct RuntimeFriendStatusParams {
 #[ts(export)]
 pub struct RuntimeSendFriendMessageParams {
     pub did: String,
-    pub message: PerspectiveExpression,
+    /// The perspective to sign as this agent.
+    #[ts(as = "super::neighbourhoods_ws::NeighbourhoodSignedPerspective")]
+    pub message: crate::types::PerspectiveInput,
 }
 
 #[derive(Deserialize, TS)]

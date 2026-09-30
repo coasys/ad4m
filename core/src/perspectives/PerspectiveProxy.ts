@@ -18,6 +18,7 @@ import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
@@ -517,7 +518,9 @@ export interface LinkListeners {
     "link-updated": LinkUpdatedCallback
 }
 
-export type LinkStatus = "shared" | "local"
+/** Link status argument. The executor accepts either case and returns links
+ *  with the upper-case form (`LinkExpression.status`). */
+export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
 interface Parameter {
     name: string
     value: string
@@ -946,7 +949,7 @@ export class PerspectiveProxy {
      * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
      * `outcome`, never on a boolean you derive from it.
      */
-    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+    async verifyFlowReceipt(receipt: JsonValue): Promise<FlowReceiptVerdict> {
         return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
     }
 
@@ -1456,17 +1459,8 @@ export class PerspectiveProxy {
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
-        const foundLinks = await this.get(query)
-        const removals = [];
-        for(const l of foundLinks){
-            delete l.__typename
-            delete l.data.__typename
-            delete l.proof.__typename
-            removals.push(l);
-        }
-        const additions = [link];
-
-        await this.linkMutations({additions, removals}, status)
+        const removals = await this.get(query)
+        await this.linkMutations({additions: [link], removals}, status)
     }
 
     /** Returns all the Social DNA flows defined in this perspective */

@@ -8,4 +8,4 @@ fromDate?: string,
 /**
  * RFC 3339 timestamp; an unparsable value is ignored.
  */
-untilDate?: string, limit?: bigint, };
+untilDate?: string, limit?: number, };

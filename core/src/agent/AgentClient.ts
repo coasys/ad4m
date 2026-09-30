@@ -1,6 +1,7 @@
-import { ApiClient, CallOptions, WsEvent, longCall } from "../apiClient";
+import {ApiClient, CallOptions, WsEvent } from '../apiClient';
 import { addListener, notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
+import { perspectiveFromWire } from "../expression/perspectiveWire";
 import {
   Agent,
   Apps,
@@ -15,6 +16,8 @@ import { AgentStatus } from "./AgentStatus";
 import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
+import type { Agent as AgentData } from "../generated/api/Agent";
+import type { AgentSignature } from "../generated/api/AgentSignature";
 import type {
   GenerateAgentRequest,
   ImportAgentRequest,
@@ -36,6 +39,14 @@ export type AgentUpdatedCallback = (agent: Agent) => void;
 export type AgentStatusChangedCallback = (agent: Agent) => void;
 export type AgentAppsUpdatedCallback = () => void;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
+
+/** Builds SDK classes (with their behaviour) from the wire's plain agent data. */
+function toAgent(data: AgentData | null): Agent | null {
+  if (!data) return null;
+  const agent = new Agent(data.did, perspectiveFromWire(data.perspective));
+  agent.directMessageLanguage = data.directMessageLanguage;
+  return agent;
+}
 
 export class AgentClient {
   #apiClient: ApiClient;
@@ -68,9 +79,7 @@ export class AgentClient {
   }
 
   async me(): Promise<Agent> {
-    const agent = await this.#apiClient.call<Agent>('agent.get');
-    let agentObject = new Agent(agent.did, agent.perspective);
-    agentObject.directMessageLanguage = agent.directMessageLanguage;
+    const agentObject = toAgent(await this.#apiClient.call('agent.get', {}));
 
     // Auto-set selfDid so event-driven cache invalidation works
     // without requiring apps to call setSelfDid() manually
@@ -82,27 +91,27 @@ export class AgentClient {
   }
 
   async status(): Promise<AgentStatus> {
-    const agentStatus = await this.#apiClient.call<AgentStatus>('agent.status');
+    const agentStatus = await this.#apiClient.call('agent.status', {});
     return new AgentStatus(agentStatus);
   }
 
   async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase }, longCall(options));
+    const result = await this.#apiClient.call('agent.generate', { passphrase }, options);
     return new AgentStatus(result);
   }
 
   async import(args: InitializeArgs): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.import', { ...args });
+    const result = await this.#apiClient.call('agent.import', { ...args });
     return new AgentStatus(result);
   }
 
   async lock(passphrase: string): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.lock', { passphrase });
+    const result = await this.#apiClient.call('agent.lock', { passphrase });
     return new AgentStatus(result);
   }
 
   async unlock(passphrase: string, holochain = true, options?: CallOptions): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain }, longCall(options));
+    const result = await this.#apiClient.call('agent.unlock', { passphrase, holochain }, options);
     return new AgentStatus(result);
   }
 
@@ -131,7 +140,7 @@ export class AgentClient {
       }
 
       // L3: network fetch
-      const result = await this.#apiClient.call<Agent>('agent.byDid', { did });
+      const result = toAgent(await this.#apiClient.call('agent.byDid', { did }));
       this.#persistent.put(did, { agent: result, ts: Date.now() }); // fire-and-forget write to L2
       return result;
     })();
@@ -180,18 +189,16 @@ export class AgentClient {
   }
 
   async updatePublicPerspective(perspective: PerspectiveInput): Promise<Agent> {
-    const cleanedPerspective = JSON.parse(JSON.stringify(perspective));
-    delete cleanedPerspective.__typename;
-    cleanedPerspective.links.forEach((link: LinkExpression) => {
-      delete link.__typename;
-      delete link.data.__typename;
-      delete link.proof.__typename;
-      delete link.status;
-    });
-
-    const a = await this.#apiClient.call<Agent>('agent.updateProfile', { publicPerspective: cleanedPerspective });
-    const agent = new Agent(a.did, a.perspective);
-    agent.directMessageLanguage = a.directMessageLanguage;
+    // Send only the signed fields: the public perspective carries no link status.
+    const publicPerspective = {
+      links: perspective.links.map(({ author, timestamp, data, proof }) => ({
+        author,
+        timestamp,
+        data: { source: data.source, target: data.target, predicate: data.predicate },
+        proof: { key: proof.key, signature: proof.signature, valid: proof.valid, invalid: proof.invalid },
+      })),
+    };
+    const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { publicPerspective }));
 
     // Immediately update byDID cache so subsequent byDID() calls
     // return fresh data without waiting for the agent-updated event
@@ -209,18 +216,16 @@ export class AgentClient {
 
   /** Has the executor sign `links` as this agent, in a throwaway perspective. */
   async #signLinks(links: LinkInput[]): Promise<LinkExpression[]> {
-    const { uuid } = await this.#apiClient.call<{ uuid: string }>('perspective.create', { name: 'Agent Perspective Proxy' });
+    const { uuid } = await this.#apiClient.call('perspective.create', { name: 'Agent Perspective Proxy' });
     try {
-      return await this.#apiClient.call<LinkExpression[]>('perspective.addLinks', { uuid, links, status: 'shared' });
+      return (await this.#apiClient.call('perspective.addLinks', { uuid, links, status: 'SHARED' })).map(LinkExpression.fromWire);
     } finally {
       await this.#apiClient.call('perspective.remove', { uuid });
     }
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
-    const a = await this.#apiClient.call<Agent>('agent.updateProfile', { dmLanguage: directMessageLanguage });
-    const agent = new Agent(a.did, a.perspective);
-    agent.directMessageLanguage = a.directMessageLanguage;
+    const agent = toAgent(await this.#apiClient.call('agent.updateProfile', { dmLanguage: directMessageLanguage }));
 
     // Immediately update byDID cache so subsequent byDID() calls
     // return fresh data without waiting for the agent-updated event
@@ -230,19 +235,19 @@ export class AgentClient {
   }
 
   async addEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
-    return this.#apiClient.call<EntanglementProof[]>('agent.addEntanglementProofs', { proofs });
+    return this.#apiClient.call('agent.addEntanglementProofs', { proofs });
   }
 
   async deleteEntanglementProofs(proofs: EntanglementProofInput[]): Promise<EntanglementProof[]> {
-    return this.#apiClient.call<EntanglementProof[]>('agent.deleteEntanglementProofs', { proofs });
+    return this.#apiClient.call('agent.deleteEntanglementProofs', { proofs });
   }
 
-  async getEntanglementProofs(): Promise<string[]> {
-    return this.#apiClient.call<string[]>('agent.getEntanglementProofs');
+  async getEntanglementProofs(): Promise<EntanglementProof[]> {
+    return this.#apiClient.call('agent.getEntanglementProofs', {});
   }
 
   async entanglementProofPreFlight(deviceKey: string, deviceKeyType: string): Promise<EntanglementProof> {
-    return this.#apiClient.call<EntanglementProof>('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
+    return this.#apiClient.call('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
   /** Each addXListener returns a function that removes the listener. */
@@ -297,75 +302,76 @@ export class AgentClient {
   };
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
-    return this.#apiClient.call<string>('agent.requestCapability', { authInfo });
+    return this.#apiClient.call('agent.requestCapability', { authInfo });
   }
 
   async permitCapability(auth: string): Promise<string> {
-    return this.#apiClient.call<string>('agent.permitCapability', { auth });
+    return this.#apiClient.call('agent.permitCapability', { auth });
   }
 
   async generateJwt(requestId: string, rand: string): Promise<string> {
-    return this.#apiClient.call<string>('agent.generateJwt', { requestId, rand });
+    return this.#apiClient.call('agent.generateJwt', { requestId, rand });
   }
 
   async getApps(): Promise<Apps[]> {
-    return this.#apiClient.call<Apps[]>('agent.getApps');
+    return this.#apiClient.call('agent.getApps', {});
   }
 
   async removeApp(requestId: string): Promise<Apps[]> {
-    return this.#apiClient.call<Apps[]>('agent.removeApp', { id: requestId });
+    return this.#apiClient.call('agent.removeApp', { id: requestId });
   }
 
   async revokeToken(requestId: string): Promise<Apps[]> {
-    return this.#apiClient.call<Apps[]>('agent.revokeToken', { token: requestId });
+    return this.#apiClient.call('agent.revokeToken', { token: requestId });
   }
 
   async isLocked(): Promise<boolean> {
-    return this.#apiClient.call<boolean>('agent.isLocked');
+    return this.#apiClient.call('agent.isLocked', {});
   }
 
-  async signMessage(message: string): Promise<string> {
-    return this.#apiClient.call<string>('agent.sign', { message });
+  async signMessage(message: string): Promise<AgentSignature> {
+    return this.#apiClient.call('agent.sign', { message });
   }
 
   // Multi-user methods
-  async createUser(email: string, password: string, appInfo?: AuthInfoInput): Promise<UserCreationResult> {
-    return this.#apiClient.call<UserCreationResult>('user.create', { email, password, appInfo });
+  async createUser(email: string, password: string): Promise<UserCreationResult> {
+    return this.#apiClient.call('user.create', { email, password });
   }
 
   async loginUser(email: string, password: string): Promise<string> {
-    return this.#apiClient.call<string>('user.login', { email, password });
+    return this.#apiClient.call('user.login', { email, password });
   }
 
   async requestLoginVerification(email: string, appInfo?: AuthInfoInput): Promise<VerificationRequestResult> {
-    return this.#apiClient.call<VerificationRequestResult>('user.requestVerification', { email, appInfo });
+    return this.#apiClient.call('user.requestVerification', { email, appInfo });
   }
 
   async verifyEmailCode(email: string, code: string, verificationType: string): Promise<string> {
-    return this.#apiClient.call<string>('user.verifyEmail', { email, code, verificationType });
+    return this.#apiClient.call('user.verifyEmail', { email, code, verificationType });
   }
 
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    const resp = await this.#apiClient.call<any>('hosting.info');
-    const info = resp?.userInfo || resp;
+    const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
+      email: '', credits: null, hotWalletAddress: null, freeAccess: false,
+    };
     return new HostingUserInfo(
-      info.email || '',
-      info.freeAccess ? 'unlimited' : String(info.credits ?? info.remainingCredits ?? '0'),
+      info.email,
+      info.freeAccess ? 'unlimited' : String(info.credits ?? 0),
       info.hotWalletAddress || undefined,
       !!info.freeAccess,
     );
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
-    return this.#apiClient.call<ComputeLogEntry[]>('runtime.computeLog', { since, limit, userEmail });
+    return this.#apiClient.call('runtime.computeLog', { since, limit, userEmail });
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {
-    return this.#apiClient.call<boolean>('hosting.setHotWallet', { address });
+    return this.#apiClient.call('hosting.setHotWallet', { address });
   }
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
-    return this.#apiClient.call<PaymentRequestResult>('hosting.requestPayment', { amountHOT });
+    return this.#apiClient.call('hosting.requestPayment', { amountHOT });
   }
 }

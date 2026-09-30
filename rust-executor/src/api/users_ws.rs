@@ -355,8 +355,8 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled);
     map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access);
-    // Always answers 501; `bool` is the result the SDK expects once implemented.
-    map.method::<NoParams, bool>("user.credits", users_credits);
+    // Always answers 501; the contract is the SDK's call.
+    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits);
     // The user's hot-wallet address (404 when none).
     map.method::<UsersEmailParams, String>("user.wallet", get_user_wallet)
         .read();
@@ -368,6 +368,14 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
 }
 
 // ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersSetCreditsParams {
+    pub email: String,
+    pub amount: f64,
+}
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -443,7 +451,8 @@ pub struct UsersEmailTestParams {
     pub email: Option<String>,
     #[ts(optional)]
     pub verification_type: Option<String>,
-    #[ts(optional)]
+    /// Unix seconds; a JSON number, well inside `Number.MAX_SAFE_INTEGER`.
+    #[ts(optional, type = "number")]
     pub expires_at: Option<i64>,
 }
 

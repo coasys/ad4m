@@ -856,7 +856,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
         .long();
     // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
-    map.method::<NoParams, AgentStatus>("agent.import", import_agent);
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
     map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
     map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
         .long();

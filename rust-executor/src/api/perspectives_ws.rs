@@ -2802,7 +2802,7 @@ pub struct PerspectiveQueryLinksParams {
     /// RFC 3339 timestamp; an unparsable value is ignored.
     #[ts(optional)]
     pub until_date: Option<String>,
-    #[ts(optional)]
+    #[ts(optional, type = "number")]
     pub limit: Option<i64>,
 }
 
@@ -3015,20 +3015,22 @@ pub struct PerspectiveAddAutoProcessorParams {
     #[serde(default)]
     #[ts(optional)]
     pub flows: Option<Vec<String>>,
+    #[ts(type = "number")]
     pub debounce_ms: i64,
     #[serde(default)]
     #[ts(optional)]
     pub batch_min: Option<usize>,
     pub batch_max: usize,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, type = "number")]
     pub max_wait_ms: Option<i64>,
+    #[ts(type = "number")]
     pub claim_ttl_ms: i64,
     #[serde(default)]
     #[ts(optional)]
     pub dedup_strategy_json: Option<String>,
     #[serde(default)]
-    #[ts(optional)]
+    #[ts(optional, type = "number")]
     pub source_window_ms: Option<i64>,
     #[serde(default)]
     #[ts(optional, type = "any")]

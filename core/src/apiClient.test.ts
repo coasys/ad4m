@@ -59,9 +59,12 @@ beforeEach(() => {
 })
 afterEach(() => client.closeAll())
 
+/** Transport tests send arbitrary method names, outside the typed table. */
+type UntypedCall = (type: string, params?: unknown, options?: object) => Promise<unknown>
+
 /** A call whose rejection counts as handled until the test awaits it. */
 function call<T = unknown>(type: string, params?: Record<string, unknown>, options?: object): Promise<T> {
-    const promise = client.call<T>(type, params, options)
+    const promise = (client.call as UntypedCall)(type, params ?? {}, options) as Promise<T>
     promise.catch(() => {})
     return promise
 }

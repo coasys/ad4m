@@ -133,7 +133,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.publish': 'neighbourhood://published',
     'neighbourhood.join': {
         uuid: 'uuid-joined', name: 'joined-neighbourhood', sharedUrl: 'neighbourhood://url',
-        neighbourhood: {}, state: 'Synced',
+        neighbourhood: {
+            author: 'did:test:123', timestamp: '2024-01-01',
+            data: { linkLanguage: 'lang://link', meta: { links: [] } },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        },
+        state: 'SYNCED',
     },
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
@@ -143,8 +148,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.sendBroadcast': true,
 
     // ── Expressions ──
-    'expression.get': (p: Record<string, unknown>) => {
-        if (p.raw === true) return 'raw-expression-data';
+    'expression.getRaw': 'raw-expression-data',
+    'expression.get': () => {
         return {
             author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
@@ -206,7 +211,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.tasks': [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
     'ai.addTask': { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
-    'ai.removeTask': { taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] },
+    'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
     'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
 
@@ -227,7 +232,11 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     },
 
     // ── Hosting ──
-    'hosting.info': { email: 'test@test.com' },
+    'hosting.info': {
+        userInfo: { email: 'test@test.com', credits: 5, hotWalletAddress: null, freeAccess: false },
+        rates: null,
+        version: { dnaHash: null, buildVersion: 'test' },
+    },
     'hosting.setHotWallet': true,
     'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
@@ -943,7 +952,7 @@ describe('NeighbourhoodClient', () => {
             'uuid-1', 'lang://link', new Perspective(),
         );
         expect(url).toBe('neighbourhood://published');
-        expect(lastRpcCall!.params.perspectiveUUID).toBe('uuid-1');
+        expect(lastRpcCall!.params.perspectiveUuid).toBe('uuid-1');
     });
 
     test('joinFromUrl() joins a neighbourhood', async () => {
@@ -1183,8 +1192,8 @@ describe('AIClient', () => {
     });
 
     test('removeTask() removes a task', async () => {
-        const task = await ad4m.ai.removeTask('task-1');
-        expect(task.name).toBe('summarize');
+        expect(await ad4m.ai.removeTask('task-1')).toBe(true);
+        expect(lastRpcCall!.params).toEqual({ id: 'task-1' });
     });
 
     test('prompt() sends a prompt', async () => {

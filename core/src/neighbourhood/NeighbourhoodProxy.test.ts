@@ -1,5 +1,8 @@
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy";
+import { Perspective, PerspectiveExpression } from "../perspectives/Perspective";
+
+const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
 
 // Mock ApiClient's subscribe to avoid real WebSocket connections
 jest.mock('../apiClient', () => {
@@ -39,7 +42,7 @@ describe("NeighbourhoodProxy", () => {
     neighbourhoodProxy.addSignalHandler(handler2);
     await promise;
 
-    neighbourhoodClient.dispatchSignal(neighbourhoodURI, true);
+    neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);
 
     expect(callbacks).toBe(2);
   });
@@ -91,7 +94,7 @@ describe("NeighbourhoodProxy", () => {
     expect(subscribeCallCount).toBe(2);
 
     // Dispatch signal
-    neighbourhoodClient.dispatchSignal(neighbourhoodURI, true);
+    neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);
 
     // Check that only handler2 was called (handler1 was removed)
     expect(callbacks1).toBe(0);

@@ -1,4 +1,6 @@
 import { callSafely } from './notifyListeners'
+import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
+import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
@@ -28,7 +30,8 @@ export interface CallOptions {
      * `AbortError`. The executor drops the reply; it cannot always stop the work.
      */
     signal?: AbortSignal
-    /** Timeout in ms, from the call to the reply. Defaults to 30 s. */
+    /** Timeout in ms, from the call to the reply. Defaults to 30 s, or
+     *  {@link LONG_TIMEOUT_MS} for a method the executor marks long. */
     timeoutMs?: number
 }
 
@@ -44,11 +47,6 @@ const DEFAULT_TIMEOUT_MS = 30_000
 /** Default timeout for calls that can run for minutes: LLM work, Holochain, publishing. */
 export const LONG_TIMEOUT_MS = 20 * 60 * 1000
 
-/** `options` with {@link LONG_TIMEOUT_MS} unless the caller set a timeout. */
-export function longCall(options?: CallOptions): CallOptions {
-    return { ...options, timeoutMs: options?.timeoutMs ?? LONG_TIMEOUT_MS }
-}
-
 const INITIAL_RECONNECT_DELAY_MS = 500
 const MAX_RECONNECT_DELAY_MS = 30_000
 
@@ -62,22 +60,6 @@ function nextId(): string {
     return String(++_idCounter)
 }
 
-/**
- * Idempotent reads. One of these that was sent when the socket dropped goes
- * out again, once, on the next socket. Other calls reject with 503: the
- * executor may already have applied them.
- */
-const RETRYABLE_READS = new Set([
-    'agent.get',
-    'agent.status',
-    'expression.get',
-    'language.get',
-    'perspective.all',
-    'perspective.get',
-    'perspective.queryLinks',
-    'perspective.snapshot',
-    'runtime.info',
-])
 
 /** Sockets that may close before a call goes out before the call fails with
  *  503. A call that never went out never reached the executor, so waiting
@@ -270,31 +252,31 @@ export class ApiClient {
     // ── RPC call method ─────────────────────────────────────────────────────
 
     /**
-     * Send an RPC call over the WebSocket, connecting first if needed.
-     * @param type - The operation type (e.g. 'agent.get', 'perspective.all')
-     * @param params - Optional parameters to include in the message
+     * Call an executor method over the WebSocket, connecting first if needed.
+     * Params and result are typed by the executor's method table
+     * (`generated/api/RpcMethods.ts`).
      * @param options - `signal` to cancel, `timeoutMs` to override the
      *   default timeout. The timeout covers connecting and the reply.
      */
-    call<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
+    call<M extends RpcMethod>(method: M, params: RpcMethods[M]['params'], options?: CallOptions): Promise<RpcMethods[M]['result']> {
         // A listener added before this call needs its `events.watch` on the
         // wire first. The executor applies a watch as it reads it, so the
         // event this call causes reaches the listener.
         this._flushWatch()
-        return this._request<T>(type, params, options)
+        return this._request(method, params, options) as Promise<RpcMethods[M]['result']>
     }
 
-    private _request<T>(type: string, params?: Record<string, unknown>, options?: CallOptions): Promise<T> {
+    private _request(type: string, params?: unknown, options?: CallOptions): Promise<unknown> {
         const signal = options?.signal
         if (signal?.aborted) {
             return Promise.reject(new DOMException('Aborted', 'AbortError'))
         }
-        const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS
+        const timeoutMs = options?.timeoutMs ?? ((LONG_METHODS as ReadonlySet<string>).has(type) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
         const id = nextId()
         // Params go under "params" so they cannot clash with "id" and "type".
         const message = JSON.stringify({ id, type, params: params || {} })
 
-        return new Promise<T>((resolve, reject) => {
+        return new Promise<unknown>((resolve, reject) => {
             const settle = (fn: () => void) => {
                 if (!this._pendingCalls.delete(id)) return
                 clearTimeout(timer)
@@ -320,9 +302,9 @@ export class ApiClient {
                 message,
                 sent: false,
                 failedConnects: 0,
-                retry: RETRYABLE_READS.has(type),
+                retry: (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
-                resolve: (value) => settle(() => resolve(value as T)),
+                resolve: (value) => settle(() => resolve(value)),
                 reject: (reason) => settle(() => reject(reason)),
             }
             this._pendingCalls.set(id, pending)

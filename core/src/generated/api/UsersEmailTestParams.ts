@@ -5,4 +5,8 @@ import type { UsersEmailTestAction } from "./UsersEmailTestAction";
  * `get-code` and `set-expiry` require `email`; `set-expiry` also requires
  * `verificationType` and `expiresAt`.
  */
-export type UsersEmailTestParams = { action: UsersEmailTestAction, email?: string, verificationType?: string, expiresAt?: bigint, };
+export type UsersEmailTestParams = { action: UsersEmailTestAction, email?: string, verificationType?: string, 
+/**
+ * Unix seconds; a JSON number, well inside `Number.MAX_SAFE_INTEGER`.
+ */
+expiresAt?: number, };
