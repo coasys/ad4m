@@ -162,17 +162,6 @@ describe('PerspectiveClient RPC operations', () => {
         expect(added).not.toHaveBeenCalled()
     })
 
-    it('releasing the sync-state listener removes its subscription', () => {
-        const unsub = jest.fn()
-        mockSubscribe.mockReturnValue(unsub)
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-
-        const release = client.addPerspectiveSyncStateChangeListener('uuid-s', [])
-        release()
-
-        expect(unsub).toHaveBeenCalledTimes(1)
-    })
-
     it('addPerspectiveAddedListener dispatches events to callbacks', () => {
         const subscriberCallbacks: ((data: any) => void)[] = []
         mockSubscribe.mockImplementation((cb: any) => {

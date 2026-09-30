@@ -1212,6 +1212,18 @@ describe('Ad4mClient', () => {
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
+    test('calls go through the injected webSocketImpl', async () => {
+        class InjectedWebSocket extends MockWebSocket {}
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', { webSocketImpl: InjectedWebSocket as any });
+
+        const agent = await freshClient.agent.me();
+
+        expect(agent.did).toBeDefined();
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+        for (const ws of MockWebSocket.instances) expect(ws).toBeInstanceOf(InjectedWebSocket);
+        freshClient.close();
+    });
+
     test('a listener on a new client receives each default event exactly once', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const listeners = {

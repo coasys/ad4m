@@ -17,7 +17,7 @@ describe('link-updated callback type', () => {
     const client: any = {
       addPerspectiveLinkAddedListener: jest.fn(),
       addPerspectiveLinkRemovedListener: jest.fn(),
-      addPerspectiveLinkUpdatedListener: (_uuid: string, cbs: LinkUpdatedCallback[]) => { updatedCallbacks = cbs; },
+      addPerspectiveLinkUpdatedListener: (_uuid: string, cbs: LinkUpdatedCallback[]) => { updatedCallbacks = cbs; return () => {}; },
       addPerspectiveSyncStateChangeListener: jest.fn(),
     };
     const proxy = new PerspectiveProxy(

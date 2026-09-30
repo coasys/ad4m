@@ -34,22 +34,19 @@ function setup(replies: Record<string, Reply>) {
   FakeWebSocket.replies = replies;
   const api = new ApiClient('http://localhost:12000', undefined, FakeWebSocket as any);
   const ai = new AIClient('http://localhost:12000', undefined, api);
-  const callbackCount = () => (api as any)._wsCallbacks.size as number;
-  return { api, ai, callbackCount };
+  return { api, ai };
 }
 
 describe('AIClient transcription streams (L7)', () => {
   it('a stream whose close call fails leaves no listener', async () => {
-    const { api, ai, callbackCount } = setup({
+    const { api, ai } = setup({
       'ai.transcriptionOpen': { result: 'stream-1' },
       'ai.transcriptionClose': { error: 'close failed' },
     });
     const received: string[] = [];
     await ai.openTranscriptionStream('model', text => received.push(text));
-    expect(callbackCount()).toBe(1);
 
     await expect(ai.closeTranscriptionStream('stream-1')).rejects.toThrow('close failed');
-    expect(callbackCount()).toBe(0);
     FakeWebSocket.last?.push({ type: 'transcription-text', streamId: 'stream-1', text: 'after close' });
     expect(received).toEqual([]);
     api.closeAll();

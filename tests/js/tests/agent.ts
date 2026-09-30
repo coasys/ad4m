@@ -148,6 +148,25 @@ export default function agentTests(testContext: TestContext) {
                 expect(currentAgentPostDeletion.perspective).not.to.be.undefined;
                 expect(currentAgentPostDeletion.perspective!.links.length).to.equal(1);
             })
+            it('mutatePublicPerspective leaves no temporary perspective behind', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+                const before = (await ad4mClient.perspective.all()).length;
+
+                await ad4mClient.agent.mutatePublicPerspective({
+                    additions: [new Link({
+                        source: "test://source-temp",
+                        predicate: "test://predicate-temp",
+                        target: "test://target-temp"
+                    })],
+                    removals: []
+                });
+
+                expect((await ad4mClient.perspective.all()).length).to.equal(before);
+
+                const added = (await ad4mClient.agent.me()).perspective!.links
+                    .filter(l => l.data.source === "test://source-temp");
+                await ad4mClient.agent.mutatePublicPerspective({ additions: [], removals: added });
+            })
             it('can create entanglementProofPreFlight', async () => {
                 const ad4mClient = testContext.ad4mClient!;
 

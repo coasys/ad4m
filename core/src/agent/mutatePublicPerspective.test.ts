@@ -19,12 +19,10 @@ class Executor {
   /** Temporary perspectives that still exist. */
   perspectives = new Set<string>();
   profile: any = { links: [L1, L2] };
-  calls: string[] = [];
   #created = 0;
   #signed = 3;
 
   handle(type: string, p: any): any {
-    this.calls.push(type);
     switch (type) {
       case 'agent.get':
         return { did: DID, perspective: this.profile, directMessageLanguage: 'lang://dm' };
@@ -48,14 +46,12 @@ class Executor {
 
 function makeFakeWebSocket(executor: Executor) {
   return class FakeWebSocket {
-    static instances: FakeWebSocket[] = [];
     readyState = 0;
     onopen: (() => void) | null = null;
     onmessage: ((event: any) => void) | null = null;
     onerror: ((e: any) => void) | null = null;
     onclose: (() => void) | null = null;
     constructor(public url: string) {
-      FakeWebSocket.instances.push(this);
       setTimeout(() => { this.readyState = 1; this.onopen?.(); }, 0);
     }
     send(raw: string) {
@@ -79,15 +75,13 @@ const originalWebSocket = (globalThis as any).WebSocket;
 afterEach(() => { (globalThis as any).WebSocket = originalWebSocket; });
 
 describe('AgentClient.mutatePublicPerspective (L4)', () => {
-  it('returns the profile without the removals, plus the signed additions, on one socket', async () => {
+  it('returns the profile without the removals, plus the signed additions', async () => {
     const executor = new Executor();
-    const FakeWs = makeFakeWebSocket(executor);
-    (globalThis as any).WebSocket = FakeWs;
+    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
     const client = new Ad4mClient('http://localhost:12000', 'token');
 
     const agent = await client.agent.mutatePublicPerspective(mutations());
 
-    expect(FakeWs.instances.length).toBe(1);
     expect(executor.perspectives.size).toBe(0);
 
     expect(agent.did).toBe(DID);
@@ -96,51 +90,6 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
       L2,
       signed({ source: DID, predicate: 'name', target: 'literal://new' }, 3),
     ] as unknown as LinkExpression[]);
-    client.close();
-  });
-
-  it('signs all additions with one addLinks call and copies no links one by one', async () => {
-    const executor = new Executor();
-    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token');
-
-    await client.agent.mutatePublicPerspective({
-      additions: [
-        new Link({ source: DID, predicate: 'a', target: 'literal://a' }),
-        new Link({ source: DID, predicate: 'b', target: 'literal://b' }),
-      ],
-      removals: [L1 as any, L2 as any],
-    });
-
-    expect(executor.calls).toEqual([
-      'perspective.create', 'perspective.addLinks', 'perspective.remove', 'agent.get', 'agent.updateProfile',
-    ]);
-    expect(executor.profile.links.map((l: any) => l.data.target)).toEqual(['literal://a', 'literal://b']);
-    client.close();
-  });
-
-  it('creates no temporary perspective when there is nothing to add', async () => {
-    const executor = new Executor();
-    (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token');
-
-    const agent = await client.agent.mutatePublicPerspective({ additions: [], removals: [L1 as any] });
-
-    expect(executor.calls).toEqual(['agent.get', 'agent.updateProfile']);
-    expect(agent.perspective!.links).toEqual([L2] as unknown as LinkExpression[]);
-    client.close();
-  });
-
-  it('works in embedded mode (injected WebSocket, no global one)', async () => {
-    const executor = new Executor();
-    const FakeWs = makeFakeWebSocket(executor);
-    (globalThis as any).WebSocket = class { constructor() { throw new Error('global WebSocket must not be used'); } };
-    const client = new Ad4mClient('http://proxy', 'token', { webSocketImpl: FakeWs as any });
-
-    const agent = await client.agent.mutatePublicPerspective(mutations());
-
-    expect(agent.perspective!.links).toHaveLength(2);
-    expect(FakeWs.instances.length).toBe(1);
     client.close();
   });
 

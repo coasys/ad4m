@@ -843,6 +843,29 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.get(all)).to.eql([])
             })
 
+            it('a listener fires without awaiting addListener; dispose stops it and leaves a second proxy listening', async () => {
+                const p = await ad4mClient.perspective.add("proxy listener test")
+                try {
+                    const first = sinon.fake()
+                    p.addListener('link-added', first)
+                    await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://one' }))
+                    await pollUntil(() => first.callCount === 1, { label: 'link-added on the first proxy' })
+
+                    const other = (await ad4mClient.perspective.byUUID(p.uuid))!
+                    const second = sinon.fake()
+                    other.addListener('link-added', second)
+                    p.dispose()
+                    await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://two' }))
+                    await pollUntil(() => second.callCount === 1, { label: 'link-added on the second proxy' })
+                    // Both proxies share one socket, so the first would have seen the event by now.
+                    expect(first.callCount).to.equal(1)
+                    expect(second.getCall(0).args[0].data.target).to.equal('test://two')
+                    other.dispose()
+                } finally {
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('can do singleTarget operations', async () => {
                 const all = new LinkQuery({})
 
