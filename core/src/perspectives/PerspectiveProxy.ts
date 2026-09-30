@@ -1639,18 +1639,11 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Adds a subject class to the perspective.
-     * Alias for addSdna() with sdnaType='subject_class'.
-     */
-    async addSubjectClass(name: string, shaclJson: string) {
-        return this.addSdna(name, '', 'subject_class', shaclJson);
-    }
-
-    /**
      * **Recommended way to add SDNA schemas.**
      * 
-     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
-     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * Store a SHACL shape in this Perspective. The executor writes it as links, as it
+     * does for `@Model` classes. The shape needs a `targetClass` and keeps its
+     * `nodeShapeUri`, which must end with `{name}Shape`.
      * 
      * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
      * @param shape - SHACLShape instance defining the schema
@@ -1674,31 +1667,7 @@ export class PerspectiveProxy {
      * await perspective.addShacl('Recipe', shape);
      */
     async addShacl(name: string, shape: SHACLShape): Promise<void> {
-        // Serialize shape to links
-        const shapeLinks = shape.toLinks();
-        
-        // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const allLinks: Link[] = [
-            ...shapeLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_shacl",
-                target: nameMapping.toUrl()
-            }),
-            new Link({
-                source: nameMapping.toUrl(),
-                predicate: "ad4m://shacl_shape_uri",
-                target: shape.nodeShapeUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        await this.addSdna(name, '', 'subject_class', JSON.stringify(shape.toJSON()));
     }
     
     /**
@@ -1734,15 +1703,20 @@ export class PerspectiveProxy {
     /**
      * Get all SHACL shapes stored in this Perspective (one RPC call).
      * The executor resolves all shapes in-process and returns them in bulk.
+     * A shape that fails to decode is skipped with a `console.warn`, so it
+     * does not hide the others.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const entries = await this.#client.getAllShacl(this.#handle.uuid);
-        return entries
-            .map(({ name, shapeUri, links }) => {
-                const shape = SHACLShape.fromLinks(links as any, shapeUri);
-                return shape ? { name, shape } : null;
-            })
-            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
+        const shapes: Array<{name: string, shape: SHACLShape}> = [];
+        for (const { name, shapeUri, links } of entries) {
+            try {
+                shapes.push({ name, shape: SHACLShape.fromLinks(links as any, shapeUri) });
+            } catch (e) {
+                console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
+            }
+        }
+        return shapes;
     }
 
     /**
@@ -1781,31 +1755,21 @@ export class PerspectiveProxy {
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
-        // Serialize flow to links
-        const flowLinks = flow.toLinks();
-        
-        // Create registration and mapping links
         const flowNameLiteral = Literal.from(name).toUrl();
-        const allLinks: Link[] = [
-            ...flowLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_flow",
-                target: flowNameLiteral
-            }),
-            new Link({
-                source: flowNameLiteral,
-                predicate: "ad4m://flow_uri",
-                target: flow.flowUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        const additions = [
+            ...flow.toLinks(),
+            { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
+            { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
+        ].map(l => new Link(l));
+
+        // Re-adding a flow replaces its transitions. Their URIs may use an
+        // older scheme, so find them through the flow's hasTransition links.
+        const edges = await this.get(new LinkQuery({ source: flow.flowUri, predicate: "ad4m://hasTransition" }));
+        const transitionLinks = await Promise.all(
+            edges.map(l => this.get(new LinkQuery({ source: l.data.target })))
+        );
+
+        await this.linkMutations({ additions, removals: [...edges, ...transitionLinks.flat()] });
     }
 
     /**
