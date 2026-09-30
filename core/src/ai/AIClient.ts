@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, CallOptions, longCall } from "../apiClient";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
@@ -9,7 +9,7 @@ export class AIClient {
     #apiClient: ApiClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
@@ -42,8 +42,8 @@ export class AIClient {
         return this.#apiClient.call<string[]>('ai.discoverModels', { baseUrl, apiKey, apiType });
     }
 
-    async addModel(model: ModelInput): Promise<string> {
-        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
+    async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
+        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) }, longCall(options));
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
@@ -91,12 +91,12 @@ export class AIClient {
         return this.#apiClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
     }
 
-    async prompt(taskId: string, prompt: string): Promise<string> {
-        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt });
+    async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
+        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt }, longCall(options));
     }
 
-    async embed(modelId: string, text: string): Promise<Array<number>> {
-        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
+    async embed(modelId: string, text: string, options?: CallOptions): Promise<Array<number>> {
+        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text }, longCall(options));
 
         const compressed = base64js.toByteArray(aiEmbed);
         // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
@@ -137,11 +137,10 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
-
-        const unsub = this.#transcriptionUnsubscribers.get(streamId);
-        if (unsub) {
-            unsub();
+        try {
+            await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
+        } finally {
+            this.#transcriptionUnsubscribers.get(streamId)?.();
             this.#transcriptionUnsubscribers.delete(streamId);
         }
     }

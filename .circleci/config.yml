@@ -65,7 +65,7 @@ commands:
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
   setup_integration_test_environment:
-    description: "Setup common integration test environment"
+    description: "Setup integration test environment with Holochain bootstrap languages"
     steps:
       - fix_workdir
       - checkout
@@ -118,9 +118,40 @@ commands:
       - run:
           name: Build bootstrap languages
           command: pnpm run build-languages
+
+  setup_local_integration_test_environment:
+    description: "Setup integration test environment with local-only bootstrap languages (no Holochain)"
+    steps:
+      - fix_workdir
+      - checkout
       - run:
-          name: Build link-server
-          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
+          name: Set LOCAL_MODE for downstream test suites
+          command: echo 'export LOCAL_MODE=true' >> "$BASH_ENV"
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            mkdir -p target/release
+            rm -f target/release/ad4m target/release/ad4m-executor
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
+            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
+      - setup_env
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
+      - run:
+          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
+          command: |
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
+      - run:
+          name: Build bootstrap languages
+          command: pnpm run build-languages
 
   restore_rust_compile_inputs:
     description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
@@ -274,17 +305,86 @@ jobs:
           command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
 
+  # The regular JS integration suite: local bootstrap languages only, no
+  # Holochain conductor. Two-executor suites share languages, neighbourhoods
+  # and agent profiles through the shared stores (tests/js/utils/sharedStores.ts).
   integration-tests-js:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_local_integration_test_environment
+      - run:
+          name: Run JS integration tests (local languages, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suite over the server-link-language: Alice + Bob on local
+  # languages (no Holochain), links syncing through a link-server the suite
+  # starts (tests/js/tests/integration-server-link.test.ts).
+  integration-tests-multi-node-server-link:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_local_integration_test_environment
+      - run:
+          name: Build link-server
+          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
+      - run:
+          name: Run multi-node server-link integration tests (Alice + Bob, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suites that need Holochain: links syncing between executors
+  # through p-diff-sync (tests/js/tests/integration.test.ts).
+  integration-tests-multi-node-holochain:
     machine: true
     resource_class: coasys/marvin-light
     steps:
       - setup_integration_test_environment
       - run:
-          name: Run integration tests
+          name: Run multi-node Holochain integration tests (Alice + Bob)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
-            cd ./tests/js && pnpm run test-main 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
@@ -298,7 +398,6 @@ jobs:
               cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
               cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
             done
-            # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
           when: always
@@ -319,19 +418,19 @@ jobs:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          name: Run email-verification integration tests (local)
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
 
   integration-tests-mcp:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run MCP integration tests
+          name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
@@ -339,9 +438,9 @@ jobs:
     machine: true
     resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_local_integration_test_environment
       - run:
-          name: Run Ad4mModel unit + integration tests
+          name: Run Ad4mModel unit + integration tests (local)
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
       - run:
@@ -456,6 +555,12 @@ workflows:
           requires:
             - build
       - integration-tests-js:
+          requires:
+            - build
+      - integration-tests-multi-node-server-link:
+          requires:
+            - build
+      - integration-tests-multi-node-holochain:
           requires:
             - build
       - integration-tests-multi-user-simple:

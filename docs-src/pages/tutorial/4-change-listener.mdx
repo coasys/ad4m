@@ -22,3 +22,5 @@ myPerspective.addListener("link-removed", (removedLink: LinkExpression) => {
   console.log("A link was removed:", removedLink);
 });
 ```
+
+`removeListener(type, callback)` removes one listener. `dispose()` removes every listener this proxy registered.
