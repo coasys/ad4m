@@ -151,7 +151,7 @@ pub struct TsType {
 }
 
 impl TsType {
-    fn of<T: ts_rs::TS + 'static + ?Sized>() -> Self {
+    pub(crate) fn of<T: ts_rs::TS + 'static + ?Sized>() -> Self {
         let cfg = ts_rs::Config::from_env();
         let mut deps: Vec<(String, std::path::PathBuf)> = Reached::of::<T>(&cfg)
             .0
@@ -405,9 +405,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
-    map.inline::<std::collections::HashMap<String, Option<Vec<String>>>, bool>(
-        super::event_interest::WATCH,
-    );
+    map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);
     log::info!("WS RPC: registered {} handlers", map.len());
     map

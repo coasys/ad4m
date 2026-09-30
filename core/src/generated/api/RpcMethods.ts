@@ -34,6 +34,7 @@ import type { EmbedRequest } from "./EmbedRequest";
 import type { EntanglementProof } from "./EntanglementProof";
 import type { EntanglementProofPreflightRequest } from "./EntanglementProofPreflightRequest";
 import type { EntanglementProofsWrapper } from "./EntanglementProofsWrapper";
+import type { EventName } from "./Events";
 import type { ExportRequest } from "./ExportRequest";
 import type { ExpressionInteractRequest } from "./ExpressionInteractRequest";
 import type { ExpressionManyRequest } from "./ExpressionManyRequest";
@@ -198,7 +199,7 @@ export interface RpcMethods {
   "ai.updateModel": { params: AiUpdateModelParams; result: boolean };
   "ai.updateTask": { params: AiUpdateTaskParams; result: AITask };
   "events.unwatch": { params: Record<string, never>; result: boolean };
-  "events.watch": { params: { [key in string]: Array<string> | null }; result: boolean };
+  "events.watch": { params: Partial<Record<EventName, Array<string> | null>>; result: boolean };
   "expression.create": { params: CreateExpressionRequest; result: string };
   "expression.get": { params: ExpressionUrlRequest; result: ExpressionRendered | null };
   "expression.getMany": { params: ExpressionManyRequest; result: Array<ExpressionRendered | null> };

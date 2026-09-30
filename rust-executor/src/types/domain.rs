@@ -776,7 +776,9 @@ pub struct ComputeLogEntry {
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
 pub struct NeighbourhoodSignalFilter {
+    pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
     pub signal: PerspectiveExpression,
     pub recipient: Option<String>, // DID of the recipient agent for this signal
@@ -811,6 +813,7 @@ pub struct LinkUpdated {
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveStateFilter {
+    pub perspective_uuid: String,
     pub state: PerspectiveState,
     pub perspective: PerspectiveHandle,
 }
@@ -1129,6 +1132,7 @@ impl GetFilter for PerspectiveHandle {
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveWithOwner {
+    pub perspective_uuid: String,
     pub perspective: PerspectiveHandle,
     pub owner: String,
 }
@@ -1151,6 +1155,7 @@ impl GetFilter for PerspectiveWithOwner {
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveRemovedWithOwner {
+    pub perspective_uuid: String,
     pub uuid: String,
     pub owner: String,
 }
@@ -1388,6 +1393,7 @@ pub struct QuerySubscription {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveQuerySubscriptionFilter {
+    pub perspective_uuid: String,
     pub uuid: String,
     pub subscription_id: String,
     pub result: String,

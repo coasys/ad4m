@@ -7,18 +7,80 @@
 //! (default `bindings/`); `pnpm run generate:api-types` in `core/` points it
 //! at `core/src/generated/api/`.
 //!
+//! Also writes `Events.ts` — every event the events socket emits, with the
+//! TypeScript type of its payload, and the perspective-scoped ones.
+//!
 //! `request.cancel` and `ping` are handled inline by the socket reader, not
 //! the map, so they are not in the table.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::api::events_ws::{event_specs, EventSpec};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
 
 const FILE_NAME: &str = "RpcMethods.ts";
+const EVENTS_FILE_NAME: &str = "Events.ts";
 
 fn quoted(names: impl Iterator<Item = String>) -> String {
     names.map(|n| format!("  \"{}\",\n", n)).collect::<String>()
+}
+
+/// Does the type expression `ty` mention the type `name`?
+fn named_in(ty: &str, name: &str) -> bool {
+    regex::Regex::new(&format!(r"\b{}\b", regex::escape(name)))
+        .unwrap()
+        .is_match(ty)
+}
+
+/// Deterministic render of `Events.ts`: events in table order, imports sorted.
+pub(crate) fn render_events(specs: &[EventSpec]) -> String {
+    let imports: BTreeSet<(String, String)> = specs
+        .iter()
+        .flat_map(|s| s.payload.deps.iter())
+        .filter(|(name, _)| specs.iter().any(|s| named_in(&s.payload.name, name)))
+        .map(|(name, path)| {
+            let module = path.with_extension("").display().to_string();
+            (name.clone(), format!("./{}", module))
+        })
+        .collect();
+
+    let mut out = String::new();
+    out.push_str(
+        "// Auto-generated from the executor's event table (rust-executor/src/api/events_ws.rs).\n",
+    );
+    out.push_str("// Do NOT edit manually — regenerate with: pnpm run generate:api-types\n\n");
+    for (name, module) in &imports {
+        out.push_str(&format!(
+            "import type {{ {} }} from \"{}\";\n",
+            name, module
+        ));
+    }
+    out.push_str("\n/** Every event the executor emits: its payload (the message without `type`). */\nexport interface EventMap {\n");
+    for s in specs {
+        out.push_str(&format!("  \"{}\": {};\n", s.name, s.payload.name));
+    }
+    out.push_str("}\n\nexport type EventName = keyof EventMap;\n\n");
+    let scoped: Vec<String> = specs
+        .iter()
+        .filter(|s| s.scoped)
+        .map(|s| format!("\"{}\"", s.name))
+        .collect();
+    out.push_str("/** Events about one perspective: they carry `perspectiveUuid`. */\n");
+    out.push_str(&format!(
+        "export type ScopedEventName = {};\n\n",
+        scoped.join(" | ")
+    ));
+    out.push_str("/** {@link ScopedEventName} as a set. */\n");
+    out.push_str("export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([\n");
+    out.push_str(&quoted(
+        specs
+            .iter()
+            .filter(|s| s.scoped)
+            .map(|s| s.name.to_string()),
+    ));
+    out.push_str("]);\n");
+    out
 }
 
 /// Deterministic render: methods sorted by name, imports sorted, fixed header.
@@ -26,10 +88,9 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
     let specs = map.specs();
     // Import only the types a contract names; the others reach it through those.
     let named = |name: &str| {
-        let word = regex::Regex::new(&format!(r"\b{}\b", regex::escape(name))).unwrap();
         specs
             .iter()
-            .any(|s| word.is_match(&s.params.name) || word.is_match(&s.result.name))
+            .any(|s| named_in(&s.params.name, name) || named_in(&s.result.name, name))
     };
     let imports: BTreeSet<(String, String)> = specs
         .iter()
@@ -39,6 +100,14 @@ pub(crate) fn render_rpc_methods(map: &HandlerMap) -> String {
             let module = path.with_extension("").display().to_string();
             (name.clone(), format!("./{}", module))
         })
+        .chain(
+            specs
+                .iter()
+                .any(|s| {
+                    named_in(&s.params.name, "EventName") || named_in(&s.result.name, "EventName")
+                })
+                .then(|| ("EventName".to_string(), "./Events".to_string())),
+        )
         .collect();
 
     let mut out = String::new();
@@ -88,6 +157,15 @@ fn export_rpc_methods() {
     }
     std::fs::write(Path::new(&dir).join(FILE_NAME), render_rpc_methods(&map))
         .expect("write RpcMethods.ts");
+    let events = event_specs();
+    for spec in &events {
+        (spec.payload.export)(&cfg).expect("export event payload types");
+    }
+    std::fs::write(
+        Path::new(&dir).join(EVENTS_FILE_NAME),
+        render_events(&events),
+    )
+    .expect("write Events.ts");
 }
 
 /// The committed SDK copy — the table and every type it imports — must match
@@ -113,6 +191,15 @@ fn committed_sdk_rpc_methods_are_current() {
         render_rpc_methods(&map),
         "core/src/generated/api/{FILE_NAME} is stale: {hint}"
     );
+    let events = event_specs();
+    let events_on_disk = std::fs::read_to_string(dir.join(EVENTS_FILE_NAME)).unwrap_or_else(|e| {
+        panic!("core/src/generated/api/{EVENTS_FILE_NAME} is missing ({e}): {hint}")
+    });
+    assert_eq!(
+        events_on_disk,
+        render_events(&events),
+        "core/src/generated/api/{EVENTS_FILE_NAME} is stale: {hint}"
+    );
 
     let cfg = ts_rs::Config::from_env();
     let stale: BTreeSet<String> = map
@@ -123,6 +210,7 @@ fn committed_sdk_rpc_methods_are_current() {
                 .into_iter()
                 .chain((s.result.stale)(&cfg, &dir))
         })
+        .chain(events.iter().flat_map(|s| (s.payload.stale)(&cfg, &dir)))
         .collect();
     assert!(stale.is_empty(), "stale generated types {stale:?}: {hint}");
 }

@@ -56,3 +56,5 @@ export type { VerifySignatureRequest } from "./VerifySignatureRequest";
 export type { WriteSettingsRequest } from "./WriteSettingsRequest";
 export { READ_METHODS, LONG_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
+export { SCOPED_EVENTS } from "./Events";
+export type { EventMap, EventName } from "./Events";

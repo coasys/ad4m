@@ -2,6 +2,8 @@
 //!
 //! Single WebSocket endpoint serving ALL event types.
 //! Each message is a JSON object `{ "type": "<event-type>", ...payload }`.
+//! [`event_specs`] types every payload (exported to the SDK as `Events.ts`);
+//! each perspective-scoped payload carries a flat `perspectiveUuid`.
 //! Events are filtered per-user in multi-user mode, then to what the socket
 //! asked for with `events.watch` (nothing until it does).
 //!
@@ -22,7 +24,7 @@
 //! | `link-updated`                | (inline)      | owner DID              | Link updated in perspective          |
 //! | `signal`                      | (inline)      | recipient DID (lazy)   | Neighbourhood signal received        |
 //! | `message-received`            | `message`     | broadcast              | Runtime message received             |
-//! | `notification-triggered`      | `notification`| perspective owner      | Notification triggered               |
+//! | `notification-triggered`      | `notification` + `perspectiveUuid` | perspective owner | Notification triggered   |
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
@@ -105,6 +107,137 @@ use crate::pubsub::{
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
+use crate::types::{
+    AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
+    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
+    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
+    PerspectiveRemovedWithOwner, PerspectiveStateFilter, PerspectiveWithOwner,
+    TranscriptionTextFilter,
+};
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
+
+/// The name of every event this socket emits. The stream builder and
+/// [`event_specs`] both use these, so an event cannot go out untyped.
+pub mod events {
+    pub const AGENT_STATUS_CHANGED: &str = "agent-status-changed";
+    pub const AGENT_UPDATED: &str = "agent-updated";
+    pub const APPS_CHANGED_EVENT: &str = "apps-changed";
+    pub const HOSTING_USER_INFO_CHANGED: &str = "hosting-user-info-changed";
+    pub const PERSPECTIVE_ADDED: &str = "perspective-added";
+    pub const PERSPECTIVE_REMOVED: &str = "perspective-removed";
+    pub const PERSPECTIVE_UPDATED: &str = "perspective-updated";
+    pub const SYNC_STATE_CHANGE: &str = "sync-state-change";
+    pub const LINK_ADDED: &str = "link-added";
+    pub const LINK_REMOVED: &str = "link-removed";
+    pub const LINK_UPDATED: &str = "link-updated";
+    pub const SIGNAL: &str = "signal";
+    pub const MESSAGE_RECEIVED: &str = "message-received";
+    pub const NOTIFICATION_TRIGGERED: &str = "notification-triggered";
+    pub const EXCEPTION_OCCURRED: &str = "exception-occurred";
+    pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
+    pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
+    pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
+    pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
+    pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
+
+    /// Every name above, in stream-builder order.
+    pub const ALL: [&str; 20] = [
+        AGENT_STATUS_CHANGED,
+        AGENT_UPDATED,
+        APPS_CHANGED_EVENT,
+        HOSTING_USER_INFO_CHANGED,
+        PERSPECTIVE_ADDED,
+        PERSPECTIVE_REMOVED,
+        PERSPECTIVE_UPDATED,
+        SYNC_STATE_CHANGE,
+        LINK_ADDED,
+        LINK_REMOVED,
+        LINK_UPDATED,
+        SIGNAL,
+        MESSAGE_RECEIVED,
+        NOTIFICATION_TRIGGERED,
+        EXCEPTION_OCCURRED,
+        TRANSCRIPTION_TEXT,
+        MODEL_LOADING_STATUS,
+        QUERY_SUBSCRIPTION_UPDATE,
+        AUTO_PROCESSOR_EVENT,
+        AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
+    ];
+}
+
+/// One emitted event: its name, the TypeScript type of its payload (the
+/// wire message without `type`) and whether it is about one perspective
+/// (carries `perspectiveUuid`, so `events.watch` can narrow it).
+pub struct EventSpec {
+    pub name: &'static str,
+    pub payload: super::ws_handler::TsType,
+    pub scoped: bool,
+}
+
+impl EventSpec {
+    fn of<T: ts_rs::TS + 'static>(name: &'static str, scoped: bool) -> Self {
+        Self {
+            name,
+            payload: super::ws_handler::TsType::of::<T>(),
+            scoped,
+        }
+    }
+}
+
+/// `agent-status-changed`: `{ agent }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct AgentStatusChangedEvent {
+    pub agent: AgentStatus,
+}
+
+/// `agent-updated`: `{ agent }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct AgentUpdatedEvent {
+    pub agent: Agent,
+}
+
+/// `message-received`: `{ message }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct MessageReceivedEvent {
+    pub message: PerspectiveExpression,
+}
+
+/// `exception-occurred`: `{ exception }`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+pub struct ExceptionOccurredEvent {
+    pub exception: ExceptionInfo,
+}
+
+/// Every event the socket emits, with its payload type.
+pub fn event_specs() -> Vec<EventSpec> {
+    use crate::perspectives::auto_processor::events::{
+        AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    };
+    use events::*;
+    vec![
+        EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
+        EventSpec::of::<AgentUpdatedEvent>(AGENT_UPDATED, false),
+        EventSpec::of::<Apps>(APPS_CHANGED_EVENT, false),
+        EventSpec::of::<HostingUserInfo>(HOSTING_USER_INFO_CHANGED, false),
+        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_ADDED, true),
+        EventSpec::of::<PerspectiveRemovedWithOwner>(PERSPECTIVE_REMOVED, true),
+        EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_UPDATED, true),
+        EventSpec::of::<PerspectiveStateFilter>(SYNC_STATE_CHANGE, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_ADDED, true),
+        EventSpec::of::<PerspectiveLinkWithOwner>(LINK_REMOVED, true),
+        EventSpec::of::<PerspectiveLinkUpdatedWithOwner>(LINK_UPDATED, true),
+        EventSpec::of::<NeighbourhoodSignalFilter>(SIGNAL, true),
+        EventSpec::of::<MessageReceivedEvent>(MESSAGE_RECEIVED, false),
+        EventSpec::of::<NotificationTriggeredEvent>(NOTIFICATION_TRIGGERED, true),
+        EventSpec::of::<ExceptionOccurredEvent>(EXCEPTION_OCCURRED, false),
+        EventSpec::of::<TranscriptionTextFilter>(TRANSCRIPTION_TEXT, false),
+        EventSpec::of::<AIModelLoadingStatus>(MODEL_LOADING_STATUS, false),
+        EventSpec::of::<PerspectiveQuerySubscriptionFilter>(QUERY_SUBSCRIPTION_UPDATE, true),
+        EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
+        EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+    ]
+}
 
 /// GET /ws/events — WebSocket endpoint for all real-time events.
 ///
@@ -272,21 +405,21 @@ pub(crate) async fn build_event_stream_for(
     // ── Agent events ──
     let s_status = did_stream_nested!(
         pubsub.subscribe(&AGENT_STATUS_CHANGED_TOPIC).await,
-        "agent-status-changed",
+        events::AGENT_STATUS_CHANGED,
         "agent",
         d_agent_status,
         matches_agent_did
     );
     let s_agent_updated = did_stream_nested!(
         pubsub.subscribe(&AGENT_UPDATED_TOPIC).await,
-        "agent-updated",
+        events::AGENT_UPDATED,
         "agent",
         d_agent_updated,
         matches_agent_did
     );
     let s_apps = did_stream!(
         pubsub.subscribe(&APPS_CHANGED).await,
-        "apps-changed",
+        events::APPS_CHANGED_EVENT,
         d_apps,
         matches_apps_user
     );
@@ -300,7 +433,7 @@ pub(crate) async fn build_event_stream_for(
                 async move {
                     match result {
                         Ok(ref msg) if matches_hosting_user(msg, email.as_deref()) => {
-                            Some(wrap_event("hosting-user-info-changed", msg))
+                            Some(wrap_event(events::HOSTING_USER_INFO_CHANGED, msg))
                         }
                         _ => None,
                     }
@@ -311,38 +444,38 @@ pub(crate) async fn build_event_stream_for(
     // ── Perspective lifecycle ──
     let s_persp_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
-        "perspective-added",
+        events::PERSPECTIVE_ADDED,
         d_persp_added
     );
     let s_persp_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_REMOVED_TOPIC).await,
-        "perspective-removed",
+        events::PERSPECTIVE_REMOVED,
         d_persp_removed
     );
     let s_persp_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_UPDATED_TOPIC).await,
-        "perspective-updated",
+        events::PERSPECTIVE_UPDATED,
         d_persp_updated
     );
     let s_sync = broadcast_stream!(
         pubsub.subscribe(&PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC).await,
-        "sync-state-change"
+        events::SYNC_STATE_CHANGE
     );
 
     // ── Link events ──
     let s_link_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_ADDED_TOPIC).await,
-        "link-added",
+        events::LINK_ADDED,
         d_link_added
     );
     let s_link_removed = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_REMOVED_TOPIC).await,
-        "link-removed",
+        events::LINK_REMOVED,
         d_link_removed
     );
     let s_link_updated = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_LINK_UPDATED_TOPIC).await,
-        "link-updated",
+        events::LINK_UPDATED,
         d_link_updated
     );
 
@@ -365,7 +498,7 @@ pub(crate) async fn build_event_stream_for(
                                 did_for_context(&ctx).ok()
                             };
                             if matches_signal_recipient(msg, did.as_deref()) {
-                                Some(wrap_event("signal", msg))
+                                Some(wrap_event(events::SIGNAL, msg))
                             } else {
                                 None
                             }
@@ -379,34 +512,33 @@ pub(crate) async fn build_event_stream_for(
     // ── Runtime events ──
     let s_msg = broadcast_stream_nested!(
         pubsub.subscribe(&RUNTIME_MESSAGED_RECEIVED_TOPIC).await,
-        "message-received",
+        events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream_nested!(
+    let s_notif = did_stream!(
         pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
             .await,
-        "notification-triggered",
-        "notification",
+        events::NOTIFICATION_TRIGGERED,
         d_notif,
         matches_notification_owner
     );
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
-        "exception-occurred",
+        events::EXCEPTION_OCCURRED,
         "exception"
     );
 
     // ── AI events ──
     let s_trans = did_stream!(
         pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
-        "transcription-text",
+        events::TRANSCRIPTION_TEXT,
         d_trans,
         matches_transcription_user
     );
     let s_loading = broadcast_stream!(
         pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await,
-        "model-loading-status"
+        events::MODEL_LOADING_STATUS
     );
 
     // ── Query subscriptions ──
@@ -414,7 +546,7 @@ pub(crate) async fn build_event_stream_for(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-        "query-subscription-update",
+        events::QUERY_SUBSCRIPTION_UPDATE,
         d_query_sub,
         matches_query_subscription_owner
     );
@@ -452,7 +584,7 @@ pub(crate) async fn build_event_stream_for(
                                 admin,
                             ) =>
                         {
-                            Some(wrap_event("auto-processor-event", msg))
+                            Some(wrap_event(events::AUTO_PROCESSOR_EVENT, msg))
                         }
                         _ => None,
                     }
@@ -487,7 +619,7 @@ pub(crate) async fn build_event_stream_for(
                                 admin,
                             ) =>
                         {
-                            Some(wrap_event("auto-processor-neighbourhood-state", msg))
+                            Some(wrap_event(events::AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, msg))
                         }
                         _ => None,
                     }
@@ -718,10 +850,7 @@ pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -
         None => true,
         Some(did) => {
             if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map
-                    .get("perspectiveId")
-                    .or_else(|| map.get("perspective_id"))
-                {
+                if let Some(serde_json::Value::String(uuid)) = map.get("perspectiveUuid") {
                     return perspective_is_owned_by(uuid, did);
                 }
             }
@@ -1189,5 +1318,106 @@ mod events_socket_message_tests {
         assert_eq!(reply(r#"{"type":"ping"}"#), json!({ "type": "pong" }));
         assert!(super::client_message_reply(r#"{"type":"other"}"#, &interest).is_none());
         assert!(super::client_message_reply("not json", &interest).is_none());
+    }
+}
+
+#[cfg(test)]
+mod event_spec_tests {
+    use super::{event_specs, events};
+    use crate::types::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_emitted_event_has_exactly_one_spec() {
+        let specs: Vec<&str> = event_specs().iter().map(|s| s.name).collect();
+        let unique: BTreeSet<&str> = specs.iter().copied().collect();
+        assert_eq!(unique.len(), specs.len(), "duplicate spec: {specs:?}");
+        assert_eq!(unique, events::ALL.into_iter().collect::<BTreeSet<_>>());
+    }
+
+    #[test]
+    fn nested_payloads_keep_their_wire_key() {
+        let wire = super::wrap_event_nested(events::AGENT_UPDATED, "agent", r#"{"did":"d"}"#);
+        let v: serde_json::Value = serde_json::from_str(&wire).unwrap();
+        assert_eq!(v["agent"]["did"], "d");
+        let _: super::AgentUpdatedEvent = serde_json::from_value(v).unwrap();
+    }
+
+    /// Serializes a scoped payload's publish struct and checks the flat
+    /// `perspectiveUuid` that `events.watch` narrows by.
+    fn uuid_of(payload: impl serde::Serialize) -> String {
+        serde_json::to_value(payload).unwrap()["perspectiveUuid"]
+            .as_str()
+            .expect("scoped payload carries perspectiveUuid")
+            .to_string()
+    }
+
+    #[test]
+    fn scoped_payloads_serialize_perspective_uuid() {
+        use crate::perspectives::auto_processor::events::{
+            AutoProcessorNeighbourhoodState, NeighbourhoodPhase,
+        };
+        let p = || "p".to_string();
+        let handle = PerspectiveHandle {
+            uuid: p(),
+            ..Default::default()
+        };
+        let scoped = [
+            uuid_of(PerspectiveWithOwner {
+                perspective_uuid: p(),
+                perspective: handle.clone(),
+                owner: "o".into(),
+            }),
+            uuid_of(PerspectiveRemovedWithOwner {
+                perspective_uuid: p(),
+                uuid: p(),
+                owner: "o".into(),
+            }),
+            uuid_of(PerspectiveStateFilter {
+                perspective_uuid: p(),
+                state: PerspectiveState::Private,
+                perspective: handle.clone(),
+            }),
+            uuid_of(PerspectiveLinkWithOwner {
+                perspective_uuid: p(),
+                ..Default::default()
+            }),
+            uuid_of(PerspectiveLinkUpdatedWithOwner {
+                perspective_uuid: p(),
+                ..Default::default()
+            }),
+            uuid_of(NeighbourhoodSignalFilter {
+                perspective_uuid: p(),
+                perspective: handle,
+                ..Default::default()
+            }),
+            uuid_of(NotificationTriggeredEvent {
+                perspective_uuid: p(),
+                notification: TriggeredNotification {
+                    notification: serde_json::from_value(serde_json::json!({
+                        "id": "n", "granted": true, "description": "", "appName": "",
+                        "appUrl": "", "appIconPath": "", "trigger": "", "perspectiveIds": [],
+                        "webhookUrl": "", "webhookAuth": "", "userEmail": null,
+                    }))
+                    .unwrap(),
+                    perspective_id: p(),
+                    trigger_match: "[]".into(),
+                },
+            }),
+            uuid_of(PerspectiveQuerySubscriptionFilter {
+                perspective_uuid: p(),
+                uuid: p(),
+                subscription_id: "s".into(),
+                result: "[]".into(),
+            }),
+            uuid_of(AutoProcessorNeighbourhoodState::new(
+                "p",
+                "proc",
+                "did:x",
+                "k",
+                NeighbourhoodPhase::Claimed,
+            )),
+        ];
+        assert!(scoped.iter().all(|u| u == "p"));
     }
 }

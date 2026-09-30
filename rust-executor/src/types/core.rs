@@ -528,6 +528,15 @@ pub struct TriggeredNotification {
     pub trigger_match: String,
 }
 
+/// The `notification-triggered` event: the triggered notification plus the
+/// perspective it fired in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTriggeredEvent {
+    pub perspective_uuid: String,
+    pub notification: TriggeredNotification,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
