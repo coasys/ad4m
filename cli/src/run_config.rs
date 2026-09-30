@@ -703,6 +703,52 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An empty `AD4M_<FLAG>` (say `AD4M_APP_DATA_PATH=${DATA_DIR}` with
+    /// `DATA_DIR` unset) is an error that names the variable, never a value
+    /// laid over the file. An empty flag value is an error that names the
+    /// flag. The test walks every flag, so a new one is covered too.
+    #[test]
+    fn an_empty_variable_or_flag_is_an_error_that_names_it() {
+        use clap::CommandFactory;
+        let _env = lock_env();
+        let dir = scratch_dir("empty-value");
+        let config = write_config(&dir, r#"{"app_data_path": "/from/file"}"#);
+        // Every flag is checked before failing, so the message lists them all.
+        let mut wrong = Vec::new();
+        let mut check =
+            |argv: &[&str], env: &[(&'static str, &str)], name: &str| match resolve(argv, env) {
+                Ok(resolved) => wrong.push(format!(
+                    "empty {name} accepted, app_data_path {:?}",
+                    resolved.config.app_data_path
+                )),
+                Err(err) if !format!("{err:#}").contains(name) => {
+                    wrong.push(format!("empty {name}: {}", format!("{err:#}").trim()))
+                }
+                Err(_) => {}
+            };
+        let mut checked = 0;
+        for arg in Cli::command().get_arguments() {
+            let Some(var) = arg.get_env().and_then(|var| var.to_str()) else {
+                continue;
+            };
+            let var: &'static str = Box::leak(var.to_owned().into_boxed_str());
+            let flag = format!("--{}", arg.get_long().unwrap());
+            let file: &[&str] = if var == "AD4M_CONFIG" {
+                &[]
+            } else {
+                &["--config", &config]
+            };
+            check(file, &[(var, "")], var);
+            let mut argv = file.to_vec();
+            argv.extend([flag.as_str(), ""]);
+            check(&argv, &[], &flag);
+            checked += 1;
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        assert_eq!(checked, 29, "every flag of run has a variable");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_group_readable_secret_file_stops_run() {
