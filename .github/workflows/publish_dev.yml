@@ -30,7 +30,11 @@ concurrency:
 
 jobs:
   npm-publish-dev:
+    # A manual run can start from any ref; only `dev` may move the `dev` tag.
+    if: github.ref == 'refs/heads/dev'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
     steps:
