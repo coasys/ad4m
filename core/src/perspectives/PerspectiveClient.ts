@@ -1,5 +1,5 @@
-import {ApiClient, WsEvent, CallOptions, RpcError } from '../apiClient';
-import { addListener, notifyListeners } from "../notifyListeners"
+import {ApiClient, CallOptions, EventFilter, RpcError } from '../apiClient';
+import type { EventMap, EventName } from '../generated/api/Events';
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import {
@@ -17,7 +17,7 @@ import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
 import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
 // runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
@@ -27,15 +27,6 @@ import type {
     FlowReceiptVerdict, FlowValidOutput,
 } from "./FlowInstance";
 
-export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => void
-export type UuidCallback = (uuid: string) => void
-export type LinkCallback = (link: LinkExpression) => void
-export interface LinkUpdate {
-    oldLink: LinkExpression
-    newLink: LinkExpression
-}
-export type LinkUpdatedCallback = (update: LinkUpdate) => void
-export type SyncStateChangeCallback = (state: PerspectiveState) => void
 
 function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw
@@ -53,18 +44,12 @@ function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesR
 
 export class PerspectiveClient {
     #apiClient: ApiClient
-    #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveRemovedCallbacks: UuidCallback[]
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
-        this.#perspectiveAddedCallbacks = []
-        this.#perspectiveUpdatedCallbacks = []
-        this.#perspectiveRemovedCallbacks = []
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -152,18 +137,10 @@ export class PerspectiveClient {
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                const event = data as Record<string, unknown>
-                if (event.type !== 'query-subscription-update') return
-
-                const eventSubscriptionId = event.subscriptionId || event.subscription_id
-                if (eventSubscriptionId !== subscriptionId) return
-
-                const parsed = normalizeQueryResult(event.result, 'Error parsing query subscription:')
-                onData(parsed)
-            }
-        )
+        return this.#apiClient.on('query-subscription-update', (event) => {
+            if (event.subscriptionId !== subscriptionId) return
+            onData(normalizeQueryResult(event.result, 'Error parsing query subscription:'))
+        })
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -353,7 +330,7 @@ export class PerspectiveClient {
      * watch loop then runs interpretation automatically over new source items
      * (like Flux per channel), coordinating which peer processes each batch via
      * the shared-graph ProcessingClaim, and emits step signals on the events
-     * WebSocket (subscribe via {@link addAutoProcessorEventListener}).
+     * WebSocket (subscribe with `on('auto-processor-event', …, { perspective })`).
      * Returns the processor id.
      */
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
@@ -446,45 +423,6 @@ export class PerspectiveClient {
     async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
         return this.#apiClient.call(
             'perspective.mintFlowReceipt', { uuid, instanceUri },
-        )
-    }
-
-    /**
-     * Subscribe to auto-processor step signals. `cb` fires for every
-     * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
-     * Processed), letting a UI show progress and await the next batch.
-     *
-     * Returns a function that removes this listener.
-     */
-    addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
-                    cb(data as unknown as AutoProcessorEvent)
-                }
-            },
-            { types: ['auto-processor-event'], perspective: uuid as string },
-        )
-    }
-
-    /**
-     * Subscribe to neighbourhood-state events on a perspective. `cb` fires
-     * when THIS executor claims / finishes / abandons a batch for any
-     * processor on `uuid` — perspective-scoped observability so a UI can
-     * render "someone is auto-processing this" without receiving the batch
-     * payload or LLM I/O. Returns a function that removes this listener.
-     */
-    addAutoProcessorNeighbourhoodStateListener(
-        uuid: String,
-        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
-                    cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
-                }
-            },
-            { types: ['auto-processor-neighbourhood-state'], perspective: uuid as string },
         )
     }
 
@@ -600,98 +538,9 @@ export class PerspectiveClient {
         return await this.#expressionClient!.create(content, languageAddress)
     }
 
-    // Subscriptions:
-    /** Returns a function that removes the listener. */
-    addPerspectiveAddedListener(cb: PerspectiveHandleCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveAddedCallbacks, cb)
-    }
-
-    /** Returns a function that removes the listener. */
-    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveUpdatedCallbacks, cb)
-    }
-
-    /** Returns a function that removes the listener. */
-    addPerspectiveRemovedListener(cb: UuidCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveRemovedCallbacks, cb)
-    }
-
-    /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
-    #listen(): void {
-        this.#apiClient.subscribe(this.#onEvent, { types: ['perspective-added', 'perspective-updated', 'perspective-removed'] })
-    }
-
-    #onEvent = (data: WsEvent): void => {
-        switch (data.type) {
-            case 'perspective-added':
-                notifyListeners(this.#perspectiveAddedCallbacks, data.perspective as PerspectiveHandle)
-                break
-            case 'perspective-updated':
-                notifyListeners(this.#perspectiveUpdatedCallbacks, data.perspective as PerspectiveHandle)
-                break
-            case 'perspective-removed':
-                notifyListeners(this.#perspectiveRemovedCallbacks, data.uuid as string)
-                break
-        }
-    }
-
-    addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'sync-state-change' && (data.perspective as { uuid?: string } | undefined)?.uuid === uuid) {
-                    notifyListeners(cb, data.state as PerspectiveState)
-                }
-            },
-            { types: ['sync-state-change'], perspective: uuid as string },
-        )
-    }
-
-    addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
-                    notifyListeners(cb, data.link as LinkExpression)
-                }
-            },
-            { types: ['link-added'], perspective: uuid as string },
-        )
-    }
-
-    addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-removed' && data.perspectiveUuid === uuid) {
-                    const link = data.link as LinkExpression & { status?: unknown }
-                    if (!link.status) {
-                        delete link.status
-                    }
-                    notifyListeners(cb, link)
-                }
-            },
-            { types: ['link-removed'], perspective: uuid as string },
-        )
-    }
-
-    addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkUpdatedCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
-                    const newLink = data.newLink as LinkExpression & { status?: unknown }
-                    const oldLink = data.oldLink as LinkExpression & { status?: unknown }
-                    if (!newLink.status) {
-                        delete newLink.status
-                    }
-                    if (!oldLink.status) {
-                        delete oldLink.status
-                    }
-                    notifyListeners(cb, data as unknown as LinkUpdate)
-                }
-            },
-            { types: ['link-updated'], perspective: uuid as string },
-        )
+    /** The client's event bus; see {@link ApiClient.on}. */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

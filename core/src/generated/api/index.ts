@@ -57,4 +57,4 @@ export type { WriteSettingsRequest } from "./WriteSettingsRequest";
 export { READ_METHODS, LONG_METHODS } from "./RpcMethods";
 export type { RpcMethods, RpcMethod } from "./RpcMethods";
 export { SCOPED_EVENTS } from "./Events";
-export type { EventMap, EventName } from "./Events";
+export type { EventMap, EventName, ScopedEventName } from "./Events";

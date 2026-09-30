@@ -8,15 +8,15 @@ import { LinkQuery } from "./LinkQuery"
  * Uses a mock ApiClient to isolate from real WebSocket connections.
  */
 
-// Mock ApiClient so we can control call/subscribe behavior
+// Mock ApiClient so we can control call/on behavior
 const mockCall = jest.fn()
-const mockSubscribe = jest.fn().mockReturnValue(() => {})
+const mockOn = jest.fn().mockReturnValue(() => {})
 
 jest.mock('../apiClient', () => {
     return {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
-            subscribe: mockSubscribe,
+            on: mockOn,
         })),
         RpcError: class RpcError extends Error {
             readonly status: number
@@ -39,7 +39,7 @@ function makeHandle(uuid: string, name: string, state = PerspectiveState.Private
 describe('PerspectiveClient RPC operations', () => {
     beforeEach(() => {
         mockCall.mockReset()
-        mockSubscribe.mockReset().mockReturnValue(() => {})
+        mockOn.mockReset().mockReturnValue(() => {})
     })
 
     it('byUUID returns a PerspectiveProxy for a valid UUID', async () => {
@@ -136,49 +136,20 @@ describe('PerspectiveClient RPC operations', () => {
     it('constructor opens no event subscription', () => {
         new PerspectiveClient('http://localhost:12000', 'token')
 
-        expect(mockSubscribe).not.toHaveBeenCalled()
+        expect(mockOn).not.toHaveBeenCalled()
     })
 
-    it('adding a lifecycle listener subscribes one shared event handler', () => {
+    it('on() registers with ApiClient.on and returns its release function', () => {
+        const release = jest.fn()
+        mockOn.mockReturnValue(release)
         const client = new PerspectiveClient('http://localhost:12000', 'token')
-        client.addPerspectiveAddedListener(() => {})
-        client.addPerspectiveUpdatedListener(() => {})
-        client.addPerspectiveRemovedListener(() => {})
+        const handler = jest.fn()
 
-        // ApiClient keeps handlers in a Set: the same handler every time adds nothing.
-        const handlers = new Set(mockSubscribe.mock.calls.map(([cb]) => cb))
-        expect(handlers.size).toBe(1)
-    })
+        const off = client.on('link-added', handler, { perspective: 'uuid-l' })
 
-    it('the function a lifecycle listener registration returns removes that listener', () => {
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const added = jest.fn()
-        const release = client.addPerspectiveAddedListener(added)
-        const onEvent = mockSubscribe.mock.calls[0][0]
-
-        release()
-        onEvent({ type: 'perspective-added', perspective: makeHandle('uuid-r', 'R') })
-
-        expect(added).not.toHaveBeenCalled()
-    })
-
-    it('addPerspectiveAddedListener dispatches events to callbacks', () => {
-        const subscriberCallbacks: ((data: any) => void)[] = []
-        mockSubscribe.mockImplementation((cb: any) => {
-            subscriberCallbacks.push(cb)
-            return () => {}
-        })
-
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const received: PerspectiveHandle[] = []
-        client.addPerspectiveAddedListener((h) => { received.push(h) })
-
-        // Simulate server push event to all subscribers (like real WS dispatch)
-        const handle = makeHandle('uuid-event', 'EventPerspective')
-        subscriberCallbacks.forEach(cb => cb({ type: 'perspective-added', perspective: handle }))
-
-        expect(received.length).toBe(1)
-        expect(received[0].uuid).toBe('uuid-event')
+        expect(mockOn).toHaveBeenCalledWith('link-added', handler, { perspective: 'uuid-l' })
+        off()
+        expect(release).toHaveBeenCalledTimes(1)
     })
 
     it('addLink calls perspective.addLink with correct params', async () => {

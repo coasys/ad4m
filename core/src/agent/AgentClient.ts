@@ -1,5 +1,4 @@
-import {ApiClient, CallOptions, WsEvent } from '../apiClient';
-import { addListener, notifyListeners } from "../notifyListeners";
+import {ApiClient, CallOptions } from '../apiClient';
 import { PerspectiveInput } from "../perspectives/Perspective";
 import { perspectiveFromWire } from "../expression/perspectiveWire";
 import {
@@ -35,10 +34,6 @@ export interface InitializeArgs {
   passphrase: string;
 }
 
-export type AgentUpdatedCallback = (agent: Agent) => void;
-export type AgentStatusChangedCallback = (agent: Agent) => void;
-export type AgentAppsUpdatedCallback = () => void;
-export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
 
 /** Builds SDK classes (with their behaviour) from the wire's plain agent data. */
 function toAgent(data: AgentData | null): Agent | null {
@@ -50,10 +45,6 @@ function toAgent(data: AgentData | null): Agent | null {
 
 export class AgentClient {
   #apiClient: ApiClient;
-  #appsChangedCallback: AgentAppsUpdatedCallback[];
-  #updatedCallbacks: AgentUpdatedCallback[];
-  #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
-  #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -71,10 +62,6 @@ export class AgentClient {
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
-    this.#updatedCallbacks = [];
-    this.#agentStatusChangedCallbacks = [];
-    this.#appsChangedCallback = [];
-    this.#hostingUserInfoChangedCallbacks = [];
     this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
   }
 
@@ -250,55 +237,14 @@ export class AgentClient {
     return this.#apiClient.call('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
-  /** Each addXListener returns a function that removes the listener. */
-  addUpdatedListener(listener: AgentUpdatedCallback): () => void {
-    this.#listen();
-    return addListener(this.#updatedCallbacks, listener);
-  }
-
-  addAppChangedListener(listener: AgentAppsUpdatedCallback): () => void {
-    this.#listen();
-    return addListener(this.#appsChangedCallback, listener);
-  }
-
-  addAgentStatusChangedListener(listener: AgentStatusChangedCallback): () => void {
-    this.#listen();
-    return addListener(this.#agentStatusChangedCallbacks, listener);
-  }
-
-  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback): () => void {
-    this.#listen();
-    return addListener(this.#hostingUserInfoChangedCallbacks, listener);
-  }
-
-  /** The events `#onEvent` routes; the executor sends only what a socket watches. */
-  static #eventTypes = ['agent-updated', 'agent-status-changed', 'apps-changed', 'hosting-user-info-changed'];
-
-  /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
+  /** Keeps cached agents fresh; registering again changes nothing. */
   #listen(): void {
-    this.#apiClient.subscribe(this.#onEvent, { types: AgentClient.#eventTypes });
+    this.#apiClient.on('agent-updated', this.#onAgentUpdated);
   }
 
-  // Payload shapes follow the event table in rust-executor/src/api/events_ws.rs:
-  // the agent events nest under `agent`, hosting-user-info-changed is inline.
-  #onEvent = (data: WsEvent): void => {
-    switch (data.type) {
-      case 'agent-updated': {
-        const agent = data.agent as Agent;
-        this.#cacheAgent(agent);
-        notifyListeners(this.#updatedCallbacks, agent);
-        break;
-      }
-      case 'agent-status-changed':
-        notifyListeners(this.#agentStatusChangedCallbacks, data.agent as Agent);
-        break;
-      case 'apps-changed':
-        notifyListeners(this.#appsChangedCallback);
-        break;
-      case 'hosting-user-info-changed':
-        notifyListeners(this.#hostingUserInfoChangedCallbacks, data as unknown as HostingUserInfo);
-        break;
-    }
+  #onAgentUpdated = (event: { agent: AgentData }): void => {
+    const agent = toAgent(event.agent);
+    if (agent) this.#cacheAgent(agent);
   };
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {

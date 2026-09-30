@@ -4,7 +4,7 @@ import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 
 const signal = new PerspectiveExpression("did:test:alice", "2026-01-01T00:00:00Z", new Perspective(), { key: "key", signature: "sig" });
 
-// Mock ApiClient's subscribe to avoid real WebSocket connections
+// Mock ApiClient's on() to avoid real WebSocket connections
 jest.mock('../apiClient', () => {
   return {
     ApiClient: jest.fn().mockImplementation(() => ({
@@ -12,7 +12,7 @@ jest.mock('../apiClient', () => {
       post: jest.fn(),
       put: jest.fn(),
       delete: jest.fn(),
-      subscribe: jest.fn().mockReturnValue(() => {}),
+      on: jest.fn().mockReturnValue(() => {}),
       waitForSubscription: jest.fn().mockResolvedValue(undefined),
     }))
   };
@@ -50,16 +50,16 @@ describe("NeighbourhoodProxy", () => {
   it("should not add multiple subscriptions when removing and adding another signal handler", async () => {
     const neighbourhoodURI = "did://123";
 
-    // Track subscribe calls via the mock
-    let subscribeCallCount = 0;
+    // Track on() calls via the mock
+    let onCallCount = 0;
     const { ApiClient } = jest.requireMock('../apiClient');
     ApiClient.mockImplementation(() => ({
       get: jest.fn(),
       post: jest.fn(),
       put: jest.fn(),
       delete: jest.fn(),
-      subscribe: jest.fn().mockImplementation(() => {
-        subscribeCallCount++;
+      on: jest.fn().mockImplementation(() => {
+        onCallCount++;
         return () => {};
       }),
       waitForSubscription: jest.fn().mockResolvedValue(undefined),
@@ -91,7 +91,7 @@ describe("NeighbourhoodProxy", () => {
     await neighbourhoodProxy.addSignalHandler(handler2);
 
     // Check that subscription was re-created (handler1 removed = unsub, handler2 added = new sub)
-    expect(subscribeCallCount).toBe(2);
+    expect(onCallCount).toBe(2);
 
     // Dispatch signal
     neighbourhoodClient.dispatchSignal(neighbourhoodURI, signal);

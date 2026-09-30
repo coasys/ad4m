@@ -122,14 +122,9 @@ export class AIClient {
     ): Promise<string> {
         const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId, params });
 
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'transcription-text' && data.streamId === streamId && data.text) {
-                    streamCallback(data.text as string);
-                }
-            },
-            { types: ['transcription-text'] },
-        );
+        const unsub = this.#apiClient.on('transcription-text', (event) => {
+            if (event.streamId === streamId && event.text) streamCallback(event.text);
+        });
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 

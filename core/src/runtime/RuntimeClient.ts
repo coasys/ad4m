@@ -1,5 +1,4 @@
-import {ApiClient, CallOptions, WsEvent } from '../apiClient'
-import { addListener, notifyListeners } from "../notifyListeners"
+import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { perspectiveExpressionFromWire, perspectiveToWire } from "../expression/perspectiveWire"
 import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
@@ -19,21 +18,12 @@ import type {
     UnytVersionInfo,
 } from "../generated/api"
 
-export type MessageCallback = (message: PerspectiveExpression) => void
-export type ExceptionCallback = (info: ExceptionInfo) => void
-export type NotificationTriggeredCallback = (notification: TriggeredNotification) => void
 
 export class RuntimeClient {
     #apiClient: ApiClient
-    #messageReceivedCallbacks: MessageCallback[]
-    #exceptionOccurredCallbacks: ExceptionCallback[]
-    #notificationTriggeredCallbacks: NotificationTriggeredCallback[]
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
-        this.#messageReceivedCallbacks = []
-        this.#exceptionOccurredCallbacks = []
-        this.#notificationTriggeredCallbacks = []
     }
 
     async info(): Promise<RuntimeInfo> {
@@ -268,41 +258,4 @@ export class RuntimeClient {
         return this.#apiClient.call('runtime.hostRates', {})
     }
 
-    /** Each addXCallback returns a function that removes the callback. */
-    addNotificationTriggeredCallback(cb: NotificationTriggeredCallback): () => void {
-        this.#listen()
-        return addListener(this.#notificationTriggeredCallbacks, cb)
-    }
-
-    addMessageCallback(cb: MessageCallback): () => void {
-        this.#listen()
-        return addListener(this.#messageReceivedCallbacks, cb)
-    }
-
-    addExceptionCallback(cb: ExceptionCallback): () => void {
-        this.#listen()
-        return addListener(this.#exceptionOccurredCallbacks, cb)
-    }
-
-    /** The events `#onEvent` routes; the executor sends only what a socket watches. */
-    static #eventTypes = ['notification-triggered', 'message-received', 'exception-occurred']
-
-    /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
-    #listen(): void {
-        this.#apiClient.subscribe(this.#onEvent, { types: RuntimeClient.#eventTypes })
-    }
-
-    #onEvent = (data: WsEvent): void => {
-        switch (data.type) {
-            case 'notification-triggered':
-                notifyListeners(this.#notificationTriggeredCallbacks, data.notification as TriggeredNotification)
-                break
-            case 'message-received':
-                notifyListeners(this.#messageReceivedCallbacks, data.message as PerspectiveExpression)
-                break
-            case 'exception-occurred':
-                notifyListeners(this.#exceptionOccurredCallbacks, data.exception as ExceptionInfo)
-                break
-        }
-    }
 }

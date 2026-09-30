@@ -1,6 +1,7 @@
 import { callSafely } from './notifyListeners'
 import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
+import type { EventMap, EventName } from './generated/api/Events'
 
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
@@ -35,10 +36,13 @@ export interface CallOptions {
     timeoutMs?: number
 }
 
-/** The events a subscriber needs: these types, about `perspective` only if
- *  given. */
-export interface EventInterest {
-    types: string[]
+/** Narrows an {@link ApiClient.on} handler to one perspective's events. */
+export interface EventFilter {
+    perspective?: string
+}
+
+interface Registration {
+    handler: (event: never) => void
     perspective?: string
 }
 
@@ -110,7 +114,8 @@ export class ApiClient {
     private _ws: WebSocket | null = null
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
     private _wsOpen: Promise<void> | null = null
-    private _wsCallbacks = new Set<(data: unknown) => void>()
+    /** `on()` handlers by event type; a type with none has no entry. */
+    private _handlers = new Map<string, Set<Registration>>()
     private _reconnectCallbacks = new Set<() => void>()
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
@@ -118,7 +123,6 @@ export class ApiClient {
     private _wsReconnectDelay = INITIAL_RECONNECT_DELAY_MS
     private _wsPingTimer: ReturnType<typeof setInterval> | null = null
     // The executor sends a socket only the events it asked for (`events.watch`).
-    private _eventInterests = new Map<(data: unknown) => void, EventInterest>()
     // What the executor has for the open socket, as sent; a new socket has `{}`.
     private _watching: string | null = '{}'
     private _watchScheduled = false
@@ -170,8 +174,10 @@ export class ApiClient {
                 return
             }
             if (parsed.type === 'pong') return
-            for (const cb of this._wsCallbacks) {
-                callSafely(cb, 'Error in WebSocket event callback:', parsed)
+            const perspective = parsed.perspectiveUuid
+            for (const reg of this._handlers.get(parsed.type as string) ?? []) {
+                if (reg.perspective !== undefined && reg.perspective !== perspective) continue
+                callSafely(reg.handler as (event: unknown) => void, `Error in '${parsed.type}' handler:`, parsed)
             }
         }
 
@@ -220,7 +226,7 @@ export class ApiClient {
                 pending.reject(closedError())
             }
         }
-        if (this._wsCallbacks.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
+        if (this._handlers.size > 0 || this._pendingCalls.size > 0) this._scheduleReconnect()
     }
 
     private _startPing(): void {
@@ -289,7 +295,7 @@ export class ApiClient {
                 // call. Drop it once no call waits on it, so the next call dials again.
                 if (this._ws?.readyState === 0 /* CONNECTING */ && this._pendingCalls.size === 0) {
                     this._closeWs()
-                    if (this._wsCallbacks.size > 0) this._ensureWs()
+                    if (this._handlers.size > 0) this._ensureWs()
                 }
             }, timeoutMs)
             const onAbort = () => {
@@ -326,24 +332,30 @@ export class ApiClient {
     // ── Event subscriptions ─────────────────────────────────────────────────
 
     /**
-     * Call `callback` with every message the executor pushes. `interest`
-     * names the events it needs; the client asks the executor for the union
-     * of all subscribers' interests. Without `interest` the callback asks for
-     * nothing and sees only what arrives anyway (live query updates).
+     * Call `handler` with every `type` event the executor pushes, or only those
+     * about `filter.perspective`. The client asks the executor for the events
+     * its handlers need (`events.watch`). Returns a function that removes this
+     * handler. Like `addEventListener`, registering the same handler for the
+     * same type and perspective again changes nothing.
      */
-    subscribe<T = WsEvent>(callback: (data: T) => void, interest?: EventInterest): () => void {
-        const cb = callback as (data: unknown) => void
-        this._wsCallbacks.add(cb)
-        if (interest) {
-            this._eventInterests.set(cb, interest)
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        const perspective = filter?.perspective
+        let regs = this._handlers.get(type)
+        if (!regs) this._handlers.set(type, regs = new Set())
+        let reg = [...regs].find(r => r.handler === handler && r.perspective === perspective)
+        if (!reg) {
+            reg = { handler: handler as (event: never) => void, perspective }
+            regs.add(reg)
             this._scheduleWatch()
         }
         this._ensureWs()
 
         return () => {
-            this._wsCallbacks.delete(cb)
-            if (this._eventInterests.delete(cb)) this._scheduleWatch()
-            if (this._wsCallbacks.size === 0 && [...this._pendingCalls.values()].every(p => p.watch)) {
+            const regs = this._handlers.get(type)
+            if (!regs?.delete(reg)) return
+            if (regs.size === 0) this._handlers.delete(type)
+            this._scheduleWatch()
+            if (this._handlers.size === 0 && [...this._pendingCalls.values()].every(p => p.watch)) {
                 for (const pending of this._pendingCalls.values()) pending.reject(closedError())
                 this._closeWs()
             }
@@ -359,16 +371,19 @@ export class ApiClient {
         await this._watchSent
     }
 
-    /** Event type → perspectives wanted (`null`: all), from every subscriber. */
-    watchedEvents(): Record<string, string[] | null> {
-        const events = new Map<string, Set<string> | null>()
-        for (const { types, perspective } of this._eventInterests.values()) {
-            for (const type of types) {
-                if (perspective === undefined) events.set(type, null)
-                else if (events.get(type) !== null) events.set(type, (events.get(type) ?? new Set()).add(perspective))
+    /** Event type → perspectives wanted (`null`: all), from every handler. */
+    watchedEvents(): Partial<Record<EventName, string[] | null>> {
+        const events: Partial<Record<EventName, string[] | null>> = {}
+        for (const type of [...this._handlers.keys()].sort() as EventName[]) {
+            const perspectives = new Set<string>()
+            let all = false
+            for (const reg of this._handlers.get(type)!) {
+                if (reg.perspective === undefined) all = true
+                else perspectives.add(reg.perspective)
             }
+            events[type] = all ? null : [...perspectives].sort()
         }
-        return Object.fromEntries([...events.keys()].sort().map(t => [t, events.get(t) ? [...events.get(t)!].sort() : null]))
+        return events
     }
 
     /** Flush the watch once per microtask, after a subscriber came or went. */
@@ -386,7 +401,7 @@ export class ApiClient {
      *  the current interest; a socket still connecting gets it on open.
      *  `_watchSent` settles with its reply. */
     private _flushWatch(): void {
-        if (this._wsCallbacks.size === 0 || this._ws?.readyState !== 1 /* OPEN */) return
+        if (this._handlers.size === 0 || this._ws?.readyState !== 1 /* OPEN */) return
         const events = this.watchedEvents()
         const key = JSON.stringify(events)
         if (key === this._watching) return
@@ -436,8 +451,7 @@ export class ApiClient {
             pending.reject(new RpcError(503, 'Client closed'))
         }
         this._closeWs()
-        this._wsCallbacks.clear()
-        this._eventInterests.clear()
+        this._handlers.clear()
         this._reconnectCallbacks.clear()
         // A reused client must not fire onReconnect on its next first open.
         this._hasConnectedOnce = false

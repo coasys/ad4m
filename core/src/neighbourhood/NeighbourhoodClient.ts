@@ -4,7 +4,6 @@ import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { perspectiveExpressionFromWire, perspectiveToWire } from "../expression/perspectiveWire"
-import type { PerspectiveExpression as WirePerspectiveExpression } from "../generated/api/PerspectiveExpression"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
@@ -92,14 +91,10 @@ export class NeighbourhoodClient {
     }
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
-                    // The `signal` event carries a PerspectiveExpression (events_ws.rs).
-                    this.dispatchSignal(perspectiveUUID, perspectiveExpressionFromWire(data.signal as WirePerspectiveExpression))
-                }
-            },
-            { types: ['signal'], perspective: perspectiveUUID },
+        const unsub = this.#apiClient.on(
+            'signal',
+            (event) => this.dispatchSignal(perspectiveUUID, perspectiveExpressionFromWire(event.signal)),
+            { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
         await this.#apiClient.waitForSubscription()
