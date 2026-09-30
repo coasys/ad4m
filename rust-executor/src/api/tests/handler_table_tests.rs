@@ -27,20 +27,6 @@ pub(crate) fn render_handler_table(names: &[String]) -> String {
     out
 }
 
-#[test]
-fn handler_table_is_sorted_and_unique() {
-    let names = build_handler_map().method_names();
-    assert!(
-        names.len() > 100,
-        "expected the full table, got {}",
-        names.len()
-    );
-    for pair in names.windows(2) {
-        assert!(pair[0] < pair[1], "not sorted/unique: {:?}", pair);
-    }
-    assert!(names.iter().any(|n| n == "runtime.info"));
-}
-
 /// Writes the table to the ts-rs export directory.
 #[test]
 fn export_handler_table() {

@@ -287,7 +287,6 @@ async fn agents_by_dids_aligns_with_input_and_matches_by_did() {
     .await
     .unwrap();
     assert_eq!(many, json!([single, null, single]));
-    assert_eq!(many.as_array().unwrap().len(), 3);
 
     let empty = call("agent.byDIDs", json!({ "dids": [] }), admin_ctx())
         .await

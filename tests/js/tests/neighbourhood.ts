@@ -64,6 +64,28 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(currentPerspective?.state).to.be.equal(PerspectiveState.Synced);
             })
 
+            it('a sync-state-change listener fires for its own perspective only @alice', async () => {
+                const alice = testContext.alice!;
+                const shared = await alice.perspective.add("sync-state-shared");
+                const other = await alice.perspective.add("sync-state-other");
+                const sharedStates: PerspectiveState[] = [];
+                const otherStates: PerspectiveState[] = [];
+                await shared.addSyncStateChangeListener(state => { sharedStates.push(state); });
+                await other.addSyncStateChangeListener(state => { otherStates.push(state); });
+                try {
+                    const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's sync-state listener test");
+                    await alice.neighbourhood.publishFromPerspective(shared.uuid, socialContext.address, new Perspective());
+
+                    await pollUntil(() => sharedStates.length > 0, { timeoutMs: 30000, intervalMs: 500, label: "sync-state-change for the shared perspective" });
+                    // Each state is a PerspectiveState value, not a JSON-encoded string.
+                    for (const state of sharedStates) expect(Object.values(PerspectiveState)).to.include(state);
+                    expect(otherStates).to.be.empty;
+                } finally {
+                    shared.dispose();
+                    other.dispose();
+                }
+            })
+
             it('can be created by Alice and joined by Bob', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob

@@ -34,14 +34,14 @@ function fakeClient() {
     let listener: ((u: QueryUpdate | QueryLagged) => void) | undefined;
     let reconnect: (() => void) | undefined;
     const client = {
-        onQueryUpdate: jest.fn((cb: (u: QueryUpdate | QueryLagged) => void) => { listener = cb; return jest.fn(); }),
-        onReconnect: jest.fn((cb: () => void) => { reconnect = cb; return jest.fn(); }),
+        onQueryUpdate: (cb: (u: QueryUpdate | QueryLagged) => void) => { listener = cb; return () => { listener = undefined; }; },
+        onReconnect: (cb: () => void) => { reconnect = cb; return () => { reconnect = undefined; }; },
         resyncSubscription: jest.fn(),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
     const update = (subscriptionId: string, revision: number, added: any[] = [], removed: any[] = []) =>
-        listener!({ subscriptionId, revision, added, removed });
-    return { client, update, send: (u: QueryUpdate | QueryLagged) => listener!(u), reconnect: () => reconnect!() };
+        listener?.({ subscriptionId, revision, added, removed });
+    return { client, update, send: (u: QueryUpdate | QueryLagged) => listener?.(u), reconnect: () => reconnect?.() };
 }
 
 function deferred<T>() {
@@ -177,15 +177,21 @@ describe('LiveQuery', () => {
     });
 
     it('dispose ends the subscription and releases one that was still opening', async () => {
-        const { client } = fakeClient();
+        const { client, update, reconnect } = fakeClient();
         const reply = deferred<Subscribed>();
-        const live = new LiveQuery(client as any, 'p', () => reply.promise, jest.fn());
+        const open = jest.fn(() => reply.promise);
+        const onResult = jest.fn();
+        const live = new LiveQuery(client as any, 'p', open, onResult);
         const started = live.start();
         live.dispose();
         reply.resolve({ subscriptionId: 's1', result: [], revision: 0 });
         await started;
         expect(client.disposeQuerySubscription).toHaveBeenCalledWith('p', 's1');
-        expect(client.onQueryUpdate.mock.results[0].value).toHaveBeenCalled();
-        expect(client.onReconnect.mock.results[0].value).toHaveBeenCalled();
+
+        update('s1', 1, [2]);
+        reconnect();
+        await tick();
+        expect(onResult).not.toHaveBeenCalled();
+        expect(open).toHaveBeenCalledTimes(1);
     });
 });

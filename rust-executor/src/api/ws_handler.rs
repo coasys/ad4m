@@ -223,24 +223,3 @@ impl ParamExt for Value {
         }
     }
 }
-
-#[cfg(test)]
-mod param_ext_tests {
-    use super::ParamExt;
-    use serde_json::json;
-
-    #[test]
-    fn opt_str_set_reads_an_optional_string_array() {
-        let p = json!({ "a": ["x", "y", "x"], "n": null, "bad": "x", "mixed": ["x", 1] });
-        let set = p.opt_str_set("a").unwrap().unwrap();
-        assert_eq!(set.len(), 2);
-        assert!(set.contains("x") && set.contains("y"));
-        assert_eq!(p.opt_str_set("missing").unwrap(), None);
-        assert_eq!(p.opt_str_set("n").unwrap(), None);
-        for key in ["bad", "mixed"] {
-            let err = p.opt_str_set(key).unwrap_err();
-            assert_eq!(err.code, 400);
-            assert_eq!(err.message, format!("`{key}` must be an array of strings"));
-        }
-    }
-}

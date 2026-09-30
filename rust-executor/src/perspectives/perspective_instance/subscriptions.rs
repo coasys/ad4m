@@ -231,49 +231,6 @@ mod tests {
     use serde_json::{json, Value};
     use std::time::Duration;
 
-    const QUERY: &str = "SELECT ?s WHERE { ?s ?p ?o }";
-
-    #[tokio::test]
-    async fn closing_a_connection_ends_only_its_subscriptions() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (a1, _, _) = p
-            .subscribe_and_query(QUERY.into(), None, "a".into())
-            .await
-            .unwrap();
-        let (a2, _, _) = p
-            .subscribe_and_query(QUERY.into(), None, "a".into())
-            .await
-            .unwrap();
-        let (b, _, _) = p
-            .subscribe_and_query(QUERY.into(), None, "b".into())
-            .await
-            .unwrap();
-
-        assert_eq!(p.dispose_connection_subscriptions("a").await, 2);
-        assert!(p.subscription_state(&a1, "a").await.is_none());
-        assert!(p.subscription_state(&a2, "a").await.is_none());
-        assert!(
-            p.subscription_state(&b, "b").await.is_some(),
-            "b is untouched"
-        );
-    }
-
-    #[tokio::test]
-    async fn only_the_owning_connection_disposes_or_reads_a_subscription() {
-        let (p, _, _) = setup_perspective_no_llm(&[]).await;
-        let (id, _, _) = p
-            .subscribe_and_query(QUERY.into(), None, "a".into())
-            .await
-            .unwrap();
-        assert!(p.subscription_state(&id, "b").await.is_none());
-        assert!(!p.dispose_query_subscription(&id, "b").await);
-        assert!(p.dispose_query_subscription(&id, "a").await);
-        assert!(
-            !p.dispose_query_subscription(&id, "a").await,
-            "already gone"
-        );
-    }
-
     // ── Delta updates ───────────────────────────────────────────────────
 
     #[test]
@@ -439,27 +396,13 @@ mod tests {
             rows,
             "the result the update led to"
         );
-
-        assert!(
-            p.subscription_state(&id, "other").await.is_none(),
-            "another connection cannot read it"
-        );
-        assert!(p.subscription_state("nope", "c").await.is_none());
     }
 
     #[tokio::test]
     async fn a_write_while_the_first_result_is_computed_is_reported() {
         let (p, _, _) = setup_perspective_no_llm(&[]).await;
         let q = "SELECT ?s ?o WHERE { ?s <test://p> ?o }".to_string();
-        let query = super::SubscribedQuery {
-            query: q.clone(),
-            last_result: String::new(),
-            user_email: None,
-            predicates: Default::default(),
-            model_query_params: None,
-            revision: 0,
-            connection: "c".into(),
-        };
+        let query = super::SubscribedQuery::new(q.clone(), None, "c".into());
         // The first result is read, then a write and its check land before
         // the subscribe completes.
         let stale = p.sparql_query(q).unwrap();

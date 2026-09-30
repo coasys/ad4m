@@ -290,6 +290,26 @@ export default function perspectiveTests(testContext: TestContext) {
                 }
             })
 
+            it('a SPARQL live query follows a link that is added, then removed', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("live sparql rows")
+                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => subscription.result as unknown as any[]
+                try {
+                    expect(rows()).to.eql([])
+
+                    const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
+                    await pollUntil(() => rows().length === 1, { label: 'live query row for the added link' })
+                    expect(JSON.stringify(rows()[0])).to.include('test://live-target')
+
+                    await p.remove(link)
+                    await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
+                } finally {
+                    subscription.dispose()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('subscriptions', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
 

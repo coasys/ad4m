@@ -404,6 +404,26 @@ struct SubscribedQuery {
     connection: String,
 }
 
+impl SubscribedQuery {
+    /// A SPARQL/Prolog subscription for `connection`, before its first result.
+    fn new(query: String, user_email: Option<String>, connection: String) -> Self {
+        let predicates = if is_sparql_query(&query) {
+            extract_predicates_from_sparql(&query)
+        } else {
+            HashSet::new() // Prolog queries: always re-check
+        };
+        SubscribedQuery {
+            query,
+            last_result: String::new(),
+            user_email,
+            predicates,
+            model_query_params: None,
+            revision: 0,
+            connection,
+        }
+    }
+}
+
 /// A batch with its creation timestamp, for timeout-based cleanup.
 struct TimestampedBatch {
     diff: PerspectiveDiff,
@@ -5693,20 +5713,7 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
-        let predicates = if is_sparql_query(&query) {
-            extract_predicates_from_sparql(&query)
-        } else {
-            HashSet::new() // Prolog queries: always re-check
-        };
-        let subscribed_query = SubscribedQuery {
-            query: query.clone(),
-            last_result: String::new(),
-            user_email,
-            predicates,
-            model_query_params: None,
-            revision: 0,
-            connection: connection_id,
-        };
+        let subscribed_query = SubscribedQuery::new(query.clone(), user_email, connection_id);
         let first_result = async {
             if is_sparql_query(&query) {
                 self.sparql_query(query.clone())

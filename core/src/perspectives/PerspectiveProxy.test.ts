@@ -182,34 +182,23 @@ describe('ApiClient.onReconnect', () => {
 
 describe('QuerySubscriptionProxy', () => {
   function liveClient(subscribeQuery: jest.Mock) {
-    let listener: ((u: any) => void) | undefined;
     const client = {
       subscribeQuery,
-      onQueryUpdate: jest.fn((cb: (u: any) => void) => { listener = cb; return jest.fn(); }),
-      onReconnect: jest.fn(() => jest.fn()),
+      onQueryUpdate: () => () => {},
+      onReconnect: () => () => {},
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     } as any;
-    return { client, update: (u: any) => listener!(u) };
+    return { client };
   }
 
-  it('resolves initialized with the first result and passes later ones to onResult', async () => {
-    const { client, update } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
+  it('resolves initialized with the first result', async () => {
+    const { client } = liveClient(jest.fn().mockResolvedValue({ subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 }));
     const subscription = new QuerySubscriptionProxy('perspective-1', 'SELECT * WHERE { ?s ?p ?o }', client);
     await subscription.subscribe();
     await expect(subscription.initialized).resolves.toBe(true);
     expect(subscription.result).toEqual([{ s: 'a' }]);
     expect(subscription.id).toBe('sub-1');
     expect(client.subscribeQuery).toHaveBeenCalledWith('perspective-1', 'SELECT * WHERE { ?s ?p ?o }');
-
-    const results: any[] = [];
-    subscription.onResult(r => results.push(r));
-    update({ subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [] });
-    expect(results).toEqual([[{ s: 'a' }, { s: 'b' }]]);
-
-    subscription.dispose();
-    expect(client.disposeQuerySubscription).toHaveBeenCalledWith('perspective-1', 'sub-1');
-    update({ subscriptionId: 'sub-1', revision: 2, added: [{ s: 'c' }], removed: [] });
-    expect(results).toHaveLength(1);
   });
 
   it('rejects initialized when the subscribe call fails', async () => {

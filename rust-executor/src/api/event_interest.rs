@@ -194,32 +194,36 @@ mod tests {
     #[test]
     fn perspective_extraction_per_event_type() {
         let cases = [
-            (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, Some("P")),
+            (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, true),
             (
                 r#"{"type":"sync-state-change","perspective":{"uuid":"P"},"state":"x"}"#,
-                Some("P"),
+                true,
             ),
             (
                 r#"{"type":"perspective-removed","uuid":"P","owner":"o"}"#,
-                Some("P"),
+                true,
             ),
             (
                 r#"{"type":"notification-triggered","notification":{"perspectiveId":"P"}}"#,
-                Some("P"),
+                true,
             ),
             (
                 r#"{"type":"auto-processor-event","perspectiveUuid":"P"}"#,
-                Some("P"),
+                true,
             ),
             (
                 r#"{"type":"exception-occurred","exception":{"uuid":"P"}}"#,
-                None,
+                false,
             ),
         ];
-        for (event, want) in cases {
-            let v: Value = serde_json::from_str(event).unwrap();
-            let t = v["type"].as_str().unwrap();
-            assert_eq!(event_perspective(t, &v), want, "{event}");
+        for (event, scoped) in cases {
+            let t = serde_json::from_str::<Value>(event).unwrap()["type"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let i = SharedInterest::default();
+            watch(&i, json!({ t: ["P"] }));
+            assert_eq!(wants(&i, event), scoped, "{event}");
         }
     }
 }

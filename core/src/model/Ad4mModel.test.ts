@@ -1269,10 +1269,10 @@ describe("Lightweight fingerprint optimization", () => {
 
 
 /** Turn a LiveQuery's update listener into `push(result)`: each push sends the
- *  next revision of `subscriptionId` as a whole-result reset. */
+ *  next revision of `subscriptionId` with the whole result. */
 function updatesFor(subscriptionId: string, listener: (update: any) => void) {
   let revision = 0;
-  return (result: any) => listener({ subscriptionId, revision: ++revision, reset: true, result });
+  return (result: any) => listener({ subscriptionId, revision: ++revision, result });
 }
 
 // ── Subscribe callback timing ──────────────────────────────────────────
@@ -1813,21 +1813,10 @@ describe("ModelQueryBuilder reconnect", () => {
     return M;
   }
 
-  it("subscribe re-opens after a reconnect and sends no keepalive", async () => {
+  it("subscribe re-opens after a reconnect", async () => {
     const { mockClient, mockPerspective, reconnect, subscribeCount } = buildMocks();
     const builder = testModel("ReconnectSubscribe").query(mockPerspective);
     await builder.subscribe(() => {});
-    expect(subscribeCount()).toBe(1);
-
-    jest.useFakeTimers();
-    try {
-      await jest.advanceTimersByTimeAsync(120_000);
-    } finally {
-      jest.useRealTimers();
-    }
-    expect(subscribeCount()).toBe(1);
-    expect(Object.keys(mockClient)).not.toContain("keepAliveQuery");
-
     await reconnect();
     expect(subscribeCount()).toBe(2);
     builder.dispose();

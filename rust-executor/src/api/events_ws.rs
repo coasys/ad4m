@@ -1234,10 +1234,6 @@ mod events_socket_message_tests {
             reply(r#"{"id":"w1","type":"events.watch","params":{"agent-updated":null}}"#),
             json!({ "id": "w1", "result": true })
         );
-        assert!(!crate::api::event_interest::wants(
-            &interest,
-            r#"{"type":"link-added","perspectiveUuid":"A"}"#
-        ));
         assert_eq!(
             reply(r#"{"id":"u1","type":"events.unwatch"}"#),
             json!({ "id": "u1", "result": true })

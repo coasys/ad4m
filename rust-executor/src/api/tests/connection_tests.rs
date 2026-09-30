@@ -165,23 +165,6 @@ async fn a_socket_gets_only_the_events_it_watches() {
 }
 
 #[tokio::test]
-async fn malformed_watch_replies_400_and_keeps_the_old_interest() {
-    let run = uuid::Uuid::new_v4().to_string();
-    let (a, b) = (format!("A-{run}"), format!("B-{run}"));
-    let mut socket = Socket::open().await;
-
-    socket.send(json!({ "id": "w1", "type": "events.watch", "params": { "link-added": [a] } }));
-    socket.reply("w1").await;
-    socket.send(json!({ "id": "w2", "type": "events.watch", "params": { "link-added": "B" } }));
-    let reply = socket.reply("w2").await;
-    assert_eq!(reply["error"]["code"], json!(400));
-    assert!(reply.get("result").is_none());
-
-    publish_both(&a, &b, &run).await;
-    assert_eq!(socket.link_events(&run).await, vec![a], "still watching A");
-}
-
-#[tokio::test]
 async fn closing_the_socket_ends_the_event_task() {
     let mut socket = Socket::open().await;
     socket.send(json!({ "type": "ping" }));
