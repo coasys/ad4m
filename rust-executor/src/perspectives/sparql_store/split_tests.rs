@@ -287,34 +287,8 @@ fn removing_as_one_user_leaves_another_users_copy() {
         .is_empty());
 }
 
-/// A store as every store before #1224 wrote it: `link` entirely in the
-/// default graph, whatever its status.
 fn store_as_before_1224(store: &SparqlStore, link: &LinkExpression) {
-    let as_shared = LinkExpression {
-        status: Some(LinkStatus::Shared),
-        ..link.clone()
-    };
-    store.add_link(&as_shared).unwrap();
-    let reifier = make_reifier_iri(link);
-    let status = NamedNodeRef::new_unchecked(ONT_STATUS);
-    store
-        .store
-        .remove(QuadRef::new(
-            reifier.as_ref(),
-            status,
-            literal("Shared").as_ref(),
-            GraphNameRef::DefaultGraph,
-        ))
-        .unwrap();
-    store
-        .store
-        .insert(QuadRef::new(
-            reifier.as_ref(),
-            status,
-            literal(status_str(link.status.as_ref().unwrap())).as_ref(),
-            GraphNameRef::DefaultGraph,
-        ))
-        .unwrap();
+    store.add_link_as_before_1224(link);
 }
 
 /// The one-time migration (#1224): a store holding everyone's Local links in
@@ -359,7 +333,11 @@ fn migration_moves_each_local_link_to_its_owners_graph_once() {
     assert!(seen_by(&bob.did).contains(&"ad4m://alice".to_string()));
     let quads_before = all_quads(&store).len();
 
-    let owners = LocalLinkOwners::new(main.did.clone(), vec![alice.did.clone(), bob.did.clone()]);
+    let owners = LocalLinkOwners::new(
+        main.did.clone(),
+        vec![alice.did.clone(), bob.did.clone()],
+        vec![],
+    );
     assert_eq!(
         migrate_local_links_to_user_graphs(&store, &owners).unwrap(),
         4
@@ -438,7 +416,7 @@ fn migration_finishes_an_interrupted_move() {
             .unwrap();
     }
 
-    let owners = LocalLinkOwners::new(main.did.clone(), vec![alice.did.clone()]);
+    let owners = LocalLinkOwners::new(main.did.clone(), vec![alice.did.clone()], vec![]);
     assert_eq!(
         migrate_local_links_to_user_graphs(&store, &owners).unwrap(),
         1
@@ -446,4 +424,231 @@ fn migration_finishes_an_interrupted_move() {
     let quads = all_quads(&store);
     assert_eq!(quads.len(), 8);
     assert!(quads.iter().all(|q| q.graph_name == graph), "{quads:#?}");
+}
+
+/// A move a non-transactional run stopped right after removing the link's
+/// status quad from the shared graph (the first quad it removed) is
+/// finished by the next run, not left readable by every user. Each move is
+/// one transaction now, so this state only comes from such a run; the test
+/// is Data's probe from the #1226 review.
+#[test]
+fn migration_finishes_a_move_interrupted_mid_removal() {
+    let (main, alice, bob) = (
+        TestSigner::generate(),
+        TestSigner::generate(),
+        TestSigner::generate(),
+    );
+    let store = SparqlStore::new(None).unwrap();
+    let link = signed(&alice, "ad4m://s", "ad4m://t", LinkStatus::Local);
+    store_as_before_1224(&store, &link);
+    let reifier = make_reifier_iri(&link);
+    let quads: Vec<Quad> = store
+        .store
+        .quads_for_pattern(
+            Some(reifier.as_ref().into()),
+            None,
+            None,
+            Some(GraphNameRef::DefaultGraph),
+        )
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let graph = GraphName::from(local_graph(&alice.did));
+    for q in &quads {
+        store
+            .store
+            .insert(QuadRef::new(
+                q.subject.as_ref(),
+                q.predicate.as_ref(),
+                q.object.as_ref(),
+                graph.as_ref(),
+            ))
+            .unwrap();
+    }
+    for q in &quads {
+        store.store.remove(q).unwrap();
+        if q.predicate.as_str() == ONT_STATUS {
+            break;
+        }
+    }
+
+    let owners = LocalLinkOwners::new(
+        main.did.clone(),
+        vec![alice.did.clone(), bob.did.clone()],
+        vec![],
+    );
+    migrate_local_links_to_user_graphs(&store, &owners).unwrap();
+
+    let sparql = sparql_targets(&store, &bob.did, "SELECT ?t WHERE { ?s <ad4m://p> ?t }");
+    let links = targets(
+        &store
+            .read_as(Some(&bob.did))
+            .query_links(Some("ad4m://s"), None, None, None, None, None)
+            .unwrap(),
+    );
+    assert!(
+        sparql.is_empty() && links.is_empty(),
+        "sparql={sparql:?} links={links:?}"
+    );
+    let alice_sees = targets(
+        &store
+            .read_as(Some(&alice.did))
+            .query_links(Some("ad4m://s"), None, None, None, None, None)
+            .unwrap(),
+    );
+    assert_eq!(alice_sees, vec!["ad4m://t".to_string()]);
+    assert!(
+        all_quads(&store).iter().all(|q| q.graph_name == graph),
+        "nothing left in the shared graph"
+    );
+}
+
+/// A Local link whose author is no user here was stored by one of the
+/// perspective's owners, who all saw it before #1224: each owner gets a
+/// copy, and nobody else. Without owners it goes to the main agent.
+#[test]
+fn migration_gives_a_foreign_local_link_to_each_perspective_owner() {
+    let (main, alice, bob, carol, stranger) = (
+        TestSigner::generate(),
+        TestSigner::generate(),
+        TestSigner::generate(),
+        TestSigner::generate(),
+        TestSigner::generate(),
+    );
+    let link = signed(&stranger, "ad4m://s", "ad4m://foreign", LinkStatus::Local);
+    let users = vec![alice.did.clone(), bob.did.clone(), carol.did.clone()];
+    let sees = |store: &SparqlStore, did: &str| {
+        !store
+            .read_as(Some(did))
+            .query_links(Some("ad4m://s"), None, None, None, None, None)
+            .unwrap()
+            .is_empty()
+    };
+
+    // Owned by Alice and Bob (and a DID that is no user here).
+    let store = SparqlStore::new(None).unwrap();
+    store_as_before_1224(&store, &link);
+    let owners = LocalLinkOwners::new(
+        main.did.clone(),
+        users.clone(),
+        vec![alice.did.clone(), bob.did.clone(), stranger.did.clone()],
+    );
+    assert_eq!(
+        migrate_local_links_to_user_graphs(&store, &owners).unwrap(),
+        1
+    );
+    assert!(sees(&store, &alice.did) && sees(&store, &bob.did));
+    assert!(!sees(&store, &carol.did) && !sees(&store, &main.did));
+    assert!(!sees(&store, &stranger.did), "the stranger is no user here");
+
+    // One owner: only she gets it.
+    let store = SparqlStore::new(None).unwrap();
+    store_as_before_1224(&store, &link);
+    let owners = LocalLinkOwners::new(main.did.clone(), users.clone(), vec![carol.did.clone()]);
+    migrate_local_links_to_user_graphs(&store, &owners).unwrap();
+    assert!(sees(&store, &carol.did));
+    assert!(!sees(&store, &alice.did) && !sees(&store, &main.did));
+
+    // No owner: the main agent.
+    let store = SparqlStore::new(None).unwrap();
+    store_as_before_1224(&store, &link);
+    let owners = LocalLinkOwners::new(main.did.clone(), users, vec![]);
+    migrate_local_links_to_user_graphs(&store, &owners).unwrap();
+    assert!(sees(&store, &main.did));
+    assert!(!sees(&store, &alice.did));
+}
+
+/// Storing a shared link Local is refused: it would take the link out of
+/// the shared graph, hiding it from every other user here. The shared link
+/// stays where it was.
+#[test]
+fn a_shared_link_is_not_stored_local() {
+    let (alice, bob, peer) = (
+        TestSigner::generate(),
+        TestSigner::generate(),
+        TestSigner::generate(),
+    );
+    let store = SparqlStore::new(None).unwrap();
+    let shared = signed(&peer, "ad4m://s", "ad4m://t", LinkStatus::Shared);
+    store.add_link(&shared).unwrap();
+    let as_local = LinkExpression {
+        status: Some(LinkStatus::Local),
+        ..shared.clone()
+    };
+    let before = all_quads(&store);
+    assert!(store.add_link_as(&as_local, &alice.did).is_err());
+    assert_eq!(all_quads(&store), before, "nothing changed");
+    assert_eq!(
+        targets(
+            &store
+                .read_as(Some(&bob.did))
+                .query_links(Some("ad4m://s"), None, None, None, None, None)
+                .unwrap()
+        ),
+        vec!["ad4m://t".to_string()]
+    );
+}
+
+/// Which graph holds a link expression is decided by its identity (author,
+/// timestamp, triple), not by its triple: a Shared copy of Alice's Local
+/// expression, as a link language delivers it, moves that expression to the
+/// shared graph with every annotation but its status unchanged.
+#[test]
+fn a_shared_copy_of_a_local_expression_moves_it_unchanged() {
+    let (alice, bob) = (TestSigner::generate(), TestSigner::generate());
+    let store = SparqlStore::new(None).unwrap();
+    let local = signed(&alice, "ad4m://s", "ad4m://t", LinkStatus::Local);
+    store.add_link_as(&local, &alice.did).unwrap();
+    let annotations = |store: &SparqlStore| -> Vec<(String, String, GraphName)> {
+        let mut a: Vec<_> = store
+            .store
+            .quads_for_pattern(
+                Some(make_reifier_iri(&local).as_ref().into()),
+                None,
+                None,
+                None,
+            )
+            .map(|q| q.unwrap())
+            .filter(|q| q.predicate.as_str() != ONT_STATUS)
+            .map(|q| (q.predicate.to_string(), q.object.to_string(), q.graph_name))
+            .collect();
+        a.sort_by_key(|x| format!("{x:?}"));
+        a
+    };
+    let before = annotations(&store);
+    assert!(before
+        .iter()
+        .all(|(_, _, g)| *g == GraphName::from(local_graph(&alice.did))));
+
+    // Ingested Shared, as `persist_link_diff` stores a link language's diff.
+    store
+        .add_link(&LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..local.clone()
+        })
+        .unwrap();
+
+    let after = annotations(&store);
+    let content = |a: &[(String, String, GraphName)]| -> Vec<(String, String)> {
+        a.iter().map(|(p, o, _)| (p.clone(), o.clone())).collect()
+    };
+    assert_eq!(
+        content(&after),
+        content(&before),
+        "the content is identical"
+    );
+    assert!(
+        after.iter().all(|(_, _, g)| g.is_default_graph()),
+        "{after:?}"
+    );
+    for reader in [&alice.did, &bob.did] {
+        let links = store
+            .read_as(Some(reader))
+            .query_links(Some("ad4m://s"), None, None, None, None, None)
+            .unwrap();
+        assert_eq!(links.len(), 1, "one copy, in the shared graph");
+        assert_eq!(links[0].author, local.author);
+        assert_eq!(links[0].timestamp, local.timestamp);
+        assert_eq!(links[0].proof.signature, local.proof.signature);
+        assert_eq!(links[0].status, Some(LinkStatus::Shared));
+    }
 }

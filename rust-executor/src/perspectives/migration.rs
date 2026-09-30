@@ -13,7 +13,7 @@
 /// 3. Remove migration calls from perspective initialization
 /// 4. Optionally remove migration-tracking methods from db.rs
 use crate::db::Ad4mDb;
-use crate::types::LinkExpression;
+use crate::types::{LinkExpression, PerspectiveHandle};
 
 /// Result of a migration operation.
 #[derive(Debug, Clone)]
@@ -81,9 +81,10 @@ pub fn convert_link_literal_uris(link: &mut LinkExpression) -> usize {
 ///
 /// A `Local` link goes to the graph of [`local_link_owner`].
 pub fn migrate_links_from_rusqlite_to_sparql(
-    perspective_uuid: &str,
+    handle: &PerspectiveHandle,
     sparql_store: &crate::perspectives::sparql_store::SparqlStore,
 ) -> Result<MigrationResult, String> {
+    let perspective_uuid = handle.uuid.as_str();
     // Check if already migrated
     let already_migrated = Ad4mDb::with_global_instance(|db| {
         db.is_perspective_migrated(perspective_uuid)
@@ -135,7 +136,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     let mut migrated_count = 0;
     let mut error_count = 0;
     let mut total_literal_conversions = 0;
-    let users = LocalLinkOwners::of_this_executor()?;
+    let owners = LocalLinkOwners::of_this_executor(handle)?;
 
     for (link_expr, status) in &links {
         let mut link_expr = link_expr.clone();
@@ -147,7 +148,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // no-op besides the clone.
         total_literal_conversions += convert_link_literal_uris(&mut link_expr);
 
-        match sparql_store.add_link_as(&link_expr, &users.owner_of(&link_expr.author)) {
+        match owners.add_link(sparql_store, &link_expr) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -204,27 +205,29 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     })
 }
 
-/// Who a `Local` link belongs to when the store does not say: the graph it
-/// moves to in [`migrate_local_links_to_user_graphs`] and in the Rusqlite
-/// migration.
+/// Who a `Local` link belongs to when the store does not say: the graphs it
+/// moves to in [`migrate_local_links_to_user_graphs`], in the Rusqlite
+/// migration and in `import_perspective`.
 ///
 /// A link whose author is a user of this executor (the main agent or a
-/// managed user) belongs to that user. Every other `Local` link — an author
-/// who is not a user here, or no author at all — belongs to the main agent.
-/// Such a link was written by a user of this executor all the same (a
-/// `LinkExpression` another agent signed), but the store did not record which
-/// one; the main agent is the executor's owner, and #1058 showed that link to
-/// nobody but the executor scope, which is gone.
+/// managed user) belongs to that user. Any other `Local` link (a
+/// `LinkExpression` another agent signed, or no author) was stored by one of
+/// the perspective's owners, but the store did not record which one. Before
+/// #1224 every owner saw it, so each owner who is a user here gets a copy:
+/// that keeps what each of them saw and shows it to nobody new. Only a link
+/// in a perspective with no such owner goes to the main agent, the
+/// executor's owner.
 pub struct LocalLinkOwners {
     main_agent: String,
     users: std::collections::HashSet<String>,
+    perspective_owners: Vec<String>,
 }
 
 impl LocalLinkOwners {
-    /// The users of this executor: the main agent and every managed user.
-    /// Fails when the executor has no main agent yet, so no link is moved
-    /// to a graph nobody reads.
-    pub fn of_this_executor() -> Result<Self, String> {
+    /// The users of this executor (the main agent and every managed user)
+    /// and the owners of the perspective `handle`. Fails when the executor
+    /// has no main agent yet, so no link is moved to a graph nobody reads.
+    pub fn of_this_executor(handle: &PerspectiveHandle) -> Result<Self, String> {
         let main_agent = crate::perspectives::sparql_store::main_agent_did()
             .ok_or("the executor has no main agent DID yet")?;
         let managed =
@@ -232,31 +235,64 @@ impl LocalLinkOwners {
         Ok(Self::new(
             main_agent,
             managed.into_iter().map(|u| u.did).collect(),
+            handle.owners.clone().unwrap_or_default(),
         ))
     }
 
-    pub fn new(main_agent: String, managed_users: Vec<String>) -> Self {
+    pub fn new(
+        main_agent: String,
+        managed_users: Vec<String>,
+        perspective_owners: Vec<String>,
+    ) -> Self {
         let mut users: std::collections::HashSet<String> = managed_users.into_iter().collect();
         users.insert(main_agent.clone());
-        LocalLinkOwners { main_agent, users }
+        let mut perspective_owners: Vec<String> = perspective_owners
+            .into_iter()
+            .filter(|o| users.contains(o))
+            .collect();
+        perspective_owners.sort();
+        perspective_owners.dedup();
+        LocalLinkOwners {
+            main_agent,
+            users,
+            perspective_owners,
+        }
     }
 
-    pub fn owner_of(&self, author: &str) -> String {
+    /// The users whose graphs a `Local` link by `author` goes to; never empty.
+    pub fn owners_of(&self, author: &str) -> Vec<String> {
         if self.users.contains(author) {
-            author.to_string()
+            vec![author.to_string()]
+        } else if !self.perspective_owners.is_empty() {
+            self.perspective_owners.clone()
         } else {
-            self.main_agent.clone()
+            vec![self.main_agent.clone()]
         }
+    }
+
+    /// Store `link` with this rule: a `Local` link in the graph of each of
+    /// its owners, a `Shared` link in the shared graph.
+    pub fn add_link(
+        &self,
+        sparql_store: &crate::perspectives::sparql_store::SparqlStore,
+        link: &LinkExpression,
+    ) -> Result<(), String> {
+        for owner in self.owners_of(&link.author) {
+            sparql_store
+                .add_link_as(link, &owner)
+                .map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 }
 
 /// Move the `Local` links a perspective's store kept in its shared default
 /// graph (every store written before #1224) into per-user graphs, and return
-/// how many moved. Runs when a perspective loads, before anything reads it.
+/// how many moved. Runs when a perspective loads, before it is registered.
 ///
-/// Each link goes to [`LocalLinkOwners::owner_of`] its author. The move keeps
-/// every quad of the link and writes it before removing it, so a link is never
-/// lost; see [`SparqlStore::move_local_links_to_user_graphs`]. It is
+/// Each link goes to [`LocalLinkOwners::owners_of`] its author. Each link
+/// moves in one transaction, so nothing is lost and nothing is left readable
+/// by every user; see [`SparqlStore::move_local_links_to_user_graphs`]. It is
 /// idempotent: it moves the `Local` links still in the default graph, so a
 /// second run finds none.
 ///
@@ -266,7 +302,7 @@ pub fn migrate_local_links_to_user_graphs(
     owners: &LocalLinkOwners,
 ) -> Result<usize, String> {
     sparql_store
-        .move_local_links_to_user_graphs(|author| owners.owner_of(author))
+        .move_local_links_to_user_graphs(|author| owners.owners_of(author))
         .map_err(|e| e.to_string())
 }
 
@@ -286,6 +322,10 @@ mod tests {
         INIT_DB.call_once(|| {
             Ad4mDb::init_global_instance(":memory:").unwrap();
         });
+        // The Rusqlite migration places Local links by the executor's users,
+        // so it needs a main agent.
+        crate::test_utils::setup_wallet();
+        crate::agent::AgentService::init_global_test_instance();
     }
 
     // ── URI conversion tests ──────────────────────────────────────────
@@ -559,7 +599,7 @@ mod tests {
         let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         let result =
-            migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql).expect("Migration failed");
+            migrate_links_from_rusqlite_to_sparql(&handle, &sparql).expect("Migration failed");
 
         assert_eq!(result.migrated, 0);
         assert_eq!(result.errors, 0);
@@ -620,7 +660,7 @@ mod tests {
         let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         let result =
-            migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql).expect("Migration failed");
+            migrate_links_from_rusqlite_to_sparql(&handle, &sparql).expect("Migration failed");
 
         assert_eq!(result.migrated, 2);
         assert_eq!(result.errors, 0);
@@ -688,13 +728,13 @@ mod tests {
         let sparql = SparqlStore::new(None).expect("Failed to create SparqlStore");
 
         // First migration
-        let result1 = migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql)
+        let result1 = migrate_links_from_rusqlite_to_sparql(&handle, &sparql)
             .expect("First migration failed");
         assert_eq!(result1.migrated, 1);
         assert_eq!(result1.literal_conversions, 1);
 
         // Second migration — should be a no-op
-        let result2 = migrate_links_from_rusqlite_to_sparql(&handle.uuid, &sparql)
+        let result2 = migrate_links_from_rusqlite_to_sparql(&handle, &sparql)
             .expect("Second migration failed");
         assert_eq!(result2.migrated, 0);
         assert_eq!(result2.errors, 0);

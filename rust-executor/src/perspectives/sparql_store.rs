@@ -644,8 +644,11 @@ impl SparqlStore {
         );
 
         // A link is stored shared or in user graphs, never both (see the type
-        // docs): storing it shared takes it out of every user graph, storing
-        // it Local takes it out of the shared graph.
+        // docs). Storing it shared takes it out of every user graph: its
+        // owners still see it, now as shared. Storing a shared link Local is
+        // refused: its writer already sees it, and taking it out of the
+        // shared graph would hide it from every other user here without
+        // removing it from the neighbourhood.
         let elsewhere: Vec<Quad> = self
             .store
             .quads_for_pattern(Some(reifier_iri.as_ref().into()), None, None, None)
@@ -655,6 +658,14 @@ impl SparqlStore {
                 (Err(_), _) => true,
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if !graph.is_default_graph() && !elsewhere.is_empty() {
+            return Err(anyhow!(
+                "Refusing to store a shared link Local: {} -[{}]-> {} is already shared",
+                link.data.source,
+                link.data.predicate.as_deref().unwrap_or(""),
+                link.data.target
+            ));
+        }
         for quad in &elsewhere {
             self.store.remove(quad)?;
         }
@@ -742,45 +753,9 @@ impl SparqlStore {
     /// by a shared link and by the reader's own Local link is in the default
     /// graph only, and a triple nobody links any more is gone.
     fn settle_direct_triple(&self, triple: &Triple) -> Result<(), Error> {
-        use std::collections::HashSet;
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let asserted_in: HashSet<GraphName> = self
-            .store
-            .quads_for_pattern(None, Some(rdf_reifies), Some(TermRef::Triple(triple)), None)
-            .map(|q| q.map(|q| q.graph_name))
-            .collect::<Result<_, _>>()?;
-        let wanted: HashSet<GraphName> = if asserted_in.contains(&GraphName::DefaultGraph) {
-            HashSet::from([GraphName::DefaultGraph])
-        } else {
-            asserted_in
-        };
-        let object = triple.object.as_ref();
-        let held_in: HashSet<GraphName> = self
-            .store
-            .quads_for_pattern(
-                Some(triple.subject.as_ref()),
-                Some(triple.predicate.as_ref()),
-                Some(object),
-                None,
-            )
-            .map(|q| q.map(|q| q.graph_name))
-            .collect::<Result<_, _>>()?;
-        for graph in wanted.difference(&held_in) {
-            self.store.insert(QuadRef::new(
-                triple.subject.as_ref(),
-                triple.predicate.as_ref(),
-                object,
-                graph.as_ref(),
-            ))?;
-        }
-        for graph in held_in.difference(&wanted) {
-            self.store.remove(QuadRef::new(
-                triple.subject.as_ref(),
-                triple.predicate.as_ref(),
-                object,
-                graph.as_ref(),
-            ))?;
-        }
+        let mut tx = self.store.start_transaction()?;
+        settle_direct_triple_in(&mut tx, triple)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1569,36 +1544,61 @@ impl SparqlStore {
             .map_err(|e| anyhow!("SPARQL store flush failed: {}", e))
     }
 
-    /// Clear the store and bulk-insert all provided links.
-    pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
-        self.clear()?;
-        for link in &links {
-            self.insert_link_triples(link, &link.author)?;
-        }
-        self.flush()?;
-        Ok(())
+    /// A store as every store before #1224 wrote it: `link` entirely in the
+    /// default graph, whatever its status.
+    #[cfg(test)]
+    pub(crate) fn add_link_as_before_1224(&self, link: &LinkExpression) {
+        let as_shared = LinkExpression {
+            status: Some(LinkStatus::Shared),
+            ..link.clone()
+        };
+        self.add_link(&as_shared).unwrap();
+        let reifier = make_reifier_iri(link);
+        let status = NamedNodeRef::new_unchecked(ONT_STATUS);
+        self.store
+            .remove(QuadRef::new(
+                reifier.as_ref(),
+                status,
+                literal("Shared").as_ref(),
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
+        self.store
+            .insert(QuadRef::new(
+                reifier.as_ref(),
+                status,
+                literal(status_str(link.status.as_ref().unwrap())).as_ref(),
+                GraphNameRef::DefaultGraph,
+            ))
+            .unwrap();
     }
 
     /// Move every `Local` link still stored in the default graph into the
-    /// graph of the user `owner_of(author)` names, and return how many moved.
+    /// graphs of the users `owners_of(author)` names (one copy per user), and
+    /// return how many moved.
     ///
     /// Before #1224 every link was in the default graph. This is the one-time
     /// move of those Local links into per-user graphs
-    /// (`migration::migrate_local_links_to_user_graphs` decides the owner).
+    /// (`migration::migrate_local_links_to_user_graphs` decides the owners).
     /// It copies the link's quads as they are (reifier, every annotation), so
     /// nothing is re-derived, then settles the direct triple.
     ///
-    /// Each link is written to its user graph before it is removed from the
-    /// default graph, so an interrupted run leaves a link in both places and
-    /// never in neither. A second run finds nothing to move: the query is
-    /// "Local links in the default graph", so it is idempotent by
-    /// construction rather than by a marker.
+    /// Each link moves in one transaction: its copies, its removal from the
+    /// default graph and the settling of its direct triple commit together,
+    /// so a crash leaves the link either where it was or moved, never half
+    /// removed (a half-removed link loses its status quad first and would
+    /// stay readable by every user). A link that is already in a user graph
+    /// and still has quads in the default graph is a move an earlier,
+    /// non-transactional run did not finish; it is finished here, keeping
+    /// the user graphs it reached. A second run finds nothing to move, so it
+    /// is idempotent by construction rather than by a marker.
     pub fn move_local_links_to_user_graphs(
         &self,
-        owner_of: impl Fn(&str) -> String,
+        owners_of: impl Fn(&str) -> Vec<String>,
     ) -> Result<usize, Error> {
+        use std::collections::HashSet;
         let status_local = literal(status_str(&LinkStatus::Local));
-        let reifiers: Vec<NamedOrBlankNode> = self
+        let mut reifiers: HashSet<NamedOrBlankNode> = self
             .store
             .quads_for_pattern(
                 None,
@@ -1608,11 +1608,37 @@ impl SparqlStore {
             )
             .map(|q| q.map(|q| q.subject))
             .collect::<Result<_, _>>()?;
+        // Half-done moves: a reifier in a user graph with quads left in the
+        // default graph.
+        for quad in self.store.quads_for_pattern(
+            None,
+            Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
+            None,
+            None,
+        ) {
+            let quad = quad?;
+            if quad.graph_name.is_default_graph() {
+                continue;
+            }
+            let left_behind = self
+                .store
+                .quads_for_pattern(
+                    Some(quad.subject.as_ref()),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .next()
+                .is_some();
+            if left_behind {
+                reifiers.insert(quad.subject);
+            }
+        }
 
         let mut moved = 0;
         for reifier in &reifiers {
-            let quads: Vec<Quad> = self
-                .store
+            let mut tx = self.store.start_transaction()?;
+            let quads: Vec<Quad> = tx
                 .quads_for_pattern(
                     Some(reifier.as_ref()),
                     None,
@@ -1620,36 +1646,112 @@ impl SparqlStore {
                     Some(GraphNameRef::DefaultGraph),
                 )
                 .collect::<Result<_, _>>()?;
-            let author = quads
-                .iter()
-                .find(|q| q.predicate.as_str() == ONT_AUTHOR)
-                .and_then(|q| match &q.object {
-                    Term::Literal(l) => Some(l.value().to_string()),
-                    _ => None,
-                })
-                .unwrap_or_default();
-            let graph = GraphName::from(local_graph(&owner_of(&author)));
-            for quad in &quads {
-                self.store.insert(QuadRef::new(
-                    quad.subject.as_ref(),
-                    quad.predicate.as_ref(),
-                    quad.object.as_ref(),
-                    graph.as_ref(),
-                ))?;
+            let reached: HashSet<GraphName> = tx
+                .quads_for_pattern(Some(reifier.as_ref()), None, None, None)
+                .map(|q| q.map(|q| q.graph_name))
+                .collect::<Result<HashSet<_>, _>>()?
+                .into_iter()
+                .filter(|g| !g.is_default_graph())
+                .collect();
+            let graphs: Vec<GraphName> = if reached.is_empty() {
+                let author = quads
+                    .iter()
+                    .find(|q| q.predicate.as_str() == ONT_AUTHOR)
+                    .and_then(|q| match &q.object {
+                        Term::Literal(l) => Some(l.value().to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                owners_of(&author)
+                    .iter()
+                    .map(|owner| GraphName::from(local_graph(owner)))
+                    .collect()
+            } else {
+                reached.into_iter().collect()
+            };
+            if graphs.is_empty() {
+                return Err(anyhow!("no owner for the Local link {reifier}"));
             }
-            for quad in &quads {
-                self.store.remove(quad)?;
-            }
-            for quad in &quads {
-                if let (RDF_REIFIES, Term::Triple(triple)) = (quad.predicate.as_str(), &quad.object)
-                {
-                    self.settle_direct_triple(triple)?;
+            for graph in &graphs {
+                for quad in &quads {
+                    tx.insert(QuadRef::new(
+                        quad.subject.as_ref(),
+                        quad.predicate.as_ref(),
+                        quad.object.as_ref(),
+                        graph.as_ref(),
+                    ));
                 }
             }
+            for quad in &quads {
+                tx.remove(quad);
+            }
+            let triples: Vec<Triple> = tx
+                .quads_for_pattern(
+                    Some(reifier.as_ref()),
+                    Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
+                    None,
+                    None,
+                )
+                .filter_map(|q| match q.map(|q| q.object) {
+                    Ok(Term::Triple(t)) => Some(Ok(*t)),
+                    Ok(_) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<Result<_, _>>()?;
+            for triple in &triples {
+                settle_direct_triple_in(&mut tx, triple)?;
+            }
+            tx.commit()?;
             moved += 1;
         }
         Ok(moved)
     }
+}
+
+/// [`SparqlStore::settle_direct_triple`] inside `tx`, so a caller can make it
+/// part of a larger atomic change. `tx` reads its own writes.
+fn settle_direct_triple_in(
+    tx: &mut oxigraph::store::Transaction<'_>,
+    triple: &Triple,
+) -> Result<(), Error> {
+    use std::collections::HashSet;
+    let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+    let asserted_in: HashSet<GraphName> = tx
+        .quads_for_pattern(None, Some(rdf_reifies), Some(TermRef::Triple(triple)), None)
+        .map(|q| q.map(|q| q.graph_name))
+        .collect::<Result<_, _>>()?;
+    let wanted: HashSet<GraphName> = if asserted_in.contains(&GraphName::DefaultGraph) {
+        HashSet::from([GraphName::DefaultGraph])
+    } else {
+        asserted_in
+    };
+    let object = triple.object.as_ref();
+    let held_in: HashSet<GraphName> = tx
+        .quads_for_pattern(
+            Some(triple.subject.as_ref()),
+            Some(triple.predicate.as_ref()),
+            Some(object),
+            None,
+        )
+        .map(|q| q.map(|q| q.graph_name))
+        .collect::<Result<_, _>>()?;
+    for graph in wanted.difference(&held_in) {
+        tx.insert(QuadRef::new(
+            triple.subject.as_ref(),
+            triple.predicate.as_ref(),
+            object,
+            graph.as_ref(),
+        ));
+    }
+    for graph in held_in.difference(&wanted) {
+        tx.remove(QuadRef::new(
+            triple.subject.as_ref(),
+            triple.predicate.as_ref(),
+            object,
+            graph.as_ref(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2365,21 +2467,6 @@ mod tests {
     }
 
     // ── Sync / reload tests ──
-
-    #[test]
-    fn test_sync_existing_links_to_sparql() {
-        let signer = TestSigner::generate();
-        let svc = new_service();
-        let links = vec![
-            make_link(&signer, "ad4m://a", "ad4m://p1", "ad4m://t1"),
-            make_link(&signer, "ad4m://b", "ad4m://p2", "ad4m://t2"),
-            make_link(&signer, "ad4m://c", "ad4m://p3", "ad4m://t3"),
-        ];
-        svc.reload(links).unwrap();
-
-        let all = svc.get_all_links().unwrap();
-        assert_eq!(all.len(), 3);
-    }
 
     #[test]
     fn test_link_add_then_query_roundtrip() {

@@ -895,33 +895,6 @@ impl PerspectiveInstance {
         }
     }
 
-    /// Sync all existing links to the SPARQL (Oxigraph) store.
-    ///
-    /// Reloading the store replaces every triple in one shot, so any
-    /// `ModelShape` warmed before the reload may now reflect stale SHACL
-    /// metadata.  Flush the entire `shape_cache` so the next query
-    /// re-parses against the freshly-loaded triples.
-    pub fn sync_existing_links_to_sparql(
-        &self,
-        links: &[DecoratedLinkExpression],
-    ) -> Result<(), deno_core::anyhow::Error> {
-        let link_exprs: Vec<LinkExpression> = links
-            .iter()
-            .map(|l| {
-                let mut le = LinkExpression::from(l.clone());
-                // The rusqlite source always records a status, so `None` here
-                // is a legacy anomaly. Default it to Shared at this boundary
-                // rather than letting one odd row abort the whole boot-time
-                // rebuild (the store refuses status-less inserts).
-                le.status = le.status.or(Some(LinkStatus::Shared));
-                le
-            })
-            .collect();
-        self.sparql_store.reload(link_exprs)?;
-        self.shape_cache.write().unwrap().clear();
-        Ok(())
-    }
-
     async fn ensure_link_language(&self) {
         let mut interval = time::interval(Duration::from_secs(5));
         while !self.is_teardown.load(Ordering::Acquire) {
