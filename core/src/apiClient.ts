@@ -113,7 +113,6 @@ export class ApiClient {
     /** The connecting or open socket; null otherwise. */
     private _ws: WebSocket | null = null
     /** Settles when `_ws` opens (resolve) or closes first (reject). */
-    private _wsOpen: Promise<void> | null = null
     private _wsCallbacks = new Set<(data: unknown) => void>()
     private _reconnectCallbacks = new Set<() => void>()
     private _hasConnectedOnce = false
@@ -135,18 +134,8 @@ export class ApiClient {
         const WsImpl = this._webSocketImpl ?? globalThis.WebSocket
         const ws = new WsImpl(this._getWsUrl())
         this._ws = ws
-        this._wsOpen = new Promise<void>((resolve, reject) => {
-            ws.onopen = () => {
-                resolve()
-                this._onOpen(ws)
-            }
-            ws.onclose = () => {
-                reject(closedError())
-                this._onClose(ws)
-            }
-        })
-        // Only waitForSubscription() awaits this; a close before open is not an error otherwise.
-        this._wsOpen.catch(() => {})
+        ws.onopen = () => this._onOpen(ws)
+        ws.onclose = () => this._onClose(ws)
 
         ws.onmessage = (event) => {
             let parsed: Record<string, unknown>
@@ -200,7 +189,6 @@ export class ApiClient {
         if (this._ws !== ws) return
         this._stopPing()
         this._ws = null
-        this._wsOpen = null
         for (const pending of this._pendingCalls.values()) {
             if (!pending.sent && ++pending.failedConnects < MAX_CONNECT_ATTEMPTS) continue
             if (pending.sent && pending.retry) {
@@ -318,12 +306,6 @@ export class ApiClient {
         }
     }
 
-    /** Wait until the WebSocket connection is established. */
-    async waitForSubscription(): Promise<void> {
-        this._ensureWs()
-        if (this._ws!.readyState !== 1 /* OPEN */) await this._wsOpen
-    }
-
     private _closeWs(): void {
         this._stopPing()
         if (this._wsReconnectTimer) {
@@ -332,7 +314,6 @@ export class ApiClient {
         }
         const ws = this._ws
         this._ws = null
-        this._wsOpen = null
         ws?.close()
     }
 

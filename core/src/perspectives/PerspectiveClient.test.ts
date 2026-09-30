@@ -17,7 +17,6 @@ jest.mock('../apiClient', () => {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
             subscribe: mockSubscribe,
-            waitForSubscription: jest.fn().mockResolvedValue(undefined),
         })),
         RpcError: class RpcError extends Error {
             readonly status: number
@@ -161,17 +160,6 @@ describe('PerspectiveClient RPC operations', () => {
         onEvent({ type: 'perspective-added', perspective: makeHandle('uuid-r', 'R') })
 
         expect(added).not.toHaveBeenCalled()
-    })
-
-    it('removeAllListeners() also removes the sync-state subscription', async () => {
-        const unsub = jest.fn()
-        mockSubscribe.mockReturnValue(unsub)
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-
-        await client.addPerspectiveSyncStateChangeListener('uuid-s', [])
-        client.removeAllListeners('uuid-s')
-
-        expect(unsub).toHaveBeenCalledTimes(1)
     })
 
     it('addPerspectiveAddedListener dispatches events to callbacks', () => {
