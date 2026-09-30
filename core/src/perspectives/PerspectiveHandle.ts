@@ -36,10 +36,11 @@ export class PerspectiveHandle {
 
     /** Build a PerspectiveHandle from the executor's wire shape. */
     static fromWire(wire: WirePerspectiveHandle): PerspectiveHandle {
+        // Keep the wire's nulls: callers compare these fields with null.
         const handle = new PerspectiveHandle(wire.uuid, wire.name, wire.state)
-        if (wire.sharedUrl) handle.sharedUrl = wire.sharedUrl
-        if (wire.neighbourhood) handle.neighbourhood = neighbourhoodExpressionFromWire(wire.neighbourhood)
-        if (wire.owners) handle.owners = wire.owners
+        handle.sharedUrl = wire.sharedUrl
+        handle.neighbourhood = wire.neighbourhood ? neighbourhoodExpressionFromWire(wire.neighbourhood) : null
+        handle.owners = wire.owners
         return handle
     }
 }
