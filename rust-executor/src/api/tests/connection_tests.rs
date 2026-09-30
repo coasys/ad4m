@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::events_ws::build_event_stream_for;
-use crate::api::tests::protocol_tests::{admin_ctx, registered_perspective};
+use crate::api::tests::support::{admin_ctx, registered_perspective};
 use crate::api::ws_handler::build_handler_map;
 use crate::api::ws_rpc::{serve, Connection};
 use crate::pubsub::{

@@ -4,7 +4,6 @@
 export const HANDLER_METHODS = [
   "agent.addEntanglementProofs",
   "agent.addTrustedAgents",
-  "agent.byDIDs",
   "agent.byDid",
   "agent.deleteEntanglementProofs",
   "agent.deleteTrustedAgents",
@@ -80,7 +79,6 @@ export const HANDLER_METHODS = [
   "perspective.create",
   "perspective.createBatch",
   "perspective.createSubject",
-  "perspective.discardBatch",
   "perspective.disposeQuery",
   "perspective.disposeSparql",
   "perspective.evaluateGetters",
