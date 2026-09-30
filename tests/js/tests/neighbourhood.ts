@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
+import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
 import { LinkLangConfig, publishLinkLanguage } from "../utils/linkLangConfig";
@@ -194,7 +194,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // Wait for Alice's link language to be wired (see simple
                 // test comment for rationale).
                 await pollUntil(async () => {
-                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const p = await alice.perspective.byUUID(aliceP1!.uuid);
                     const s = p?.state;
                     return s !== PerspectiveState.Private
                         && s !== PerspectiveState.NeighboudhoodCreationInitiated;
@@ -240,7 +240,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Bob to receive Alice's post-burst links
                 await pollUntil(async () => {
-                    const links = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}));
+                    const links = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://alice'}));
                     console.log(`Bob has ${links.length}/3 of Alice's post-burst links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "bob receives alice's post-burst links" });
@@ -261,7 +261,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Alice to receive Bob's links
                 await pollUntil(async () => {
-                    const links = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}));
+                    const links = await testContext.alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://bob'}));
                     console.log(`Alice has ${links.length}/3 of Bob's links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "alice receives bob's links" });
@@ -469,7 +469,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -478,7 +478,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;
@@ -486,7 +486,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     bobNH!.addSignalHandler(bobHandler)
 
                     let link = new LinkExpression()
-                    link.author = aliceDID;
+                    link.author = aliceDID!;
                     link.timestamp = new Date().toISOString();
                     link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
                     link.proof = new ExpressionProof("sig", "key");
@@ -521,7 +521,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('supports loopback functionality for broadcasts', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -530,7 +530,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;

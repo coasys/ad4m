@@ -430,8 +430,7 @@ export default function aiTests(testContext: TestContext) {
                 expect(updatedTask.promptExamples).to.deep.equal([{ input: "Updated input", output: "Updated output" }]);
 
                 // Remove a task
-                const removedTask = await ad4mClient.ai.removeTask(newTask.taskId);
-                expect(removedTask).to.deep.equal(updatedTask);
+                expect(await ad4mClient.ai.removeTask(newTask.taskId)).to.equal(true);
 
                 // Verify task is removed
                 const tasksAfterRemoval = await ad4mClient.ai.tasks();

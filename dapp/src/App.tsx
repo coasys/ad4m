@@ -84,7 +84,6 @@ function Main() {
 
   useEffect(() => {
     if (client && isConnectedToADAM) {
-      // @ts-ignore
       client.agent.getEntanglementProofs().then(setProofs);
     } else {
       setProofs([]);

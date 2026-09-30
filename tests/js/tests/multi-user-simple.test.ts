@@ -589,7 +589,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user1
             for (const link of links1) {
-                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.predicate} should be authored by user1`);
+                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.data.predicate} should be authored by user1`);
                 expect(link.proof.valid).to.be.true;
             }
 
@@ -610,7 +610,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user2
             for (const link of links2) {
-                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.predicate} should be authored by user2`);
+                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.data.predicate} should be authored by user2`);
                 expect(link.proof.valid).to.be.true;
             }
 

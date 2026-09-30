@@ -21,7 +21,7 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
     signMessage: vi.fn().mockResolvedValue({ signature: 'sig', publicKey: 'pk' }),
     addHostingUserInfoChangedListener: vi.fn(),
     computeLog: vi.fn().mockResolvedValue([]),
-    requestPayment: vi.fn().mockResolvedValue({ success: true, message: 'OK' }),
+    requestPayment: vi.fn().mockResolvedValue({ success: true, amountHOT: '100' }),
   };
 
   const mockRuntime = {
