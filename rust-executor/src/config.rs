@@ -419,6 +419,21 @@ mod tests {
             .is_ok());
     }
 
+    /// `prepare()` turns an empty credential into `None`, so every reader after
+    /// it (capabilities, the MCP bind host and auth) sees the same "no
+    /// credential" that `check_admin_credential` refused or let through.
+    #[test]
+    fn prepare_turns_an_empty_admin_credential_into_none() {
+        for flag in [None, Some(false), Some(true)] {
+            let mut config = with_credential(Some(""), flag);
+            config.prepare();
+            assert_eq!(config.admin_credential, None, "flag {flag:?}");
+        }
+        let mut config = with_credential(Some("secret"), Some(true));
+        config.prepare();
+        assert_eq!(config.admin_credential.as_deref(), Some("secret"));
+    }
+
     #[test]
     fn admin_credential_or_testing_flag_starts() {
         assert!(with_credential(Some("secret"), None)
