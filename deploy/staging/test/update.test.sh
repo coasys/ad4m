@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs deploy/staging/update.sh against a throwaway git remote, with pnpm,
 # cargo, systemctl, curl, node and sleep replaced by stubs, and checks each
-# decision it makes: wait, deploy, skip, roll back, keep a failed build out.
+# decision it makes: wait, deploy, skip, roll back, keep a failed build out,
+# recover from a failed step after the stop, ignore a tag named like the branch.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -63,6 +64,16 @@ cat >"$T/stubs/node" <<'EOF'
 # agent.mjs status: a build marked bad never unlocks.
 sha=$(cat "$STUB_DIR/running")
 if [[ -f $STUB_DIR/bad-$sha ]]; then echo locked; else cat "$STUB_DIR/agent"; fi
+EOF
+cat >"$T/stubs/cp" <<'EOF'
+#!/usr/bin/env bash
+# With $STUB_DIR/fail-snapshot, copying into snapshots/ fails half-way, as on a full disk.
+if [[ -f $STUB_DIR/fail-snapshot && ${*: -1} == */snapshots/* ]]; then
+  mkdir -p "${*: -1}"
+  echo "cp: error writing: No space left on device" >&2
+  exit 1
+fi
+exec /bin/cp "$@"
 EOF
 printf '#!/bin/sh\n' >"$T/stubs/sleep"
 chmod +x "$T/stubs/"*
@@ -150,34 +161,76 @@ check "result names the build failure" bash -c "[[ '$(status last_result)' == 'b
 check "the running build is not stopped" bash -c "! grep -q systemctl '$T/calls'"
 check "deployed_sha is unchanged" [ "$(status deployed_sha)" = "$bad" ]
 
-# 7. Housekeeping after several deploys: two snapshots, releases current + previous.
+# 7. Housekeeping: keep the release and the data snapshot of the previous build.
 last=$(commit "next" "AD4M_UNLOCK_PASSPHRASE_FILE")
 run
 check "a later deploy succeeds" [ "$(status deployed_sha)" = "$last" ]
-check "two snapshots are kept" [ "$(find "$T/state/snapshots" -mindepth 1 -maxdepth 1 | wc -l)" = 2 ]
+check "only the previous build's snapshot is kept" \
+  [ "$(find "$T/state/snapshots" -mindepth 1 -maxdepth 1 -printf '%f\n' | sed 's/.*-//')" = "$bad" ]
 check "only current and previous releases are kept" \
   [ "$(find "$T/state/releases" -mindepth 1 -maxdepth 1 -printf '%f\n' | sort | tr '\n' ' ')" = "$(printf '%s\n' "$bad" "$last" | sort | tr '\n' ' ')" ]
 
-# 8. No agent yet passes the gate on /health alone.
+# 8. Once an agent was unlocked, a build that finds no agent fails the gate.
 echo no-agent >"$T/agent"
-fresh=$(commit "fresh" "AD4M_UNLOCK_PASSPHRASE_FILE")
+lost=$(commit "loses the agent" "AD4M_UNLOCK_PASSPHRASE_FILE")
 run
-check "a node without an agent deploys" [ "$(status last_result)" = "deployed (no agent yet)" ]
-check "and records the SHA" [ "$(status deployed_sha)" = "$fresh" ]
+check "a build without the agent is rolled back" [ "$(status deployed_sha)/$(status last_failed_sha)" = "$last/$lost" ]
+check "an automatic rollback leaves previous at the build before" [ "$(readlink "$T/state/previous")" = "releases/$bad" ]
+echo unlocked >"$T/agent"
 
-# 9. Rollback by hand: the previous build with the data it had.
+# 9. Two failed deploys in a row, then a rollback by hand: the build before
+# comes back with its own data, not with the newer build's.
+worse=$(commit "fails too" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$worse"
+run
+check "the second failed deploy is rolled back" [ "$(status deployed_sha)/$(status last_failed_sha)" = "$last/$worse" ]
+snap=$(find "$T/state/snapshots" -mindepth 1 -maxdepth 1 -name "*-$bad")
+check "the snapshot of the build before survives failed deploys" [ -n "$snap" ]
 run rollback
-check "rollback runs the previous build" [ "$(cat "$T/running")" = "$last" ]
-check "rollback records it" [ "$(status deployed_sha)/$(status last_failed_sha)" = "$last/$fresh" ]
-check "rollback result" [ "$(status last_result)" = "rolled_back by hand: $fresh; $last runs again" ]
-snap=$(find "$T/state/snapshots" -mindepth 1 -maxdepth 1 -name "*-$last")
+check "rollback runs the previous build" [ "$(cat "$T/running")" = "$bad" ]
+check "rollback records it" [ "$(status deployed_sha)" = "$bad" ]
+check "rollback result" [ "$(status last_result)" = "rolled_back by hand: $last; $bad runs again" ]
 check "rollback restores the previous build's data" \
   [ "$(head -n -1 "$T/data/written-by")" = "$(cat "$snap/written-by")" ]
-check "the rolled-back build's data is kept aside" [ "$(tail -n 1 "$T/data.failed/written-by")" = "$fresh" ]
+check "the rolled-back build's data is kept aside" [ "$(tail -n 1 "$T/data.failed/written-by")" = "$last" ]
 run
-check "the timer does not redeploy the rolled-back SHA" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "the timer does not deploy the staging head after a rollback" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
 run rollback
 check "a second rollback has nothing to go back to" [ "$(status last_result)" = "error: no previous build to roll back to" ]
+
+# 9b. No snapshot of the previous build's data: refuse, unless told to keep the data.
+rm "$T/bad-$worse"
+AD4M_STAGING_RETRY=1 run
+check "a retried SHA deploys" [ "$(status deployed_sha)/$(status previous_sha)" = "$worse/$bad" ]
+rm -rf "$T/state/snapshots/"*
+run rollback
+check "rollback without a snapshot is refused" [ "$(status last_result)" = "error: no snapshot of the data of $bad; AD4M_STAGING_KEEP_DATA=1 rolls back on the current data" ]
+check "and changes nothing" [ "$(cat "$T/running")" = "$worse" ]
+AD4M_STAGING_KEEP_DATA=1 run rollback
+check "AD4M_STAGING_KEEP_DATA=1 rolls back on the current data" \
+  [ "$(cat "$T/running")/$(tail -n 2 "$T/data/written-by" | head -n 1)" = "$bad/$worse" ]
+
+# 9c. A tag named like the branch does not decide what is deployed.
+git -C "$T/work" checkout -q -b side
+git -C "$T/work" commit -q --allow-empty -m "not on staging"
+git -C "$T/work" push -q origin "HEAD:refs/tags/origin/staging"
+git -C "$T/work" checkout -q staging
+git -C "$T/repo" fetch -q --tags origin
+head=$(commit "the real head" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "the branch head is deployed, not the tag" [ "$(status deployed_sha)" = "$head" ]
+
+# 9d. A step between the stop and the gate fails (the snapshot, on a full
+# disk): the running build comes back, the SHA counts as failed.
+touch "$T/fail-snapshot"
+full=$(commit "disk full" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+rm "$T/fail-snapshot"
+check "the old build runs again" [ "$(cat "$T/running")" = "$head" ]
+check "current points at it" [ "$(readlink "$T/state/current")" = "releases/$head" ]
+check "the SHA is recorded as failed" [ "$(status last_failed_sha)" = "$full" ]
+check "the result says so" [ "$(status last_result)" = "error: deploying $full failed before its check; $head runs again" ]
+check "no partial snapshot is left" bash -c "! find '$T/state/snapshots' -mindepth 1 -maxdepth 1 -name '*-$head' | grep -q ."
 
 # 10. A secret file others can read stops the update before anything else.
 chmod 644 "$T/config/secrets/unlock-passphrase"
@@ -199,6 +252,13 @@ check "a failed first deploy stops staging" [ "$(jq -r .last_result "$T/state2/s
   "rolled_back: $(git -C "$T/work" rev-parse HEAD) failed the gate; there is no previous build, staging is stopped" ]
 check "and leaves no current build" [ ! -e "$T/state2/current" ]
 check "and no data dir" [ ! -e "$T/data2" ]
+
+# 13. A node that never had an agent passes the gate on /health alone.
+export AD4M_STAGING_STATE=$T/state3 AD4M_STAGING_DATA=$T/data3 AD4M_STAGING_SRC=$T/src3
+echo no-agent >"$T/agent"
+rm "$T/bad-$(git -C "$T/work" rev-parse HEAD)"
+run
+check "a node without an agent deploys" [ "$(jq -r .last_result "$T/state3/status.json")" = "deployed (no agent yet)" ]
 
 echo "$failures failed"
 ((failures == 0))
