@@ -292,13 +292,20 @@ pub fn run() {
             let launcher_state = LauncherState::load().unwrap();
             let (config_file, smtp_password) =
                 launcher_state.executor_config(String::from(app_path.to_str().unwrap()), free_port);
+            // to_ad4m_config fails only on inputs the launcher does not
+            // produce: an SMTP password is always set (possibly "", which is
+            // valid here), and free_port + 1 cannot overflow. Should that
+            // change, setup fails with the reason logged instead of a panic.
             let mut config = config_file
                 .to_ad4m_config(&ExecutorSecrets {
                     admin_credential: Some(req_credential.to_string()),
                     smtp_password,
                     unlock_passphrase: None,
                 })
-                .expect("launcher state maps to an executor config");
+                .map_err(|e| {
+                    error!("Cannot start the executor with the launcher's settings: {e}");
+                    e
+                })?;
             config.hc_use_bootstrap = Some(true);
             config.hc_use_mdns = Some(false);
             config.hc_use_proxy = Some(true);

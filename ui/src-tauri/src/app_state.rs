@@ -504,6 +504,25 @@ mod tests {
         );
     }
 
+    /// A later launcher may add keys to `tls_config` or `multi_user_config`.
+    /// After a rollback this version must still read the file: a failed
+    /// parse makes `load()` fall back to the default state, and the next
+    /// save overwrites SMTP, TLS, MCP and host registration.
+    #[test]
+    fn launcher_state_with_keys_from_a_later_version_still_loads() {
+        let mut json: serde_json::Value = serde_json::from_str(&fixture()).unwrap();
+        json["tls_config"]["future_key"] = true.into();
+        json["multi_user_config"]["future_key"] = 1.into();
+        json["multi_user_config"]["tls_config"]["future_key"] = "x".into();
+        let state: LauncherState = serde_json::from_value(json).expect("unknown keys are ignored");
+        let multi_user = state.multi_user_config.unwrap();
+        assert_eq!(
+            multi_user.tls_config.unwrap().cert_file_path,
+            "/etc/ssl/node.pem"
+        );
+        assert_eq!(multi_user.smtp_config.unwrap().password, "smtp-secret");
+    }
+
     #[test]
     fn launcher_state_maps_to_the_executor_config_the_launcher_starts() {
         let state: LauncherState = serde_json::from_str(&fixture()).unwrap();

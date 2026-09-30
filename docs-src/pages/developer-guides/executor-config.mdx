@@ -33,8 +33,10 @@ ad4m-executor config print --config /etc/ad4m/executor-config.json --port 12400
 ## Keys
 
 Every key is optional. The file is rejected at startup if it contains a key
-not listed here (a typo fails loudly instead of being ignored) or a secret
-value (see [Secrets](#secrets)).
+not listed here, at any depth (a typo fails loudly instead of being
+ignored, and the error names the key by its path, e.g.
+`multi_user_config.tls_config.tls_prot`), or a secret value (see
+[Secrets](#secrets)).
 
 | Key | Type | Default | Flag / variable |
 |---|---|---|---|
@@ -56,6 +58,10 @@ Inside the nested objects some keys are required: `enabled` in
 `multi_user_config`; `enabled`, `cert_file_path` and `key_file_path` in
 `tls_config`; every key but `password_file` in `smtp_config`.
 `tls_config` and `smtp_config` may be `null` or left out.
+
+`multi_user_config.enabled: false` (or `--enable-multi-user false`) does not
+turn multi-user off on a data directory where it was enabled before: the
+executor records multi-user as on in its database and only ever sets it.
 
 **`tls_config`** starts an HTTPS/WSS listener on `0.0.0.0:<tls_port>`. The
 plain RPC port then stays on `127.0.0.1`.
@@ -111,6 +117,10 @@ Secrets come from files or environment variables:
 - A secret file must not be readable by group or others: mode `0600` or
   `0400`, otherwise `run` stops and names the file and its mode.
 - One trailing newline is removed, so `echo "$SECRET" > file` works.
+- An empty secret stops `run`: an empty file (or one holding only a
+  newline), an empty `AD4M_ADMIN_CREDENTIAL` or `AD4M_SMTP_PASSWORD`, or
+  `--admin-credential ""`. An empty admin credential would match the empty
+  token a client without credentials sends.
 - `--admin-credential <value>` still works and wins over both variables,
   but the value is visible to every user on the host through `ps`. Prefer
   the file.

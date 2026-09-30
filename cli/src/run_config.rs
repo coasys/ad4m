@@ -54,8 +54,14 @@ pub struct RunArgs {
     /// Admin credential granting full capabilities to whoever presents it.
     /// Prefer AD4M_ADMIN_CREDENTIAL_FILE (or the AD4M_ADMIN_CREDENTIAL
     /// environment variable): a flag value is visible to every user on the
-    /// host via `ps` and stays in shell history.
-    #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
+    /// host via `ps` and stays in shell history. Must not be empty.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_ADMIN_CREDENTIAL",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     pub admin_credential: Option<String>,
     #[arg(long, action, env = "AD4M_LOCALHOST")]
     pub localhost: Option<bool>,
@@ -221,6 +227,7 @@ pub fn process_env(name: &str) -> Option<String> {
 pub(crate) mod tests {
     use super::*;
     use clap::Parser;
+    use rust_executor::config_file::{MultiUserSettings, TlsSettings};
     use std::path::Path;
     use std::sync::{Mutex, MutexGuard};
 
@@ -325,6 +332,189 @@ pub(crate) mod tests {
 
         let config_from_env = resolve(&[], &[("AD4M_CONFIG", &config)]).unwrap().config;
         assert_eq!(config_from_env.port, Some(14400));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn merged(argv: &[&str], env: &[(&'static str, &str)]) -> ExecutorConfigFile {
+        let _vars = EnvVars::set(env);
+        let mut full = vec!["ad4m-executor"];
+        full.extend_from_slice(argv);
+        Cli::try_parse_from(full)
+            .unwrap()
+            .run
+            .merged_file()
+            .unwrap()
+    }
+
+    /// Every config-file key with a flag, one row each: its JSON pointer,
+    /// its variable, its flag, and two values unlike the file's (`true`
+    /// for the booleans).
+    const OVERRIDABLE: &[(&str, &str, &str, &str, &str)] = &[
+        (
+            "/app_data_path",
+            "AD4M_APP_DATA_PATH",
+            "--app-data-path",
+            "/b",
+            "/c",
+        ),
+        ("/port", "AD4M_PORT", "--port", "14200", "14300"),
+        (
+            "/hc_admin_port",
+            "AD4M_HC_ADMIN_PORT",
+            "--hc-admin-port",
+            "14201",
+            "14301",
+        ),
+        (
+            "/hc_app_port",
+            "AD4M_HC_APP_PORT",
+            "--hc-app-port",
+            "14202",
+            "14302",
+        ),
+        (
+            "/localhost",
+            "AD4M_LOCALHOST",
+            "--localhost",
+            "false",
+            "true",
+        ),
+        (
+            "/run_dapp_server",
+            "AD4M_RUN_DAPP_SERVER",
+            "--run-dapp-server",
+            "false",
+            "true",
+        ),
+        (
+            "/auto_permit_cap_requests",
+            "AD4M_AUTO_PERMIT_CAP_REQUESTS",
+            "--auto-permit-cap-requests",
+            "false",
+            "true",
+        ),
+        (
+            "/mcp_enabled",
+            "AD4M_ENABLE_MCP",
+            "--enable-mcp",
+            "false",
+            "true",
+        ),
+        ("/mcp_port", "AD4M_MCP_PORT", "--mcp-port", "14204", "14304"),
+        (
+            "/multi_user_config/enabled",
+            "AD4M_ENABLE_MULTI_USER",
+            "--enable-multi-user",
+            "false",
+            "true",
+        ),
+        (
+            "/multi_user_config/tls_config/cert_file_path",
+            "AD4M_TLS_CERT_FILE",
+            "--tls-cert-file",
+            "/b/cert",
+            "/c/cert",
+        ),
+        (
+            "/multi_user_config/tls_config/key_file_path",
+            "AD4M_TLS_KEY_FILE",
+            "--tls-key-file",
+            "/b/key",
+            "/c/key",
+        ),
+        (
+            "/multi_user_config/tls_config/tls_port",
+            "AD4M_TLS_PORT",
+            "--tls-port",
+            "14203",
+            "14303",
+        ),
+    ];
+
+    /// For every row of [`OVERRIDABLE`]: the variable alone, the flag alone,
+    /// and the flag over the variable each change that key and no other.
+    /// The file is a struct literal, so a new `ExecutorConfigFile` field
+    /// does not compile here until it is set, and then fails the
+    /// completeness check until it has a row (or is listed as flagless).
+    #[test]
+    fn every_key_is_overridden_by_its_variable_and_flag_and_nothing_else() {
+        let _env = lock_env();
+        let dir = scratch_dir("precedence-table");
+        let file = ExecutorConfigFile {
+            app_data_path: Some("/a".into()),
+            port: Some(14100),
+            hc_admin_port: Some(14101),
+            hc_app_port: Some(14102),
+            localhost: Some(true),
+            run_dapp_server: Some(true),
+            auto_permit_cap_requests: Some(true),
+            multi_user_config: Some(MultiUserSettings {
+                enabled: true,
+                smtp_config: None,
+                tls_config: Some(TlsSettings {
+                    enabled: true,
+                    cert_file_path: "/a/cert".into(),
+                    key_file_path: "/a/key".into(),
+                    tls_port: Some(14103),
+                }),
+            }),
+            log_config: Some([("holochain".to_string(), "warn".to_string())].into()),
+            mcp_enabled: Some(true),
+            mcp_port: Some(14104),
+        };
+        let file_json = serde_json::to_value(&file).unwrap();
+        let config = write_config(&dir, &file_json.to_string());
+
+        fn leaves(value: &serde_json::Value, at: String, out: &mut Vec<String>) {
+            match value.as_object() {
+                Some(object) => {
+                    for (key, value) in object {
+                        leaves(value, format!("{at}/{key}"), out);
+                    }
+                }
+                None => out.push(at),
+            }
+        }
+        let mut keys = Vec::new();
+        leaves(&file_json, String::new(), &mut keys);
+        let flagless = [
+            "/log_config/holochain",
+            "/multi_user_config/smtp_config",
+            "/multi_user_config/tls_config/enabled",
+        ];
+        for key in keys.iter().filter(|key| !flagless.contains(&key.as_str())) {
+            assert!(
+                OVERRIDABLE.iter().any(|row| row.0 == key),
+                "{key} has no row in OVERRIDABLE"
+            );
+        }
+
+        let as_json = |value: &str| {
+            serde_json::from_str(value).unwrap_or_else(|_| serde_json::Value::from(value))
+        };
+        assert_eq!(
+            serde_json::to_value(merged(&["--config", &config], &[])).unwrap(),
+            file_json
+        );
+        for &(pointer, var, flag, b, c) in OVERRIDABLE {
+            let expect = |value: &str| {
+                let mut expected = file_json.clone();
+                *expected.pointer_mut(pointer).unwrap() = as_json(value);
+                expected
+            };
+            let actual = |argv: &[&str], env: &[(&'static str, &str)]| {
+                let mut full = vec!["--config", config.as_str()];
+                full.extend_from_slice(argv);
+                serde_json::to_value(merged(&full, env)).unwrap()
+            };
+            assert_eq!(actual(&[], &[(var, b)]), expect(b), "{var} over the file");
+            assert_eq!(actual(&[flag, b], &[]), expect(b), "{flag} over the file");
+            assert_eq!(
+                actual(&[flag, c], &[(var, b)]),
+                expect(c),
+                "{flag} over {var}"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -490,6 +680,26 @@ pub(crate) mod tests {
         .err()
         .expect("two sources for one secret is an error");
         assert!(format!("{err:#}").contains("set only one"), "{err:#}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An empty admin credential would grant every capability to a client
+    /// that sends no token, so it stops `run` from every source.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_admin_credential_stops_run() {
+        let _env = lock_env();
+        let dir = scratch_dir("empty-admin");
+        let empty = write_secret(&dir.join("admin"), "\n");
+        let err = resolve(&[], &[("AD4M_ADMIN_CREDENTIAL_FILE", &empty)])
+            .err()
+            .expect("an empty credential file is an error");
+        assert!(format!("{err:#}").contains("is empty"), "{err:#}");
+
+        assert!(
+            resolve(&["--admin-credential", ""], &[]).is_err(),
+            "an empty --admin-credential is an error"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
