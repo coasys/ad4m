@@ -71,6 +71,7 @@ pub struct Apps {
 #[derive(Default, Debug, Deserialize, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct AuthInfoInput {
     pub app_desc: String,
     pub app_domain: String,
@@ -169,6 +170,7 @@ mod tests {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct ExpressionProofInput {
     pub invalid: Option<bool>,
     pub key: Option<String>,
@@ -250,6 +252,7 @@ pub struct LanguageMeta {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LanguageMetaInput {
     pub description: String,
     pub name: String,
@@ -300,6 +303,7 @@ impl std::fmt::Display for LinkStatus {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LinkExpressionInput {
     pub author: String,
     pub data: LinkInput,
@@ -318,6 +322,7 @@ pub struct LinkExpressionUpdated {
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
+#[ts(optional_fields)]
 pub struct LinkInput {
     pub predicate: Option<String>,
     pub source: String,
@@ -812,6 +817,7 @@ pub struct PerspectiveStateFilter {
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ModelApiInput {
     pub base_url: String,
     pub api_key: String,
@@ -849,6 +855,7 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct LocalModelInput {
     pub file_name: String,
     pub tokenizer_source: Option<TokenizerSourceInput>,
@@ -866,6 +873,7 @@ pub struct TokenizerSourceInput {
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct ModelInput {
     pub name: String,
     pub api: Option<ModelApiInput>,
@@ -876,6 +884,7 @@ pub struct ModelInput {
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct AITaskInput {
     pub name: String,
     pub model_id: String,
@@ -1280,6 +1289,7 @@ impl GetFilter for ComputeLogEntry {
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(optional_fields)]
 pub struct VoiceActivityParamsInput {
     pub start_threshold: Option<f64>,
     pub start_window: Option<i32>,

@@ -3,4 +3,4 @@ import type { LocalModelInput } from "./LocalModelInput";
 import type { ModelApiInput } from "./ModelApiInput";
 import type { ModelType } from "./ModelType";
 
-export type ModelInput = { name: string, api: ModelApiInput | null, local: LocalModelInput | null, type: ModelType, };
+export type ModelInput = { name: string, api?: ModelApiInput, local?: LocalModelInput, type: ModelType, };

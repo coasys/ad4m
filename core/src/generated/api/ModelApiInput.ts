@@ -5,4 +5,4 @@ export type ModelApiInput = { baseUrl: string, apiKey: string, model: string, ap
  * Optional ceiling for the provider's context window, in tokens.
  * See [`crate::types::ModelApi::max_num_ctx`].
  */
-maxNumCtx: number | null, };
+maxNumCtx?: number, };
