@@ -9,8 +9,9 @@
 //!   clears it.
 //! - `null` takes every event of that type; a list takes only events about
 //!   those perspectives.
-//! - Live query updates (`query-subscription-update`) are not filtered: they
-//!   only ever reach the connection that opened the subscription.
+//! - Live query updates (`query-subscription-update`) are not filtered: a
+//!   socket keeps getting the updates of its owner's live queries without a
+//!   watch.
 
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
@@ -124,7 +125,7 @@ mod tests {
     const UPDATED_B: &str =
         r#"{"type":"perspective-updated","perspective":{"uuid":"B"},"owner":"did:x"}"#;
     const QUERY_A: &str =
-        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","revision":1}"#;
+        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","result":"[]"}"#;
     const AGENT: &str = r#"{"type":"agent-updated","agent":{"did":"did:x"}}"#;
 
     fn watch(i: &SharedInterest, params: Value) -> Value {

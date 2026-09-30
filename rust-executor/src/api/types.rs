@@ -839,10 +839,18 @@ pub struct SubscribeQueryRequest {
     pub query: String,
 }
 
+#[derive(Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct SubscribeQueryResponse {
+    pub subscription_id: String,
+    pub result: String,
+}
+
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct ResyncSubscriptionRequest {
+pub struct KeepAliveQueryRequest {
     pub subscription_id: String,
 }
 

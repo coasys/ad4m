@@ -26,7 +26,7 @@
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | own connection         | Live query update (`/api/v1/ws` only)|
+//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
@@ -134,13 +134,11 @@ pub async fn events_ws(
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user. `connection_id` is the RPC connection whose live query updates
-/// the stream carries (`None`: no query updates).
+/// per-user.
 pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
-    connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // Resolve the DID once at subscription time — avoids repeated JWT decode +
     // DB / AgentService lookups on every single event. If the client connected
@@ -150,14 +148,7 @@ pub(crate) async fn build_event_stream(
         let ctx = AgentContext::from_auth_token(auth_token.clone());
         did_for_context(&ctx).ok()
     };
-    build_event_stream_for(
-        auth_token,
-        resolved_did,
-        user_email,
-        is_admin,
-        connection_id,
-    )
-    .await
+    build_event_stream_for(auth_token, resolved_did, user_email, is_admin).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
@@ -167,7 +158,6 @@ pub(crate) async fn build_event_stream_for(
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
-    connection_id: Option<String>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -184,6 +174,7 @@ pub(crate) async fn build_event_stream_for(
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
+    let d_query_sub = resolved_did.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
@@ -418,12 +409,14 @@ pub(crate) async fn build_event_stream_for(
         "model-loading-status"
     );
 
-    // ── Query subscriptions: only the connection that opened one ──
-    let s_query_sub = query_update_stream(
+    // ── Query subscriptions ──
+    let s_query_sub = did_stream!(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
-        connection_id,
+        "query-subscription-update",
+        d_query_sub,
+        matches_query_subscription_owner
     );
 
     // ── Auto-processor step signals ──
@@ -541,7 +534,7 @@ async fn handle_events_ws(
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(auth_token, user_email, is_admin, None).await;
+    let event_stream = build_event_stream(auth_token, user_email, is_admin).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
@@ -737,35 +730,18 @@ pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -
     }
 }
 
-/// The `query-subscription-update` events of the connection `connection_id`.
-/// When the topic lags, updates were dropped, maybe this connection's: it
-/// gets one `{ "type": "query-subscription-update", "lagged": true }`, and
-/// the client resyncs every live query.
-fn query_update_stream(
-    rx: tokio::sync::broadcast::Receiver<String>,
-    connection_id: Option<String>,
-) -> impl futures::stream::Stream<Item = String> + Send {
-    tokio_stream::wrappers::BroadcastStream::new(rx).filter_map(move |r| {
-        let event = match r {
-            Ok(msg) => query_update_for(&msg, connection_id.as_deref()),
-            Err(BroadcastStreamRecvError::Lagged(_)) => connection_id
-                .as_ref()
-                .map(|_| r#"{"type":"query-subscription-update","lagged":true}"#.to_string()),
-        };
-        async move { event }
-    })
-}
-
-/// The `query-subscription-update` event for `msg` if it belongs to the
-/// connection `connection_id`, without the routing key.
-fn query_update_for(msg: &str, connection_id: Option<&str>) -> Option<String> {
-    let mut update: serde_json::Map<String, serde_json::Value> = serde_json::from_str(msg).ok()?;
-    match update.remove("connectionId") {
-        Some(serde_json::Value::String(owner)) if Some(owner.as_str()) == connection_id => {}
-        _ => return None,
+pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
+    match current_did {
+        None => true,
+        Some(did) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
+                if let Some(serde_json::Value::String(uuid)) = map.get("uuid") {
+                    return perspective_is_owned_by(uuid, did);
+                }
+            }
+            true
+        }
     }
-    update.insert("type".into(), "query-subscription-update".into());
-    Some(serde_json::Value::Object(update).to_string())
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -1194,35 +1170,7 @@ mod lazy_did_tests {
 #[cfg(test)]
 mod events_socket_message_tests {
     use crate::api::event_interest::SharedInterest;
-    use futures::StreamExt;
-    use serde_json::{json, Value};
-
-    #[tokio::test]
-    async fn a_lagged_query_topic_tells_the_connection_to_resync() {
-        let updates = |connection: Option<&str>| {
-            let (tx, rx) = tokio::sync::broadcast::channel(1);
-            for revision in [1, 2] {
-                let msg =
-                    json!({ "subscriptionId": "s", "revision": revision, "connectionId": "c" });
-                tx.send(msg.to_string()).unwrap();
-            }
-            let stream = super::query_update_stream(rx, connection.map(String::from));
-            stream
-                .map(|e| serde_json::from_str::<Value>(&e).unwrap())
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            updates(Some("c")).await,
-            vec![
-                json!({ "type": "query-subscription-update", "lagged": true }),
-                json!({ "type": "query-subscription-update", "subscriptionId": "s", "revision": 2 }),
-            ]
-        );
-        assert!(
-            updates(None).await.is_empty(),
-            "a socket with no live queries gets nothing"
-        );
-    }
+    use serde_json::json;
 
     #[test]
     fn events_socket_watch_round_trip_carries_the_request_id() {
