@@ -7,49 +7,154 @@
 //! `ad4m-executor config print` shows the merged result, secrets redacted.
 
 use anyhow::{bail, Context, Result};
+use clap::builder::{BoolValueParser, PathBufValueParser, StringValueParser, TypedValueParser};
+use clap::error::ErrorKind;
+use clap::parser::ValueSource;
+use clap::value_parser;
 use rust_executor::config_file::{ExecutorConfigFile, ExecutorSecrets, REDACTED};
 use rust_executor::Ad4mConfig;
 use std::path::PathBuf;
 
+/// Refuses an empty value, then parses with `P`. clap hands an empty
+/// `AD4M_<FLAG>` to the parser as `""`, so without this
+/// `AD4M_APP_DATA_PATH=${DATA_DIR}` with `DATA_DIR` unset would lay `""`
+/// over the file and put the data directory under the working directory.
+/// The error names the variable or the flag the value came from, never the
+/// value.
+#[derive(Clone)]
+struct NonEmpty<P>(P);
+
+fn non_empty<P: TypedValueParser>(parser: P) -> NonEmpty<P> {
+    NonEmpty(parser)
+}
+
+impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
+    type Value = P::Value;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<Self::Value, clap::Error> {
+        self.parse_ref_(cmd, arg, value, ValueSource::CommandLine)
+    }
+
+    fn parse_ref_(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+        source: ValueSource,
+    ) -> Result<Self::Value, clap::Error> {
+        if !value.is_empty() {
+            return self.0.parse_ref_(cmd, arg, value, source);
+        }
+        let var = arg
+            .and_then(|arg| arg.get_env())
+            .map(|var| var.to_string_lossy());
+        let flag = arg.and_then(|arg| arg.get_long());
+        let message = match (source, var, flag) {
+            (ValueSource::EnvVariable, Some(var), _) => {
+                format!("{var} is set but empty: unset it or give it a value")
+            }
+            (_, _, Some(flag)) => format!("--{flag} needs a value, not an empty string"),
+            _ => "an empty value is not allowed".to_string(),
+        };
+        Err(clap::Error::raw(ErrorKind::ValueValidation, message).format(&mut cmd.clone()))
+    }
+}
+
 /// Flags of `ad4m-executor run`. Each also reads `AD4M_<FLAG>`, e.g.
-/// `--mcp-port` reads `AD4M_MCP_PORT`.
+/// `--mcp-port` reads `AD4M_MCP_PORT`. Each goes through [`non_empty`], so
+/// an empty variable or flag value is an error rather than a value.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
     /// JSON config file with the launcher's key names (see the docs'
     /// "Executor config file" page). There is no default path.
-    #[arg(long, env = "AD4M_CONFIG")]
+    #[arg(long, env = "AD4M_CONFIG", value_parser = non_empty(PathBufValueParser::new()))]
     pub config: Option<PathBuf>,
-    #[arg(short, long, action, env = "AD4M_APP_DATA_PATH")]
+    #[arg(
+        short,
+        long,
+        action,
+        env = "AD4M_APP_DATA_PATH",
+        value_parser = non_empty(StringValueParser::new())
+    )]
     pub app_data_path: Option<String>,
-    #[arg(short, long, action, env = "AD4M_NETWORK_BOOTSTRAP_SEED")]
+    #[arg(
+        short,
+        long,
+        action,
+        env = "AD4M_NETWORK_BOOTSTRAP_SEED",
+        value_parser = non_empty(StringValueParser::new())
+    )]
     pub network_bootstrap_seed: Option<String>,
-    #[arg(short, long, action, env = "AD4M_LANGUAGE_LANGUAGE_ONLY")]
+    #[arg(
+        short,
+        long,
+        action,
+        env = "AD4M_LANGUAGE_LANGUAGE_ONLY",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub language_language_only: Option<bool>,
-    #[arg(long, action, env = "AD4M_RUN_DAPP_SERVER")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_RUN_DAPP_SERVER",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub run_dapp_server: Option<bool>,
-    #[arg(short = 'p', long = "port", action, env = "AD4M_PORT")]
+    #[arg(
+        short = 'p',
+        long = "port",
+        action,
+        env = "AD4M_PORT",
+        value_parser = non_empty(value_parser!(u16))
+    )]
     pub port: Option<u16>,
-    #[arg(long, action, env = "AD4M_HC_ADMIN_PORT")]
+    #[arg(long, action, env = "AD4M_HC_ADMIN_PORT", value_parser = non_empty(value_parser!(u16)))]
     pub hc_admin_port: Option<u16>,
-    #[arg(long, action, env = "AD4M_HC_APP_PORT")]
+    #[arg(long, action, env = "AD4M_HC_APP_PORT", value_parser = non_empty(value_parser!(u16)))]
     pub hc_app_port: Option<u16>,
-    #[arg(long, action, env = "AD4M_HC_USE_BOOTSTRAP")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_HC_USE_BOOTSTRAP",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub hc_use_bootstrap: Option<bool>,
-    #[arg(long, action, env = "AD4M_HC_USE_LOCAL_PROXY")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_HC_USE_LOCAL_PROXY",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub hc_use_local_proxy: Option<bool>,
-    #[arg(long, action, env = "AD4M_HC_USE_MDNS")]
+    #[arg(long, action, env = "AD4M_HC_USE_MDNS", value_parser = non_empty(BoolValueParser::new()))]
     pub hc_use_mdns: Option<bool>,
-    #[arg(long, action, env = "AD4M_HC_USE_PROXY")]
+    #[arg(long, action, env = "AD4M_HC_USE_PROXY", value_parser = non_empty(BoolValueParser::new()))]
     pub hc_use_proxy: Option<bool>,
-    #[arg(long, action, env = "AD4M_HC_PROXY_URL")]
+    #[arg(long, action, env = "AD4M_HC_PROXY_URL", value_parser = non_empty(StringValueParser::new()))]
     pub hc_proxy_url: Option<String>,
-    #[arg(long, action, env = "AD4M_HC_BOOTSTRAP_URL")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_HC_BOOTSTRAP_URL",
+        value_parser = non_empty(StringValueParser::new())
+    )]
     pub hc_bootstrap_url: Option<String>,
-    #[arg(long, action, env = "AD4M_HC_RELAY_URL")]
+    #[arg(long, action, env = "AD4M_HC_RELAY_URL", value_parser = non_empty(StringValueParser::new()))]
     pub hc_relay_url: Option<String>,
-    #[arg(short, long, action, env = "AD4M_CONNECT_HOLOCHAIN")]
+    #[arg(
+        short,
+        long,
+        action,
+        env = "AD4M_CONNECT_HOLOCHAIN",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub connect_holochain: Option<bool>,
-    #[arg(long, action, env = "AD4M_RUN_HOLOCHAIN")]
+    #[arg(long, action, env = "AD4M_RUN_HOLOCHAIN", value_parser = non_empty(BoolValueParser::new()))]
     pub run_holochain: Option<bool>,
     /// Admin credential granting full capabilities to whoever presents it.
     /// Prefer AD4M_ADMIN_CREDENTIAL_FILE (or the AD4M_ADMIN_CREDENTIAL
@@ -60,29 +165,49 @@ pub struct RunArgs {
         action,
         env = "AD4M_ADMIN_CREDENTIAL",
         hide_env_values = true,
-        value_parser = clap::builder::NonEmptyStringValueParser::new()
+        value_parser = non_empty(StringValueParser::new())
     )]
     pub admin_credential: Option<String>,
-    #[arg(long, action, env = "AD4M_LOCALHOST")]
+    #[arg(long, action, env = "AD4M_LOCALHOST", value_parser = non_empty(BoolValueParser::new()))]
     pub localhost: Option<bool>,
-    #[arg(long, action, env = "AD4M_TLS_CERT_FILE")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_TLS_CERT_FILE",
+        value_parser = non_empty(StringValueParser::new())
+    )]
     pub tls_cert_file: Option<String>,
-    #[arg(long, action, env = "AD4M_TLS_KEY_FILE")]
+    #[arg(long, action, env = "AD4M_TLS_KEY_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub tls_key_file: Option<String>,
     /// HTTPS/WSS port. Default: the RPC port + 1.
-    #[arg(long, action, env = "AD4M_TLS_PORT")]
+    #[arg(long, action, env = "AD4M_TLS_PORT", value_parser = non_empty(value_parser!(u16)))]
     pub tls_port: Option<u16>,
-    #[arg(long, action, env = "AD4M_LOG_HOLOCHAIN_METRICS")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_LOG_HOLOCHAIN_METRICS",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub log_holochain_metrics: Option<bool>,
-    #[arg(long, action, env = "AD4M_ENABLE_MULTI_USER")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_ENABLE_MULTI_USER",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub enable_multi_user: Option<bool>,
-    #[arg(long, action, env = "AD4M_ENABLE_MCP")]
+    #[arg(long, action, env = "AD4M_ENABLE_MCP", value_parser = non_empty(BoolValueParser::new()))]
     pub enable_mcp: Option<bool>,
-    #[arg(long, action, env = "AD4M_MCP_PORT")]
+    #[arg(long, action, env = "AD4M_MCP_PORT", value_parser = non_empty(value_parser!(u16)))]
     pub mcp_port: Option<u16>,
     /// Grant capability requests without the user confirming them. Default:
     /// true without --config (the CLI's historic behaviour), false with it.
-    #[arg(long, action, env = "AD4M_AUTO_PERMIT_CAP_REQUESTS")]
+    #[arg(
+        long,
+        action,
+        env = "AD4M_AUTO_PERMIT_CAP_REQUESTS",
+        value_parser = non_empty(BoolValueParser::new())
+    )]
     pub auto_permit_cap_requests: Option<bool>,
     /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
     /// over MCP in addition to the static instance_* tools. Default: false.
@@ -90,12 +215,13 @@ pub struct RunArgs {
         long,
         num_args = 0..=1,
         default_missing_value = "true",
-        env = "AD4M_DYNAMIC_CLASS_TOOLS"
+        env = "AD4M_DYNAMIC_CLASS_TOOLS",
+        value_parser = non_empty(BoolValueParser::new())
     )]
     pub dynamic_class_tools: Option<bool>,
     /// Write the executor PID to this file on startup (removed on clean shutdown).
     /// Useful for test harnesses that need targeted process cleanup.
-    #[arg(long, env = "AD4M_PID_FILE")]
+    #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
 }
 
