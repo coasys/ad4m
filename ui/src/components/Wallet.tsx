@@ -1,5 +1,4 @@
 import React, { useContext, useEffect, useState, useCallback } from "react";
-import type { UnytVersionInfo } from "@coasys/ad4m";
 import { Ad4minContext } from "../context/Ad4minContext";
 import { cardStyle } from "./styles";
 
@@ -47,7 +46,11 @@ const Wallet = () => {
   const [error, setError] = useState<string | null>(null);
 
   // Version info
-  const [versionInfo, setVersionInfo] = useState<UnytVersionInfo | null>(null);
+  const [versionInfo, setVersionInfo] = useState<{
+    installed: string | null;
+    bundled: string;
+    needsUpdate: boolean;
+  } | null>(null);
   const [reinstalling, setReinstalling] = useState(false);
 
   // Send form
@@ -164,7 +167,12 @@ const Wallet = () => {
 
       // Fetch version info
       try {
-        setVersionInfo(await client.runtime.unytVersionInfo());
+        const viStr = await client.runtime.unytVersionInfo();
+        if (viStr) {
+          try {
+            setVersionInfo(JSON.parse(viStr));
+          } catch {}
+        }
       } catch (e: any) {
         console.warn("Failed to fetch version info:", e.message);
       }

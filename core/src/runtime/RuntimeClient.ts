@@ -14,8 +14,6 @@ import type {
     ImportRequest,
     SetMultiUserRequest,
     SetFreeHostingEnabledRequest,
-    HostRate,
-    UnytVersionInfo,
 } from "../generated/api"
 
 export type MessageCallback = (message: PerspectiveExpression) => void
@@ -225,15 +223,12 @@ export class RuntimeClient {
         return this.#apiClient.call<string>('runtime.unytWalletHistory', { page, perPage })
     }
 
-    /** Installed and bundled DNA versions, and why the last install failed (`installError`). */
-    async unytVersionInfo(): Promise<UnytVersionInfo> {
-        return this.#apiClient.call<UnytVersionInfo>('runtime.unytVersionInfo')
+    async unytVersionInfo(): Promise<string> {
+        return this.#apiClient.call<string>('runtime.unytVersionInfo')
     }
 
-    /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the
-     *  background. Poll {@link unytVersionInfo} for the outcome. */
-    async setUnytMembraneProof(proof: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('runtime.setUnytMembraneProof', { proof })
+    async unytSetMembraneProof(proof: string): Promise<{ success: boolean; message: string }> {
+        return this.#apiClient.call<{ success: boolean; message: string }>('runtime.unytSetMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
@@ -252,12 +247,17 @@ export class RuntimeClient {
         return this.#apiClient.call<boolean>('user.freeAccess', { email, enabled })
     }
 
-    async setHostRates(rates: HostRate[]): Promise<boolean> {
-        return this.#apiClient.call<boolean>('runtime.setHostRates', { rates })
+    async setHostRates(ratesJson: string): Promise<boolean> {
+        return this.#apiClient.call<boolean>('runtime.setHostRates', { ratesJson })
     }
 
-    async hostRates(): Promise<HostRate[]> {
-        return this.#apiClient.call<HostRate[]>('runtime.hostRates')
+    async getHostRates(): Promise<{ description: string; priceInHOT: number }[]> {
+        const result = await this.#apiClient.call<string>('runtime.getHostRates')
+        try {
+            return JSON.parse(result)
+        } catch {
+            return []
+        }
     }
 
     /** Each addXCallback returns a function that removes the callback. */
