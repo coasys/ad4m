@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { ExceptionInfo } from "@coasys/ad4m";
@@ -322,7 +322,8 @@ describe("Authentication integration tests", () => {
         it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
             let excpetions: ExceptionInfo[] = [];
             adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e) })
-            
+            // Subscription-init delay: the subscription registered with the
+            // callback does not wait for the server, and exceptions are not redelivered.
             await sleep(1000);
 
             let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
@@ -340,8 +341,8 @@ describe("Authentication integration tests", () => {
                     }
                 ] as CapabilityInput[]
             } as AuthInfoInput)
-            
-            await sleep(1000);
+
+            await pollUntil(() => excpetions.length >= 1, { timeoutMs: 5000, label: "capability request exception fires" });
 
             expect(excpetions.length).to.be.equal(1);
             expect(excpetions[0].type).to.be.equal("CAPABILITY_REQUESTED");

@@ -31,7 +31,6 @@ import { fileURLToPath } from "url";
 import { expect } from "chai";
 import {
   baseUrl,
-  sleep,
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
@@ -173,9 +172,6 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       batchMax: 32,
       claimTtlMs: 60_000,
     } as any);
-
-    // Give the supervisor its first tick (5s) to spawn per-user loops.
-    await sleep(6_000);
 
     // `perspective.add` assigns the caller as the owner, so a strict
     // ownership regime would make Bob's `byUUID` return `null`
