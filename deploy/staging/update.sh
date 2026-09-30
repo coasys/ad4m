@@ -14,8 +14,10 @@
 #   deployed_sha = <sha>                     current -> the old build, start;
 #                                 restore fails --> nothing runs, no current)
 #
-# A run killed after the swap leaves `current` != deployed_sha; the next run
-# rolls that build back first, as if it had failed the gate.
+# A deploy killed after the swap leaves `current` != deployed_sha; the next
+# run rolls that build back first, as if it had failed the gate. An
+# unfinished rollback by hand, or a `current` that status.json does not
+# account for, is left to the operator.
 #
 # Every outcome is written to status.json in the state dir and copied to
 # $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),
@@ -90,7 +92,8 @@ fi
 field() { jq -r --arg k "$1" '.[$k] // empty' "$STATUS"; }
 
 # set_status key value [key value ...]: merges into status.json and copies it
-# to the public path. A value "null" is JSON null.
+# to the public path. A value "null" is JSON null. Returns 1 if either write
+# fails; status.json then keeps its last content.
 set_status() {
   local args=() filter='.' i=0
   while (($# >= 2)); do
@@ -104,10 +107,13 @@ set_status() {
     i=$((i + 1))
   done
   filter+=' | .checked_at = (now | todate)'
-  jq "${args[@]}" "$filter" "$STATUS" >"$STATUS.tmp"
-  mv "$STATUS.tmp" "$STATUS"
+  if ! { jq "${args[@]}" "$filter" "$STATUS" >"$STATUS.tmp" && mv "$STATUS.tmp" "$STATUS"; }; then
+    rm -f "$STATUS.tmp"
+    log "could not write status.json"
+    return 1
+  fi
   if [[ -d $(dirname "$PUBLIC_STATUS") ]]; then
-    cp "$STATUS" "$PUBLIC_STATUS.tmp" && mv "$PUBLIC_STATUS.tmp" "$PUBLIC_STATUS"
+    cp "$STATUS" "$PUBLIC_STATUS.tmp" && mv "$PUBLIC_STATUS.tmp" "$PUBLIC_STATUS" || return 1
   else
     log "no directory for $PUBLIC_STATUS; status.json not published"
   fi
@@ -115,7 +121,7 @@ set_status() {
 
 fail() {
   log "$1"
-  set_status last_result "$1"
+  set_status last_result "$1" || true
   exit 1
 }
 
@@ -184,10 +190,12 @@ start_and_gate() {
 # 2 if the data dir could not be restored; then nothing runs and `current` is
 # gone, so neither a restart nor the next deploy runs on a torn data dir.
 # Callers run it as a condition, which turns errexit off inside it: every
-# step checks its own result.
+# step checks its own result. A failed status write does not stop the
+# restore: the old build and its data matter more, and without the record
+# the next run only tries the failed build again.
 roll_back() {
   systemctl --user stop "$UNIT" || true
-  set_status last_failed_sha "$1"
+  set_status last_failed_sha "$1" || log "could not record $1 as failed; the next run tries it again"
   if [[ -n $2 && -d $DATA ]]; then
     # Keep what the failed build left, for debugging, until the next rollback.
     if ! { rm -rf "${DATA:?}.failed" && mv "$DATA" "$DATA.failed"; }; then
@@ -224,22 +232,27 @@ if [[ $COMMAND == rollback ]]; then
   # The staging head counts as failed, so the timer stays on $previous
   # until staging moves.
   failed=$(field staging_sha)
+  # in_flight tells the next run that `current` != deployed_sha is this
+  # rollback, not an interrupted deploy.
+  set_status in_flight rollback last_result "rolling back by hand from $current to $previous"
   rc=0
   roll_back "${failed:-$current}" "$snapshot" "$previous" || rc=$?
   ((rc != 2)) || restore_failed "$previous"
   ((rc == 0)) || fail "rolled_back by hand: $current; $previous failed the gate too (agent: ${agent_state:-no answer})"
   rm -f "$STATE/previous"
   set_status deployed_sha "$previous" subject "$(git -C "$SRC" log -1 --format=%s "$previous" 2>/dev/null || true)" \
-    deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" previous_sha null last_result "rolled_back by hand: $current; $previous runs again"
+    deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" previous_sha null in_flight null \
+    last_result "rolled_back by hand: $current; $previous runs again"
   log "$previous runs again"
   exit 0
 fi
 
 # --- An earlier run that ended between the swap and its result
 # `current` names the build that runs. If it is not deployed_sha, the last
-# deploy was killed during its gate (a reboot, the OOM killer) or its
-# rollback could not restore the data. A snapshot taken now would label the
-# unchecked build's data as the deployed build's.
+# deploy or rollback by hand was killed during its gate (a reboot, the OOM
+# killer), a rollback by hand failed its gate, or a rollback could not
+# restore the data. A snapshot taken now would label the unchecked build's
+# data as the deployed build's.
 deployed=$(field deployed_sha)
 live=$(readlink "$STATE/current" || true)
 live=${live#releases/}
@@ -249,15 +262,23 @@ if [[ $live != "$deployed" ]]; then
     log "no build is current while $deployed is deployed: a restore failed; staging stays stopped until an operator restores the data (runbook: Roll back)"
     exit 1
   fi
-  log "the deploy of $live was interrupted before its check; rolling back"
-  snapshot=$(find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -name "*-${deployed:-none}" | sort | tail -n 1)
-  if [[ -z $snapshot && -n $deployed ]]; then
-    fail "error: the deploy of $live was interrupted, and there is no snapshot of the data of $deployed; left to the operator"
+  if [[ $(field in_flight) == rollback ]]; then
+    log "the rollback by hand from $deployed to $live did not finish; staging is left as it is for an operator (runbook: Roll back)"
+    # A rollback whose gate failed has written its result; keep it.
+    [[ $(field last_result) == "rolled_back by hand: "* ]] && exit 1
+    fail "error: the rollback by hand from $deployed to $live was interrupted; left to the operator"
   fi
+  # Without a deployed build there is no data to go back to, and a lost
+  # status.json looks the same as an interrupted first deploy: touch nothing.
+  [[ -n $deployed ]] ||
+    fail "error: current is $live, but status.json names no deployed build (an interrupted first deploy, or a lost status.json); left to the operator"
+  log "the deploy of $live was interrupted before its check; rolling back"
+  snapshot=$(find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -name "*-$deployed" | sort | tail -n 1)
+  [[ -n $snapshot ]] ||
+    fail "error: the deploy of $live was interrupted, and there is no snapshot of the data of $deployed; left to the operator"
   rc=0
-  roll_back "$live" "${snapshot:-none}" "$deployed" || rc=$?
-  ((rc != 2)) || restore_failed "${deployed:-the node before $live}"
-  [[ -n $deployed ]] || fail "rolled_back: the deploy of $live was interrupted; there is no previous build, staging is stopped"
+  roll_back "$live" "$snapshot" "$deployed" || rc=$?
+  ((rc != 2)) || restore_failed "$deployed"
   ((rc == 0)) || fail "rolled_back: the deploy of $live was interrupted, and $deployed failed the gate after the rollback"
   fail "rolled_back: the deploy of $live was interrupted; $deployed runs again"
 fi
@@ -338,9 +359,11 @@ restore_on_error() {
   else
     rm -f "$STATE/current"
   fi
-  set_status last_failed_sha "$sha" last_result "error: deploying $sha failed before its check; ${deployed:-nothing} runs again"
+  set_status last_failed_sha "$sha" last_result "error: deploying $sha failed before its check; ${deployed:-nothing} runs again" ||
+    log "could not record $sha as failed"
   exit "$rc"
 }
+set_status in_flight deploy
 log "stopping $UNIT"
 systemctl --user stop "$UNIT"
 trap restore_on_error EXIT
@@ -364,8 +387,8 @@ if start_and_gate; then
   log "deployed $sha$note"
   if [[ -n $deployed ]]; then link previous "$deployed"; fi
   set_status deployed_sha "$sha" subject "$subject" deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    previous_sha "${deployed:-null}" last_result "deployed$note"
-  [[ $agent_state == unlocked ]] && set_status agent unlocked
+    previous_sha "${deployed:-null}" in_flight null last_result "deployed$note"
+  if [[ $agent_state == unlocked ]]; then set_status agent unlocked; fi
   # Keep what a rollback by hand to $deployed needs: its build and its data.
   prune_snapshots "${deployed:-none}"
   find "$STATE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
