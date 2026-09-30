@@ -17,7 +17,7 @@ describe('link-updated callback type', () => {
     const client: any = {
       addPerspectiveLinkAddedListener: jest.fn(),
       addPerspectiveLinkRemovedListener: jest.fn(),
-      addPerspectiveLinkUpdatedListener: (_uuid: string, cbs: LinkUpdatedCallback[]) => { updatedCallbacks = cbs; },
+      addPerspectiveLinkUpdatedListener: (_uuid: string, cbs: LinkUpdatedCallback[]) => { updatedCallbacks = cbs; return () => {}; },
       addPerspectiveSyncStateChangeListener: jest.fn(),
     };
     const proxy = new PerspectiveProxy(
@@ -26,14 +26,14 @@ describe('link-updated callback type', () => {
     );
 
     const seen: string[] = [];
-    await proxy.addListener('link-updated', (update) => {
+    proxy.addListener('link-updated', (update) => {
       // Compiles only if `update` is typed as LinkUpdate.
       seen.push(`${update.oldLink.data.target}->${update.newLink.data.target}`);
     });
     // @ts-expect-error a link-updated callback does not receive a LinkExpression
-    await proxy.addListener('link-updated', (link: LinkExpression) => {});
+    proxy.addListener('link-updated', (link: LinkExpression) => {});
     // link-added keeps its LinkExpression callback type
-    await proxy.addListener('link-added', (link: LinkExpression) => {});
+    proxy.addListener('link-added', (link: LinkExpression) => {});
 
     const update: LinkUpdate = { oldLink: linkExpression('old'), newLink: linkExpression('new') };
     updatedCallbacks[0](update);
