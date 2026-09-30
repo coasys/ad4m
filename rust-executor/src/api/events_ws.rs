@@ -521,7 +521,7 @@ pub(crate) async fn build_event_stream_for(
             .await,
         events::NOTIFICATION_TRIGGERED,
         d_notif,
-        matches_notification_owner
+        matches_perspective_owner
     );
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
@@ -548,7 +548,7 @@ pub(crate) async fn build_event_stream_for(
             .await,
         events::QUERY_SUBSCRIPTION_UPDATE,
         d_query_sub,
-        matches_query_subscription_owner
+        matches_perspective_owner
     );
 
     // ── Auto-processor step signals ──
@@ -845,31 +845,18 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
     }
 }
 
-pub(crate) fn matches_notification_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map.get("perspectiveUuid") {
-                    return perspective_is_owned_by(uuid, did);
-                }
-            }
-            true
-        }
-    }
-}
-
-pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(uuid)) = map.get("uuid") {
-                    return perspective_is_owned_by(uuid, did);
-                }
-            }
-            true
-        }
+/// Multi-user: only events about a perspective the session owns. An event
+/// without `perspectiveUuid` passes.
+pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return true;
+    };
+    match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(v) => match v.get("perspectiveUuid").and_then(serde_json::Value::as_str) {
+            Some(uuid) => perspective_is_owned_by(uuid, did),
+            None => true,
+        },
+        Err(_) => true,
     }
 }
 
@@ -1419,5 +1406,24 @@ mod event_spec_tests {
             )),
         ];
         assert!(scoped.iter().all(|u| u == "p"));
+    }
+}
+
+#[cfg(test)]
+mod perspective_owner_filter_tests {
+    use super::matches_perspective_owner;
+
+    #[test]
+    fn filters_by_the_flat_perspective_uuid() {
+        let unknown = r#"{"perspectiveUuid":"no-such-perspective","notification":{}}"#;
+        assert!(
+            !matches_perspective_owner(unknown, Some("did:x")),
+            "an unverifiable owner fails closed"
+        );
+        assert!(matches_perspective_owner(unknown, None), "single-user");
+        assert!(matches_perspective_owner(
+            r#"{"notification":{}}"#,
+            Some("did:x")
+        ));
     }
 }

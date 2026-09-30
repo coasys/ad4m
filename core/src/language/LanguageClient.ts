@@ -2,7 +2,6 @@ import {ApiClient, CallOptions } from '../apiClient'
 import { LanguageHandle } from "./LanguageHandle"
 import { LanguageMeta, LanguageMetaInput } from "./LanguageMeta"
 import { LanguageRef } from "./LanguageRef"
-import type { ApplyTemplateRequest, PublishLanguageRequest, WriteSettingsRequest } from "../generated/api"
 
 export class LanguageClient {
     #apiClient: ApiClient

@@ -246,9 +246,9 @@ fn check<T: DeserializeOwned>(v: &Value) -> Result<(), String> {
 
 struct Entry {
     handler: WsHandler,
-    params: Option<Check>,
+    params: Check,
     #[cfg_attr(not(debug_assertions), allow(dead_code))]
-    result: Option<Check>,
+    result: Check,
 }
 
 /// Returned by [`HandlerMap::method`] to mark a method `read` or `long`.
@@ -287,27 +287,30 @@ impl HandlerMap {
     /// Register `handler` for `name` with its contract: dispatch rejects
     /// params that do not deserialize into `P` (400), and debug builds log a
     /// result that does not deserialize into `R`. The contract is exported
-    /// to the SDK (`core/src/generated/rpc.ts`).
+    /// to the SDK (`core/src/generated/api/RpcMethods.ts`).
     pub fn method<P, R>(&mut self, name: &str, handler: impl WsFn) -> MethodFlags<'_>
     where
         P: DeserializeOwned + ts_rs::TS + 'static,
         R: DeserializeOwned + ts_rs::TS + 'static,
     {
-        self.insert(name, handler, Some(check::<P>), Some(check::<R>));
-        self.specs.push(MethodSpec {
-            name: name.to_string(),
-            params: TsType::of::<P>(),
-            result: TsType::of::<R>(),
-            read: false,
-            long: false,
-        });
-        MethodFlags(self.specs.last_mut().expect("just pushed"))
+        if self.handlers.contains_key(name) {
+            panic!("Duplicate WS handler registration for '{}'", name);
+        }
+        self.handlers.insert(
+            name.to_string(),
+            Entry {
+                handler: Box::new(move |params, ctx| handler.call(params, ctx)),
+                params: check::<P>,
+                result: check::<R>,
+            },
+        );
+        self.inline::<P, R>(name)
     }
 
     /// Record the contract of a method the socket reader handles itself
     /// (`events.watch`, `events.unwatch`), so the SDK gets its types. It is
     /// not dispatched through the map.
-    pub fn inline<P, R>(&mut self, name: &str)
+    pub fn inline<P, R>(&mut self, name: &str) -> MethodFlags<'_>
     where
         P: ts_rs::TS + 'static,
         R: ts_rs::TS + 'static,
@@ -319,29 +322,10 @@ impl HandlerMap {
             read: false,
             long: false,
         });
+        MethodFlags(self.specs.last_mut().expect("just pushed"))
     }
 
-    fn insert(
-        &mut self,
-        name: &str,
-        handler: impl WsFn,
-        params: Option<Check>,
-        result: Option<Check>,
-    ) {
-        if self.handlers.contains_key(name) {
-            panic!("Duplicate WS handler registration for '{}'", name);
-        }
-        self.handlers.insert(
-            name.to_string(),
-            Entry {
-                handler: Box::new(move |params, ctx| handler.call(params, ctx)),
-                params,
-                result,
-            },
-        );
-    }
-
-    /// The contracts of the methods registered with [`Self::method`], sorted by name.
+    /// Every method contract, sorted by name.
     pub fn specs(&self) -> Vec<&MethodSpec> {
         let mut specs: Vec<&MethodSpec> = self.specs.iter().collect();
         specs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -359,17 +343,13 @@ impl HandlerMap {
             .handlers
             .get(msg_type)
             .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))?;
-        if let Some(check) = entry.params {
-            check(&params).map_err(|e| {
-                WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
-            })?;
-        }
+        (entry.params)(&params).map_err(|e| {
+            WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
+        })?;
         let result = (entry.handler)(params, ctx).await?;
         #[cfg(debug_assertions)]
-        if let Some(check) = entry.result {
-            if let Err(e) = check(&result) {
-                log::error!("{} returned a result outside its contract: {}", msg_type, e);
-            }
+        if let Err(e) = (entry.result)(&result) {
+            log::error!("{} returned a result outside its contract: {}", msg_type, e);
         }
         Ok(result)
     }
@@ -377,14 +357,6 @@ impl HandlerMap {
     /// Number of registered handlers (useful for logging at startup).
     pub fn len(&self) -> usize {
         self.handlers.len()
-    }
-
-    /// Registered message types, sorted. Source of the exported handler
-    /// table (`HandlerMethods.ts`, see `api::tests::handler_table_tests`).
-    pub fn method_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.handlers.keys().cloned().collect();
-        names.sort();
-        names
     }
 }
 

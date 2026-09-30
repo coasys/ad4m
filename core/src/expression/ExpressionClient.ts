@@ -3,7 +3,6 @@ import { InteractionCall, InteractionMeta } from "../language/Language";
 import { ExpressionRendered } from "./Expression";
 import { Literal } from "../Literal";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
-import type { CreateExpressionRequest, ExpressionManyRequest } from "../generated/api";
 
 interface CachedExpression {
     data: ExpressionRendered;

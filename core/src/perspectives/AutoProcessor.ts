@@ -90,7 +90,6 @@ export type AutoProcessorStep =
   | "emptyTranscript"
   | "failed";
 
-
 /**
  * Coarse-grained phase of a neighbourhood-state event.
  *
@@ -100,7 +99,6 @@ export type AutoProcessorStep =
  *   error); the claim will TTL-expire.
  */
 export type NeighbourhoodPhase = "claimed" | "finished" | "abandoned";
-
 
 /**
  * Opt a one-shot `runInterpretation` call into the same event streams a

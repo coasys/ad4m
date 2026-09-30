@@ -39,12 +39,6 @@ function extractNamespaceFromUri(uri: string): string {
     return uri;
 }
 
-
-// Generic unsubscribe interface for event subscriptions
-interface Unsubscribable {
-    unsubscribe(): void;
-}
-
 /** Proxy object for a subscribed Prolog query that provides real-time updates
  * 
  * This class handles:
@@ -1290,7 +1284,9 @@ export class PerspectiveProxy {
      * ```
      */
     on<K extends ScopedEventName>(type: K, handler: (event: EventMap[K]) => void): () => void {
-        const release = this.#client.on(type, handler, { perspective: this.#handle.uuid })
+        // A registration of this proxy's own, so dispose() cannot release another proxy's
+        // registration of the same function (on() treats equal handlers as one).
+        const release = this.#client.on(type, (event: EventMap[K]) => handler(event), { perspective: this.#handle.uuid })
         const releaseOnce = () => {
             if (this.#releases.delete(releaseOnce)) release()
         }
