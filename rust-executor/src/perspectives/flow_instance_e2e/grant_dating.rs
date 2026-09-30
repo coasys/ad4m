@@ -254,6 +254,59 @@ async fn a_rule_with_no_datable_did_grants_nothing() {
     );
 }
 
+/// More back-dated links from a non-granter than collection carries must
+/// not push the genuine grant out: collection drops what cannot date the
+/// grant before it caps what it keeps.
+///
+/// Red if collection caps before it filters: the cap keeps Mallory's
+/// earliest links, the reader drops them all, and the genuine grant made
+/// before the vote is lost.
+#[tokio::test(flavor = "multi_thread")]
+async fn links_that_cannot_date_a_grant_do_not_evict_one_that_can() {
+    use crate::perspectives::flow_evaluator::MAX_GRANT_LINKS;
+    let admin = TestSigner::generate();
+    let mallory = TestSigner::generate();
+    let mut f = seed_satisfied_fixture(None).await;
+    let me = acting_did(&f);
+    set_consensus_rule(
+        &mut f,
+        "delivery://Delivery.scoped",
+        &rule(serde_json::json!({
+            "className": "ns://Task",
+            "didProperty": "owner",
+            "where": { "author": admin.did },
+        })),
+    )
+    .await;
+    for i in 0..=MAX_GRANT_LINKS {
+        sync_signed_at(
+            &mut f,
+            &mallory,
+            TASK,
+            "ns://owner",
+            &literal(&me),
+            long_ago() - chrono::Duration::minutes(i as i64),
+        )
+        .await;
+    }
+    sync_signed_at(
+        &mut f,
+        &admin,
+        TASK,
+        "ns://owner",
+        &literal(&me),
+        chrono::Utc::now(),
+    )
+    .await;
+    tick().await;
+    f.mint_one().await;
+    assert_eq!(
+        f.derived().await.state,
+        "scoped",
+        "admin granted the role before the vote, however many links Mallory wrote"
+    );
+}
+
 /// The control for the tests above: the same kinds of role, granted by the
 /// right author before the vote, do settle the edge. Without it, a gate that
 /// admitted nobody would pass every test in this file.
