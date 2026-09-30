@@ -337,22 +337,22 @@ describe('long calls', () => {
     afterEach(() => jest.useRealTimers())
 
     const calls: [string, (o?: object) => Promise<unknown>][] = [
-        ['ai.prompt', (o) => new AIClient(url, undefined, false, client).prompt('t', 'p', o)],
-        ['ai.embed', (o) => new AIClient(url, undefined, false, client).embed('m', 'x', o)],
-        ['ai.addModel', (o) => new AIClient(url, undefined, false, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
-        ['agent.generate', (o) => new AgentClient(url, undefined, false, client).generate('pw', o)],
-        ['agent.unlock', (o) => new AgentClient(url, undefined, false, client).unlock('pw', true, o)],
+        ['ai.prompt', (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
+        ['ai.embed', (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
+        ['ai.addModel', (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
+        ['agent.generate', (o) => new AgentClient(url, undefined, client).generate('pw', o)],
+        ['agent.unlock', (o) => new AgentClient(url, undefined, client).unlock('pw', true, o)],
         ['language.publish', (o) => new LanguageClient(url, undefined, client).publish('/p', { name: 'l' } as any, o)],
         ['language.applyTemplate', (o) => new LanguageClient(url, undefined, client).applyTemplateAndPublish('h', '{}', o)],
         ['neighbourhood.publish', (o) => new NeighbourhoodClient(url, undefined, client).publishFromPerspective('u', 'l', { links: [] } as any, o)],
         ['neighbourhood.join', (o) => new NeighbourhoodClient(url, undefined, client).joinFromUrl('n://x', o)],
-        ['runtime.restartHolochain', (o) => new RuntimeClient(url, undefined, false, client).restartHolochain(o)],
-        ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, false, client).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
-        ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, false, client).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
+        ['runtime.restartHolochain', (o) => new RuntimeClient(url, undefined, client).restartHolochain(o)],
+        ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, client).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
+        ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, client).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
     ]
     const proxy = () => new PerspectiveProxy(
         new PerspectiveHandle('u', 'p'),
-        new PerspectiveClient(url, undefined, false, client),
+        new PerspectiveClient(url, undefined, client),
     )
     const proxyCalls: typeof calls = [
         ['perspective.runInterpretation', (o) => proxy().runInterpretation([], 'b', undefined, o)],
@@ -396,53 +396,37 @@ describe('long calls', () => {
 })
 
 describe('ApiClient event dispatch', () => {
-    beforeEach(() => {
-        FakeWebSocket.last = null
-    })
-
     it('keeps delivering an event to later subscribers when one subscriber throws', async () => {
-        const client = new ApiClient(
-            'http://localhost:1234',
-            undefined,
-            FakeWebSocket as unknown as new (url: string) => WebSocket,
-        )
         const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
         const received: string[] = []
         client.subscribe(() => { received.push('first') })
         client.subscribe(() => { throw new Error('boom') })
         client.subscribe(() => { received.push('third') })
-        await flushMicrotasks()
+        await flush()
 
-        FakeWebSocket.last!.serverPush({ type: 'perspective-added', perspective: { uuid: 'u' } })
+        socket(0).reply({ type: 'perspective-added', perspective: { uuid: 'u' } })
 
         expect(received).toEqual(['first', 'third'])
-        expect(errorSpy).toHaveBeenCalled()
+        expect(errorSpy).toHaveBeenCalledWith('Error in WebSocket event callback:', expect.objectContaining({ message: 'boom' }))
         errorSpy.mockRestore()
-        client.closeAll()
     })
 
     it('logs a rejection from an async subscriber instead of leaving it unhandled', async () => {
-        const client = new ApiClient(
-            'http://localhost:1234',
-            undefined,
-            FakeWebSocket as unknown as new (url: string) => WebSocket,
-        )
         const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
         const unhandled = jest.fn()
         process.on('unhandledRejection', unhandled)
         const received: string[] = []
         client.subscribe(async () => { throw new Error('async boom') })
         client.subscribe(() => { received.push('second') })
-        await flushMicrotasks()
+        await flush()
 
-        FakeWebSocket.last!.serverPush({ type: 'perspective-added', perspective: { uuid: 'u' } })
-        await new Promise((r) => setTimeout(r, 0))
+        socket(0).reply({ type: 'perspective-added', perspective: { uuid: 'u' } })
+        await flush()
 
         expect(received).toEqual(['second'])
         expect(errorSpy).toHaveBeenCalledWith('Error in WebSocket event callback:', expect.objectContaining({ message: 'async boom' }))
         expect(unhandled).not.toHaveBeenCalled()
         process.off('unhandledRejection', unhandled)
         errorSpy.mockRestore()
-        client.closeAll()
     })
 })
