@@ -102,6 +102,18 @@ pub(super) fn role_link(
     valid: bool,
     timestamp: &str,
 ) -> LinkExpression {
+    role_link_on("r0", predicate, target, author, valid, timestamp)
+}
+
+/// [`role_link`] on the instance `source`.
+pub(super) fn role_link_on(
+    source: &str,
+    predicate: &str,
+    target: &str,
+    author: &str,
+    valid: bool,
+    timestamp: &str,
+) -> LinkExpression {
     use crate::types::Link as CoreLink;
     let at = chrono::DateTime::parse_from_rfc3339(timestamp)
         .unwrap_or_else(|e| panic!("fixture timestamp `{timestamp}`: {e}"))
@@ -113,7 +125,7 @@ pub(super) fn role_link(
     let signing_key = if valid { signer } else { persona("forger") };
     let mut expr = signing_key.sign_at(
         CoreLink {
-            source: "r0".to_string(),
+            source: source.to_string(),
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         }
@@ -125,9 +137,31 @@ pub(super) fn role_link(
     LinkExpression::from(expr)
 }
 
-/// A signed `instance --agent--> did` grant link at `at`.
+/// A signed `instance --agent--> did` grant link by admin at `at`.
 pub(super) fn grant_link(did: &str, at: &str) -> LinkExpression {
-    role_link("agent", did, ADMIN(), true, at)
+    grant_link_by(ADMIN(), did, at)
+}
+
+/// A signed `instance --agent--> did` grant link by `granter` at `at`.
+pub(super) fn grant_link_by(granter: &str, did: &str, at: &str) -> LinkExpression {
+    role_link("agent", did, granter, true, at)
+}
+
+/// The same link on another instance, signed again by the same key, or by
+/// the forger's when it did not verify. A link already there is returned
+/// as it is, so a hand-damaged fixture stays damaged.
+fn on_instance(link: &LinkExpression, source: &str) -> LinkExpression {
+    if link.data.source == source {
+        return link.clone();
+    }
+    role_link_on(
+        source,
+        link.data.predicate.as_deref().unwrap_or_default(),
+        &link.data.target,
+        &link.author,
+        link.compute_proof_valid(),
+        &link.timestamp,
+    )
 }
 
 /// A signed tombstone by `by` at `at`.
@@ -141,18 +175,29 @@ pub(super) fn tombstone(did: &str, by: &str, at: &str) -> LinkExpression {
     )
 }
 
-/// The store's answer for one DID: a grant link at `granted_at` (when
+/// The store's answer for one DID: admin's grant link at `granted_at` (when
 /// given) plus one signed tombstone per `(by, at)`.
 pub(super) fn history(
     did: &str,
     granted_at: Option<&str>,
     revocations: &[(&str, &str)],
 ) -> RoleGrantLinks {
+    history_by(ADMIN(), did, granted_at, revocations)
+}
+
+/// [`history`] with the grant link written by `granter`.
+pub(super) fn history_by(
+    granter: &str,
+    did: &str,
+    granted_at: Option<&str>,
+    revocations: &[(&str, &str)],
+) -> RoleGrantLinks {
     RoleGrantLinks {
         grant_links: granted_at
-            .map(|at| grant_link(did, at))
+            .map(|at| grant_link_by(granter, did, at))
             .into_iter()
             .collect(),
+        grantees_own_links: Vec::new(),
         revocation_links: revocations
             .iter()
             .map(|(by, at)| tombstone(did, by, at))
@@ -197,13 +242,21 @@ pub(super) fn eligible_now<'g>(
 /// `histories` holds each **instance's** links, keyed by instance id, the
 /// way the real store holds them. A history can hold links about several
 /// DIDs. Picking out the candidate's links is `RoleGrantLinks::from_instance`'s
-/// job, not the stub's. An instance with no entry has no links.
+/// job, not the stub's. An instance with no entry holds admin's grant link
+/// for the DID the query names, at [`T0`], unless `undated_instances`, where
+/// it holds nothing and so nothing dates a grant. Every link is handed back
+/// re-homed onto the instance asked about (re-signed by the same key, or by
+/// the forger's when it did not verify), so one history can serve several
+/// instances.
 ///
 /// It answers `links` the way `model_query` does: under `__links`, one
-/// array per requested key. [`STUB_GRANT_KEY`] gets `grant_links`, the
-/// tombstone predicate gets `revocation_links`, and any other key gets
-/// `[]`. A key nobody wrote has no links in the real store, so a
-/// misspelled or unexpected key reads as "none" here too.
+/// array per requested key. [`STUB_GRANT_KEY`] gets `grant_links`,
+/// [`STUB_OWN_KEY`] gets `grantees_own_links`, the tombstone predicate gets
+/// `revocation_links`, and any other key gets `[]`. A key nobody wrote has
+/// no links in the real store, so a misspelled or unexpected key reads as
+/// "none" here too. Its class declares the two predicates
+/// ([`RequiresQueryable::class_predicates`]), which is what an
+/// `author: "$did"` rule reads the grantee's own links from.
 #[derive(Default)]
 pub(super) struct RoleStub {
     pub(super) member_dids: Vec<String>,
@@ -219,6 +272,11 @@ pub(super) struct RoleStub {
 /// key the stub answers with grant links. [`grant_link`] writes it as the
 /// predicate.
 pub(super) const STUB_GRANT_KEY: &str = "agent";
+
+/// The other predicate the stubbed class declares: where `grantees_own_links`
+/// live. An `author: "$did"` rule reads it, with [`STUB_GRANT_KEY`], as the
+/// class's predicates.
+pub(super) const STUB_OWN_KEY: &str = "rank";
 
 #[async_trait]
 impl RequiresQueryable for RoleStub {
@@ -242,16 +300,29 @@ impl RequiresQueryable for RoleStub {
         let keys: Option<Vec<&str>> = query["links"]
             .as_array()
             .map(|keys| keys.iter().filter_map(Value::as_str).collect());
+        let named = self
+            .member_dids
+            .iter()
+            .find(|d| query_json.contains(d.as_str()));
         let links_of = |id: &str, keys: &[&str]| -> Map<String, Value> {
-            let history = self.histories.get(id).cloned().unwrap_or_default();
+            let history = match (self.histories.get(id), named) {
+                (Some(history), _) => history.clone(),
+                (None, Some(did)) if !self.undated_instances => history(did, Some(T0), &[]),
+                (None, _) => RoleGrantLinks::default(),
+            };
+            let here = |links: &[LinkExpression]| -> Value {
+                json!(links.iter().map(|l| on_instance(l, id)).collect::<Vec<_>>())
+            };
             keys.iter()
                 .map(|&key| {
                     let rows = if key
                         == crate::perspectives::flow_instance::atom::ROLE_GRANT_REVOKED_PREDICATE
                     {
-                        json!(history.revocation_links)
+                        here(&history.revocation_links)
                     } else if key == STUB_GRANT_KEY {
-                        json!(history.grant_links)
+                        here(&history.grant_links)
+                    } else if key == STUB_OWN_KEY {
+                        here(&history.grantees_own_links)
                     } else {
                         json!([])
                     };
@@ -274,6 +345,10 @@ impl RequiresQueryable for RoleStub {
             })
             .collect();
         Ok(json!({ "instances": instances, "totalCount": n }).to_string())
+    }
+
+    async fn class_predicates(&self, _class_name: &str) -> anyhow::Result<Vec<String>> {
+        Ok(vec![STUB_GRANT_KEY.to_string(), STUB_OWN_KEY.to_string()])
     }
 }
 

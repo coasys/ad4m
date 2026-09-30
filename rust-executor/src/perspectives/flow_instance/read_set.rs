@@ -31,8 +31,9 @@ pub struct ProposalLinks {
 ///
 /// - `proposals` — every verified link of every proposal, from every author,
 ///   each with its own signature verdict.
-/// - `role_grants` — the grant links and revocation tombstones behind each
-///   voter's membership, carried *before* any authority filter.
+/// - `role_grants` — the links that date each voter's grant and the
+///   revocation tombstones that end it; tombstones are carried *before* any
+///   authority filter.
 ///
 /// No derived value travels. Grant windows, revocation times and the
 /// authority rule are all recomputed by the reader
@@ -45,8 +46,10 @@ pub struct ProposalLinks {
 /// Exactly three residues stay asserted, and each is named where it lives:
 /// that a matched instance really satisfied the role query
 /// (`model_query` hydration witnesses no link — the model-query-signatures
-/// gap), [`roles::RoleInstanceHistory::asserted_instance_timestamp`] for
-/// instances with no dated grant link, and **completeness** — a minter can withhold a
+/// gap); that a carried grant link sits on one of the rule's DID fields (the
+/// reader re-checks its instance, target, author and signature, but a field
+/// name maps to a predicate only through the class shape, which a pure
+/// reader does not hold); and **completeness** — a minter can withhold a
 /// tombstone it dislikes, which absence of a link can never disprove.
 ///
 /// # Reading one that arrived from elsewhere
@@ -191,17 +194,13 @@ impl ReadSet {
     ///   look at — and a proposal carries links from *every* author, so a
     ///   third party who writes a garbage link onto someone else's proposal
     ///   must not be able to make the whole receipt unverifiable.
-    /// - **Revocation tombstones only lose their locality claim.** They are
-    ///   plain [`LinkExpression`] — no verdict field a sender could set — and
-    ///   [`RoleGrantEvidence::resolve`] computes the verdict from the
-    ///   signature on every call
-    ///   ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)),
+    /// - **Role evidence only loses its locality claim.** Dating links and
+    ///   tombstones are plain [`LinkExpression`] — no verdict field a sender
+    ///   could set — and [`RoleGrantEvidence::resolve`] computes the verdict
+    ///   from the signature on every call
+    ///   ([`GrantDating`](super::roles::dating::GrantDating),
+    ///   [`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)),
     ///   so that call is the unskippable check.
-    /// - **Grant links are signature-FILTERED here**, because nothing
-    ///   downstream checks their signatures at all
-    ///   ([`grant_link_names_did`](crate::perspectives::flow_evaluator) —
-    ///   #1063). See [`reverified_history`] for why dropping one also
-    ///   suppresses the fallback dating.
     pub fn reverified(&self) -> ReadSet {
         ReadSet {
             instance_uri: self.instance_uri.clone(),
@@ -279,52 +278,23 @@ fn link_counts(link: &DecoratedLinkExpression) -> bool {
     link.proof.valid == Some(true)
 }
 
-/// One role instance's carried history, re-verified.
+/// One role instance's carried history, stripped of its locality claims.
 ///
-/// # Dropping a grant link must not widen the window
-///
-/// Grant links are the one kind nothing downstream signature-checks (#1063),
-/// so the filter has to happen here. But filtering alone inverts:
-/// [`RoleGrantEvidence::resolve`] dates a grant from the earliest surviving
-/// grant link and, with none left, falls back to
-/// `asserted_instance_timestamp` — the instance's own creation, which is
-/// *earlier* than any assignment link. A forged grant link would then buy a
-/// **wider** window than a genuine one, which is the exact inversion #1065
-/// wrote the ordering rules to avoid.
-///
-/// So dropping any grant link also drops the fallback. With no dated grant
-/// link and no fallback, `resolve` fails closed — and an unresolvable
-/// candidate aborts the whole derivation ([`role_grant_views`]) rather than
-/// de-quorating one edge and letting the walk take a survivor contention
-/// would have held. A broken grant signature therefore **collapses** the
-/// eligibility window instead of widening it.
-///
-/// Tombstones are never dropped here, only stripped of their locality claim:
-/// dropping one could only widen a window, and `resolve` verifies them by
-/// construction
-/// ([`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator)).
+/// Nothing is dropped here: [`RoleGrantEvidence::resolve`] recomputes every
+/// signature and applies every filter itself, and a link it rejects can only
+/// leave a grant undated, never dated earlier.
 ///
 /// A carried `produced_at` passes through untouched: it is a date, not a
 /// link, and there is nothing here to re-check it against. What it is worth
 /// to a reader of a serialised read-set is stated in
 /// [`grant`](super::grant) § *What a receipt of a gated flow proves*.
 fn reverified_history(history: &roles::RoleInstanceHistory) -> roles::RoleInstanceHistory {
-    let grant_links: Vec<LinkExpression> = history
-        .grant_links
-        .iter()
-        .filter(|l| l.compute_proof_valid())
-        .map(delocalized)
-        .collect();
-    let dropped_a_grant_link = grant_links.len() != history.grant_links.len();
+    let delocalized_all = |links: &[LinkExpression]| links.iter().map(delocalized).collect();
     roles::RoleInstanceHistory {
         instance_id: history.instance_id.clone(),
-        grant_links,
-        revocation_links: history.revocation_links.iter().map(delocalized).collect(),
-        asserted_instance_timestamp: if dropped_a_grant_link {
-            None
-        } else {
-            history.asserted_instance_timestamp.clone()
-        },
+        grant_links: delocalized_all(&history.grant_links),
+        grantees_own_links: delocalized_all(&history.grantees_own_links),
+        revocation_links: delocalized_all(&history.revocation_links),
         produced_at: history.produced_at.clone(),
     }
 }

@@ -112,7 +112,7 @@ pub const FIRED_MARK: &str = "fired";
 /// grant; the link's author-asserted timestamp is the revocation time. Source =
 /// role-instance URI, target = the DID — literal-encoded or raw, the reader
 /// accepts both (`flow_evaluator::target_names_did`). Authority mirrors the
-/// grant's own rule (`roles::revocation_authorised`): whoever the role
+/// grant's own rule (`roles::evidence::granter_authorised`): whoever the role
 /// query's `author` condition accepts as granter may revoke, which makes
 /// admin-gated roles admin-revoked, `$did` roles self-revoked, and
 /// open-authorship roles revocable by anyone. Stays in the graph forever so

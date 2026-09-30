@@ -302,6 +302,14 @@ bobPress.derivedState;        // "Done"
 
 Each vote is gated **as of its own timestamp**. A voter who held the role when they signed still counts after the role is revoked, and a voter who signed before the grant does not count retroactively. Revocation is a signed tombstone link on the role instance, never a deletion. It stops future votes and does not rewrite settled history.
 
+**When a grant starts.** A grant starts at a link, and only at a link whose signature verifies and whose author the role query accepts:
+
+- On a field whose condition is the voter's DID (`didProperty: "agent"`, or `where: { member: "$did" }`), the grant starts at the earliest such link naming the DID. The author must be one the query's `where.author` accepts, the same rule that decides who may revoke. With no `where.author`, anyone may grant.
+- Under `where: { author: "$did" }` the grant is the instance itself, written by the voter. It starts at the earliest link the voter wrote on the instance.
+- A query with both starts at the later of the two.
+
+A query that names `$did` in neither way (for example only inside an `in` list) grants nobody, and so does an instance with no such link. Nothing else dates a grant: not the instance's own timestamp, and not a link from someone the query does not accept, however early it is stamped. The grant author can still back-date their own grant, just as they can back-date a revocation; nobody else can.
+
 One convention follows for Social DNA authors: **role instances are add-only, and membership ends only through tombstones.** The role query runs against the current graph — only the instance's existence is windowed in time — so a query keyed on a mutable property (`where: { active: true }`) reopens the deletion problem: flipping the property would remove the instance from historical verdicts and un-settle edges its votes once settled. State that changes belongs in new instances, not in edited ones.
 
 <Callout type="warning" emoji="⚠️">
