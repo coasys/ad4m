@@ -210,6 +210,8 @@ export class ApiClient {
         }
 
         ws.onclose = () => {
+            // A socket closed by _closeWs() reports its close late; by then it owns nothing.
+            if (this._ws !== ws) return
             this._stopPing()
             this._ws = null
             // Reset the readiness promise so future calls reconnect

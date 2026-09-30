@@ -341,3 +341,30 @@ describe('ApiClient event dispatch', () => {
         client.closeAll()
     })
 })
+
+describe('ApiClient with a socket that reports its close late', () => {
+    it('a late close of the previous socket does not fail calls sent on the next one', async () => {
+        const sockets: FakeWebSocket[] = []
+        class LateCloseSocket extends FakeWebSocket {
+            constructor(url: string) { super(url); sockets.push(this) }
+            // Browsers and `ws` fire onclose some time after close().
+            close() {
+                this.readyState = FakeWebSocket.CLOSING
+                setTimeout(() => { this.readyState = FakeWebSocket.CLOSED; this.onclose?.() }, 5)
+            }
+        }
+        const client = new ApiClient('http://localhost:1234', undefined, LateCloseSocket as unknown as new (url: string) => WebSocket)
+        const release = client.subscribe(() => {})
+        await new Promise((r) => setTimeout(r, 0))
+
+        release() // the last subscriber leaves: the socket closes, and reports it later
+        const call = client.call('agent.get', {})
+        await new Promise((r) => setTimeout(r, 1)) // the call is sent on a new socket
+        const sent = JSON.parse(sockets[1].sent[0])
+        await new Promise((r) => setTimeout(r, 10)) // the old socket's onclose fires
+        sockets[1].serverPush({ id: sent.id, result: { did: 'did:test' } })
+
+        await expect(call).resolves.toEqual({ did: 'did:test' })
+        client.closeAll()
+    })
+})
