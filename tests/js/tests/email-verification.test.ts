@@ -70,7 +70,7 @@ describe("Email Verification with Mock Service", () => {
                 apiPort, hcAdminPort, hcAppPort, false,
                 undefined, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
 
-        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, undefined, false)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
