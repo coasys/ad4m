@@ -3,8 +3,8 @@
  * --config <file>`): the file's ports, TLS, MCP and multi-user settings take
  * effect, the admin credential comes from AD4M_ADMIN_CREDENTIAL_FILE, and
  * with AD4M_UNLOCK_PASSPHRASE_FILE a restarted executor unlocks its agent
- * without anyone calling agent.unlock. A config file holding a secret value
- * stops `run`. Holochain is off (AD4M_RUN_HOLOCHAIN=false): the conductor is
+ * without anyone calling agent.unlock. A config file holding a secret value,
+ * or an empty admin credential file, stops `run`. Holochain is off (AD4M_RUN_HOLOCHAIN=false): the conductor is
  * not what these settings are about.
  */
 import path from "path";
@@ -194,5 +194,23 @@ describe("Executor config file", () => {
         expect(code).to.not.equal(0);
         expect(stderr).to.include("admin_credential is not allowed in the config file");
         expect(stderr).to.not.include("inline-secret-value");
+    });
+
+    it("refuses an empty admin credential file", async () => {
+        await stop();
+        // An empty credential would match the empty token of a client that
+        // sends none, and give it admin access.
+        const empty = path.join(dir, "secrets", "empty-admin-credential");
+        writeSecret(empty, "\n");
+        const proc = spawn(executorBinary(), ["run", "--config", configPath], {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, AD4M_RUN_HOLOCHAIN: "false", AD4M_ADMIN_CREDENTIAL_FILE: empty },
+        });
+        let stderr = "";
+        proc.stderr!.on("data", (d) => (stderr += d.toString()));
+        proc.stdout!.on("data", (d) => (stderr += d.toString()));
+        const code = await new Promise<number | null>((resolve) => proc.once("exit", resolve));
+        expect(code).to.not.equal(0);
+        expect(stderr).to.include(`the secret in ${empty} is empty`);
     });
 });
