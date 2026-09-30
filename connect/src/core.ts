@@ -270,7 +270,7 @@ export default class Ad4mConnect extends EventTarget {
     if (!this.ad4mClient) return;
 
     this.releaseCreditListener?.();
-    this.releaseCreditListener = this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
+    this.releaseCreditListener = this.ad4mClient.on('hosting-user-info-changed', (info) => {
       const userInfo: UserInfo = {
         email: info.email,
         remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
@@ -325,7 +325,7 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
+  async requestTopUp(amountHOT: number): Promise<{ success: boolean; amountHOT: string }> {
     if (!this.ad4mClient) throw new Error('Not connected');
     return requestPayment(this.ad4mClient, amountHOT);
   }

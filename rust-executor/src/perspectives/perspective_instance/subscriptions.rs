@@ -65,7 +65,8 @@ impl PerspectiveInstance {
     }
 
     /// Publish one update on the `query-subscription-update` topic:
-    /// `{ uuid, subscriptionId, revision, ... }` plus the change (see
+    /// `{ perspectiveUuid, uuid, subscriptionId, revision, ... }`
+    /// (`QuerySubscriptionUpdate`) plus the change (see
     /// [`result_delta`]) plus `connectionId`, which the RPC socket uses to
     /// deliver it to the subscription's own connection only.
     pub(super) async fn send_delta_update(
@@ -75,6 +76,7 @@ impl PerspectiveInstance {
         revision: u64,
         mut payload: Map<String, Value>,
     ) {
+        payload.insert("perspectiveUuid".into(), json!(self.uuid));
         payload.insert("uuid".into(), json!(self.uuid));
         payload.insert("subscriptionId".into(), json!(subscription_id));
         payload.insert("revision".into(), json!(revision));
@@ -356,6 +358,10 @@ mod tests {
         assert_eq!(u["upsert"][0]["id"], json!("test://t1"));
         assert_eq!(u["ids"], json!(["test://t1"]));
         assert!(u.get("result").is_none(), "no whole result on a delta");
+        let typed: crate::types::QuerySubscriptionUpdate =
+            serde_json::from_value(u.clone()).expect("the event_specs payload type");
+        assert_eq!(typed.perspective_uuid, p.uuid, "events.watch scopes by it");
+        assert_eq!(typed.revision, 1);
 
         // Nothing changed: no update, revision stays.
         assert!(updates_after_check(&p, &id).await.is_empty());

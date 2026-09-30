@@ -19,7 +19,8 @@ pub use domain::{
     OnlineAgent, PaymentRequestResult, PerspectiveExpression, PerspectiveHandle, PerspectiveInput,
     PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveRemovedWithOwner,
     PerspectiveState, PerspectiveStateFilter, PerspectiveUnsignedInput, PerspectiveWithOwner,
-    PromptOutput, QuerySubscription, ReadinessStatus, RequestContext, Resource, ResourceInput,
-    RuntimeInfo, SentMessage, TokenizerSourceInput, TranscriptionTextFilter, UserCreationResult,
-    UserStatistics, VerificationRequestResult, VoiceActivityParamsInput,
+    PromptOutput, QuerySubscription, QuerySubscriptionUpdate, QuerySubscriptionUpdateEvent,
+    QueryUpdatesLagged, ReadinessStatus, RequestContext, Resource, ResourceInput, RuntimeInfo,
+    SentMessage, TokenizerSourceInput, TranscriptionTextFilter, UserCreationResult, UserStatistics,
+    VerificationRequestResult, VoiceActivityParamsInput,
 };

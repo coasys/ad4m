@@ -1,8 +1,9 @@
-import { ApiClient, CallOptions, longCall } from "../apiClient"
+import {ApiClient, CallOptions } from '../apiClient'
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
-import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspective"
+import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
+import { perspectiveExpressionFromWire, perspectiveToWire } from "../expression/perspectiveWire"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
@@ -22,60 +23,61 @@ export class NeighbourhoodClient {
         meta: Perspective,
         options?: CallOptions,
     ): Promise<string> {
-        return this.#apiClient.call<string>('neighbourhood.publish', {
-            perspectiveUUID, linkLanguage, meta
-        }, longCall(options))
+        return this.#apiClient.call('neighbourhood.publish', {
+            perspectiveUuid: perspectiveUUID, linkLanguage, meta: perspectiveToWire(meta)
+        }, options)
     }
 
     async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
-        return this.#apiClient.call<PerspectiveHandle>('neighbourhood.join', { url }, longCall(options))
+        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
-        return this.#apiClient.call<DID[]>('neighbourhood.otherAgents', { uuid: perspectiveUUID })
+        return this.#apiClient.call('neighbourhood.otherAgents', { uuid: perspectiveUUID })
     }
 
     async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
+        return this.#apiClient.call('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
     }
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
-        return this.#apiClient.call<OnlineAgent[]>('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
+        const agents = await this.#apiClient.call('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
+        return agents.map(({ did, status }) => ({ did, status: perspectiveExpressionFromWire(status) }))
     }
 
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status })
+        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status: perspectiveToWire(status) })
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
+        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
     }
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
-            uuid: perspectiveUUID, remoteAgentDid, payload
+        return this.#apiClient.call('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload: perspectiveToWire(payload)
         })
     }
 
     async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
+        return this.#apiClient.call('neighbourhood.sendSignal', {
             uuid: perspectiveUUID, remoteAgentDid, payload, signed: false
         })
     }
 
     async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
-            uuid: perspectiveUUID, payload, loopback
+        return this.#apiClient.call('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload: perspectiveToWire(payload), loopback
         })
     }
 
     async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
+        return this.#apiClient.call('neighbourhood.sendBroadcast', {
             uuid: perspectiveUUID, payload, loopback, signed: false
         })
     }
 
-    dispatchSignal(perspectiveUUID: string, signal: unknown) {
+    dispatchSignal(perspectiveUUID: string, signal: PerspectiveExpression) {
         const handlers = this.#signalHandlers.get(perspectiveUUID)
         if (handlers) {
             for (const handler of handlers) {
@@ -89,13 +91,10 @@ export class NeighbourhoodClient {
     }
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
-                    this.dispatchSignal(perspectiveUUID, data.signal)
-                }
-            },
-            { types: ['signal'], perspective: perspectiveUUID },
+        const unsub = this.#apiClient.on(
+            'signal',
+            (event) => this.dispatchSignal(perspectiveUUID, perspectiveExpressionFromWire(event.signal)),
+            { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
         await this.#apiClient.waitForSubscription()

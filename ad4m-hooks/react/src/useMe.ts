@@ -1,6 +1,6 @@
 import { useState, useCallback, useEffect } from "react";
-import { getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
-import { Agent, AgentStatus, LinkExpression, AgentClient } from "@coasys/ad4m";
+import { agentFromWire, getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
+import { Ad4mClient, Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
 
 type MeData = {
   agent?: Agent;
@@ -16,7 +16,7 @@ type MyInfo<T> = {
   reload: Function;
 };
 
-export function useMe<T>(agent: AgentClient | undefined, formatter: (links: LinkExpression[]) => T): MyInfo<T> {
+export function useMe<T>(client: Ad4mClient | undefined, formatter: (links: LinkExpression[]) => T): MyInfo<T> {
   const forceUpdate = useForceUpdate();
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -31,11 +31,11 @@ export function useMe<T>(agent: AgentClient | undefined, formatter: (links: Link
 
   // Fetch data from AD4M and save to cache
   const getData = useCallback(() => {
-    if (!agent) {
+    if (!client) {
       return;
     }
 
-    const promises = Promise.all([agent.status(), agent.me()]);
+    const promises = Promise.all([client.agent.status(), client.agent.me()]);
 
     promises
       .then(async ([status, agent]) => {
@@ -43,7 +43,7 @@ export function useMe<T>(agent: AgentClient | undefined, formatter: (links: Link
         mutate({ agent, status });
       })
       .catch((error) => setError(error.toString()));
-  }, [agent, mutate]);
+  }, [client, mutate]);
 
   // Trigger initial fetch
   useEffect(getData, [getData]);
@@ -56,25 +56,21 @@ export function useMe<T>(agent: AgentClient | undefined, formatter: (links: Link
 
   // Listen to remote changes
   useEffect(() => {
-    const changed = (status: AgentStatus) => {
-      const newMeData = { agent: data?.agent, status };
-      mutate(newMeData);
-      return null;
-    };
+    if (!client) return;
 
-    const updated = (agent: Agent) => {
-      const newMeData = { agent, status: data?.status };
-      mutate(newMeData);
-      return null;
-    };
+    const releases = [
+      client.on("agent-status-changed", ({ agent: status }) => {
+        const current = getCache<MeData>(cacheKey);
+        mutate({ agent: current?.agent, status: new AgentStatus(status) });
+      }),
+      client.on("agent-updated", ({ agent }) => {
+        const current = getCache<MeData>(cacheKey);
+        mutate({ agent: agentFromWire(agent), status: current?.status });
+      }),
+    ];
 
-    if (agent) {
-      agent.addAgentStatusChangedListener(changed);
-      agent.addUpdatedListener(updated);
-
-      // TODO need a way to remove listeners
-    }
-  }, [agent]);
+    return () => releases.forEach((release) => release());
+  }, [client, cacheKey, mutate]);
 
   const data = getCache<MeData>(cacheKey);
   let profile = null as T | null;

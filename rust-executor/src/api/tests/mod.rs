@@ -9,8 +9,12 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod handler_table_tests;
 #[cfg(test)]
-pub mod protocol_tests;
+pub mod live_query_tests;
+#[cfg(test)]
+pub mod runtime_ws_tests;
 #[cfg(test)]
 pub mod shacl_ws_tests;
+#[cfg(test)]
+pub mod support;
 #[cfg(test)]
 pub mod types_tests;

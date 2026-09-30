@@ -2,6 +2,9 @@ import { Ad4mClient } from './Ad4mClient';
 import { ApiClient } from './apiClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
+import type { EventMap, EventName } from './generated/api/Events';
+import type { DecoratedLinkExpression } from './generated/api/DecoratedLinkExpression';
+import type { PerspectiveHandle } from './generated/api/PerspectiveHandle';
 
 // Save original WebSocket so we can restore it after the suite
 const originalWebSocket = (global as any).WebSocket;
@@ -133,7 +136,12 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.publish': 'neighbourhood://published',
     'neighbourhood.join': {
         uuid: 'uuid-joined', name: 'joined-neighbourhood', sharedUrl: 'neighbourhood://url',
-        neighbourhood: {}, state: 'Synced',
+        neighbourhood: {
+            author: 'did:test:123', timestamp: '2024-01-01',
+            data: { linkLanguage: 'lang://link', meta: { links: [] } },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        },
+        state: 'SYNCED',
     },
     'neighbourhood.otherAgents': ['did:other:1', 'did:other:2'],
     'neighbourhood.hasTelepresence': true,
@@ -143,8 +151,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'neighbourhood.sendBroadcast': true,
 
     // ── Expressions ──
-    'expression.get': (p: Record<string, unknown>) => {
-        if (p.raw === true) return 'raw-expression-data';
+    'expression.getRaw': 'raw-expression-data',
+    'expression.get': () => {
         return {
             author: 'did:test:123', timestamp: '2024-01-01', data: '{"content":"hello"}',
             language: { address: 'lang://test' }, proof: { valid: true },
@@ -206,7 +214,7 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'ai.tasks': [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
     'ai.addTask': { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
     'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
-    'ai.removeTask': { taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] },
+    'ai.removeTask': true,
     'ai.prompt': 'This is the AI response',
     'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
 
@@ -227,19 +235,23 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     },
 
     // ── Hosting ──
-    'hosting.info': { email: 'test@test.com' },
+    'hosting.info': {
+        userInfo: { email: 'test@test.com', credits: 5, hotWalletAddress: null, freeAccess: false },
+        rates: null,
+        version: { dnaHash: null, buildVersion: 'test' },
+    },
     'hosting.setHotWallet': true,
     'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
     // ── Runtime: host rates & Unyt ──
-    'runtime.getHostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
+    'runtime.hostRates': [{ description: 'Link write', priceInHOT: 0.001 }],
     'runtime.setHostRates': true,
     'runtime.unytAgentKey': 'unyt-agent-key-123',
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
     'runtime.unytWalletBalance': '1000.50',
     'runtime.unytWalletHistory': '[]',
-    'runtime.unytVersionInfo': '{"version":"0.1.0"}',
-    'runtime.unytSetMembraneProof': { success: true, message: 'ok' },
+    'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
+    'runtime.setUnytMembraneProof': true,
     'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
     'runtime.unytSendHot': { success: true, message: 'sent' },
 };
@@ -342,6 +354,33 @@ Object.defineProperty(MockWebSocket.prototype, 'CLOSED', { value: 3 });
 function lastOf<T>(arr: T[]): T {
     return arr[arr.length - 1];
 }
+
+// ===================== WIRE EVENTS =====================
+// Events exactly as the executor sends them; the payload type is checked against the event table.
+
+function event<K extends EventName>(type: K, payload: EventMap[K]): { type: K } & EventMap[K] {
+    return { type, ...payload };
+}
+
+function wireLink(source: string, target = 'test://value'): DecoratedLinkExpression {
+    return {
+        author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
+        data: { source, predicate: 'test://has', target },
+        proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+        status: 'SHARED',
+    };
+}
+
+function wireHandle(uuid: string): PerspectiveHandle {
+    return { uuid, name: 'test-perspective', neighbourhood: null, sharedUrl: null, state: 'SYNCED', owners: null };
+}
+
+const OWNER = 'did:test:123';
+const linkAdded = (perspectiveUuid: string, source: string) => event('link-added', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
+const linkRemoved = (perspectiveUuid: string, source: string) => event('link-removed', { perspectiveUuid, owner: OWNER, link: wireLink(source) });
+const linkUpdated = (perspectiveUuid: string, oldSource: string, newSource: string) =>
+    event('link-updated', { perspectiveUuid, owner: OWNER, oldLink: wireLink(oldSource), newLink: wireLink(newSource) });
+const perspectiveAdded = (uuid: string) => event('perspective-added', { perspectiveUuid: uuid, owner: OWNER, perspective: wireHandle(uuid) });
 
 // ===================== TEST SETUP =====================
 
@@ -485,42 +524,26 @@ describe('AgentClient', () => {
         expect(result).toEqual([]);
     });
 
-    test('agent-updated event unwraps nested agent payload', async () => {
+    test('an agent-updated handler receives the agent under `agent`', async () => {
         const freshClient = newClient();
         const callback = jest.fn();
-        freshClient.agent.addUpdatedListener(callback);
+        freshClient.on('agent-updated', ({ agent }) => callback(agent));
 
-        const ws = lastOf(MockWebSocket.instances);
+        const agent = { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null };
+        lastOf(MockWebSocket.instances).emit(event('agent-updated', { agent }));
 
-        ws.emit({
-            type: 'agent-updated',
-            agent: { did: 'did:test:updated', directMessageLanguage: 'lang://dm2', perspective: null, isInitialized: true, isUnlocked: true },
-        });
-
-        expect(callback).toHaveBeenCalledTimes(1);
-        const received = callback.mock.calls[0][0];
-        expect(received.did).toBe('did:test:updated');
-        expect(received.directMessageLanguage).toBe('lang://dm2');
-        expect(received).not.toHaveProperty('type');
+        expect(callback.mock.calls).toEqual([[agent]]);
     });
 
-    test('agent-status-changed event unwraps nested agent payload', async () => {
+    test('an agent-status-changed handler receives the status under `agent`', async () => {
         const freshClient = newClient();
         const callback = jest.fn();
-        freshClient.agent.addAgentStatusChangedListener(callback);
+        freshClient.on('agent-status-changed', ({ agent }) => callback(agent));
 
-        const ws = lastOf(MockWebSocket.instances);
+        const status = { did: 'did:test:status', didDocument: null, error: null, isInitialized: true, isUnlocked: false };
+        lastOf(MockWebSocket.instances).emit(event('agent-status-changed', { agent: status }));
 
-        ws.emit({
-            type: 'agent-status-changed',
-            agent: { did: 'did:test:status', isInitialized: true, isUnlocked: false },
-        });
-
-        expect(callback).toHaveBeenCalledTimes(1);
-        const received = callback.mock.calls[0][0];
-        expect(received.did).toBe('did:test:status');
-        expect(received.isUnlocked).toBe(false);
-        expect(received).not.toHaveProperty('type');
+        expect(callback.mock.calls).toEqual([[status]]);
     });
 });
 
@@ -641,7 +664,7 @@ describe('PerspectiveClient', () => {
 
     test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
         const freshClient = newClient();
-        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
+        freshClient.on('perspective-added', jest.fn());
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
@@ -653,57 +676,53 @@ describe('PerspectiveClient', () => {
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
 
-        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
-        freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
-        freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+        freshClient.on('link-added', ({ link }) => linkAddedCallback(link), { perspective: 'uuid-1' });
+        freshClient.on('link-removed', ({ link }) => linkRemovedCallback(link), { perspective: 'uuid-1' });
+        freshClient.on('link-updated', ({ oldLink, newLink }) => linkUpdatedCallback({ oldLink, newLink }), { perspective: 'uuid-1' });
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         // Events for a different perspective should be ignored
-        ws.emit({
-            type: 'link-added',
-            perspectiveUuid: 'uuid-2',
-            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
-        ws.emit({
-            type: 'link-removed',
-            perspectiveUuid: 'uuid-2',
-            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
-        ws.emit({
-            type: 'link-updated',
-            perspectiveUuid: 'uuid-2',
-            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://other-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
+        ws.emit(linkAdded('uuid-2', 'test://other-added'));
+        ws.emit(linkRemoved('uuid-2', 'test://other-removed'));
+        ws.emit(linkUpdated('uuid-2', 'test://other-old', 'test://other-new'));
 
         expect(linkAddedCallback).not.toHaveBeenCalled();
         expect(linkRemovedCallback).not.toHaveBeenCalled();
         expect(linkUpdatedCallback).not.toHaveBeenCalled();
 
         // Events for the correct perspective should fire
-        const addedLink = {
-            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://added', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
-        };
-        const removedLink = {
-            author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z',
-            data: { source: 'test://removed', predicate: 'test://has', target: 'test://value' }, proof: { valid: true },
+        ws.emit(linkAdded('uuid-1', 'test://added'));
+        ws.emit(linkRemoved('uuid-1', 'test://removed'));
+        ws.emit(linkUpdated('uuid-1', 'test://updated-old', 'test://updated-new'));
+
+        expect(linkAddedCallback).toHaveBeenCalledWith(wireLink('test://added'));
+        expect(linkRemovedCallback).toHaveBeenCalledWith(wireLink('test://removed'));
+        expect(linkUpdatedCallback).toHaveBeenCalledWith({ oldLink: wireLink('test://updated-old'), newLink: wireLink('test://updated-new') });
+    });
+
+    test('onQueryUpdate() gets every live query update and lag signal on the socket', async () => {
+        const freshClient = newClient();
+        const callback = jest.fn();
+        const unsubscribe = freshClient.perspective.onQueryUpdate(callback);
+        const ws = lastOf(MockWebSocket.instances);
+        const update = {
+            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId: 'sub-1', revision: 1,
+            added: [{ id: 'community://1' }], removed: [],
         };
 
-        ws.emit({ type: 'link-added', perspectiveUuid: 'uuid-1', link: addedLink });
-        ws.emit({ type: 'link-removed', perspectiveUuid: 'uuid-1', link: removedLink });
-        ws.emit({
-            type: 'link-updated',
-            perspectiveUuid: 'uuid-1',
-            oldLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-old', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-            newLink: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 'test://updated-new', predicate: 'test://has', target: 'test://value' }, proof: { valid: true } },
-        });
+        ws.emit(perspectiveAdded('uuid-ignored'));
+        expect(callback).not.toHaveBeenCalled();
 
-        expect(linkAddedCallback).toHaveBeenCalledWith(addedLink);
-        expect(linkRemovedCallback).toHaveBeenCalledWith(removedLink);
-        expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
+        ws.emit(event('query-subscription-update', update));
+        ws.emit(event('query-subscription-update', { lagged: true }));
+        expect(callback).toHaveBeenNthCalledWith(1, expect.objectContaining(update));
+        expect(callback).toHaveBeenNthCalledWith(2, expect.objectContaining({ lagged: true }));
+
+        unsubscribe();
+        ws.emit(event('query-subscription-update', { ...update, revision: 2 }));
+        expect(callback).toHaveBeenCalledTimes(2);
     });
 
     test('a client asks the executor for the events its listeners need', async () => {
@@ -714,9 +733,9 @@ describe('PerspectiveClient', () => {
             // Lets each events.watch go out and get its reply.
             const settle = async () => { for (let i = 0; i < 3; i++) await jest.advanceTimersByTimeAsync(10); };
 
-            const releaseAddedA = freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
-            freshClient.perspective.addPerspectiveLinkAddedListener('B', [jest.fn()]);
-            const releaseRemovedA = freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
+            const releaseAddedA = freshClient.on('link-added', jest.fn(), { perspective: 'A' });
+            freshClient.on('link-added', jest.fn(), { perspective: 'B' });
+            const releaseRemovedA = freshClient.on('link-removed', jest.fn(), { perspective: 'A' });
             await settle();
             const ws = lastOf(MockWebSocket.instances);
             expect(lastOf(watches(ws))).toEqual(expect.objectContaining({ 'link-added': ['A', 'B'], 'link-removed': ['A'] }));
@@ -744,13 +763,13 @@ describe('PerspectiveClient', () => {
     test('a call made right after adding a listener is sent after the events.watch it needs', async () => {
         // First use: the listener and the call both wait for the socket.
         const freshClient = newClient();
-        freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+        freshClient.on('link-added', jest.fn(), { perspective: 'A' });
         await freshClient.perspective.snapshotByUUID('A');
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.rpc.map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
 
         // Open socket: a listener added in the same tick as the call.
-        freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
+        freshClient.on('link-removed', jest.fn(), { perspective: 'A' });
         await freshClient.perspective.snapshotByUUID('A');
         expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
@@ -762,7 +781,7 @@ describe('PerspectiveClient', () => {
         const api = new ApiClient('http://127.0.0.1:12000', 'test-token');
         clients.push({ close: () => api.closeAll() });
         try {
-            api.subscribe(() => {}, { types: ['link-added'], perspective: 'A' });
+            api.on('link-added', () => {}, { perspective: 'A' });
             let settled = false;
             const waiting = api.waitForSubscription().then(() => { settled = true; });
             await new Promise(r => setTimeout(r, 20));
@@ -792,7 +811,7 @@ describe('PerspectiveClient', () => {
             // The executor rejects the watch once (404: not a closed socket), then accepts it.
             delete MOCK_RESPONSES['events.watch'];
             const recovering = await opened(newClient());
-            recovering.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+            recovering.on('link-added', jest.fn(), { perspective: 'A' });
             await jest.advanceTimersByTimeAsync(10);
             const ws = lastOf(MockWebSocket.instances);
             expect(watchCount(ws)).toBe(1);
@@ -805,7 +824,7 @@ describe('PerspectiveClient', () => {
             // An executor that keeps rejecting it gets some retries, then no more.
             delete MOCK_RESPONSES['events.watch'];
             const failing = await opened(newClient());
-            failing.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
+            failing.on('link-added', jest.fn(), { perspective: 'A' });
             for (let i = 0; i < 20; i++) await jest.advanceTimersByTimeAsync(1_000);
             const sent = watchCount(lastOf(MockWebSocket.instances));
             expect(sent).toBeGreaterThan(1);
@@ -821,21 +840,23 @@ describe('PerspectiveClient', () => {
 
     test('sync-state and signal listeners only fire for their perspective', async () => {
         const freshClient = newClient();
-        const syncState = jest.fn(() => null);
-        await freshClient.perspective.addPerspectiveSyncStateChangeListener('A', [syncState]);
+        const syncState = jest.fn();
+        freshClient.on('sync-state-change', ({ state }) => syncState(state), { perspective: 'A' });
         const signal = jest.fn();
         await freshClient.neighbourhood.addSignalHandler('A', signal);
         const ws = lastOf(MockWebSocket.instances);
         expect(lastOf(ws.rpc.filter(c => c.type === 'events.watch')).params)
             .toEqual({ 'signal': ['A'], 'sync-state-change': ['A'] });
 
-        ws.emit({ type: 'sync-state-change', state: 'Synced', perspective: { uuid: 'B' } });
-        ws.emit({ type: 'sync-state-change', state: 'Synced', perspective: { uuid: 'A' } });
-        expect(syncState.mock.calls).toEqual([['Synced']]);
+        const syncStateChange = (uuid: string) => event('sync-state-change', { perspectiveUuid: uuid, state: 'SYNCED', perspective: wireHandle(uuid) });
+        ws.emit(syncStateChange('B'));
+        ws.emit(syncStateChange('A'));
+        expect(syncState.mock.calls).toEqual([['SYNCED']]);
 
-        const payload = { author: 'did:x', timestamp: 't', data: { links: [] }, proof: {} };
-        ws.emit({ type: 'signal', signal: payload, perspective: { uuid: 'B' } });
-        ws.emit({ type: 'signal', signal: payload, perspective: { uuid: 'A' } });
+        const payload = { author: 'did:x', timestamp: 't', data: { links: [] }, proof: { key: 'k', signature: 's', valid: true, invalid: false } };
+        const signalEvent = (uuid: string) => event('signal', { perspectiveUuid: uuid, perspective: wireHandle(uuid), signal: payload, recipient: null });
+        ws.emit(signalEvent('B'));
+        ws.emit(signalEvent('A'));
         expect(signal).toHaveBeenCalledTimes(1);
     });
 
@@ -942,7 +963,7 @@ describe('NeighbourhoodClient', () => {
             'uuid-1', 'lang://link', new Perspective(),
         );
         expect(url).toBe('neighbourhood://published');
-        expect(lastRpcCall!.params.perspectiveUUID).toBe('uuid-1');
+        expect(lastRpcCall!.params.perspectiveUuid).toBe('uuid-1');
     });
 
     test('joinFromUrl() joins a neighbourhood', async () => {
@@ -1182,8 +1203,8 @@ describe('AIClient', () => {
     });
 
     test('removeTask() removes a task', async () => {
-        const task = await ad4m.ai.removeTask('task-1');
-        expect(task.name).toBe('summarize');
+        expect(await ad4m.ai.removeTask('task-1')).toBe(true);
+        expect(lastRpcCall!.params).toEqual({ id: 'task-1' });
     });
 
     test('prompt() sends a prompt', async () => {
@@ -1290,16 +1311,20 @@ describe('Multi-user and Hosting', () => {
         expect(lastRpcCall!.params.action).toBe('clear-codes');
     });
 
-    test('getHostRates() returns parsed rates', async () => {
-        const rates = await ad4m.runtime.getHostRates();
+    test('hostRates() returns the rates', async () => {
+        const rates = await ad4m.runtime.hostRates();
+        expect(lastRpcCall!.type).toBe('runtime.hostRates');
         expect(rates).toHaveLength(1);
         expect(rates[0].description).toBe('Link write');
         expect(rates[0].priceInHOT).toBe(0.001);
     });
 
-    test('setHostRates() sends rates JSON', async () => {
-        const result = await ad4m.runtime.setHostRates(JSON.stringify([{ description: 'test', priceInHOT: 1 }]));
+    test('setHostRates() sends the rates', async () => {
+        const rates = [{ description: 'test', priceInHOT: 1 }];
+        const result = await ad4m.runtime.setHostRates(rates);
         expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setHostRates');
+        expect(lastRpcCall!.params).toEqual({ rates });
     });
 });
 
@@ -1325,14 +1350,16 @@ describe('Unyt Integration', () => {
         expect(history).toBe('[]');
     });
 
-    test('unytVersionInfo() returns version info', async () => {
+    test('unytVersionInfo() returns version info and the install error', async () => {
         const info = await ad4m.runtime.unytVersionInfo();
-        expect(info).toContain('version');
+        expect(lastRpcCall!.type).toBe('runtime.unytVersionInfo');
+        expect(info).toEqual({ installed: null, bundled: '0.61.0', installError: 'install failed' });
     });
 
-    test('unytSetMembraneProof() sets proof', async () => {
-        const result = await ad4m.runtime.unytSetMembraneProof('proof-data');
-        expect(result.success).toBe(true);
+    test('setUnytMembraneProof() sets proof', async () => {
+        const result = await ad4m.runtime.setUnytMembraneProof('proof-data');
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setUnytMembraneProof');
         expect(lastRpcCall!.params.proof).toBe('proof-data');
     });
 
@@ -1380,44 +1407,59 @@ describe('Ad4mClient', () => {
         freshClient.close();
     });
 
-    test('a listener on a new client receives each default event exactly once', async () => {
+    test('a handler on a new client receives each client-wide event exactly once', async () => {
         const freshClient = newClient();
-        const listeners = {
+        const handlers = {
             agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
             hosting: jest.fn(),
             added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
             message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
         };
-        freshClient.agent.addUpdatedListener(listeners.agentUpdated);
-        freshClient.agent.addAgentStatusChangedListener(listeners.agentStatus);
-        freshClient.agent.addAppChangedListener(listeners.apps);
-        freshClient.agent.addHostingUserInfoChangedListener(listeners.hosting);
-        freshClient.perspective.addPerspectiveAddedListener(listeners.added);
-        freshClient.perspective.addPerspectiveUpdatedListener(listeners.updated);
-        freshClient.perspective.addPerspectiveRemovedListener(listeners.removed);
-        freshClient.runtime.addMessageCallback(listeners.message);
-        freshClient.runtime.addExceptionCallback(listeners.exception);
-        freshClient.runtime.addNotificationTriggeredCallback(listeners.notification);
+        freshClient.on('agent-updated', ({ agent }) => handlers.agentUpdated(agent));
+        freshClient.on('agent-status-changed', ({ agent }) => handlers.agentStatus(agent));
+        freshClient.on('apps-changed', () => handlers.apps());
+        freshClient.on('hosting-user-info-changed', (info) => handlers.hosting(info));
+        freshClient.on('perspective-added', ({ perspective }) => handlers.added(perspective));
+        freshClient.on('perspective-updated', ({ perspective }) => handlers.updated(perspective));
+        freshClient.on('perspective-removed', ({ perspectiveUuid }) => handlers.removed(perspectiveUuid));
+        freshClient.on('message-received', ({ message }) => handlers.message(message));
+        freshClient.on('exception-occurred', ({ exception }) => handlers.exception(exception));
+        freshClient.on('notification-triggered', ({ notification }) => handlers.notification(notification));
         await freshClient.agent.me(); // wait for the socket to open
 
+        const exception = { addon: null, title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' as const };
+        const notification = {
+            notification: {
+                id: 'n-1', granted: true, description: 'd', appName: 'a', appUrl: 'u', appIconPath: 'i',
+                trigger: 'q', perspectiveIds: ['uuid-a'], webhookUrl: '', webhookAuth: '', userEmail: null,
+            },
+            perspectiveId: 'uuid-a', triggerMatch: '[]',
+        };
         const ws = lastOf(MockWebSocket.instances);
-        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:upd' } });
-        ws.emit({ type: 'agent-status-changed', agent: { did: 'did:test:upd' } });
-        ws.emit({ type: 'apps-changed' });
-        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c', remainingCredits: '1', freeAccess: false });
-        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-a' } });
-        ws.emit({ type: 'perspective-updated', perspective: { uuid: 'uuid-a' } });
-        ws.emit({ type: 'perspective-removed', uuid: 'uuid-a' });
-        ws.emit({ type: 'message-received', message: { author: 'did:test:1' } });
-        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
-        ws.emit({ type: 'notification-triggered', notification: { id: 'n-1' } });
+        ws.emit(event('agent-updated', { agent: { did: 'did:test:upd', directMessageLanguage: null, perspective: null } }));
+        ws.emit(event('agent-status-changed', { agent: { did: 'did:test:upd', didDocument: null, error: null, isInitialized: true, isUnlocked: true } }));
+        ws.emit(event('apps-changed', {
+            requestId: 'app1', token: 'tok', revoked: null,
+            auth: { appName: 'a', appDesc: 'd', appDomain: null, appUrl: null, appIconPath: null, capabilities: null, userEmail: null },
+        }));
+        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit(perspectiveAdded('uuid-a'));
+        ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', owner: OWNER, perspective: wireHandle('uuid-a') }));
+        ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a', owner: OWNER }));
+        ws.emit(event('message-received', { message: {
+            author: 'did:test:1', timestamp: '2024-01-01T00:00:00.000Z', data: { links: [] },
+            proof: { key: 'k', signature: 's', valid: true, invalid: false },
+        } }));
+        ws.emit(event('exception-occurred', { exception }));
+        ws.emit(event('notification-triggered', { perspectiveUuid: 'uuid-a', notification }));
 
-        for (const listener of Object.values(listeners)) {
-            expect(listener).toHaveBeenCalledTimes(1);
+        for (const handler of Object.values(handlers)) {
+            expect(handler).toHaveBeenCalledTimes(1);
         }
-        expect(listeners.added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
-        expect(listeners.removed).toHaveBeenCalledWith('uuid-a');
-        expect(listeners.exception).toHaveBeenCalledWith({ title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' });
+        expect(handlers.added).toHaveBeenCalledWith(wireHandle('uuid-a'));
+        expect(handlers.removed).toHaveBeenCalledWith('uuid-a');
+        expect(handlers.exception).toHaveBeenCalledWith(exception);
+        expect(handlers.notification).toHaveBeenCalledWith(notification);
         freshClient.close();
     });
 
@@ -1427,69 +1469,63 @@ describe('Ad4mClient', () => {
         expect(freshClient.agent.addComputeLogUpdatedListener).toBeUndefined();
     });
 
-    test('agent and runtime listener registrations return a function that removes the listener', async () => {
+    test('the function on() returns removes the handler', async () => {
         const freshClient = newClient();
         const hosting = jest.fn();
         const exception = jest.fn();
-        freshClient.agent.addHostingUserInfoChangedListener(hosting)();
-        freshClient.runtime.addExceptionCallback(exception)();
+        freshClient.on('hosting-user-info-changed', hosting)();
+        freshClient.on('exception-occurred', exception)();
         await freshClient.agent.me();
 
         const ws = lastOf(MockWebSocket.instances);
-        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c' });
-        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
+        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit(event('exception-occurred', { exception: { addon: null, title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } }));
 
         expect(hosting).not.toHaveBeenCalled();
         expect(exception).not.toHaveBeenCalled();
         freshClient.close();
     });
 
-    test('a listener added after close() receives events again', async () => {
+    test('a handler added after close() receives events again', async () => {
         const freshClient = newClient();
-        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
+        freshClient.on('perspective-added', jest.fn());
         freshClient.close();
         const added = jest.fn();
-        freshClient.perspective.addPerspectiveAddedListener(added);
+        freshClient.on('perspective-added', added);
         await freshClient.agent.me();
 
-        lastOf(MockWebSocket.instances).emit({ type: 'perspective-added', perspective: { uuid: 'uuid-c' } });
+        lastOf(MockWebSocket.instances).emit(perspectiveAdded('uuid-c'));
 
         expect(added).toHaveBeenCalledTimes(1);
         freshClient.close();
     });
 
-    test('a client without listeners opens no event subscription', async () => {
+    test('a client without handlers opens no event subscription', async () => {
         const freshClient = newClient();
         expect(MockWebSocket.instances).toHaveLength(0);
         freshClient.close();
     });
 
-    test('a throwing listener does not stop later listeners for the same event', async () => {
+    test('a throwing handler does not stop later handlers for the same event', async () => {
         const freshClient = newClient();
         const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
         const first = jest.fn();
         const third = jest.fn();
-        freshClient.perspective.addPerspectiveAddedListener(first);
-        freshClient.perspective.addPerspectiveAddedListener(() => { throw new Error('listener bug'); });
-        freshClient.perspective.addPerspectiveAddedListener(third);
+        freshClient.on('perspective-added', first);
+        freshClient.on('perspective-added', () => { throw new Error('handler bug'); });
+        freshClient.on('perspective-added', ({ perspective }) => third(perspective));
         const linkThird = jest.fn();
-        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
-            () => { throw new Error('link listener bug'); },
-            linkThird,
-        ]);
+        freshClient.on('link-added', () => { throw new Error('link handler bug'); }, { perspective: 'uuid-1' });
+        freshClient.on('link-added', linkThird, { perspective: 'uuid-1' });
         await freshClient.agent.me();
 
         const ws = lastOf(MockWebSocket.instances);
-        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-d' } });
-        ws.emit({
-            type: 'link-added',
-            perspectiveUuid: 'uuid-1',
-            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
-        });
+        ws.emit(perspectiveAdded('uuid-d'));
+        ws.emit(linkAdded('uuid-1', 's'));
 
         expect(first).toHaveBeenCalledTimes(1);
         expect(third).toHaveBeenCalledTimes(1);
-        expect(third).toHaveBeenCalledWith({ uuid: 'uuid-d' });
+        expect(third).toHaveBeenCalledWith(wireHandle('uuid-d'));
         expect(linkThird).toHaveBeenCalledTimes(1);
         expect(errorSpy).toHaveBeenCalled();
         errorSpy.mockRestore();

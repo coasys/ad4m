@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use crate::api::events_ws::build_event_stream_for;
-use crate::api::tests::protocol_tests::{admin_conn_ctx, registered_perspective};
+use crate::api::tests::support::{admin_conn_ctx, registered_perspective};
 use crate::api::ws_handler::{build_handler_map, HandlerMap};
 use crate::api::ws_rpc::{serve, Connection};
 use crate::pubsub::{
@@ -234,7 +234,7 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
     let late_id = Arc::new(std::sync::Mutex::new(None::<String>));
     let mut handlers = build_handler_map();
     let b = block.clone();
-    handlers.register("test.block", move |_, _| {
+    handlers.method::<Value, bool>("test.block", move |_, _| {
         let b = b.clone();
         async move {
             b.notified().await;
@@ -242,19 +242,22 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
         }
     });
     let (l, slot, uuid) = (late.clone(), late_id.clone(), p.0.clone());
-    handlers.register("test.subscribeLate", move |_, ctx| {
-        let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
-        async move {
-            l.notified().await;
-            let (id, _, _) = crate::perspectives::get_perspective(&uuid)
-                .unwrap()
-                .subscribe_and_query(QUERY.into(), None, ctx.connection_id.clone().unwrap())
-                .await
-                .unwrap();
-            *slot.lock().unwrap() = Some(id);
-            Ok(json!(true))
-        }
-    });
+    handlers.method::<Value, bool>(
+        "test.subscribeLate",
+        move |_, ctx: Arc<crate::types::RequestContext>| {
+            let (l, slot, uuid) = (l.clone(), slot.clone(), uuid.clone());
+            async move {
+                l.notified().await;
+                let (id, _, _) = crate::perspectives::get_perspective(&uuid)
+                    .unwrap()
+                    .subscribe_and_query(QUERY.into(), None, ctx.connection_id.clone().unwrap())
+                    .await
+                    .unwrap();
+                *slot.lock().unwrap() = Some(id);
+                Ok(json!(true))
+            }
+        },
+    );
 
     let mut socket = Socket::open_with(handlers).await;
     let early = socket.subscribe(&p.0).await;
@@ -286,8 +289,8 @@ async fn a_closed_socket_ends_its_subscriptions_without_waiting_for_calls() {
 async fn query_updates_reach_only_their_connection() {
     let (mut a, mut b) = (Socket::open().await, Socket::open().await);
     let sub = uuid::Uuid::new_v4().to_string();
-    let update = json!({ "uuid": "p", "subscriptionId": sub, "revision": 1,
-        "added": [], "removed": [], "changed": [], "connectionId": a.connection_id });
+    let update = json!({ "perspectiveUuid": "p", "uuid": "p", "subscriptionId": sub, "revision": 1,
+        "added": [], "removed": [], "connectionId": a.connection_id });
     get_global_pubsub()
         .await
         .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
@@ -296,6 +299,7 @@ async fn query_updates_reach_only_their_connection() {
     let got = a.next_of(|m| m["subscriptionId"] == sub).await;
     assert_eq!(got["type"], json!("query-subscription-update"));
     assert!(got.get("connectionId").is_none(), "routing key stripped");
+    assert_eq!(got["perspectiveUuid"], json!("p"));
     let leaked = tokio::time::timeout(
         Duration::from_millis(300),
         b.next_of(|m| m["subscriptionId"] == sub),

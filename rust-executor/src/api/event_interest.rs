@@ -15,7 +15,7 @@
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 
 use super::ws_handler::ParamExt;
 
@@ -28,25 +28,37 @@ pub type EventInterest = HashMap<String, Option<HashSet<String>>>;
 /// Per-connection interest; empty = no events.
 pub type SharedInterest = Arc<RwLock<EventInterest>>;
 
-/// The perspective an event is about, by event type. `None` for events that
-/// are not perspective-scoped.
+/// The event types that carry `perspectiveUuid` (`EventSpec.scoped`).
+static SCOPED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    super::events_ws::event_specs()
+        .into_iter()
+        .filter(|s| s.scoped)
+        .map(|s| s.name)
+        .collect()
+});
+
+/// The perspective an event is about. `None` for events that are not
+/// perspective-scoped.
 fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> {
-    let v = match event_type {
-        "link-added"
-        | "link-removed"
-        | "link-updated"
-        | "auto-processor-event"
-        | "auto-processor-neighbourhood-state" => event.get("perspectiveUuid"),
-        "perspective-added" | "perspective-updated" | "sync-state-change" | "signal" => {
-            event.get("perspective").and_then(|p| p.get("uuid"))
-        }
-        "perspective-removed" => event.get("uuid"),
-        "notification-triggered" => event
-            .get("notification")
-            .and_then(|n| n.get("perspectiveId").or_else(|| n.get("perspective_id"))),
-        _ => None,
-    };
-    v.and_then(Value::as_str)
+    if !SCOPED.contains(event_type) {
+        return None;
+    }
+    event.get("perspectiveUuid").and_then(Value::as_str)
+}
+
+/// The TypeScript type of `events.watch` params: event name → the
+/// perspectives wanted (`null`: all). `EventName` comes from `Events.ts`.
+pub struct WatchParams;
+
+impl ts_rs::TS for WatchParams {
+    type WithoutGenerics = Self;
+    type OptionInnerType = Self;
+    fn name(_: &ts_rs::Config) -> String {
+        "Partial<Record<EventName, Array<string> | null>>".to_string()
+    }
+    fn inline(cfg: &ts_rs::Config) -> String {
+        Self::name(cfg)
+    }
 }
 
 fn parse(params: &Value) -> Result<EventInterest, String> {
@@ -65,7 +77,7 @@ pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
         return false;
     };
     let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
-    if event_type == "query-subscription-update" {
+    if event_type == super::events_ws::events::QUERY_SUBSCRIPTION_UPDATE {
         return true;
     }
     match interest
@@ -121,10 +133,8 @@ mod tests {
 
     const LINK_A: &str = r#"{"type":"link-added","perspectiveUuid":"A","owner":"did:x","link":{}}"#;
     const LINK_B: &str = r#"{"type":"link-added","perspectiveUuid":"B","owner":"did:x","link":{}}"#;
-    const UPDATED_B: &str =
-        r#"{"type":"perspective-updated","perspective":{"uuid":"B"},"owner":"did:x"}"#;
-    const QUERY_A: &str =
-        r#"{"type":"query-subscription-update","uuid":"A","subscriptionId":"s","revision":1}"#;
+    const UPDATED_B: &str = r#"{"type":"perspective-updated","perspectiveUuid":"B","perspective":{"uuid":"B"},"owner":"did:x"}"#;
+    const QUERY_A: &str = r#"{"type":"query-subscription-update","perspectiveUuid":"A","uuid":"A","subscriptionId":"s","revision":1}"#;
     const AGENT: &str = r#"{"type":"agent-updated","agent":{"did":"did:x"}}"#;
 
     fn watch(i: &SharedInterest, params: Value) -> Value {
@@ -194,19 +204,24 @@ mod tests {
     #[test]
     fn perspective_extraction_per_event_type() {
         let cases = [
-            (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, true),
+            (r#"{"type":"signal","perspectiveUuid":"P"}"#, true),
             (
-                r#"{"type":"sync-state-change","perspective":{"uuid":"P"},"state":"x"}"#,
+                r#"{"type":"perspective-added","perspectiveUuid":"P"}"#,
                 true,
             ),
             (
-                r#"{"type":"perspective-removed","uuid":"P","owner":"o"}"#,
+                r#"{"type":"sync-state-change","perspectiveUuid":"P","state":"x"}"#,
                 true,
             ),
             (
-                r#"{"type":"notification-triggered","notification":{"perspectiveId":"P"}}"#,
+                r#"{"type":"perspective-removed","perspectiveUuid":"P","uuid":"P","owner":"o"}"#,
                 true,
             ),
+            (
+                r#"{"type":"notification-triggered","perspectiveUuid":"P","notification":{"perspectiveId":"P"}}"#,
+                true,
+            ),
+            (r#"{"type":"signal","perspective":{"uuid":"P"}}"#, false),
             (
                 r#"{"type":"auto-processor-event","perspectiveUuid":"P"}"#,
                 true,
@@ -215,6 +230,7 @@ mod tests {
                 r#"{"type":"exception-occurred","exception":{"uuid":"P"}}"#,
                 false,
             ),
+            (r#"{"type":"agent-updated","perspectiveUuid":"P"}"#, false),
         ];
         for (event, scoped) in cases {
             let t = serde_json::from_str::<Value>(event).unwrap()["type"]

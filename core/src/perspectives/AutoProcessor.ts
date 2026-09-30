@@ -90,65 +90,6 @@ export type AutoProcessorStep =
   | "emptyTranscript"
   | "failed";
 
-/** A single step-signal from one auto-processor pass on one perspective. */
-export interface AutoProcessorEvent {
-  type: "auto-processor-event";
-  perspectiveUuid: string;
-  processorId: string;
-  /** DID of the agent that ran the pass (which peer claimed/processed/backed off). */
-  agentDid?: string;
-  step: AutoProcessorStep;
-  /** The batch's source item ids (present from `batchReady` onward). */
-  itemIds: string[];
-  /**
-   * Content hash of the batch — the same value
-   * {@link AutoProcessorNeighbourhoodStateEvent.batchKey} carries, and the
-   * key that joins the two streams.
-   *
-   * A UI that renders one row per pass subscribes to both: the
-   * perspective-scoped neighbourhood stream opens the row (and names the
-   * claimant), while this DID-scoped stream fills in the fine-grained
-   * steps and LLM I/O for the pass this agent is running. Matching them on
-   * `processorId` alone breaks as soon as a processor runs a second pass;
-   * matching on `itemIds` means re-implementing the Rust SHA-256 and its
-   * exact serialization. So both streams carry the same key.
-   *
-   * Present from `batchReady` onward. Optional on the type because a
-   * pre-#903 executor does not send it — treat its absence as "cannot
-   * correlate", not as an error.
-   */
-  batchKey?: string;
-  /** Instance base URIs written by the pass (present on `processed`). */
-  bases: string[];
-  /** Free-form context for the step (a holder/elected DID, an error, …). */
-  detail?: string;
-  /** Raw LLM prompt this pass fed the model. Present ONLY on
-   *  `llmRequestSent` events, and only when the processor was configured
-   *  with `emitDebugEvents: true`. Never carried on `processed`. */
-  llmInput?: string;
-  /** Raw LLM response this pass received. Present ONLY on
-   *  `llmResponseReceived` events, and only when the processor was
-   *  configured with `emitDebugEvents: true`. Never carried on `processed`. */
-  llmOutput?: string;
-  /**
-   * Name of the tool the harness LLM invoked (or that just returned).
-   * Present on `toolCall` + `toolResult` events (harness path only).
-   */
-  toolName?: string;
-  /**
-   * JSON-encoded arguments the LLM sent to the tool. Present ONLY on
-   * `toolCall`; absent on `toolResult` where {@link toolResult} carries
-   * the return text instead.
-   */
-  toolArgsJson?: string;
-  /**
-   * The tool's return text. Present ONLY on `toolResult`; may be
-   * pre-truncated by the emitter with an `…[truncated for event]`
-   * marker when the tool returns a large payload (e.g. a `_query`
-   * result). Consumers wanting the full text can re-run the tool.
-   */
-  toolResult?: string;
-}
 
 /**
  * Coarse-grained phase of a neighbourhood-state event.
@@ -160,27 +101,6 @@ export interface AutoProcessorEvent {
  */
 export type NeighbourhoodPhase = "claimed" | "finished" | "abandoned";
 
-/**
- * `auto-processor-neighbourhood-state` — perspective-scoped observability
- * event. Fires when THIS executor claims, finishes, or abandons a batch.
- * Anyone with perspective read access sees it, so a UI can render "someone
- * is auto-processing this" without receiving the batch payload or LLM I/O.
- *
- * Cross-executor visibility (peer's claim reaching us via Holochain sync) is
- * NOT covered here; consumers who need that subscribe to `link-added` and
- * filter for the `has_claim` predicate on the shared perspective.
- */
-export interface AutoProcessorNeighbourhoodStateEvent {
-  type: "auto-processor-neighbourhood-state";
-  perspectiveUuid: string;
-  processorId: string;
-  /** DID that claimed the batch — the pass owner's DID. */
-  claimantDid: string;
-  /** SHA-256 hex of the batch's item-id set — merge `claimed` + `finished`
-   *  for the same key to render a single row in a UI. */
-  batchKey: string;
-  phase: NeighbourhoodPhase;
-}
 
 /**
  * Opt a one-shot `runInterpretation` call into the same event streams a
@@ -315,3 +235,9 @@ export interface InterpretationOverlayInfo {
   /** `[realPredicate, stagedValue]` pairs — the model's proposed values. */
   inferred: [string, any][];
 }
+
+/** A step signal from one auto-processor pass (`auto-processor-event`). */
+export type { AutoProcessorEvent } from "../generated/api/AutoProcessorEvent";
+/** This executor claimed, finished or abandoned a batch
+ *  (`auto-processor-neighbourhood-state`). */
+export type { AutoProcessorNeighbourhoodState as AutoProcessorNeighbourhoodStateEvent } from "../generated/api/AutoProcessorNeighbourhoodState";

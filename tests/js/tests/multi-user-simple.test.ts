@@ -589,7 +589,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user1
             for (const link of links1) {
-                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.predicate} should be authored by user1`);
+                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.data.predicate} should be authored by user1`);
                 expect(link.proof.valid).to.be.true;
             }
 
@@ -610,7 +610,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user2
             for (const link of links2) {
-                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.predicate} should be authored by user2`);
+                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.data.predicate} should be authored by user2`);
                 expect(link.proof.valid).to.be.true;
             }
 
@@ -2460,12 +2460,12 @@ describe("Multi-User Simple integration tests", () => {
             // Subscribe both users to perspectiveAdded
             console.log("Subscribing users to perspectiveAdded...");
             
-            client1.perspective.addPerspectiveAddedListener((perspective) => {
+            client1.on('perspective-added', ({ perspective }) => {
                 console.log(`User 1 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1Events.push(perspective);
             });
 
-            client2.perspective.addPerspectiveAddedListener((perspective) => {
+            client2.on('perspective-added', ({ perspective }) => {
                 console.log(`User 2 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2Events.push(perspective);
             });
@@ -2527,12 +2527,12 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspectiveUpdated
             console.log("Subscribing users to perspectiveUpdated...");
-            client1.perspective.addPerspectiveUpdatedListener((perspective) => {
+            client1.on('perspective-updated', ({ perspective }) => {
                 console.log(`User 1 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1UpdateEvents.push(perspective);
             });
 
-            client2.perspective.addPerspectiveUpdatedListener((perspective) => {
+            client2.on('perspective-updated', ({ perspective }) => {
                 console.log(`User 2 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2UpdateEvents.push(perspective);
             });
@@ -2596,15 +2596,15 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspective_link_added for each user's perspective
             console.log("Subscribing users to perspective_link_added...");
-            client1.perspective.addPerspectiveLinkAddedListener(user1Perspective.uuid, [(link) => {
+            client1.on('link-added', ({ link }) => {
                 console.log(`User 1 received link added event in perspective ${user1Perspective.uuid}`);
                 user1LinkEvents.push(link);
-            }]);
+            }, { perspective: user1Perspective.uuid });
 
-            client2.perspective.addPerspectiveLinkAddedListener(user2Perspective.uuid, [(link) => {
+            client2.on('link-added', ({ link }) => {
                 console.log(`User 2 received link added event in perspective ${user2Perspective.uuid}`);
                 user2LinkEvents.push(link);
-            }]);
+            }, { perspective: user2Perspective.uuid });
 
             // Subscription-init delay (see comment above this describe)
             await sleep(1000);
@@ -2692,12 +2692,12 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspectiveRemoved
             console.log("Subscribing users to perspectiveRemoved...");
-            client1.perspective.addPerspectiveRemovedListener((uuid) => {
+            client1.on('perspective-removed', ({ perspectiveUuid: uuid }) => {
                 console.log(`User 1 received perspectiveRemoved event: ${uuid}`);
                 user1RemoveEvents.push(uuid);
             });
 
-            client2.perspective.addPerspectiveRemovedListener((uuid) => {
+            client2.on('perspective-removed', ({ perspectiveUuid: uuid }) => {
                 console.log(`User 2 received perspectiveRemoved event: ${uuid}`);
                 user2RemoveEvents.push(uuid);
             });
