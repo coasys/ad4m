@@ -538,6 +538,27 @@ jobs:
           working_directory: plugins/ad4m
           command: npm test
 
+  deploy-scripts:
+    # deploy/staging: shellcheck and the update.sh test (stubbed build and
+    # systemd, seconds). Needs no build; shellcheck is a pinned release binary.
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - run:
+          name: shellcheck deploy/staging
+          command: |
+            dir=$(mktemp -d)
+            curl -fsSL -o "$dir/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
+            echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $dir/shellcheck.tar.xz" | sha256sum -c -
+            tar -xJf "$dir/shellcheck.tar.xz" -C "$dir"
+            "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh
+            rm -rf "$dir"
+      - run:
+          name: update.sh test
+          command: deploy/staging/test/update.test.sh
+
 workflows:
   version: 2
   build-and-test:
@@ -546,6 +567,7 @@ workflows:
     jobs:
       - build
       - plugin-ad4m-tests
+      - deploy-scripts
       - js-unit-tests
       - fmt
       - clippy:
