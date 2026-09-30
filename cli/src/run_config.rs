@@ -337,14 +337,11 @@ pub(crate) mod tests {
             resolve(&[], &[]).unwrap().config.auto_permit_cap_requests,
             Some(true)
         );
-        assert_eq!(
-            resolve(&["--config", &config], &[])
-                .unwrap()
-                .config
-                .auto_permit_cap_requests
-                .unwrap_or(false),
-            false
-        );
+        assert!(!resolve(&["--config", &config], &[])
+            .unwrap()
+            .config
+            .auto_permit_cap_requests
+            .unwrap_or_default());
         assert_eq!(
             resolve(
                 &["--config", &config, "--auto-permit-cap-requests", "true"],

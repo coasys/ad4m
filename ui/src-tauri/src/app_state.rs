@@ -364,7 +364,7 @@ impl LauncherState {
         let tls_enabled = multi_user_config
             .tls_config
             .as_ref()
-            .is_some_and(|tls| tls.enabled);
+            .map_or(false, |tls| tls.enabled);
         let file = ExecutorConfigFile {
             app_data_path: Some(app_path),
             port: Some(port),
