@@ -2,8 +2,7 @@ import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, Perspect
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
-import { sleep } from "../utils/utils";
-import { pollUntil } from "../utils/linkLangConfig";
+import { pollUntil } from "../utils/utils";
 
 export default function perspectiveTests(testContext: TestContext) {
     return  () => {
@@ -160,13 +159,13 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink" });
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink2.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink2" });
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink3.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink3" });
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await sleep(10);
+                await pollUntil(() => Date.now() > new Date(addLink4.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink4" });
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
@@ -322,14 +321,14 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 const name = "Subscription Test Perspective"
                 const p = await ad4mClient.perspective.add(name)
-                await sleep(1000)
+                await pollUntil(() => perspectiveAdded.calledOnce, { timeoutMs: 5000, label: "perspectiveAdded callback fires" });
                 expect(perspectiveAdded.calledOnce).to.be.true;
                 const pSeenInAddCB = perspectiveAdded.getCall(0).args[0];
                 expect(pSeenInAddCB.uuid).to.equal(p.uuid)
                 expect(pSeenInAddCB.name).to.equal(p.name)
 
                 const p1 = await ad4mClient.perspective.update(p.uuid , "New Name")
-                await sleep(1000)
+                await pollUntil(() => perspectiveUpdated.calledOnce, { timeoutMs: 5000, label: "perspectiveUpdated callback fires" });
                 expect(perspectiveUpdated.calledOnce).to.be.true;
                 const pSeenInUpdateCB = perspectiveUpdated.getCall(0).args[0];
                 expect(pSeenInUpdateCB.uuid).to.equal(p1.uuid)
@@ -344,19 +343,19 @@ export default function perspectiveTests(testContext: TestContext) {
                 await ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'ad4m://root', target: 'lang://123'})
-                await sleep(1000)
+                await pollUntil(() => linkAdded.called, { timeoutMs: 5000, label: "linkAdded callback fires" });
                 expect(linkAdded.called).to.be.true;
                 expect(linkAdded.getCall(0).args[0]).to.eql(linkExpression)
 
                 const updatedLinkExpression = await ad4mClient.perspective.updateLink(p1.uuid , linkExpression, {source: 'ad4m://root', target: 'lang://456'})
-                await sleep(1000)
+                await pollUntil(() => linkUpdated.called, { timeoutMs: 5000, label: "linkUpdated callback fires" });
                 expect(linkUpdated.called).to.be.true;
                 expect(linkUpdated.getCall(0).args[0].newLink).to.eql(updatedLinkExpression)
 
                 const copiedUpdatedLinkExpression = {...updatedLinkExpression}
 
                 await ad4mClient.perspective.removeLink(p1.uuid , updatedLinkExpression)
-                await sleep(1000)
+                await pollUntil(() => linkRemoved.called, { timeoutMs: 5000, label: "linkRemoved callback fires" });
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
             })
@@ -882,7 +881,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 }))
 
                 // Wait for subscription update
-                await sleep(1000)
+                await pollUntil(() => updates.length > 0, { timeoutMs: 5000, intervalMs: 100, label: "subscription update received" });
 
                 // Verify we got an update
                 expect(updates.length).to.be.greaterThan(0)
