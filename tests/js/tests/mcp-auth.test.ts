@@ -80,7 +80,7 @@ describe("MCP Authentication HTTP Tests", function() {
         await sleep(3000);
 
         // Generate agent via REST (no MCP equivalent)
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via REST");
     });
@@ -248,7 +248,7 @@ describe("MCP Authentication HTTP Tests", function() {
 
         before(async function() {
             // Enable multi-user mode via REST so email tools work
-            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");
         });

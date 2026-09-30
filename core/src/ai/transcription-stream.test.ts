@@ -33,7 +33,7 @@ class FakeWebSocket {
 function setup(replies: Record<string, Reply>) {
   FakeWebSocket.replies = replies;
   const api = new ApiClient('http://localhost:12000', undefined, FakeWebSocket as any);
-  const ai = new AIClient('http://localhost:12000', undefined, false, api);
+  const ai = new AIClient('http://localhost:12000', undefined, api);
   const callbackCount = () => (api as any)._wsCallbacks.size as number;
   return { api, ai, callbackCount };
 }

@@ -220,7 +220,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         await sleep(3000);
 
         // Generate agent via REST (no MCP equivalent yet)
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         const agentStatus = await adminClient.agent.generate("test-passphrase");
         agentDid = agentStatus.did!;
         console.log("Agent generated via REST, DID:", agentDid);
@@ -1461,7 +1461,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         before(async function() {
             // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
-            wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+            wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
 
             // Set up a profile so get_mention_waker_config has names to search for
             await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {

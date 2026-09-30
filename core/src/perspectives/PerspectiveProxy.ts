@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { LinkCallback, LinkUpdatedCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowValidOutput,
@@ -510,7 +510,12 @@ export class QuerySubscriptionProxy {
     }
 }
 
-type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
+/** Callback type of each link event. */
+export interface LinkListeners {
+    "link-added": LinkCallback
+    "link-removed": LinkCallback
+    "link-updated": LinkUpdatedCallback
+}
 
 export type LinkStatus = "shared" | "local"
 interface Parameter {
@@ -583,12 +588,10 @@ export class PerspectiveProxy {
     /** @internal Exposed for ModelQueryBuilder subscription management */
     get client(): PerspectiveClient { return this.#client; }
 
-    #perspectiveLinkAddedCallbacks: LinkCallback[]
-    #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #linkListeners: { [K in keyof LinkListeners]: LinkListeners[K][] } = { "link-added": [], "link-removed": [], "link-updated": [] }
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[] = []
     /** Release of the one socket listener per type that feeds a callback array. */
-    #typeReleases = new Map<PerspectiveListenerTypes | 'sync-state-change', () => void>()
+    #typeReleases = new Map<keyof LinkListeners | 'sync-state-change', () => void>()
     /** Releases of the auto-processor listeners; each call adds one. */
     #autoProcessorReleases: (() => void)[] = []
     #ensuredSubjectClasses = new Set<string>()
@@ -600,10 +603,6 @@ export class PerspectiveProxy {
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
-        this.#perspectiveLinkUpdatedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
@@ -616,13 +615,13 @@ export class PerspectiveProxy {
 
     /** Registers the socket listener that feeds one callback array on first use,
      *  so a proxy with no listeners holds no socket callbacks. */
-    #register(type: PerspectiveListenerTypes | 'sync-state-change'): void {
+    #register(type: keyof LinkListeners | 'sync-state-change'): void {
         if (this.#typeReleases.has(type)) return
         const uuid = this.#handle.uuid
         this.#typeReleases.set(type,
-            type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#perspectiveLinkAddedCallbacks)
-            : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#perspectiveLinkRemovedCallbacks)
-            : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#perspectiveLinkUpdatedCallbacks)
+            type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#linkListeners['link-added'])
+            : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#linkListeners['link-removed'])
+            : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#linkListeners['link-updated'])
             : this.#client.addPerspectiveSyncStateChangeListener(uuid, this.#perspectiveSyncStateChangeCallbacks)
         )
     }
@@ -1327,18 +1326,15 @@ export class PerspectiveProxy {
      * perspective.addListener("link-removed", (link) => {
      *   console.log("Link removed:", link);
      * });
+     *
+     * // Listen for updated links: the callback receives { oldLink, newLink }
+     * perspective.addListener("link-updated", ({ oldLink, newLink }) => {
+     *   console.log("Link updated:", oldLink, "->", newLink);
+     * });
      * ```
      */
-    addListener(type: PerspectiveListenerTypes, cb: LinkCallback): void {
-        if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb);
-        } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb);
-        } else if (type === 'link-updated') {
-            this.#perspectiveLinkUpdatedCallbacks.push(cb);
-        } else {
-            return
-        }
+    addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
+        this.#linkListeners[type].push(cb)
         this.#register(type)
     }
 
@@ -1365,17 +1361,10 @@ export class PerspectiveProxy {
      * @param type - Type of change to stop listening for
      * @param cb - The callback function to remove
      */
-    removeListener(type: PerspectiveListenerTypes, cb: LinkCallback): void {
-        if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
-        } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
-        } else if (type === 'link-updated') {
-            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
-        }
+    removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
+        const listeners = this.#linkListeners[type]
+        const index = listeners.indexOf(cb)
+        if (index >= 0) listeners.splice(index, 1)
     }
 
     /** Removes every listener this proxy registered. Other proxies for the same
@@ -1385,9 +1374,7 @@ export class PerspectiveProxy {
         this.#typeReleases.clear()
         this.#autoProcessorReleases.forEach(release => release())
         this.#autoProcessorReleases = []
-        this.#perspectiveLinkAddedCallbacks.length = 0
-        this.#perspectiveLinkRemovedCallbacks.length = 0
-        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        for (const listeners of Object.values(this.#linkListeners)) listeners.length = 0
         this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 

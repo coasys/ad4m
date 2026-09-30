@@ -71,7 +71,7 @@ describe("MCP Neighbourhood Integration Tests", function () {
 
         await sleep(3000);
 
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated");
     });

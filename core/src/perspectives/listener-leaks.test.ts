@@ -29,7 +29,7 @@ class FakeWebSocket {
 function setup() {
   FakeWebSocket.instances = [];
   const api = new ApiClient('http://localhost:12000', undefined, FakeWebSocket as any);
-  const client = new PerspectiveClient('http://localhost:12000', undefined, false, api);
+  const client = new PerspectiveClient('http://localhost:12000', undefined, api);
   const callbackCount = () => (api as any)._wsCallbacks.size as number;
   const ws = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   const proxy = (uuid = 'uuid-1') => new PerspectiveProxy(

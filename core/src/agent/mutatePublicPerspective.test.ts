@@ -83,7 +83,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     const executor = new Executor();
     const FakeWs = makeFakeWebSocket(executor);
     (globalThis as any).WebSocket = FakeWs;
-    const client = new Ad4mClient('http://localhost:12000', 'token', false);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
 
     const agent = await client.agent.mutatePublicPerspective(mutations());
 
@@ -102,7 +102,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
   it('signs all additions with one addLinks call and copies no links one by one', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token', false);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
 
     await client.agent.mutatePublicPerspective({
       additions: [
@@ -122,7 +122,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
   it('creates no temporary perspective when there is nothing to add', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token', false);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
 
     const agent = await client.agent.mutatePublicPerspective({ additions: [], removals: [L1 as any] });
 
@@ -135,7 +135,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
     const executor = new Executor();
     const FakeWs = makeFakeWebSocket(executor);
     (globalThis as any).WebSocket = class { constructor() { throw new Error('global WebSocket must not be used'); } };
-    const client = new Ad4mClient('http://proxy', 'token', false, { webSocketImpl: FakeWs as any });
+    const client = new Ad4mClient('http://proxy', 'token', { webSocketImpl: FakeWs as any });
 
     const agent = await client.agent.mutatePublicPerspective(mutations());
 
@@ -147,7 +147,7 @@ describe('AgentClient.mutatePublicPerspective (L4)', () => {
   it('removes the temporary perspective when signing fails', async () => {
     const executor = new Executor();
     (globalThis as any).WebSocket = makeFakeWebSocket(executor);
-    const client = new Ad4mClient('http://localhost:12000', 'token', false);
+    const client = new Ad4mClient('http://localhost:12000', 'token');
     const original = executor.handle.bind(executor);
     executor.handle = (type, p) => {
       if (type === 'perspective.addLinks') throw new Error('sign failed');
