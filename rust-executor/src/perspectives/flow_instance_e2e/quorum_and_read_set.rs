@@ -111,12 +111,10 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     // `granted_at` the minter computed. The rule carries
     // `didProperty: "owner"` and the fixture writes the assignment link
     // `TASK --ns://owner--> literal(did)`, so the assignment link itself must
-    // travel. `asserted_instance_timestamp` is the *fallback* for instances
-    // that carry no assignment link, and accepting it here would let the
-    // assertion pass on a read-set where nothing travels at all — which is
-    // exactly the hole #1065's first review found: `grant_links` was empty for
-    // every `didProperty` role because the store query used the property
-    // *name* where the graph holds the RDF *predicate*. No disjunction.
+    // travel: it is the only thing that can date the grant (#1063). An empty
+    // `grant_links` is exactly the hole #1065's first review found: it was
+    // empty for every `didProperty` role because the store query used the
+    // property *name* where the graph holds the RDF *predicate*.
     assert!(
         !evidence.instances.is_empty(),
         "the voter's role query must have matched at least one instance: {evidence:?}"

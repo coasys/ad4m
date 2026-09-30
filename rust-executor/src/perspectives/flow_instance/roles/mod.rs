@@ -5,8 +5,8 @@
 //! why it happens in the loader and not in [`fold`](super::fold). It fails
 //! closed in every direction: a store error aborts the read rather than
 //! mis-counting a vote; a role query that cannot tell one DID from another
-//! is an error rather than "everybody passes"; a role instance that cannot be
-//! placed in time is an error rather than "granted since forever".
+//! is an error rather than "everybody passes"; a role instance no qualifying
+//! link can date grants nothing rather than "granted since forever".
 //!
 //! ## What a grant is, and what a revocation is
 //!
@@ -42,29 +42,39 @@
 //!
 //! ## Where the timestamps come from
 //!
-//! - `granted_at` is the earliest `instance --didProperty--> did` link, when
-//!   the query names a `didProperty` and that link exists — there the grant is
-//!   dated from the assignment itself; otherwise the instance's own timestamp
-//!   (its earliest link, as `model_query` reports it). Only that fallback is
-//!   coarse: in it, membership acquired on a pre-existing instance dates from the
-//!   instance, not the acquisition. Neither branch is ever "unknown, so always":
-//!   an instance with no timestamp at all is an error.
+//! - `granted_at`, for every role query without `producedByFlow`, comes from
+//!   one rule ([`dating`]), applied where the evidence is collected and again
+//!   in [`RoleGrantEvidence::resolve`]:
 //!
-//!   **This paragraph described the intent from #1027 until #1065; it did not
-//!   describe the code.** The `didProperty` branch had never once executed:
-//!   the role's `didProperty` is a property *name* and the lookup passed it to
-//!   `get_links` as an RDF *predicate*, so it matched nothing and every
-//!   `didProperty` role fell through to the fallback — which is normally
-//!   EARLIER than the assignment link, making the branch advertised as the
-//!   precise one the widest one available. Every such grant was therefore
-//!   retroactive to the instance's creation, and votes cast between then and
-//!   the DID actually being assigned counted toward quorum. `didProperty` is
-//!   resolved through the class shape since #1065 — by a hand-rolled lookup
-//!   at first, and since #1103 by `model_query` itself, which reads the
-//!   assignment links through its `links` option
-//!   ([`RoleGrantLinks::query_keys`]); the sentence above is true from #1065
-//!   forward and from no earlier commit. Receipts minted before it date their
-//!   grants from the instance.
+//!   1. **DID fields.** A `where` field whose translated condition is the
+//!      candidate's DID is a DID field: `didProperty` is one, `member: "$did"`
+//!      another. A grant link is a link on a DID field that names the DID,
+//!      whose signature verifies, and whose author [`granter_authorised`](evidence::granter_authorised)
+//!      accepts, the same function that decides who may revoke. The grant
+//!      counts from the earliest grant link.
+//!   2. **`author: "$did"`** (and `didProperty: "author"`, which says the
+//!      same), in a rule with no DID field. The grant is the instance
+//!      itself, written by the grantee. It counts from the earliest link on
+//!      the instance, on a predicate the class declares, whose signature
+//!      verifies and whose author is the candidate. The author condition
+//!      must be `$did` itself: `author: { in: ["$did", admin] }` is not.
+//!   3. A rule with a DID field is dated by rule 1 alone, even where it also
+//!      says `author: "$did"`. Rule 1 already accepts the grantee's own link
+//!      on the field when the author condition admits `$did`, and it must
+//!      also accept a link from any other granter the condition admits
+//!      (`author: { in: ["$did", admin] }`, or `or` arms `author: "$did"` /
+//!      `author: admin`, which the translator collapses into that list). So
+//!      in a rule whose `or` arms mix a DID field with a separate
+//!      `author: "$did"` arm, a candidate who matches only that arm is not
+//!      granted.
+//!   4. A rule with neither, or an instance with no qualifying link, grants
+//!      nothing: the instance contributes no window. Nothing else dates a
+//!      grant, not the instance's own timestamp, not a link from anyone the
+//!      rule does not accept.
+//!
+//!   Before #1063 the grant counted from the earliest link naming the DID
+//!   from any author, signed or not, and a rule with no `didProperty` fell
+//!   back to the instance's earliest link, so anyone could back-date a grant.
 //! - `granted_at` is **the granting run's quorum time** when the role query
 //!   declares `producedByFlow`, and then nothing else may date it — not the
 //!   assignment link, not the instance timestamp, not even as a fallback. See
@@ -80,37 +90,36 @@
 //!
 //! ## Authority
 //!
-//! A tombstone counts only when its signature verifies **and** its author
-//! is one the grant's own rule would accept as a granter: the role query's
-//! `author` condition (top level, and any `or` branch) is applied to the
-//! tombstone's author through `model_query`'s own condition evaluator
-//! ([`revocation_authorised`]). The translator nests that condition under
+//! A grant link and a tombstone each count only when the signature verifies
+//! **and** the author is one the grant's own rule accepts as a granter: the
+//! role query's `author` condition (top level, and any `or` branch) is
+//! applied to the link's author through `model_query`'s own condition
+//! evaluator ([`granter_authorised`](evidence::granter_authorised)). The translator nests that condition under
 //! every `where` field the rule filters on, `{ forTask: { eq: T, author: A },
 //! agent: { eq: did, author: A } }`, and under the fields of every `or` arm
 //! that names no author of its own, so a grant counts only when A wrote the
 //! `agent` link and every other `where` link the rule matches on (#1114), and
 //! a revocation only when A wrote the tombstone. The `linkedTo` link is not
 //! one of them: it is matched from any author until `model_query` can scope
-//! the parent link (#1139). That covers eligibility, not dating:
-//! `granted_at` is still the earliest `agent -> did` link from *any* author,
-//! so a candidate's own earlier link back-dates a grant A made later (#1063).
-//! The condition is read from the *translated*
+//! the parent link (#1139). The condition is read from the *translated*
 //! query — `$did` is already substituted to the candidate whose membership
 //! is being tested, and never stands for anyone's author — so
 //! `where: { author: "did:…admin" }` makes grants *and* revocations
 //! admin-only, while `author: "$did"` requires the author to be that
 //! candidate: a role that can only be self-granted is therefore also only
-//! self-revoked. A rule with no author condition lets anyone grant — and,
-//! symmetrically, anyone revoke — which is exactly the authority that social
-//! DNA already declares.
+//! self-revoked, and dated only by the grantee's own links. A rule with no
+//! author condition lets anyone grant — and, symmetrically, anyone revoke —
+//! which is exactly the authority that social DNA already declares.
 //!
 //! ## Accepted caveat: author-asserted timestamps
 //!
 //! A tombstone's timestamp is asserted by its author, so an admin could
-//! back-date a revocation and retroactively un-settle an edge. That is an
-//! escalation of *timing* only, within an authority the social DNA already
-//! grants: the admin controls membership, and a back-dated revocation
-//! achieves nothing a genuinely earlier one would not have. Documented, not
+//! back-date a revocation and retroactively un-settle an edge; the same holds
+//! for a grant link an admin back-dates. That is an escalation of *timing*
+//! only, within an authority the social DNA already grants: the admin
+//! controls membership, and a back-dated grant or revocation achieves nothing
+//! a genuinely earlier one would not have. Nobody else can move either edge:
+//! their links do not count. Documented, not
 //! engineered around, in v1 (#1027).
 //!
 //! The half of this that *is* engineered around is the **grant** side, for
@@ -141,18 +150,13 @@
 //! [`RoleGrantEvidence::resolve`] (when it is read) — otherwise the minter
 //! and the verifier disagree, which either mints receipts that fail their own
 //! verification or lets material the minter dropped widen a window. Hence one
-//! predicate per link kind, exported from `flow_evaluator` and called from
-//! both sites: [`grant_link_names_did`] and [`revocation_link_counts_for_did`].
-//!
-//! The two kinds are filtered *differently*, unchanged from pre-#1027:
-//! tombstones must carry a verified signature, grant links need only name the
-//! DID. Making grant links signature-filtered too is a real hole but not a
-//! one-line one — `granted_at` falls back to the instance timestamp, which is
-//! normally earlier than the assignment link, so dropping links can widen the
-//! window rather than narrow it, and the bigger half of the hole is a missing
-//! author filter. See <https://github.com/coasys/ad4m/issues/1063>, which
-//! also waits on the `proof.valid` tri-state (#1046).
+//! predicate per link kind, called from both sites:
+//! [`GrantDating`](dating::GrantDating) for the links that date a grant and
+//! [`revocation_link_counts_for_did`](crate::perspectives::flow_evaluator::revocation_link_counts_for_did)
+//! for tombstones. Collection filters the dating links before it caps them,
+//! so links that do not count cannot evict one that does.
 
+pub mod dating;
 pub mod evidence;
 #[cfg(test)]
 mod test_support;
@@ -165,7 +169,7 @@ use crate::perspectives::flow_evaluator::{
     requires_query_input, run_query, RequiresQueryable, RoleGrantLinks,
 };
 use crate::perspectives::shacl_parser::{ConsensusRule, ModelQuery};
-use evidence::instance_timestamp;
+use dating::GrantDating;
 pub use evidence::{RoleGrantEvidence, RoleInstanceHistory};
 use serde_json::Value;
 pub use window::{RoleGrant, RoleGrantWindow};
@@ -186,19 +190,20 @@ pub use window::{RoleGrant, RoleGrantWindow};
 /// A query that references the DID in neither way cannot discriminate
 /// between candidates, and "I cannot determine membership" must never
 /// degrade to "everyone is a member" — so it is an `Err`, as is any store or
-/// translation failure. Timing is **not** decided here any more: an instance
-/// that cannot be placed in time fails closed in [`RoleGrantEvidence::resolve`],
-/// on both sides of the wire, rather than only on this one.
+/// translation failure. Timing is **not** decided here: an instance no link
+/// can date grants nothing in [`RoleGrantEvidence::resolve`], on both sides
+/// of the wire.
 ///
-/// The grant links and the signed tombstones come back with the matches: the
-/// role query asks `model_query` for [`RoleGrantLinks::query_keys`] and
+/// The dating links and the signed tombstones come back with the matches:
+/// the role query asks `model_query` for [`RoleGrantLinks::query_keys`] and
 /// [`RoleGrantLinks::from_instance`] reads each match's history off the
-/// result, so the fan-out is one `model_query` per candidate (it was
-/// candidates × instances × 2 `get_links` before #1103). Authority is
-/// deliberately **not** applied
-/// here: the tombstones travel unfiltered and the reader applies
-/// [`revocation_authorised`] itself, so a minter cannot silently mis-apply
-/// the rule. Nothing here is queried again by the fold.
+/// result, so the fan-out is one `model_query` per candidate, plus one
+/// [`RequiresQueryable::class_predicates`] per role under `author: "$did"`.
+/// The dating links are filtered by [`GrantDating`] there and again by the
+/// reader; the tombstones travel without the authority filter and the reader
+/// applies [`granter_authorised`](evidence::granter_authorised) itself, so a
+/// minter cannot silently mis-apply the rule. Nothing here is queried again
+/// by the fold.
 pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
     perspective: &Q,
     to_state: &str,
@@ -219,11 +224,6 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         );
     }
 
-    // A property NAME, not a predicate. `model_query` resolves it through
-    // the class's shape, for the `where` that matches and for the `links`
-    // that date the match alike — see `RoleGrantLinks::query_keys`.
-    let did_property = role.did_property.as_deref();
-
     // A `producedByFlow` gate is decided here, against this replica's own
     // graph, once for the whole role: every receipt fully verified, bound to
     // `(role.class_name, id)`. Over budget, or a flow this replica does not
@@ -236,23 +236,33 @@ pub async fn resolve_role_grants<Q: RequiresQueryable + ?Sized>(
         None => None,
     };
 
+    // Under `author: "$did"` with no DID field any link the grantee wrote on
+    // the instance can date the grant, so the role query asks for every predicate the class
+    // declares. Asked once per role; unused otherwise.
+    let mut own_link_keys: Option<Vec<String>> = None;
+
     let mut evidence = Vec::with_capacity(candidates.len());
     for did in candidates {
         // `links` is added to this read only. The translated query `resolve`
         // reads the authority rule from is rebuilt by the reader without it.
         let mut input = requires_query_input(role, record, did)?;
-        input["links"] = Value::from(RoleGrantLinks::query_keys(did_property));
+        let dating = GrantDating::new(role, &input, did)?;
+        if dating.by_grantee && own_link_keys.is_none() {
+            own_link_keys = Some(perspective.class_predicates(&role.class_name).await?);
+        }
+        let own_keys = own_link_keys.as_deref().unwrap_or_default();
+        input["links"] = Value::from(RoleGrantLinks::query_keys(&dating, own_keys));
         let matched = run_query(perspective, &role.class_name, &input).await?;
 
         let mut instances = Vec::with_capacity(matched.len());
         for item in &matched {
             let content: Value = serde_json::from_str(&item.content)?;
-            let links = RoleGrantLinks::from_instance(&content, did_property, did)?;
+            let links = RoleGrantLinks::from_instance(&content, &dating, own_keys)?;
             instances.push(RoleInstanceHistory {
                 instance_id: item.id.clone(),
                 grant_links: links.grant_links,
+                grantees_own_links: links.grantees_own_links,
                 revocation_links: links.revocation_links,
-                asserted_instance_timestamp: instance_timestamp(item),
                 produced_at: produced
                     .as_ref()
                     .and_then(|by_id| by_id.get(&item.id).cloned()),
@@ -314,7 +324,8 @@ mod tests {
              json!({ "className": "ns://Reviewer", "didProperty": "agent" }),
              vec![ALICE()], vec![ALICE(), BOB()], vec![ALICE()], Some(2)),
             ("shape 2: $did token substitutes per candidate",
-             json!({ "className": "ns://Member", "where": { "member": "$did" } }),
+             // `agent`, the stub's grant key: a `$did` field is dated by its own links.
+             json!({ "className": "ns://Member", "where": { "agent": "$did" } }),
              vec![BOB()], vec![ALICE(), BOB()], vec![BOB()], None),
             ("one role instance does not satisfy count.min = 2",
              json!({ "className": "ns://Reviewer", "didProperty": "agent", "count": { "min": 2 } }),
@@ -336,7 +347,7 @@ mod tests {
                 assert_eq!(g.instances, g.windows.iter().map(|w| w.instance_id.clone()).collect::<Vec<_>>(),
                            "{name}: `instances` is the windows' IDs");
                 for w in &g.windows {
-                    assert_eq!(w.granted_at, T0, "{name}: an undated grant link dates from the instance");
+                    assert_eq!(w.granted_at, T0, "{name}: dated by admin's grant link");
                     assert!(w.revocations.is_empty(), "{name}: no tombstones were reported");
                 }
             }
@@ -379,16 +390,17 @@ mod tests {
         }
 
         // Timing fails closed one step later, in the pure resolve, so it fails
-        // the same way for a reader off-perspective: an instance with no signed
-        // grant link and no instance timestamp cannot be placed in time, and
-        // an unplaceable grant gates nothing rather than gating everything.
+        // the same way for a reader off-perspective: an instance no link can
+        // date grants nothing, rather than gating everything.
         let stub = RoleStub { undated_instances: true, ..members(&[ALICE()]) };
         let undated = role(json!({ "className": "ns://Reviewer", "didProperty": "agent" }));
         let evidence = resolve_role_grants(&stub, "approved", &undated, &record(), &dids(&[ALICE()]))
             .await
             .expect("collecting the links themselves cannot fail on timing");
-        let err = evidence[0].resolve(&translated(&undated, ALICE()), &undated).expect_err("undated instance");
-        assert!(err.to_string().contains("cannot be placed in time"), "got {err:#}");
+        assert_eq!(evidence[0].instances.len(), 1, "the instance matched");
+        let grant = evidence[0].resolve(&translated(&undated, ALICE()), &undated).expect("resolves");
+        assert!(grant.windows.is_empty(), "but nothing dates it, so it is no grant");
+        assert!(!grant.eligible_at(NOW, None));
 
         // And the undeterminable rule never even runs a query.
         let stub = RoleStub { unconditional_instances: Some(1), ..Default::default() };
