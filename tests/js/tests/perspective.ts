@@ -1,5 +1,5 @@
 import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
 import { sleep } from "../utils/utils";
