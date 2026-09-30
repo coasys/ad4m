@@ -23,7 +23,10 @@ on:
       - 'planning/**'
   workflow_dispatch:
 
-# One at a time and in order, so the `dev` tag always ends on the latest merge.
+# One at a time and in order, so the `dev` tag always ends on the latest merge. GitHub keeps one
+# pending run per group, so when merges arrive faster than a publish, a newer pending run replaces
+# the older one: that commit gets no version of its own, and the next one covers it. Running them in
+# parallel instead would let an older run finish last and move `dev` backwards.
 concurrency:
   group: publish-dev
   cancel-in-progress: false
@@ -38,7 +41,10 @@ jobs:
     container:
       image: coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
     steps:
+      # The job holds the npm token, so the checkout leaves no git credentials behind.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install deps
         run: pnpm install
