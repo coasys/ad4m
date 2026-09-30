@@ -58,7 +58,7 @@ describe("Multi-User Simple integration tests", () => {
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
             apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl!, bootstrapUrl!);
 
-        adminAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+        adminAd4mClient = new Ad4mClient(baseUrl(apiPort))
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -152,7 +152,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Login one user to update their last_seen
             const token1 = await adminAd4mClient!.agent.loginUser("stats1@example.com", "password1");
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
 
             // User 1 creates a perspective
             await client1.perspective.add("User 1 Perspective");
@@ -217,7 +217,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Login the user (this should trigger last_seen tracking)
             const token = await adminAd4mClient!.agent.loginUser("lastseen@example.com", "password");
-            const userClient = new Ad4mClient(baseUrl(apiPort), token, false);
+            const userClient = new Ad4mClient(baseUrl(apiPort), token);
 
             console.log("========================HERE================================");
             // Make a request to trigger last_seen update
@@ -315,7 +315,7 @@ describe("Multi-User Simple integration tests", () => {
             const userToken = await adminAd4mClient!.agent.loginUser("charlie@example.com", "password789");
 
             // Create authenticated client
-            const userClient = new Ad4mClient(baseUrl(apiPort), userToken, false);
+            const userClient = new Ad4mClient(baseUrl(apiPort), userToken);
             
             // Test agent.me
             const agent = await userClient.agent.me();
@@ -333,12 +333,12 @@ describe("Multi-User Simple integration tests", () => {
             
             // Login first time
             const token1 = await adminAd4mClient!.agent.loginUser("dave@example.com", "passwordABC");
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
             const agent1 = await client1.agent.me();
 
             // Login second time
             const token2 = await adminAd4mClient!.agent.loginUser("dave@example.com", "passwordABC");
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
             const agent2 = await client2.agent.me();
 
             // Should get the same DID both times
@@ -379,8 +379,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("isolation1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("isolation2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get initial perspective counts
             const user1InitialPerspectives = await client1.perspective.all();
@@ -427,7 +427,7 @@ describe("Multi-User Simple integration tests", () => {
             // Create a user and their perspective
             const userResult = await createTestUser("mainisolation@example.com", "password");
             const userToken = await adminAd4mClient!.agent.loginUser("mainisolation@example.com", "password");
-            const userClient = new Ad4mClient(baseUrl(apiPort), userToken, false);
+            const userClient = new Ad4mClient(baseUrl(apiPort), userToken);
 
             const userPerspective = await userClient.perspective.add("User Isolated Perspective");
             expect(userPerspective.name).to.equal("User Isolated Perspective");
@@ -459,8 +459,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("accessctrl1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("accessctrl2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
             
             // User 1 creates a perspective
             const perspective1 = await client1.perspective.add("Access Test Perspective");
@@ -493,8 +493,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("linkauth1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("linkauth2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // User 1 creates perspective and adds a link
             const p1 = await client1.perspective.add("User 1 Test Perspective");
@@ -568,8 +568,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("subject1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("subject2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // User 1 creates perspective and ensures SDNA subject class
             const p1 = await client1.perspective.add("User 1 Subject Test Perspective");
@@ -633,8 +633,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("profile1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("profile2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get initial agent info for both users
             const user1Agent = await client1.agent.me();
@@ -671,8 +671,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("status1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("status2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Check agent status for both users
             const user1Status = await client1.agent.status();
@@ -718,8 +718,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("update1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("update2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // User 1 updates their profile
             let link1 = new LinkExpression();
@@ -780,8 +780,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("private1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("private2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get agent info for both users
             const user1Agent = await client1.agent.me();
@@ -814,8 +814,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("agentlang1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("agentlang2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get the DIDs for both users
             const user1Agent = await client1.agent.me();
@@ -896,8 +896,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("perspective1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("perspective2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get initial agent info
             const user1Agent = await client1.agent.me();
@@ -1003,8 +1003,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("expr1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("expr2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get the DIDs for both users
             const user1Agent = await client1.agent.me();
@@ -1068,8 +1068,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("nh1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("nh2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get the DIDs for both users
             const user1Agent = await client1.agent.me();
@@ -1197,8 +1197,8 @@ describe("Multi-User Simple integration tests", () => {
             await createTestUser("conv2@example.com", "password2");
             const token1 = await adminAd4mClient!.agent.loginUser("conv1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("conv2@example.com", "password2");
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Agent 1 publishes a neighbourhood; agent 2 joins it.
             const p1Handle = await client1.perspective.add("Convergence Neighbourhood");
@@ -1326,8 +1326,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("prolog1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("prolog2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             console.log("User 1 creates neighbourhood and adds initial SDNA...");
 
@@ -1438,8 +1438,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("signal1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("signal2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get user DIDs
             const user1Status = await client1.agent.status();
@@ -1598,8 +1598,8 @@ describe("Multi-User Simple integration tests", () => {
             await createTestUser("flux2@example.com", "password2");
             const token2 = await adminAd4mClient!.agent.loginUser("flux2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get user DIDs
             const user1Status = await client1.agent.me();
@@ -1771,7 +1771,7 @@ describe("Multi-User Simple integration tests", () => {
             // Create and login a managed user
             await createTestUser("main_agent_signal@example.com", "password");
             const userToken = await adminAd4mClient!.agent.loginUser("main_agent_signal@example.com", "password");
-            const userClient = new Ad4mClient(baseUrl(apiPort), userToken, false);
+            const userClient = new Ad4mClient(baseUrl(apiPort), userToken);
 
             const userStatus = await userClient.agent.me();
             const userDid = userStatus.did!;
@@ -1920,7 +1920,7 @@ describe("Multi-User Simple integration tests", () => {
                 bootstrapUrl!
             );
 
-            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort), undefined, false);
+            node2AdminClient = new Ad4mClient(baseUrl(node2GqlPort));
             await node2AdminClient.agent.generate("passphrase");
             await node2AdminClient.runtime.setMultiUserEnabled(true);
 
@@ -1928,14 +1928,14 @@ describe("Multi-User Simple integration tests", () => {
             // Create and login 2 users on node 1
             await createTestUser("node1user1@example.com", "password1");
             const node1User1Token = await adminAd4mClient!.agent.loginUser("node1user1@example.com", "password1");
-            node1User1Client = new Ad4mClient(baseUrl(apiPort), node1User1Token, false);
+            node1User1Client = new Ad4mClient(baseUrl(apiPort), node1User1Token);
             const node1User1Agent = await node1User1Client.agent.me();
             node1User1Did = node1User1Agent.did;
             console.log("Node 1 User 1 DID:", node1User1Did);
 
             await createTestUser("node1user2@example.com", "password2");
             const node1User2Token = await adminAd4mClient!.agent.loginUser("node1user2@example.com", "password2");
-            node1User2Client = new Ad4mClient(baseUrl(apiPort), node1User2Token, false);
+            node1User2Client = new Ad4mClient(baseUrl(apiPort), node1User2Token);
             const node1User2Agent = await node1User2Client.agent.me();
             node1User2Did = node1User2Agent.did;
             console.log("Node 1 User 2 DID:", node1User2Did);
@@ -1945,7 +1945,7 @@ describe("Multi-User Simple integration tests", () => {
             await node2AdminClient.agent.createUser("node2user1@example.com", "password3");
             await node2AdminClient.runtime.setUserFreeAccess("node2user1@example.com", true);
             const node2User1Token = await node2AdminClient.agent.loginUser("node2user1@example.com", "password3");
-            node2User1Client = new Ad4mClient(baseUrl(node2GqlPort), node2User1Token, false);
+            node2User1Client = new Ad4mClient(baseUrl(node2GqlPort), node2User1Token);
             const node2User1Agent = await node2User1Client.agent.me();
             node2User1Did = node2User1Agent.did;
             console.log("Node 2 User 1 DID:", node2User1Did);
@@ -1953,7 +1953,7 @@ describe("Multi-User Simple integration tests", () => {
             await node2AdminClient.agent.createUser("node2user2@example.com", "password4");
             await node2AdminClient.runtime.setUserFreeAccess("node2user2@example.com", true);
             const node2User2Token = await node2AdminClient.agent.loginUser("node2user2@example.com", "password4");
-            node2User2Client = new Ad4mClient(baseUrl(node2GqlPort), node2User2Token, false);
+            node2User2Client = new Ad4mClient(baseUrl(node2GqlPort), node2User2Token);
             const node2User2Agent = await node2User2Client.agent.me();
             node2User2Did = node2User2Agent.did;
             console.log("Node 2 User 2 DID:", node2User2Did);
@@ -2450,8 +2450,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("sub1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("sub2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Track perspective added events for both users
             const user1Events: any[] = [];
@@ -2464,13 +2464,11 @@ describe("Multi-User Simple integration tests", () => {
                 console.log(`User 1 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1Events.push(perspective);
             });
-            client1.perspective.subscribePerspectiveAdded();
 
             client2.perspective.addPerspectiveAddedListener((perspective) => {
                 console.log(`User 2 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2Events.push(perspective);
             });
-            client2.perspective.subscribePerspectiveAdded();
 
             // Subscription-init delay (see comment above this describe)
             await sleep(1000);
@@ -2516,8 +2514,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("update1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("update2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Create perspectives for both users
             const user1Perspective = await client1.perspective.add("User 1 Update Test");
@@ -2533,13 +2531,11 @@ describe("Multi-User Simple integration tests", () => {
                 console.log(`User 1 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1UpdateEvents.push(perspective);
             });
-            client1.perspective.subscribePerspectiveUpdated();
 
             client2.perspective.addPerspectiveUpdatedListener((perspective) => {
                 console.log(`User 2 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2UpdateEvents.push(perspective);
             });
-            client2.perspective.subscribePerspectiveUpdated();
 
             // Subscription-init delay (see comment above this describe)
             await sleep(1000);
@@ -2587,8 +2583,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("linkuser1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("linkuser2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Create perspectives for both users
             const user1Perspective = await client1.perspective.add("User 1 Link Test");
@@ -2682,8 +2678,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("remove1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("remove2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Create perspectives for both users
             const user1Perspective = await client1.perspective.add("User 1 Remove Test");
@@ -2700,13 +2696,11 @@ describe("Multi-User Simple integration tests", () => {
                 console.log(`User 1 received perspectiveRemoved event: ${uuid}`);
                 user1RemoveEvents.push(uuid);
             });
-            client1.perspective.subscribePerspectiveRemoved();
 
             client2.perspective.addPerspectiveRemovedListener((uuid) => {
                 console.log(`User 2 received perspectiveRemoved event: ${uuid}`);
                 user2RemoveEvents.push(uuid);
             });
-            client2.perspective.subscribePerspectiveRemoved();
 
             // Subscription-init delay (see comment above this describe)
             await sleep(1000);
@@ -2754,8 +2748,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("notify1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("notify2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // User 1 creates a perspective and notification
             const user1Perspective = await client1.perspective.add("User 1 Notification Test");
@@ -2822,8 +2816,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("did1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("did2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             // Get each user's agent DID
             const user1Status = await client1.agent.status();
@@ -2906,8 +2900,8 @@ describe("Multi-User Simple integration tests", () => {
             const token1 = await adminAd4mClient!.agent.loginUser("access1@example.com", "password1");
             const token2 = await adminAd4mClient!.agent.loginUser("access2@example.com", "password2");
 
-            const client1 = new Ad4mClient(baseUrl(apiPort), token1, false);
-            const client2 = new Ad4mClient(baseUrl(apiPort), token2, false);
+            const client1 = new Ad4mClient(baseUrl(apiPort), token1);
+            const client2 = new Ad4mClient(baseUrl(apiPort), token2);
 
             const perspective = await client1.perspective.add("Access Test");
 
@@ -2950,7 +2944,7 @@ describe("Multi-User Simple integration tests", () => {
             await createTestUser("grant-test@example.com", "password1");
             const token = await adminAd4mClient!.agent.loginUser("grant-test@example.com", "password1");
 
-            const managedClient = new Ad4mClient(baseUrl(apiPort), token, false);
+            const managedClient = new Ad4mClient(baseUrl(apiPort), token);
 
             const perspective = await managedClient.perspective.add("Grant Test");
 
@@ -3047,7 +3041,7 @@ describe("Multi-User Simple integration tests", () => {
                 bootstrapUrl!
             );
 
-            node3MainClient = new Ad4mClient(baseUrl(node3GqlPort), undefined, false);
+            node3MainClient = new Ad4mClient(baseUrl(node3GqlPort));
             await node3MainClient.agent.generate("passphrase");
             // Note: we do NOT enable multi-user on Node 3 - it's a standalone agent
 
@@ -3155,7 +3149,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n--- Creating managed user (late signup) ---");
             await createTestUser("flux-managed@example.com", "fluxpass");
             const managedToken = await adminAd4mClient!.agent.loginUser("flux-managed@example.com", "fluxpass");
-            localManagedUserClient = new Ad4mClient(baseUrl(apiPort), managedToken, false);
+            localManagedUserClient = new Ad4mClient(baseUrl(apiPort), managedToken);
             const managedAgent = await localManagedUserClient.agent.me();
             localManagedUserDid = managedAgent.did;
             console.log("Created managed user DID:", localManagedUserDid);

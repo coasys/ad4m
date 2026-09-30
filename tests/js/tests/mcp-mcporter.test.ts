@@ -76,7 +76,7 @@ describe("MCP mcporter Integration Tests", function() {
 
         // Poll until the server answers, then generate once: generate() is
         // not idempotent, so retrying it could only fail with "already exists".
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await pollUntil(async () => {
             await adminClient.agent.status();
             return true;

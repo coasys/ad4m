@@ -1,4 +1,4 @@
-import { Ad4mClient, Link, LinkQuery, PerspectiveProxy, PerspectiveState } from "@coasys/ad4m";
+import { Ad4mClient, Link, LinkQuery, MentionMessage, PerspectiveProxy, PerspectiveState, QuerySubscriptionProxy, WakerSubscriptionManager } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { expect } from "chai";
 import * as sinon from "sinon";
@@ -256,6 +256,37 @@ export default function perspectiveTests(testContext: TestContext) {
 
                 let queryLinksDeleted = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test2"}));
                 expect(queryLinksDeleted.length).to.equal(0);
+            })
+
+            it('waker resolves the parent of a new mention', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("waker mention parents")
+                const quiet = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
+                const wakes: (MentionMessage[] | undefined)[] = []
+                const manager = new WakerSubscriptionManager({
+                    perspectiveClient: ad4mClient.perspective,
+                    logger: quiet,
+                    QuerySubscriptionProxy,
+                    debounceMs: 50,
+                    onWake: (_sub, _result, mentions) => { wakes.push(mentions) },
+                })
+                try {
+                    await manager.subscribe({
+                        id: 'waker-mention-parents',
+                        type: 'mention',
+                        perspective: p.uuid,
+                        channel: '',
+                        query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
+                    })
+                    await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+
+                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
+                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
+                } finally {
+                    manager.disposeAll()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
             })
 
             it('subscriptions', async () => {

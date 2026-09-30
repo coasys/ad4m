@@ -79,7 +79,7 @@ describe("MCP Authentication HTTP Tests", function() {
 
         // Poll until the server answers, then generate once: generate() is
         // not idempotent, so retrying it could only fail with "already exists".
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await pollUntil(async () => {
             await adminClient.agent.status();
             return true;
@@ -248,7 +248,7 @@ describe("MCP Authentication HTTP Tests", function() {
 
         before(async function() {
             // Enable multi-user mode via REST so email tools work
-            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");
         });
