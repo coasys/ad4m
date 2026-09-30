@@ -493,6 +493,26 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An empty admin credential would grant every capability to a client
+    /// that sends no token, so it stops `run` from every source.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_admin_credential_stops_run() {
+        let _env = lock_env();
+        let dir = scratch_dir("empty-admin");
+        let empty = write_secret(&dir.join("admin"), "\n");
+        let err = resolve(&[], &[("AD4M_ADMIN_CREDENTIAL_FILE", &empty)])
+            .err()
+            .expect("an empty credential file is an error");
+        assert!(format!("{err:#}").contains("is empty"), "{err:#}");
+
+        assert!(
+            resolve(&["--admin-credential", ""], &[]).is_err(),
+            "an empty --admin-credential is an error"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_group_readable_secret_file_stops_run() {

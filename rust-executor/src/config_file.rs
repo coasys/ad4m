@@ -467,6 +467,44 @@ mod tests {
         assert_eq!(log_config["holochain"], "warn");
     }
 
+    /// `launcher-state.json` written by a later launcher may carry keys this
+    /// version does not know. The launcher must still read it: a failed
+    /// parse makes `LauncherState::load` fall back to the default state,
+    /// and the next save overwrites the file.
+    #[test]
+    fn the_shared_types_accept_keys_they_do_not_know() {
+        let multi_user: MultiUserSettings<serde_json::Value> = serde_json::from_str(
+            r#"{"enabled": true, "smtp_config": null, "future_key": 1,
+                "tls_config": {"enabled": true, "cert_file_path": "/c", "key_file_path": "/k",
+                               "tls_port": 12100, "future_tls_key": "x"}}"#,
+        )
+        .expect("unknown multi_user_config keys are ignored");
+        assert_eq!(multi_user.tls_config.unwrap().tls_port, Some(12100));
+    }
+
+    #[test]
+    fn an_unknown_nested_key_in_the_config_file_is_rejected() {
+        for (json, key) in [
+            (
+                r#"{"multi_user_config": {"enabled": true, "tls": null}}"#,
+                "multi_user_config.tls",
+            ),
+            (
+                r#"{"multi_user_config": {"enabled": true, "tls_config":
+                    {"enabled": false, "cert_file_path": "", "key_file_path": "",
+                     "tls_prot": 1}}}"#,
+                "multi_user_config.tls_config.tls_prot",
+            ),
+            (
+                &SMTP_FILE.replace(r#""port": 465,"#, r#""port": 465, "hots": "x","#),
+                "multi_user_config.smtp_config.hots",
+            ),
+        ] {
+            let err = parse(json).unwrap_err().to_string();
+            assert!(err.contains(&format!("unknown key `{key}`")), "{err}");
+        }
+    }
+
     #[test]
     fn an_inline_smtp_password_is_rejected() {
         let err = parse(&SMTP_FILE.replace(r#""port": 465,"#, r#""port": 465, "password": "x","#))
@@ -486,11 +524,7 @@ mod tests {
     #[test]
     fn an_unknown_key_is_rejected() {
         let err = parse(r#"{"mcp_prot": 3003}"#).unwrap_err().to_string();
-        assert!(err.contains("unknown field `mcp_prot`"), "{err}");
-        let err = parse(r#"{"multi_user_config": {"enabled": true, "tls": null}}"#)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("unknown field `tls`"), "{err}");
+        assert!(err.contains("unknown key `mcp_prot`"), "{err}");
     }
 
     #[test]
@@ -590,6 +624,38 @@ mod tests {
         ] {
             write_secret(&path, content, 0o600);
             assert_eq!(read_secret_file(&path).unwrap(), expected, "{content:?}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An empty admin credential matches the empty token an unauthenticated
+    /// client sends, so an empty secret is an error wherever it is read.
+    #[cfg(unix)]
+    #[test]
+    fn an_empty_secret_is_an_error() {
+        let dir = scratch_dir("empty");
+        let path = dir.join("secret");
+        for content in ["", "\n", "\r\n"] {
+            write_secret(&path, content, 0o600);
+            let err = read_secret_file(&path)
+                .err()
+                .unwrap_or_else(|| panic!("{content:?} is not a secret"));
+            assert!(err.to_string().contains("is empty"), "{err}");
+        }
+
+        let file = ExecutorConfigFile::default();
+        let path = path.to_string_lossy().into_owned();
+        for (var, value) in [
+            ("AD4M_ADMIN_CREDENTIAL_FILE", path.as_str()),
+            ("AD4M_ADMIN_CREDENTIAL", ""),
+            ("AD4M_SMTP_PASSWORD", ""),
+            ("AD4M_UNLOCK_PASSPHRASE_FILE", path.as_str()),
+        ] {
+            let env = |name: &str| (name == var).then(|| value.to_string());
+            let err = ExecutorSecrets::from_env(env, &file)
+                .err()
+                .unwrap_or_else(|| panic!("empty {var} is accepted"));
+            assert!(err.to_string().contains("is empty"), "{var}: {err}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
