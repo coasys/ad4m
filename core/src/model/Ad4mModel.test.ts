@@ -2920,20 +2920,19 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       @HasMany({ through: "test://has_tag" })
       tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
     }
 
-    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
       const perspective = makePerspective();
 
-      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      const initialValues = perspective.createSubject.mock.calls[0][2];
-      expect(initialValues).toEqual({ title: "hello" });
-      expect(initialValues).not.toHaveProperty("_baseExpression");
-      expect(initialValues).not.toHaveProperty("_perspective");
-      expect(initialValues).not.toHaveProperty("type");
-      expect(initialValues).not.toHaveProperty("tags");
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
     });
   });
 

@@ -1483,13 +1483,12 @@ export class Ad4mModel {
         const propMeta = metadata.properties[key];
         // Only offer keys with a declared, settable model property. This
         // excludes ORM bookkeeping fields (_baseExpression, _perspective —
-        // enumerable instance fields, not model properties), HasMany
-        // relations (tracked in a separate registry, never in
-        // `metadata.properties`), and read-only properties/flags
-        // (readOnly: true). None of these have an `ad4m://setter` on the
-        // Rust side, which otherwise logs a "declares no setter" warning
-        // per key on every save().
-        if (!propMeta || propMeta.readOnly) {
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
+        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
           continue;
         }
         if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
