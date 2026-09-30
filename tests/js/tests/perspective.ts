@@ -159,14 +159,16 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(create.name).to.equal("test-links-time");
 
                 let addLink = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target", predicate: "lang://predicate"}));
-                // The queries below bound on `timestamp - 1`, so consecutive links must be at least 2 ms apart.
-                await pollUntil(() => Date.now() > new Date(addLink.timestamp).getTime() + 1, { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink" });
+                // Each wait ends once the clock has passed the last link's timestamp, so timestamps
+                // strictly increase. The date bounds are inclusive, so the queries below bound on
+                // the links' own timestamps.
+                await pollUntil(() => Date.now() > new Date(addLink.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink" });
                 let addLink2 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target2", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink2.timestamp).getTime() + 1, { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink2" });
+                await pollUntil(() => Date.now() > new Date(addLink2.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink2" });
                 let addLink3 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target3", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink3.timestamp).getTime() + 1, { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink3" });
+                await pollUntil(() => Date.now() > new Date(addLink3.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink3" });
                 let addLink4 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target4", predicate: "lang://predicate"}));
-                await pollUntil(() => Date.now() > new Date(addLink4.timestamp).getTime() + 1, { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink4" });
+                await pollUntil(() => Date.now() > new Date(addLink4.timestamp).getTime(), { timeoutMs: 1000, intervalMs: 1, label: "timestamp separation after addLink4" });
                 let addLink5 = await ad4mClient!.perspective.addLink(create.uuid, new Link({source: "lang://test", target: "lang://test-target5", predicate: "lang://predicate"}));
 
                 // Get all the links
@@ -190,17 +192,17 @@ export default function perspectiveTests(testContext: TestContext) {
 
 
                 //Test can get all links but first by querying from second timestamp
-                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date()}));
+                let queryLinks = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date()}));
                 expect(queryLinks.length).to.equal(4);
 
                 //Test can get links limited
-                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(new Date(addLink2.timestamp).getTime() - 1), untilDate: new Date(), limit: 3}));
+                let queryLinksLimited = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({source: "lang://test", fromDate: new Date(addLink2.timestamp), untilDate: new Date(), limit: 3}));
                 expect(queryLinksLimited.length).to.equal(3);
 
                 //Test can get only the first link
                 let queryLinksFirst = await ad4mClient!.perspective.queryLinks(create.uuid, new LinkQuery({
                     source: "lang://test", fromDate: new Date(addLink.timestamp),
-                    untilDate: new Date(new Date(addLink2.timestamp).getTime() - 1)
+                    untilDate: new Date(addLink.timestamp)
                 }));
                 expect(queryLinksFirst.length).to.equal(1);
                 expect(queryLinksFirst[0].data.target).to.equal("lang://test-target");
