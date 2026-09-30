@@ -3,10 +3,8 @@ import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
 import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
-import { perspectiveExpressionFromWire, perspectiveToWire } from "../expression/perspectiveWire"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
-import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
 
 export class NeighbourhoodClient {
     #apiClient: ApiClient
@@ -24,7 +22,7 @@ export class NeighbourhoodClient {
         options?: CallOptions,
     ): Promise<string> {
         return this.#apiClient.call('neighbourhood.publish', {
-            perspectiveUuid: perspectiveUUID, linkLanguage, meta: perspectiveToWire(meta)
+            perspectiveUuid: perspectiveUUID, linkLanguage, meta: Perspective.toWire(meta)
         }, options)
     }
 
@@ -42,11 +40,11 @@ export class NeighbourhoodClient {
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
         const agents = await this.#apiClient.call('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
-        return agents.map(({ did, status }) => ({ did, status: perspectiveExpressionFromWire(status) }))
+        return agents.map(({ did, status }) => ({ did, status: PerspectiveExpression.fromWire(status) }))
     }
 
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
-        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status: perspectiveToWire(status) })
+        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status: Perspective.toWire(status) })
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
@@ -55,7 +53,7 @@ export class NeighbourhoodClient {
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
         return this.#apiClient.call('neighbourhood.sendSignal', {
-            uuid: perspectiveUUID, remoteAgentDid, payload: perspectiveToWire(payload)
+            uuid: perspectiveUUID, remoteAgentDid, payload: Perspective.toWire(payload)
         })
     }
 
@@ -67,7 +65,7 @@ export class NeighbourhoodClient {
 
     async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
         return this.#apiClient.call('neighbourhood.sendBroadcast', {
-            uuid: perspectiveUUID, payload: perspectiveToWire(payload), loopback
+            uuid: perspectiveUUID, payload: Perspective.toWire(payload), loopback
         })
     }
 
@@ -93,7 +91,7 @@ export class NeighbourhoodClient {
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#apiClient.on(
             'signal',
-            (event) => this.dispatchSignal(perspectiveUUID, perspectiveExpressionFromWire(event.signal)),
+            (event) => this.dispatchSignal(perspectiveUUID, PerspectiveExpression.fromWire(event.signal)),
             { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)

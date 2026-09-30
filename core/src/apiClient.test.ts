@@ -454,6 +454,24 @@ describe('ApiClient.on', () => {
         expect(second).toHaveBeenCalledTimes(1)
     })
 
+    it('skips a handler removed during dispatch and delivers to one added during dispatch from the next event', async () => {
+        const received: string[] = []
+        let offSecond = () => {}
+        client.on('link-added', () => {
+            received.push('first')
+            offSecond()
+            client.on('link-added', () => { received.push('added') })
+        })
+        offSecond = client.on('link-added', () => { received.push('second') })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first'])
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first', 'first', 'added'])
+    })
+
     it('removes a type from watchedEvents() with its last unsubscribe', () => {
         const offAll = client.on('link-added', () => {})
         const offP1 = client.on('link-added', () => {}, { perspective: 'p1' })
@@ -479,6 +497,22 @@ describe('ApiClient.on', () => {
         expect(socket(0).sent).toEqual([
             expect.objectContaining({ type: 'events.watch', params: { 'agent-updated': null, 'link-added': ['p1'] } }),
         ])
+    })
+
+    it('clears the watch when the last handler goes while a call keeps the socket open', async () => {
+        TestSocket.autoOpen = false
+        const off = client.on('link-added', () => {})
+        await flush()
+        socket(0).open()
+        const pending = call('agent.get', {})
+        off()
+        await flush()
+
+        const watches = socket(0).sent.filter(m => m.type === 'events.watch').map(m => m.params)
+        expect(watches).toEqual([{ 'link-added': null }, {}])
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'agent.get')!.id, result: null })
+        await pending
     })
 
     it('ignores a second registration of the same handler for the same type and perspective', async () => {
@@ -590,6 +624,19 @@ describe('PerspectiveProxy.on', () => {
         socket(0).reply(linkAdded('p1'))
         expect(mine).not.toHaveBeenCalled()
         expect(other).toHaveBeenCalledTimes(1)
+    })
+
+    it("a proxy's dispose() leaves another proxy's registration of the same function", async () => {
+        const shared = jest.fn()
+        const proxy = proxyFor('p1')
+        const sibling = proxyFor('p1')
+        proxy.on('link-added', shared)
+        sibling.on('link-added', shared)
+        await flush()
+
+        proxy.dispose()
+        socket(0).reply(linkAdded('p1'))
+        expect(shared).toHaveBeenCalledTimes(1)
     })
 
     it('does not release a handler twice when its function runs before dispose()', async () => {

@@ -1,23 +1,7 @@
 import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
-import { perspectiveExpressionFromWire, perspectiveToWire } from "../expression/perspectiveWire"
-import { RuntimeInfo, ExceptionInfo, SentMessage, NotificationInput, Notification, TriggeredNotification, ImportResult, UserStatistics } from "./RuntimeTypes"
-import type {
-    OpenLinkRequest,
-    TrustedAgentsRequest,
-    LinkLanguageTemplatesRequest,
-    FriendsListRequest,
-    VerifySignatureRequest,
-    SetStatusRequest,
-    FriendSendMessageRequest,
-    ExportRequest,
-    ImportRequest,
-    SetMultiUserRequest,
-    SetFreeHostingEnabledRequest,
-    HostRate,
-    UnytVersionInfo,
-} from "../generated/api"
-
+import { RuntimeInfo, SentMessage, NotificationInput, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
+import type { HostRate, UnytVersionInfo } from "../generated/api"
 
 export class RuntimeClient {
     #apiClient: ApiClient
@@ -100,25 +84,25 @@ export class RuntimeClient {
     }
 
     async setStatus(perspective: Perspective): Promise<boolean> {
-        return this.#apiClient.call('runtime.setStatus', { status: perspectiveToWire(perspective) })
+        return this.#apiClient.call('runtime.setStatus', { status: Perspective.toWire(perspective) })
     }
 
     async friendStatus(did: string): Promise<PerspectiveExpression> {
         const status = await this.#apiClient.call('runtime.friendStatus', { did })
-        return status ? perspectiveExpressionFromWire(status) : null
+        return status ? PerspectiveExpression.fromWire(status) : null
     }
 
     async friendSendMessage(did: string, message: Perspective): Promise<boolean> {
-        return this.#apiClient.call('runtime.sendFriendMessage', { did, message: perspectiveToWire(message) })
+        return this.#apiClient.call('runtime.sendFriendMessage', { did, message: Perspective.toWire(message) })
     }
 
     async messageInbox(): Promise<PerspectiveExpression[]> {
-        return (await this.#apiClient.call('runtime.inbox', {})).map(perspectiveExpressionFromWire)
+        return (await this.#apiClient.call('runtime.inbox', {})).map(PerspectiveExpression.fromWire)
     }
 
     async messageOutbox(): Promise<SentMessage[]> {
         const sent = await this.#apiClient.call('runtime.outbox', {})
-        return sent.map(({ recipient, message }) => ({ recipient, message: perspectiveExpressionFromWire(message) }))
+        return sent.map(({ recipient, message }) => ({ recipient, message: PerspectiveExpression.fromWire(message) }))
     }
 
     async requestInstallNotification(notification: NotificationInput) {

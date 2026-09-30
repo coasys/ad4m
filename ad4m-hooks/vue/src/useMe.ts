@@ -1,6 +1,5 @@
 import { computed, effect, ref, shallowRef, watch } from "vue";
 import { Ad4mClient, Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
-import { agentFromWire } from "@coasys/hooks-helpers";
 
 const status = shallowRef<AgentStatus>({ isInitialized: false, isUnlocked: false });
 const agent = shallowRef<Agent | undefined>();
@@ -21,7 +20,7 @@ export function useMe<T>(client: Ad4mClient, formatter: (links: LinkExpression[]
     });
 
     client.on("agent-updated", ({ agent: a }) => {
-      agent.value = agentFromWire(a);
+      agent.value = Agent.fromWire(a);
     });
   }, {});
 

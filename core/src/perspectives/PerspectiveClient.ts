@@ -10,7 +10,7 @@ import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
+import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
@@ -491,7 +491,6 @@ export class PerspectiveClient {
             'perspective.getAllShacl', { uuid }
         )
     }
-
 
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {

@@ -61,9 +61,11 @@ anything that signs, bills or writes.
   when the socket closes, and again as each call still in flight ends (a late subscribe). No keepalive; subscribing without a connection (REST) is a 400.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
-- Handler table: `HandlerMap::method_names()`; `tests/handler_table_tests.rs` writes `HandlerMethods.ts`
-  (ts-rs export dir) and fails if `core/src/generated/api/HandlerMethods.ts` is stale — regenerate
-  (`pnpm run generate:api-types` in `core/`) after adding a handler.
+- Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
+  `event_specs()` in `events_ws.rs` types every event payload. `tests/handler_table_tests.rs`
+  writes `RpcMethods.ts` and `Events.ts` (ts-rs export dir) and fails if the copies in
+  `core/src/generated/api/` or any type they import are stale — regenerate
+  (`pnpm run generate:api-types` in `core/`) after changing a handler or an event.
 
 ## Types
 

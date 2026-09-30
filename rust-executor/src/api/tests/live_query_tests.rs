@@ -42,11 +42,12 @@ const TODO_SDNA: &str = r#"{
 
 #[test]
 fn keepalive_methods_are_gone() {
-    let names = build_handler_map().method_names();
+    let map = build_handler_map();
+    let names: Vec<&str> = map.specs().iter().map(|s| s.name.as_str()).collect();
     for gone in ["perspective.keepAliveQuery", "perspective.keepAliveSparql"] {
-        assert!(!names.contains(&gone.to_string()), "{gone}");
+        assert!(!names.contains(&gone), "{gone}");
     }
-    assert!(names.contains(&"perspective.resyncSubscription".to_string()));
+    assert!(names.contains(&"perspective.resyncSubscription"));
 }
 // ── subscribe replies and resync ────────────────────────────────────────
 

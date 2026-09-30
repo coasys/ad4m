@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { agentFromWire, getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
+import { getCache, setCache, subscribe, unsubscribe } from "@coasys/hooks-helpers";
 import { Ad4mClient, Agent, AgentStatus, LinkExpression } from "@coasys/ad4m";
 
 type MeData = {
@@ -65,7 +65,7 @@ export function useMe<T>(client: Ad4mClient | undefined, formatter: (links: Link
       }),
       client.on("agent-updated", ({ agent }) => {
         const current = getCache<MeData>(cacheKey);
-        mutate({ agent: agentFromWire(agent), status: current?.status });
+        mutate({ agent: Agent.fromWire(agent), status: current?.status });
       }),
     ];
 

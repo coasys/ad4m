@@ -175,7 +175,11 @@ export class ApiClient {
             }
             if (parsed.type === 'pong') return
             const perspective = parsed.perspectiveUuid
-            for (const reg of this._handlers.get(parsed.type as string) ?? []) {
+            const regs = this._handlers.get(parsed.type as string)
+            // Like DOM events: a handler added during dispatch waits for the
+            // next event, and a handler removed during dispatch gets no more.
+            for (const reg of [...regs ?? []]) {
+                if (!regs!.has(reg)) continue
                 if (reg.perspective !== undefined && reg.perspective !== perspective) continue
                 callSafely(reg.handler as (event: unknown) => void, `Error in '${parsed.type}' handler:`, parsed)
             }
@@ -401,7 +405,8 @@ export class ApiClient {
      *  the current interest; a socket still connecting gets it on open.
      *  `_watchSent` settles with its reply. */
     private _flushWatch(): void {
-        if (this._handlers.size === 0 || this._ws?.readyState !== 1 /* OPEN */) return
+        // With no handlers left this sends `{}`, so the executor stops sending events.
+        if (this._ws?.readyState !== 1 /* OPEN */) return
         const events = this.watchedEvents()
         const key = JSON.stringify(events)
         if (key === this._watching) return

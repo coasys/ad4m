@@ -1,10 +1,8 @@
 import {ApiClient, CallOptions } from '../apiClient';
 import { PerspectiveInput } from "../perspectives/Perspective";
-import { perspectiveFromWire } from "../expression/perspectiveWire";
 import {
   Agent,
   Apps,
-  AuthInfo,
   AuthInfoInput,
   EntanglementProof,
   EntanglementProofInput,
@@ -17,15 +15,6 @@ import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
 import type { AgentSignature } from "../generated/api/AgentSignature";
-import type {
-  GenerateAgentRequest,
-  ImportAgentRequest,
-  LockAgentRequest,
-  UnlockAgentRequest,
-  SignMessageRequest,
-  PermitCapabilityRequest,
-  GenerateJwtRequest,
-} from "../generated/api";
 
 export interface InitializeArgs {
   did: string;
@@ -34,13 +23,8 @@ export interface InitializeArgs {
   passphrase: string;
 }
 
-
-/** Builds SDK classes (with their behaviour) from the wire's plain agent data. */
 function toAgent(data: AgentData | null): Agent | null {
-  if (!data) return null;
-  const agent = new Agent(data.did, perspectiveFromWire(data.perspective));
-  agent.directMessageLanguage = data.directMessageLanguage;
-  return agent;
+  return data ? Agent.fromWire(data) : null;
 }
 
 export class AgentClient {
@@ -243,8 +227,7 @@ export class AgentClient {
   }
 
   #onAgentUpdated = (event: { agent: AgentData }): void => {
-    const agent = toAgent(event.agent);
-    if (agent) this.#cacheAgent(agent);
+    this.#cacheAgent(Agent.fromWire(event.agent));
   };
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
