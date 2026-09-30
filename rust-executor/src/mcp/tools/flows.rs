@@ -280,6 +280,10 @@ impl Ad4mMcpHandler {
         flow_uri: &str,
         viewer_did: Option<&str>,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
+        // Read as the caller (#1224): the instance, their cache, and the
+        // derivation's proposals and votes.
+        let scoped = viewer_did.map(|did| perspective.read_as(did));
+        let perspective = scoped.as_ref().unwrap_or(perspective);
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
         let Some(record) = instances
             .into_iter()
@@ -464,6 +468,11 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error listing valid outputs: {:#}", e),
         };
 
+        let perspective = match self.viewer_did().await {
+            Ok(Some(did)) => perspective.read_as(&did),
+            Ok(None) => perspective,
+            Err(e) => return format!("Error listing valid outputs: {}", e),
+        };
         match crate::perspectives::flow_instance::produced::flow_valid_outputs(
             &perspective,
             &flow_uri,
@@ -792,7 +801,7 @@ mod tests {
             .await
             .expect("get_links");
         perspective
-            .remove_links(own.into_iter().map(Into::into).collect(), None)
+            .remove_links(own.into_iter().map(Into::into).collect(), None, &ctx)
             .await
             .expect("drop the minter's cache");
         plant(&mut perspective, inst_uri).await;
@@ -906,6 +915,7 @@ mod tests {
                         },
                         LinkStatus::Local,
                         None,
+                        &crate::agent::AgentContext::main_agent(),
                     )
                     .await
                     .expect("add_link_expression");

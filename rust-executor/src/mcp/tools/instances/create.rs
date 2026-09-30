@@ -72,11 +72,11 @@ impl Ad4mMcpHandler {
         // existing instance, merging its property links.
         // Reads made while serving this tool call stay in the calling
         // agent's visibility scope (issue #1024).
-        let viewer =
-            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
-                Ok(v) => v,
-                Err(e) => return error_json(e.to_string()),
-            };
+        let viewer = match crate::perspectives::viewer_reads::viewer_did_for_context(&agent_context)
+        {
+            Ok(v) => v,
+            Err(e) => return error_json(e.to_string()),
+        };
         match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {
                 return error_json(format!(

@@ -129,7 +129,7 @@ pub async fn gather_transcript_sparql(
     sparql: &str,
 ) -> anyhow::Result<Vec<TranscriptTurn>> {
     let rows_json = perspective
-        .sparql_query(sparql.to_string())
+        .sparql_query(sparql.to_string(), None)
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}"))?;
     let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: bad SPARQL result JSON: {e:#}"))?;

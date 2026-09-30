@@ -70,7 +70,7 @@ pub async fn load_processed_source_ids(
 ) -> anyhow::Result<HashSet<String>> {
     let cutoff = window_ms.map(|w| now_ms.saturating_sub(w));
     let rows_json = perspective
-        .sparql_query(processed_ids_query(processor_id))
+        .sparql_query(processed_ids_query(processor_id), None)
         .map_err(|e| anyhow::anyhow!("load_processed_source_ids: SPARQL failed: {e:#}"))?;
     let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
         .map_err(|e| anyhow::anyhow!("load_processed_source_ids: bad SPARQL JSON: {e:#}"))?;

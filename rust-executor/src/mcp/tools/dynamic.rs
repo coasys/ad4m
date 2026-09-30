@@ -883,7 +883,7 @@ impl Ad4mMcpHandler {
                 if let Some(getter_query) = getter {
                     let sparql =
                         getter_query.replace("<Base>", &format!("<{}>", expression_address));
-                    match perspective.sparql_query(sparql) {
+                    match perspective.sparql_query(sparql, None) {
                         Ok(result_json) => {
                             if let Ok(rows) = serde_json::from_str::<
                                 Vec<serde_json::Map<String, serde_json::Value>>,
@@ -1031,7 +1031,7 @@ impl Ad4mMcpHandler {
             {
                 for link in links {
                     if let Err(e) = perspective
-                        .remove_link(link.into(), Some(batch_id.clone()))
+                        .remove_link(link.into(), Some(batch_id.clone()), &agent_context)
                         .await
                     {
                         return format!(
@@ -1119,7 +1119,11 @@ impl Ad4mMcpHandler {
             .await
         {
             for link in links {
-                if perspective.remove_link(link.into(), None).await.is_ok() {
+                if perspective
+                    .remove_link(link.into(), None, &agent_context)
+                    .await
+                    .is_ok()
+                {
                     removed += 1;
                 }
             }
@@ -1136,7 +1140,11 @@ impl Ad4mMcpHandler {
             .await
         {
             for link in links {
-                if perspective.remove_link(link.into(), None).await.is_ok() {
+                if perspective
+                    .remove_link(link.into(), None, &agent_context)
+                    .await
+                    .is_ok()
+                {
                     removed += 1;
                 }
             }
@@ -1217,7 +1225,7 @@ impl Ad4mMcpHandler {
         if let Ok(links) = existing {
             for link in links {
                 if let Err(e) = perspective
-                    .remove_link(link.into(), Some(batch_id.clone()))
+                    .remove_link(link.into(), Some(batch_id.clone()), &agent_context)
                     .await
                 {
                     return format!(
@@ -1289,8 +1297,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error resolving collection '{}': {}", collection_name, e),
         };
 
-        let viewer = match crate::perspectives::link_visibility::viewer_did_for_context(&_agent_ctx)
-        {
+        let viewer = match crate::perspectives::viewer_reads::viewer_did_for_context(&_agent_ctx) {
             Ok(v) => v,
             Err(e) => return format!("Error resolving requesting agent: {}", e),
         };
@@ -1445,7 +1452,11 @@ impl Ad4mMcpHandler {
             Ok(links) => {
                 let mut removed = 0;
                 for link in links {
-                    if perspective.remove_link(link.into(), None).await.is_ok() {
+                    if perspective
+                        .remove_link(link.into(), None, &agent_ctx)
+                        .await
+                        .is_ok()
+                    {
                         removed += 1;
                     }
                 }

@@ -150,11 +150,11 @@ impl Ad4mMcpHandler {
         };
         // Reads made while serving this tool call stay in the calling
         // agent's visibility scope (issue #1024).
-        let viewer =
-            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
-                Ok(v) => v,
-                Err(e) => return error_json(e.to_string()),
-            };
+        let viewer = match crate::perspectives::viewer_reads::viewer_did_for_context(&agent_context)
+        {
+            Ok(v) => v,
+            Err(e) => return error_json(e.to_string()),
+        };
         match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
@@ -295,11 +295,11 @@ impl Ad4mMcpHandler {
         };
         // Reads made while serving this tool call stay in the calling
         // agent's visibility scope (issue #1024).
-        let viewer =
-            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
-                Ok(v) => v,
-                Err(e) => return error_json(e.to_string()),
-            };
+        let viewer = match crate::perspectives::viewer_reads::viewer_did_for_context(&agent_context)
+        {
+            Ok(v) => v,
+            Err(e) => return error_json(e.to_string()),
+        };
         match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
@@ -353,7 +353,10 @@ impl Ad4mMcpHandler {
             if !target_matches(&link.data.target, wanted, &encoded) {
                 continue;
             }
-            match perspective.remove_link(link.into(), None).await {
+            match perspective
+                .remove_link(link.into(), None, &agent_context)
+                .await
+            {
                 Ok(_) => removed += 1,
                 Err(e) => {
                     return error_json(format!(

@@ -600,6 +600,9 @@ pub async fn run_interpretation_with_strategy_and_model(
     emit_ctx: Option<&crate::perspectives::auto_processor::events::InterpretationEmitContext>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
+    // The run reads as the user it acts for (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     // Returns a task already spawned into its LLM worker, so `prompt` can use it
     // immediately (see `ensure_interpretation_task_for_model`).
     let task = ensure_interpretation_task_for_model(model_override).await?;
@@ -660,7 +663,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             Vec::new()
         };
-        let viewer_did = crate::perspectives::link_visibility::viewer_did_for_context(context)
+        let viewer_did = crate::perspectives::viewer_reads::viewer_did_for_context(context)
             .ok()
             .flatten();
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
@@ -1038,6 +1041,9 @@ pub async fn run_interpretation_with_harness_and_model(
     credit_gate: Option<Arc<dyn crate::ai_service::harness::CreditGate>>,
     flow_filter: Option<&[String]>,
 ) -> anyhow::Result<InterpretationOutcome> {
+    // The run reads as the user it acts for (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     // Same task-row selection as the single-shot path so the model + system
     // prompt + few-shots + billing meta come from the same row the operator
     // configured — the harness pass is just a different loop, not a
@@ -1064,7 +1070,7 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         Vec::new()
     };
-    let viewer_did = crate::perspectives::link_visibility::viewer_did_for_context(context)
+    let viewer_did = crate::perspectives::viewer_reads::viewer_did_for_context(context)
         .ok()
         .flatten();
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(

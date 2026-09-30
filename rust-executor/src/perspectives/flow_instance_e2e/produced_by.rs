@@ -517,7 +517,7 @@ async fn an_output_that_is_no_longer_its_class_stops_being_a_valid_output() {
         .collect();
     assert!(!marker.is_empty(), "the type marker exists to remove");
     f.perspective
-        .remove_links(marker, None)
+        .remove_links(marker, None, &f.ctx)
         .await
         .expect("de-type the output");
     assert!(

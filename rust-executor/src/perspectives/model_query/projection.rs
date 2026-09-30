@@ -64,7 +64,6 @@ pub(super) async fn resolve_projections(
     depth: u8,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
-    viewer_did: Option<&str>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -84,7 +83,6 @@ pub(super) async fn resolve_projections(
     let guard = LinkGuard {
         status: link_status,
         include_unverified,
-        viewer: viewer_did,
     };
 
     for (key, proj) in projections {
@@ -336,7 +334,6 @@ pub(super) async fn resolve_projections(
                                 &sub_query,
                                 resolver,
                                 depth + 1,
-                                viewer_did,
                             ))
                             .await
                             {
@@ -652,7 +649,7 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
 }
 
 /// The query's [`LinkGuard`] for one projection's `?parent <predicate> ?t`
-/// link: its `linkStatus`, #1113 verdict and, for a viewer, #1024 visibility.
+/// link: its `linkStatus` and #1113 verdict.
 ///
 /// With an `author` / `timestamp` filter the query already joins that link's
 /// reifier as `?_prj_reif`, so the checks are read off the same reifier: a

@@ -2,6 +2,7 @@
 ///
 /// Provides migration paths:
 /// - Rusqlite → SPARQL (Oxigraph) — for users upgrading from earlier versions
+/// - `Local` links from the shared default graph into per-user graphs (#1224)
 ///
 /// During migration, `literal://` URIs are converted to the canonical `literal:` format.
 ///
@@ -77,6 +78,8 @@ pub fn convert_link_literal_uris(link: &mut LinkExpression) -> usize {
 /// During migration, all `literal://` URIs are converted to the canonical `literal:` format.
 ///
 /// The function is idempotent — calling it multiple times on the same perspective is safe.
+///
+/// A `Local` link goes to the graph of [`local_link_owner`].
 pub fn migrate_links_from_rusqlite_to_sparql(
     perspective_uuid: &str,
     sparql_store: &crate::perspectives::sparql_store::SparqlStore,
@@ -132,6 +135,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
     let mut migrated_count = 0;
     let mut error_count = 0;
     let mut total_literal_conversions = 0;
+    let users = LocalLinkOwners::of_this_executor()?;
 
     for (link_expr, status) in &links {
         let mut link_expr = link_expr.clone();
@@ -143,7 +147,7 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         // no-op besides the clone.
         total_literal_conversions += convert_link_literal_uris(&mut link_expr);
 
-        match sparql_store.add_link(&link_expr) {
+        match sparql_store.add_link_as(&link_expr, &users.owner_of(&link_expr.author)) {
             Ok(_) => {
                 migrated_count += 1;
             }
@@ -198,6 +202,72 @@ pub fn migrate_links_from_rusqlite_to_sparql(
         errors: error_count,
         literal_conversions: total_literal_conversions,
     })
+}
+
+/// Who a `Local` link belongs to when the store does not say: the graph it
+/// moves to in [`migrate_local_links_to_user_graphs`] and in the Rusqlite
+/// migration.
+///
+/// A link whose author is a user of this executor (the main agent or a
+/// managed user) belongs to that user. Every other `Local` link — an author
+/// who is not a user here, or no author at all — belongs to the main agent.
+/// Such a link was written by a user of this executor all the same (a
+/// `LinkExpression` another agent signed), but the store did not record which
+/// one; the main agent is the executor's owner, and #1058 showed that link to
+/// nobody but the executor scope, which is gone.
+pub struct LocalLinkOwners {
+    main_agent: String,
+    users: std::collections::HashSet<String>,
+}
+
+impl LocalLinkOwners {
+    /// The users of this executor: the main agent and every managed user.
+    /// Fails when the executor has no main agent yet, so no link is moved
+    /// to a graph nobody reads.
+    pub fn of_this_executor() -> Result<Self, String> {
+        let main_agent = crate::perspectives::sparql_store::main_agent_did()
+            .ok_or("the executor has no main agent DID yet")?;
+        let managed =
+            Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string())?;
+        Ok(Self::new(
+            main_agent,
+            managed.into_iter().map(|u| u.did).collect(),
+        ))
+    }
+
+    pub fn new(main_agent: String, managed_users: Vec<String>) -> Self {
+        let mut users: std::collections::HashSet<String> = managed_users.into_iter().collect();
+        users.insert(main_agent.clone());
+        LocalLinkOwners { main_agent, users }
+    }
+
+    pub fn owner_of(&self, author: &str) -> String {
+        if self.users.contains(author) {
+            author.to_string()
+        } else {
+            self.main_agent.clone()
+        }
+    }
+}
+
+/// Move the `Local` links a perspective's store kept in its shared default
+/// graph (every store written before #1224) into per-user graphs, and return
+/// how many moved. Runs when a perspective loads, before anything reads it.
+///
+/// Each link goes to [`LocalLinkOwners::owner_of`] its author. The move keeps
+/// every quad of the link and writes it before removing it, so a link is never
+/// lost; see [`SparqlStore::move_local_links_to_user_graphs`]. It is
+/// idempotent: it moves the `Local` links still in the default graph, so a
+/// second run finds none.
+///
+/// [`SparqlStore::move_local_links_to_user_graphs`]: crate::perspectives::sparql_store::SparqlStore::move_local_links_to_user_graphs
+pub fn migrate_local_links_to_user_graphs(
+    sparql_store: &crate::perspectives::sparql_store::SparqlStore,
+    owners: &LocalLinkOwners,
+) -> Result<usize, String> {
+    sparql_store
+        .move_local_links_to_user_graphs(|author| owners.owner_of(author))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

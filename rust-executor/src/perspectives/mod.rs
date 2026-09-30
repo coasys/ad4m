@@ -16,8 +16,7 @@ pub mod interpretation;
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
-pub mod link_visibility;
-mod viewer_reads;
+pub mod viewer_reads;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
@@ -134,6 +133,25 @@ pub fn initialize_from_db() {
                 }
                 Ok(_) => {} // Already migrated or nothing to migrate
                 Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+            }
+
+            // Local links move out of the shared default graph into the graph
+            // of the user they belong to (#1224). Before the instance is
+            // registered, so no read sees them in the shared graph.
+            match migration::LocalLinkOwners::of_this_executor().and_then(|owners| {
+                migration::migrate_local_links_to_user_graphs(&p.sparql_store, &owners)
+            }) {
+                Ok(0) => {}
+                Ok(moved) => log::info!(
+                    "🔄 Moved {} Local links of perspective {} into per-user graphs",
+                    moved,
+                    handle_clone.uuid
+                ),
+                Err(e) => log::error!(
+                    "Moving Local links of perspective {} into per-user graphs failed: {}",
+                    handle_clone.uuid,
+                    e
+                ),
             }
 
             // No named-graph → reifier migration. The named-graph storage model
@@ -735,27 +753,21 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    // `instance.links` is already `LinkExpression`. Decorating just to persist
-    // would convert back at the store boundary. Missing status defaults to
-    // Local, matching the previous decorate path (not Shared).
-    let additions: Vec<crate::types::LinkExpression> = instance
-        .links
-        .into_iter()
-        .map(|mut link| {
-            if link.status.is_none() {
-                link.status = Some(LinkStatus::Local);
-            }
-            link
-        })
-        .collect();
-
-    perspective
-        .persist_link_diff(&crate::types::PerspectiveDiff {
-            additions,
-            removals: vec![],
-        })
-        .await
-        .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
+    // `instance.links` is already `LinkExpression`, written to the store as
+    // it is. Missing status defaults to Local, matching the previous decorate
+    // path (not Shared). An export records no user a Local link belongs to,
+    // so it goes to the graph of the user who authored it here, or else the
+    // main agent's (#1224, `LocalLinkOwners`).
+    let owners = migration::LocalLinkOwners::of_this_executor()?;
+    for mut link in instance.links {
+        if link.status.is_none() {
+            link.status = Some(LinkStatus::Local);
+        }
+        perspective
+            .sparql_store
+            .add_link_as(&link, &owners.owner_of(&link.author))
+            .map_err(|e| format!("Failed to persist link to SPARQL store: {}", e))?;
+    }
 
     Ok(instance.handle)
 }
@@ -880,7 +892,12 @@ mod tests {
         println!("test_link: {:?}", test_link);
 
         perspective
-            .add_link_expression(test_link.clone(), LinkStatus::Local, None)
+            .add_link_expression(
+                test_link.clone(),
+                LinkStatus::Local,
+                None,
+                &crate::agent::AgentContext::main_agent(),
+            )
             .await
             .expect("Failed to add link");
 

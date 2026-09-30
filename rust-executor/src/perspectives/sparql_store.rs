@@ -21,6 +21,32 @@ const ONT_STATUS: &str = "ad4m://ontology/status";
 /// [`signed_target_annotation`].
 const ONT_WIRE_TARGET: &str = "ad4m://ontology/wireTarget";
 const RDF_REIFIES: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
+/// Prefix of the named graph that holds one user's `Local` links.
+const LOCAL_GRAPH_PREFIX: &str = "ad4m://local/";
+
+/// The named graph holding `did`'s `Local` links: `ad4m://local/<did>`.
+///
+/// A DID is used as it is when it forms a valid IRI (every `did:key` does),
+/// and percent-encoded otherwise.
+pub fn local_graph(did: &str) -> NamedNode {
+    NamedNode::new(format!("{LOCAL_GRAPH_PREFIX}{did}")).unwrap_or_else(|_| {
+        NamedNode::new_unchecked(format!(
+            "{LOCAL_GRAPH_PREFIX}{}",
+            percent_encoding::utf8_percent_encode(did, &RFC3986_COMPONENT_ENCODE)
+        ))
+    })
+}
+
+/// The DID of the executor's main agent, if it has one yet.
+///
+/// A read that names no user reads as the main agent: it is the executor's
+/// own identity, and on a single-user executor the only user. See
+/// [`SparqlStore`].
+pub(crate) fn main_agent_did() -> Option<String> {
+    let service = crate::agent::AgentService::global_instance();
+    let guard = service.lock().ok()?;
+    guard.as_ref()?.did.clone()
+}
 
 /// Datatype IRI for AD4M JSON literals — used when a property holds a JSON
 /// payload (objects/arrays) that should round-trip through the store without
@@ -405,14 +431,47 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 }
 
 /// Oxigraph-backed SPARQL store for AD4M link data.
-/// Uses RDF 1.2 reifiers: direct triples in default graph with metadata
-/// attached via `rdf:reifies` triple terms.
+/// Uses RDF 1.2 reifiers: direct triples with metadata attached via
+/// `rdf:reifies` triple terms.
 ///
 /// # Storage Model
 /// Each link is stored as:
-/// 1. Direct triple: `<source> <predicate> <target> .` (default graph)
+/// 1. Direct triple: `<source> <predicate> <target> .`
 /// 2. Reifier: `<link:HASH> rdf:reifies <<( source predicate target )>> .`
-/// 3. Metadata: `<link:HASH> ad4m://ontology/* "value" .` (default graph)
+/// 3. Metadata: `<link:HASH> ad4m://ontology/* "value" .`
+///
+/// # Where a link lives: shared store, per-user graphs (#1224)
+///
+/// A `Shared` link is stored in the default graph. A `Local` link is stored
+/// in the named graph of the user who wrote it, [`local_graph`]
+/// (`ad4m://local/<did>`): its reifier, its metadata and, unless the default
+/// graph already holds it, its direct triple.
+///
+/// ```text
+///   default graph            ad4m://local/<alice>     ad4m://local/<bob>
+///   Shared links             Alice's Local links      Bob's Local links
+///        \______________________/
+///          what Alice reads
+/// ```
+///
+/// A read sees the default graph plus the graph of one user, its reader.
+/// That choice is made once, here: [`Self::read_as`] sets the reader, every
+/// read method (link scans, [`Self::query`], [`Self::query_arbitrary`], the
+/// model-query engine's SPARQL) uses the reader's dataset, and the SPARQL
+/// text itself does not change. A query cannot name another user's graph:
+/// the dataset overrides `FROM` / `FROM NAMED`, and `GRAPH ?g` sees the
+/// reader's graph only. There is no reader that sees every graph.
+///
+/// A handle without a reader (every handle [`Self::new`] makes) reads as the
+/// main agent, the executor's own identity ([`main_agent_did`]), and sees
+/// shared links only while the executor has no main agent.
+///
+/// Each direct triple is in the reader's view at most once: it is kept in the
+/// default graph when a shared link asserts it, and otherwise in each user
+/// graph that holds a link asserting it ([`Self::settle_direct_triple`]).
+/// A link (one reifier) is stored either shared or in user graphs, never
+/// both: the write that stores it removes it from the other side, as the
+/// single-graph store overwrote its status.
 ///
 /// A `literal:*` target is stored as a typed literal, so its wire bytes are
 /// not kept by the triple. When they differ from the canonical rendering, the
@@ -425,6 +484,8 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
+    /// Whose graph reads see besides the shared one; `None` is the main agent.
+    reader: Option<Arc<str>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -482,7 +543,48 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
+            reader: None,
         })
+    }
+
+    /// This store as `did` reads it: the shared links plus `did`'s own
+    /// `Local` links. `None` keeps this handle's reader.
+    pub fn read_as(&self, did: Option<&str>) -> SparqlStore {
+        SparqlStore {
+            store: self.store.clone(),
+            reader: did.map(Arc::from).or_else(|| self.reader.clone()),
+        }
+    }
+
+    /// The graph of the user this handle reads as, if any.
+    fn reader_graph(&self) -> Option<NamedNode> {
+        match &self.reader {
+            Some(did) => Some(local_graph(did)),
+            None => main_agent_did().map(|did| local_graph(&did)),
+        }
+    }
+
+    /// The graphs a read sees: the default graph, then the reader's graph.
+    fn read_graphs(&self) -> Vec<GraphName> {
+        let mut graphs = vec![GraphName::DefaultGraph];
+        if let Some(g) = self.reader_graph() {
+            graphs.push(g.into());
+        }
+        graphs
+    }
+
+    /// Restrict a prepared query to the reader's dataset: the default graph
+    /// merged with the reader's graph, and no named graph but the reader's.
+    /// Set after parsing, so it overrides any `FROM` / `FROM NAMED` in the
+    /// query text.
+    fn scope_to_reader(&self, query: &mut oxigraph::sparql::PreparedSparqlQuery) {
+        let dataset = query.dataset_mut();
+        dataset.set_default_graph(self.read_graphs());
+        dataset.set_available_named_graphs(
+            self.reader_graph()
+                .map(|g| vec![NamedOrBlankNode::NamedNode(g)])
+                .unwrap_or_default(),
+        );
     }
 
     /// Returns the number of quads in the store (for diagnostics).
@@ -502,55 +604,11 @@ impl SparqlStore {
             })
     }
 
-    fn insert_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
-        let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
-        let reifier_iri = make_reifier_iri(link);
-
-        // 1. Direct triple in default graph. `target_term` may be a typed
-        //    literal (for `literal:*` wire values) or a NamedNode.
-        let target_ref: TermRef = match &target_term {
-            Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-            Term::Literal(l) => TermRef::Literal(l.as_ref()),
-            Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-            Term::Triple(_) => {
-                return Err(anyhow!(
-                    "Triple-shaped target is not supported in link storage"
-                ));
-            }
-        };
-        self.store.insert(QuadRef::new(
-            source_iri.as_ref(),
-            predicate_iri.as_ref(),
-            target_ref,
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 2. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
-        //    Triple's object position accepts any Term, so a typed literal
-        //    target reifies the same way a NamedNode target does.
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-        let triple_term = Triple::new(
-            source_iri.clone(),
-            predicate_iri.clone(),
-            target_term.clone(),
-        );
-        self.store.insert(QuadRef::new(
-            reifier_iri.as_ref(),
-            rdf_reifies,
-            TermRef::Triple(&triple_term),
-            GraphNameRef::DefaultGraph,
-        ))?;
-
-        // 3. Metadata on the reifier node (all default graph)
-        let proof = &link.proof;
-
-        // `proof.valid` is a read view over the signature: always compute it from
-        // the key and signature, never trust the caller's field. This means no
-        // test helper, migration, or external caller can slip a fabricated or
-        // stale verdict onto disk. The caller's `proof.valid` is intentionally
-        // ignored here â tests that want `Some(true)` must carry a real signature.
-        let valid_str = link.compute_proof_valid().to_string();
-
+    /// The graph a write of `link` by `owner` goes to: the default graph for a
+    /// `Shared` link, `owner`'s graph for a `Local` one. The owner is the user
+    /// the write acts for, not the author the link names, so a user can only
+    /// ever write into their own graph.
+    fn write_graph(link: &LinkExpression, owner: &str) -> Result<GraphName, Error> {
         // Status must be decided by the caller, not defaulted here. A silent
         // `None => Shared` fallback would let any write path that forgot to
         // set it mislabel a local link as shared — the kind of quiet
@@ -558,15 +616,73 @@ impl SparqlStore {
         // (add/update/batch, link-language ingest, migration, boot rebuild)
         // assigns status at its own boundary; a `None` reaching this point is
         // a bug, and refusing the insert makes it fail loudly.
-        let status = link.status.as_ref().ok_or_else(|| {
-            anyhow!(
+        match link.status.as_ref() {
+            Some(LinkStatus::Shared) => Ok(GraphName::DefaultGraph),
+            Some(LinkStatus::Local) => Ok(local_graph(owner).into()),
+            None => Err(anyhow!(
                 "Refusing to store link without an explicit local/shared status: {} -[{}]-> {}",
                 link.data.source,
                 link.data.predicate.as_deref().unwrap_or(""),
                 link.data.target
-            )
-        })?;
+            )),
+        }
+    }
 
+    fn insert_link_triples(&self, link: &LinkExpression, owner: &str) -> Result<(), Error> {
+        let graph = Self::write_graph(link, owner)?;
+        let (source_iri, predicate_iri, target_term) = make_direct_triple(link);
+        if let Term::Triple(_) = target_term {
+            return Err(anyhow!(
+                "Triple-shaped target is not supported in link storage"
+            ));
+        }
+        let reifier_iri = make_reifier_iri(link);
+        let triple_term = Triple::new(
+            source_iri.clone(),
+            predicate_iri.clone(),
+            target_term.clone(),
+        );
+
+        // A link is stored shared or in user graphs, never both (see the type
+        // docs): storing it shared takes it out of every user graph, storing
+        // it Local takes it out of the shared graph.
+        let elsewhere: Vec<Quad> = self
+            .store
+            .quads_for_pattern(Some(reifier_iri.as_ref().into()), None, None, None)
+            .filter(|q| match (q, &graph) {
+                (Ok(q), GraphName::DefaultGraph) => !q.graph_name.is_default_graph(),
+                (Ok(q), _) => q.graph_name.is_default_graph(),
+                (Err(_), _) => true,
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        for quad in &elsewhere {
+            self.store.remove(quad)?;
+        }
+
+        // 1. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
+        //    Triple's object position accepts any Term, so a typed literal
+        //    target reifies the same way a NamedNode target does.
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        self.store.insert(QuadRef::new(
+            reifier_iri.as_ref(),
+            rdf_reifies,
+            TermRef::Triple(&triple_term),
+            graph.as_ref(),
+        ))?;
+
+        // 2. Metadata on the reifier node, in the same graph.
+        let proof = &link.proof;
+
+        // `proof.valid` is a read view over the signature: always compute it from
+        // the key and signature, never trust the caller's field. This means no
+        // test helper, migration, or external caller can slip a fabricated or
+        // stale verdict onto disk. The caller's `proof.valid` is intentionally
+        // ignored here â tests that want `Some(true)` must carry a real signature.
+        let valid_str = link.compute_proof_valid().to_string();
+        let status = link
+            .status
+            .as_ref()
+            .expect("write_graph checked the status");
         let wire_target = signed_target_annotation(link, &target_term);
 
         // `None` writes nothing, after clearing a stale value: a canonical
@@ -597,7 +713,7 @@ impl SparqlStore {
                     Some(reifier_iri.as_ref().into()),
                     Some(pred),
                     None,
-                    Some(GraphNameRef::DefaultGraph),
+                    Some(graph.as_ref()),
                 )
                 .collect::<Result<Vec<_>, _>>()?;
             for quad in &stale {
@@ -610,16 +726,74 @@ impl SparqlStore {
                 reifier_iri.as_ref(),
                 pred,
                 TermRef::Literal(lit.as_ref()),
-                GraphNameRef::DefaultGraph,
+                graph.as_ref(),
             ))?;
         }
 
+        // 3. The direct triple, in whichever graphs now need it.
+        self.settle_direct_triple(&triple_term)
+    }
+
+    /// Put the direct triple `triple` in exactly the graphs that need it:
+    /// the default graph when a shared link asserts it, otherwise each user
+    /// graph holding a link that asserts it, and no graph when no link does.
+    ///
+    /// This keeps every reader's view free of duplicates: a triple asserted
+    /// by a shared link and by the reader's own Local link is in the default
+    /// graph only, and a triple nobody links any more is gone.
+    fn settle_direct_triple(&self, triple: &Triple) -> Result<(), Error> {
+        use std::collections::HashSet;
+        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let asserted_in: HashSet<GraphName> = self
+            .store
+            .quads_for_pattern(None, Some(rdf_reifies), Some(TermRef::Triple(triple)), None)
+            .map(|q| q.map(|q| q.graph_name))
+            .collect::<Result<_, _>>()?;
+        let wanted: HashSet<GraphName> = if asserted_in.contains(&GraphName::DefaultGraph) {
+            HashSet::from([GraphName::DefaultGraph])
+        } else {
+            asserted_in
+        };
+        let object = triple.object.as_ref();
+        let held_in: HashSet<GraphName> = self
+            .store
+            .quads_for_pattern(
+                Some(triple.subject.as_ref()),
+                Some(triple.predicate.as_ref()),
+                Some(object),
+                None,
+            )
+            .map(|q| q.map(|q| q.graph_name))
+            .collect::<Result<_, _>>()?;
+        for graph in wanted.difference(&held_in) {
+            self.store.insert(QuadRef::new(
+                triple.subject.as_ref(),
+                triple.predicate.as_ref(),
+                object,
+                graph.as_ref(),
+            ))?;
+        }
+        for graph in held_in.difference(&wanted) {
+            self.store.remove(QuadRef::new(
+                triple.subject.as_ref(),
+                triple.predicate.as_ref(),
+                object,
+                graph.as_ref(),
+            ))?;
+        }
         Ok(())
     }
 
-    /// Insert triples for a link into the store.
+    /// Store a link as its author wrote it: a `Local` link goes to the
+    /// author's graph. Writes that act for a user use [`Self::add_link_as`].
     pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
-        self.insert_link_triples(link)
+        self.insert_link_triples(link, &link.author)
+    }
+
+    /// Store a link written by `owner`: a `Local` link goes to `owner`'s
+    /// graph, whoever the link names as its author.
+    pub fn add_link_as(&self, link: &LinkExpression, owner: &str) -> Result<(), Error> {
+        self.insert_link_triples(link, owner)
     }
 
     /// Test-only: drop the `proofValid` annotation from a stored link's
@@ -652,7 +826,7 @@ impl SparqlStore {
                 Some(reifier_iri.as_ref().into()),
                 Some(NamedNodeRef::new_unchecked(predicate)),
                 None,
-                Some(GraphNameRef::DefaultGraph),
+                None,
             )
             .collect::<Result<Vec<_>, _>>()?;
         if quads.is_empty() {
@@ -664,56 +838,50 @@ impl SparqlStore {
         Ok(())
     }
 
-    /// Remove all triples for a link from the store.
+    /// Remove a link its author wrote: see [`Self::add_link`].
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_link_as(link, &link.author)
+    }
+
+    /// Remove a link as `owner`: from the shared graph and from `owner`'s
+    /// own graph, wherever it is stored. The status the caller passes does
+    /// not choose (callers such as `link_mutations` stamp one on every
+    /// removal), and another user's graph is never touched.
+    pub fn remove_link_as(&self, link: &LinkExpression, owner: &str) -> Result<(), Error> {
+        self.remove_link_from(link, &[GraphName::DefaultGraph, local_graph(owner).into()])
+    }
+
+    /// Remove a shared link only, as a link language's removal does: no
+    /// user's graph is touched.
+    pub fn remove_shared_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_link_from(link, &[GraphName::DefaultGraph])
+    }
+
+    fn remove_link_from(&self, link: &LinkExpression, graphs: &[GraphName]) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
-        let quads: Vec<_> = self
-            .store
-            .quads_for_pattern(
-                Some(reifier_iri.as_ref().into()),
-                None,
-                None,
-                Some(GraphNameRef::DefaultGraph),
-            )
-            .collect::<Result<Vec<_>, _>>()?;
-        for quad in &quads {
-            self.store.remove(quad)?;
+        for graph in graphs {
+            let quads: Vec<_> = self
+                .store
+                .quads_for_pattern(
+                    Some(reifier_iri.as_ref().into()),
+                    None,
+                    None,
+                    Some(graph.as_ref()),
+                )
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &quads {
+                self.store.remove(quad)?;
+            }
         }
 
-        // 2. Remove the direct triple IF no other reifier references it
+        // 2. The direct triple stays where another link still asserts it.
         let (source, predicate, target_term) = make_direct_triple(link);
-        let triple_term = Triple::new(source.clone(), predicate.clone(), target_term.clone());
-        let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
-
-        let still_referenced = self
-            .store
-            .quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                Some(TermRef::Triple(&triple_term)),
-                None,
-            )
-            .next()
-            .is_some();
-
-        if !still_referenced {
-            let target_ref: TermRef = match &target_term {
-                Term::NamedNode(n) => TermRef::NamedNode(n.as_ref()),
-                Term::Literal(l) => TermRef::Literal(l.as_ref()),
-                Term::BlankNode(b) => TermRef::BlankNode(b.as_ref()),
-                Term::Triple(_) => return Ok(()),
-            };
-            self.store.remove(QuadRef::new(
-                source.as_ref(),
-                predicate.as_ref(),
-                target_ref,
-                GraphNameRef::DefaultGraph,
-            ))?;
+        if let Term::Triple(_) = target_term {
+            return Ok(());
         }
-
-        Ok(())
+        self.settle_direct_triple(&Triple::new(source, predicate, target_term))
     }
 
     /// Return all links in the store using a SPARQL 1.2 reifier query.
@@ -730,10 +898,12 @@ impl SparqlStore {
         &self,
         query: &str,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        let results = self
+        let mut prepared = self
             .sparql_evaluator()
             .parse_query(query)
-            .map_err(|e| anyhow!("Failed to parse link query: {}", e))?
+            .map_err(|e| anyhow!("Failed to parse link query: {}", e))?;
+        self.scope_to_reader(&mut prepared);
+        let results = prepared
             .on_store(&self.store)
             .execute()
             .map_err(|e| anyhow!("link query failed: {}", e))?;
@@ -767,29 +937,6 @@ impl SparqlStore {
         until_date: Option<&str>,
         limit: Option<usize>,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_links_for_viewer(
-            source, predicate, target, from_date, until_date, limit, None,
-        )
-    }
-
-    /// [`Self::query_links`], restricted to the links `viewer_did` may see.
-    ///
-    /// `viewer_did == None` is executor scope and reads the whole row set; see
-    /// [`link_visibility`](crate::perspectives::link_visibility) for why that
-    /// scope exists. The predicate is applied inside the scan rather than to
-    /// the returned `Vec` so `limit` counts *visible* rows — post-filtering a
-    /// limited page would silently return short pages to the viewer.
-    #[allow(clippy::too_many_arguments)]
-    pub fn query_links_for_viewer(
-        &self,
-        source: Option<&str>,
-        predicate: Option<&str>,
-        target: Option<&str>,
-        from_date: Option<&str>,
-        until_date: Option<&str>,
-        limit: Option<usize>,
-        viewer_did: Option<&str>,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::ops::ControlFlow;
         // Bail out early on the zero-page case: the closure below pushes first,
         // then checks `links.len() >= lim`, so without this guard `Some(0)`
@@ -798,21 +945,13 @@ impl SparqlStore {
             return Ok(Vec::new());
         }
         let mut links = Vec::new();
-        self.for_each_matched_link(
-            source,
-            predicate,
-            target,
-            from_date,
-            until_date,
-            viewer_did,
-            |link| {
-                links.push(link);
-                match limit {
-                    Some(lim) if links.len() >= lim => ControlFlow::Break(()),
-                    _ => ControlFlow::Continue(()),
-                }
-            },
-        )?;
+        self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+            links.push(link);
+            match limit {
+                Some(lim) if links.len() >= lim => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        })?;
         Ok(links)
     }
 
@@ -831,27 +970,6 @@ impl SparqlStore {
         limit: usize,
         reverse: bool,
     ) -> Result<Vec<DecoratedLinkExpression>, Error> {
-        self.query_links_top_n_by_timestamp_for_viewer(
-            source, predicate, target, from_date, until_date, limit, reverse, None,
-        )
-    }
-
-    /// [`Self::query_links_top_n_by_timestamp`], restricted to the links
-    /// `viewer_did` may see. The predicate runs inside the scan, before the
-    /// bounded heap, so the page holds `limit` links the viewer can actually
-    /// see instead of `limit` rows that are then thinned out.
-    #[allow(clippy::too_many_arguments)]
-    pub fn query_links_top_n_by_timestamp_for_viewer(
-        &self,
-        source: Option<&str>,
-        predicate: Option<&str>,
-        target: Option<&str>,
-        from_date: Option<&str>,
-        until_date: Option<&str>,
-        limit: usize,
-        reverse: bool,
-        viewer_did: Option<&str>,
-    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
         use std::cmp::Reverse;
         use std::collections::BinaryHeap;
         use std::ops::ControlFlow;
@@ -866,24 +984,15 @@ impl SparqlStore {
             // so evicting the top whenever size exceeds `limit` retains
             // exactly the K smallest.
             let mut heap: BinaryHeap<TimestampedLink> = BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(
-                source,
-                predicate,
-                target,
-                from_date,
-                until_date,
-                viewer_did,
-                |link| {
-                    let dt =
-                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                    heap.push(TimestampedLink { dt, seq, link });
-                    seq += 1;
-                    if heap.len() > limit {
-                        heap.pop();
-                    }
-                    ControlFlow::Continue(())
-                },
-            )?;
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(TimestampedLink { dt, seq, link });
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(r) = heap.pop() {
                 out.push(r.link);
@@ -896,24 +1005,15 @@ impl SparqlStore {
             // evicts the smallest whenever size exceeds `limit`.
             let mut heap: BinaryHeap<Reverse<TimestampedLink>> =
                 BinaryHeap::with_capacity(limit + 1);
-            self.for_each_matched_link(
-                source,
-                predicate,
-                target,
-                from_date,
-                until_date,
-                viewer_did,
-                |link| {
-                    let dt =
-                        ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
-                    heap.push(Reverse(TimestampedLink { dt, seq, link }));
-                    seq += 1;
-                    if heap.len() > limit {
-                        heap.pop();
-                    }
-                    ControlFlow::Continue(())
-                },
-            )?;
+            self.for_each_matched_link(source, predicate, target, from_date, until_date, |link| {
+                let dt = ChronoDateTime::parse_from_rfc3339(&link.timestamp).unwrap_or_default();
+                heap.push(Reverse(TimestampedLink { dt, seq, link }));
+                seq += 1;
+                if heap.len() > limit {
+                    heap.pop();
+                }
+                ControlFlow::Continue(())
+            })?;
             let mut out: Vec<DecoratedLinkExpression> = Vec::with_capacity(heap.len());
             while let Some(Reverse(r)) = heap.pop() {
                 out.push(r.link);
@@ -930,11 +1030,9 @@ impl SparqlStore {
     /// [`Self::query_links_top_n_by_timestamp`] so the (gnarly) RocksDB
     /// reifier walk lives in exactly one place.
     ///
-    /// `viewer_did` is the visibility scope of the read: `None` sees every
-    /// link, `Some(did)` drops the `Local` links `did` did not author. The
-    /// check sits here, at the single point where a link's `author` and
-    /// `status` are both known, so every scan-based read path inherits it.
-    #[allow(clippy::too_many_arguments)]
+    /// Scans the reader's graphs ([`Self::read_graphs`]): a direct triple is
+    /// in at most one of them, and each of its reifiers is read with the
+    /// metadata in its own graph.
     fn for_each_matched_link<F>(
         &self,
         source: Option<&str>,
@@ -942,7 +1040,6 @@ impl SparqlStore {
         target: Option<&str>,
         from_date: Option<&str>,
         until_date: Option<&str>,
-        viewer_did: Option<&str>,
         mut callback: F,
     ) -> Result<(), Error>
     where
@@ -969,12 +1066,14 @@ impl SparqlStore {
         });
 
         let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
+        let graphs = self.read_graphs();
 
-        // Search direct triples in the default graph
-        for quad_result in
+        // Search direct triples in the reader's graphs
+        let direct = graphs.iter().flat_map(|graph| {
             self.store
-                .quads_for_pattern(s_ref, p_ref, t_ref, Some(GraphNameRef::DefaultGraph))
-        {
+                .quads_for_pattern(s_ref, p_ref, t_ref, Some(graph.as_ref()))
+        });
+        for quad_result in direct {
             let quad = quad_result?;
 
             // Skip reifier and metadata predicates — only process data triples
@@ -1005,13 +1104,16 @@ impl SparqlStore {
                 quad.object.clone(),
             );
 
-            // Find all reifiers for this triple
-            for reifier_quad in self.store.quads_for_pattern(
-                None,
-                Some(rdf_reifies),
-                Some(TermRef::Triple(&triple_term)),
-                Some(GraphNameRef::DefaultGraph),
-            ) {
+            // Find all reifiers for this triple the reader may see
+            let reifiers = graphs.iter().flat_map(|graph| {
+                self.store.quads_for_pattern(
+                    None,
+                    Some(rdf_reifies),
+                    Some(TermRef::Triple(&triple_term)),
+                    Some(graph.as_ref()),
+                )
+            });
+            for reifier_quad in reifiers {
                 let rq = reifier_quad?;
                 let reifier_node = match &rq.subject {
                     NamedOrBlankNode::NamedNode(n) => n,
@@ -1037,7 +1139,7 @@ impl SparqlStore {
                     Some(reifier_subject),
                     None,
                     None,
-                    Some(GraphNameRef::DefaultGraph),
+                    Some(rq.graph_name.as_ref()),
                 ) {
                     let aq = ann_quad?;
                     let pred_str = aq.predicate.as_str();
@@ -1128,10 +1230,6 @@ impl SparqlStore {
                     },
                     status,
                 };
-
-                if !crate::perspectives::link_visibility::decorated_visible_to(&link, viewer_did) {
-                    continue;
-                }
 
                 if let ControlFlow::Break(_) = callback(link) {
                     return Ok(());
@@ -1306,16 +1404,15 @@ impl SparqlStore {
     ) -> Result<String, Error> {
         validate_readonly_query(query_string)?;
 
-        let results = self
+        let mut prepared = self
             .sparql_evaluator()
             .parse_query(query_string)
-            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?
-            .on_store(&self.store)
-            .execute()
-            .map_err(|e| {
-                let truncated = &query_string[..query_string.len().min(500)];
-                anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
-            })?;
+            .map_err(|e| anyhow!("Failed to parse SPARQL query: {}", e))?;
+        self.scope_to_reader(&mut prepared);
+        let results = prepared.on_store(&self.store).execute().map_err(|e| {
+            let truncated = &query_string[..query_string.len().min(500)];
+            anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
+        })?;
 
         match results {
             QueryResults::Solutions(solutions) => {
@@ -1476,12 +1573,87 @@ impl SparqlStore {
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
         self.clear()?;
         for link in &links {
-            self.insert_link_triples(link)?;
+            self.insert_link_triples(link, &link.author)?;
         }
         self.flush()?;
         Ok(())
     }
+
+    /// Move every `Local` link still stored in the default graph into the
+    /// graph of the user `owner_of(author)` names, and return how many moved.
+    ///
+    /// Before #1224 every link was in the default graph. This is the one-time
+    /// move of those Local links into per-user graphs
+    /// (`migration::migrate_local_links_to_user_graphs` decides the owner).
+    /// It copies the link's quads as they are (reifier, every annotation), so
+    /// nothing is re-derived, then settles the direct triple.
+    ///
+    /// Each link is written to its user graph before it is removed from the
+    /// default graph, so an interrupted run leaves a link in both places and
+    /// never in neither. A second run finds nothing to move: the query is
+    /// "Local links in the default graph", so it is idempotent by
+    /// construction rather than by a marker.
+    pub fn move_local_links_to_user_graphs(
+        &self,
+        owner_of: impl Fn(&str) -> String,
+    ) -> Result<usize, Error> {
+        let status_local = literal(status_str(&LinkStatus::Local));
+        let reifiers: Vec<NamedOrBlankNode> = self
+            .store
+            .quads_for_pattern(
+                None,
+                Some(NamedNodeRef::new_unchecked(ONT_STATUS)),
+                Some(status_local.as_ref().into()),
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .map(|q| q.map(|q| q.subject))
+            .collect::<Result<_, _>>()?;
+
+        let mut moved = 0;
+        for reifier in &reifiers {
+            let quads: Vec<Quad> = self
+                .store
+                .quads_for_pattern(
+                    Some(reifier.as_ref()),
+                    None,
+                    None,
+                    Some(GraphNameRef::DefaultGraph),
+                )
+                .collect::<Result<_, _>>()?;
+            let author = quads
+                .iter()
+                .find(|q| q.predicate.as_str() == ONT_AUTHOR)
+                .and_then(|q| match &q.object {
+                    Term::Literal(l) => Some(l.value().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let graph = GraphName::from(local_graph(&owner_of(&author)));
+            for quad in &quads {
+                self.store.insert(QuadRef::new(
+                    quad.subject.as_ref(),
+                    quad.predicate.as_ref(),
+                    quad.object.as_ref(),
+                    graph.as_ref(),
+                ))?;
+            }
+            for quad in &quads {
+                self.store.remove(quad)?;
+            }
+            for quad in &quads {
+                if let (RDF_REIFIES, Term::Triple(triple)) = (quad.predicate.as_str(), &quad.object)
+                {
+                    self.settle_direct_triple(triple)?;
+                }
+            }
+            moved += 1;
+        }
+        Ok(moved)
+    }
 }
+
+#[cfg(test)]
+mod split_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1765,8 +1937,10 @@ mod tests {
         );
     }
 
+    /// A shared link uses no named graph; a `Local` one does, see
+    /// `split_tests` (#1224).
     #[test]
-    fn test_no_named_graphs_used() {
+    fn test_shared_link_uses_no_named_graph() {
         let signer = TestSigner::generate();
         let svc = new_service();
         let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
@@ -1780,12 +1954,12 @@ mod tests {
             .unwrap();
         assert!(
             named.is_empty(),
-            "No named graphs should be used in reifier model"
+            "A shared link should not create a named graph"
         );
     }
 
     #[test]
-    fn test_all_data_in_default_graph() {
+    fn test_shared_link_is_all_in_default_graph() {
         let signer = TestSigner::generate();
         let svc = new_service();
         let link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");

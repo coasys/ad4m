@@ -1,22 +1,53 @@
-//! Viewer-scoped read entry points on [`PerspectiveInstance`].
+//! Reads on [`PerspectiveInstance`] as one user.
 //!
 //! These are the `*_for_viewer` forms of the instance's link and model-query
-//! reads. The executor-scope forms (`get_links`, `model_query`) stay in
-//! `perspective_instance.rs` as thin wrappers that pass `None`. The visibility
-//! rule itself is in [`link_visibility`](crate::perspectives::link_visibility).
+//! reads, and [`PerspectiveInstance::read_as`]. They only choose whose view a
+//! read runs in; the store decides what that view holds: the shared links
+//! plus the viewer's own `Local` links
+//! ([`SparqlStore`](crate::perspectives::sparql_store::SparqlStore), #1224).
+//! `viewer_did == None` reads as the instance does: the main agent, unless
+//! the instance was scoped with [`PerspectiveInstance::read_as`]. The plain
+//! forms (`get_links`, `model_query`) pass `None`.
 
 use super::perspective_instance::{PerspectiveInstance, MODEL_QUERY_SHAPE_WAIT};
-use crate::agent::AgentContext;
-use crate::perspectives::link_visibility::viewer_did_for_context;
+use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::model_query::types::ShapeResolver;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
 use chrono::DateTime;
+use deno_core::anyhow::Error as AnyhowError;
 use deno_core::error::AnyError;
 
+/// The viewer a request is read as: the DID of the agent it is attributed to.
+///
+/// Fails closed: a request whose DID cannot be resolved is an error, not a
+/// read as the main agent. This includes the main agent itself:
+/// `is_main_agent` is true for every token that carries no user email.
+pub fn viewer_did_for_context(context: &AgentContext) -> Result<Option<String>, AnyhowError> {
+    did_for_context(context).map(Some)
+}
+
 impl PerspectiveInstance {
-    /// [`Self::get_links_local_decorated`] in the visibility scope of
-    /// `viewer_did` — see
-    /// [`link_visibility`](crate::perspectives::link_visibility).
+    /// This instance as `did` reads it: every read through the returned
+    /// clone (links, model queries, SPARQL) sees the shared links plus
+    /// `did`'s own `Local` links. Writes are unaffected; they always go to
+    /// the graph of the user they act for.
+    ///
+    /// The flow engine runs each pass through such a clone, so a pass for one
+    /// user reads that user's view only.
+    pub fn read_as(&self, did: &str) -> PerspectiveInstance {
+        let mut scoped = self.clone();
+        scoped.sparql_store = std::sync::Arc::new(self.sparql_store.read_as(Some(did)));
+        scoped
+    }
+
+    /// [`Self::read_as`] the user `context` acts for. The flow engine's entry
+    /// points (a consensus pass, a proposal, an accept, a read's refresh)
+    /// start with this: the engine reads as the one user it acts for.
+    pub fn read_as_context(&self, context: &AgentContext) -> Result<PerspectiveInstance, AnyError> {
+        Ok(self.read_as(&did_for_context(context)?))
+    }
+
+    /// [`Self::get_links_local_decorated`] as `viewer_did` reads.
     pub(super) fn get_links_local_decorated_for_viewer(
         &self,
         query: &LinkQuery,
@@ -31,19 +62,18 @@ impl PerspectiveInstance {
             dt.to_rfc3339()
         });
 
-        Ok(self.sparql_store.query_links_for_viewer(
+        Ok(self.sparql_store.read_as(viewer_did).query_links(
             query.source.as_deref(),
             query.predicate.as_deref(),
             query.target.as_deref(),
             from_date.as_deref(),
             until_date.as_deref(),
             None, // limit is applied after sorting in get_links()
-            viewer_did,
         )?)
     }
 
-    /// [`Self::get_links`] in the visibility scope of `viewer_did`:
-    /// `Local` links authored by someone else are not returned.
+    /// [`Self::get_links`] as `viewer_did` reads: another user's `Local`
+    /// links are not in that view.
     pub async fn get_links_for_viewer(
         &self,
         q: &LinkQuery,
@@ -85,7 +115,8 @@ impl PerspectiveInstance {
             });
             return Ok(self
                 .sparql_store
-                .query_links_top_n_by_timestamp_for_viewer(
+                .read_as(viewer_did)
+                .query_links_top_n_by_timestamp(
                     query.source.as_deref(),
                     query.predicate.as_deref(),
                     query.target.as_deref(),
@@ -93,7 +124,6 @@ impl PerspectiveInstance {
                     until_date.as_deref(),
                     limit as usize,
                     reverse,
-                    viewer_did,
                 )?);
         }
 
@@ -122,12 +152,11 @@ impl PerspectiveInstance {
         Ok(links)
     }
 
-    /// [`Self::get_links_for_viewer`] in the scope of the agent that a write
-    /// acts for.
+    /// [`Self::get_links_for_viewer`] as the agent that a write acts for.
     ///
-    /// A write that first looks up the links it will remove or replace must
-    /// use this, not `get_links`. A lookup in executor scope also finds other
-    /// users' `Local` links, and the write then deletes them (#1024).
+    /// A write that first looks up the links it will remove or replace uses
+    /// this, not `get_links`, so it only finds links that agent may remove
+    /// (#1024).
     pub async fn get_links_for_context(
         &self,
         q: &LinkQuery,
@@ -137,10 +166,9 @@ impl PerspectiveInstance {
         self.get_links_for_viewer(q, viewer.as_deref()).await
     }
 
-    /// [`Self::model_query`] in the visibility scope of `viewer_did`: instance
-    /// properties, relations and projections built from another user's `Local`
-    /// links are not hydrated, so an instance that exists only in those links
-    /// does not appear at all.
+    /// [`Self::model_query`] as `viewer_did` reads: another user's `Local`
+    /// links are not in that view, so they neither hydrate nor select, and an
+    /// instance that exists only in them does not appear at all.
     pub async fn model_query_for_viewer(
         &self,
         class_name: &str,
@@ -178,10 +206,13 @@ impl PerspectiveInstance {
 
         if let Some(filter) = produced_by_flow {
             // Which outputs a valid receipt vouches for is the flow engine's
-            // derivation, read in executor scope. It only narrows the ids;
-            // the query below still reads each instance as `viewer_did`.
+            // derivation, read as the same viewer. It only narrows the ids.
+            let scoped = match viewer_did {
+                Some(did) => self.read_as(did),
+                None => self.clone(),
+            };
             let valid = crate::perspectives::flow_instance::produced::flow_valid_outputs(
-                self,
+                &scoped,
                 &filter.flow,
                 filter.state.as_deref(),
             )

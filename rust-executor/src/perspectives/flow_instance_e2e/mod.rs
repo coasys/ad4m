@@ -136,7 +136,7 @@ async fn sync_vote_from(f: &mut Fixture, signer: &TestSigner, proposal_uri: &str
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(vote), LinkStatus::Shared, None)
+        .add_link_expression(LinkExpression::from(vote), LinkStatus::Shared, None, &f.ctx)
         .await
         .expect("sync a second agent's vote");
 }
@@ -209,7 +209,12 @@ async fn sync_committed_proposal_from(
             .normalize(),
         );
         f.perspective
-            .add_link_expression(LinkExpression::from(signed), LinkStatus::Shared, None)
+            .add_link_expression(
+                LinkExpression::from(signed),
+                LinkStatus::Shared,
+                None,
+                &f.ctx,
+            )
             .await
             .expect("sync a foreign proposal link");
     }
@@ -228,7 +233,7 @@ async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None)
+        .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None, &f.ctx)
         .await
         .expect("sync a peer's fired mark");
 }

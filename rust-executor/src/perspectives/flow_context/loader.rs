@@ -245,6 +245,9 @@ pub async fn gather_active_flow_contexts(
     flow_filter: Option<&[String]>,
     viewer_did: Option<&str>,
 ) -> Vec<FlowContext> {
+    // Read as the run's user (#1224).
+    let scoped = viewer_did.map(|did| perspective.read_as(did));
+    let perspective = scoped.as_ref().unwrap_or(perspective);
     let mut flows_by_uri = match load_shacl_flows(perspective).await {
         Ok(m) => m,
         Err(e) => {

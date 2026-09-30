@@ -1,4 +1,3 @@
-use super::link_visibility;
 use super::model_query::is_safe_iri_target;
 use super::model_query::load_shape_from_store;
 use super::model_query::types::{ModelShape, ShapeResolver};
@@ -1590,7 +1589,14 @@ impl PerspectiveInstance {
                     l
                 })
                 .collect(),
-            removals: unique_removals.clone(),
+            removals: unique_removals
+                .iter()
+                .cloned()
+                .map(|mut l| {
+                    l.status = Some(LinkStatus::Shared);
+                    l
+                })
+                .collect(),
         };
         let decorated_diff = DecoratedPerspectiveDiff {
             additions: unique_additions
@@ -1603,8 +1609,9 @@ impl PerspectiveInstance {
                 .collect(),
         };
 
-        // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        // Write to SPARQL store (primary storage for links). A link language
+        // carries shared links only, so no user graph is written.
+        self.persist_link_diff(&store_diff, None).await?;
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
@@ -1626,7 +1633,7 @@ impl PerspectiveInstance {
         // and scoped; a no-op for diffs outside the flow vocabulary.
         self.schedule_flow_consensus_pass(&decorated_diff);
 
-        self.pubsub_publish_diff(decorated_diff).await;
+        self.pubsub_publish_diff(decorated_diff, None).await;
 
         Ok(())
     }
@@ -1658,7 +1665,7 @@ impl PerspectiveInstance {
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
         let result = self
-            .add_link_expression(link_expr, status, batch_id)
+            .add_link_expression(link_expr, status, batch_id, context)
             .await?;
 
         if let Some(ref email) = context.user_email {
@@ -1676,11 +1683,17 @@ impl PerspectiveInstance {
         Ok(result)
     }
 
+    /// Remove a link `context`'s user can see: a shared link, or one of their
+    /// own `Local` links. Another user's `Local` link is not found, so it
+    /// cannot be removed (#1024).
     pub async fn remove_link(
         &mut self,
         link_expression: LinkExpression,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
+        let actor = did_for_context(context)?;
+        let store = self.sparql_store.read_as(Some(&actor));
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
@@ -1691,8 +1704,7 @@ impl PerspectiveInstance {
             let _handle = self.persisted.lock().await.clone();
 
             // Query SPARQL store
-            let decorated_link = self
-                .sparql_store
+            let decorated_link = store
                 .get_link(
                     &link_expression.data.source,
                     link_expression.data.predicate.as_deref(),
@@ -1711,7 +1723,7 @@ impl PerspectiveInstance {
             let _handle = self.persisted.lock().await.clone();
 
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = store.get_link(
                 &link_expression.data.source,
                 link_expression.data.predicate.as_deref(),
                 &link_expression.data.target,
@@ -1728,12 +1740,13 @@ impl PerspectiveInstance {
                     DecoratedPerspectiveDiff::from_removals(vec![decorated_link_result.clone()]);
 
                 // Remove from SPARQL store (primary storage)
-                self.persist_link_diff(&diff).await?;
+                self.persist_link_diff(&diff, Some(&actor)).await?;
 
                 // Update both Prolog engines: subscription (immediate) + query (lazy)
                 self.update_prolog_engines(decorated_diff.clone()).await;
 
-                self.pubsub_publish_diff(decorated_diff.clone()).await;
+                self.pubsub_publish_diff(decorated_diff.clone(), Some(&actor))
+                    .await;
 
                 if status == LinkStatus::Shared {
                     self.spawn_commit_and_handle_error(&diff);
@@ -1746,7 +1759,14 @@ impl PerspectiveInstance {
         }
     }
 
-    async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+    /// Publish `decorated_diff`'s link events, one per owner. `actor` is the
+    /// user the write acted for: a `Local` link is in their graph only, so
+    /// only they get its event ([`event_reaches`]).
+    async fn pubsub_publish_diff(
+        &self,
+        decorated_diff: DecoratedPerspectiveDiff,
+        actor: Option<&str>,
+    ) {
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -1763,7 +1783,7 @@ impl PerspectiveInstance {
                     // Co-owners share one instance, so the per-owner fan-out
                     // would otherwise hand every owner a link they cannot
                     // read back through any query — issue #1024.
-                    if !link_visibility::decorated_visible_to(link, Some(owner)) {
+                    if !event_reaches(link, owner, actor) {
                         continue;
                     }
                     pubsub
@@ -1783,7 +1803,7 @@ impl PerspectiveInstance {
             // Publish link removed events - one per owner for proper multi-user isolation
             for link in &decorated_diff.removals {
                 for owner in owners {
-                    if !link_visibility::decorated_visible_to(link, Some(owner)) {
+                    if !event_reaches(link, owner, actor) {
                         continue;
                     }
                     pubsub
@@ -1833,11 +1853,14 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Store a signed link for `context`'s user. A `Local` link goes to that
+    /// user's graph, whoever it names as author.
     pub async fn add_link_expression(
         &mut self,
         link_expression: LinkExpression,
         status: LinkStatus,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
         // Test seam (#981) — see `fail_add_link_after`'s doc comment. The
         // field (and this check) only exist in test builds, so this is
@@ -1884,7 +1907,8 @@ impl PerspectiveInstance {
             DecoratedPerspectiveDiff::from_additions(vec![decorated_link_expression.clone()]);
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&diff).await?;
+        let actor = did_for_context(context)?;
+        self.persist_link_diff(&diff, Some(&actor)).await?;
 
         // Update both Prolog engines: subscription (immediate) + query (lazy)
         self.update_prolog_engines(decorated_perspective_diff.clone())
@@ -1894,7 +1918,8 @@ impl PerspectiveInstance {
             self.spawn_commit_and_handle_error(&diff);
         }
 
-        self.pubsub_publish_diff(decorated_perspective_diff).await;
+        self.pubsub_publish_diff(decorated_perspective_diff, Some(&actor))
+            .await;
         Ok(decorated_link_expression)
     }
 
@@ -1953,10 +1978,13 @@ impl PerspectiveInstance {
                 DecoratedPerspectiveDiff::from_additions(decorated_link_expressions.clone());
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&perspective_diff).await?;
+            let actor = did_for_context(context)?;
+            self.persist_link_diff(&perspective_diff, Some(&actor))
+                .await?;
 
             self.spawn_prolog_facts_update(decorated_perspective_diff.clone(), None);
-            self.pubsub_publish_diff(decorated_perspective_diff).await;
+            self.pubsub_publish_diff(decorated_perspective_diff, Some(&actor))
+                .await;
 
             if status == LinkStatus::Shared {
                 self.spawn_commit_and_handle_error(&perspective_diff);
@@ -2041,10 +2069,12 @@ impl PerspectiveInstance {
         };
 
         // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        let actor = did_for_context(context)?;
+        self.persist_link_diff(&store_diff, Some(&actor)).await?;
 
         self.spawn_prolog_facts_update(decorated_diff.clone(), None);
-        self.pubsub_publish_diff(decorated_diff.clone()).await;
+        self.pubsub_publish_diff(decorated_diff.clone(), Some(&actor))
+            .await;
 
         if status == LinkStatus::Shared {
             self.spawn_commit_and_handle_error(&store_diff);
@@ -2089,9 +2119,11 @@ impl PerspectiveInstance {
             crate::billing::check_compute_credits(email)?;
         }
         let handle = self.persisted.lock().await.clone();
+        let actor = did_for_context(context)?;
 
-        // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
+        // Query SPARQL store, as the acting user sees it: another user's
+        // Local link is not theirs to update (#1024).
+        let decorated_link_option = self.sparql_store.read_as(Some(&actor)).get_link(
             &old_link.data.source,
             old_link.data.predicate.as_deref(),
             &old_link.data.target,
@@ -2150,7 +2182,7 @@ impl PerspectiveInstance {
             );
 
             // Write to SPARQL store (primary storage for links)
-            self.persist_link_diff(&diff).await?;
+            self.persist_link_diff(&diff, Some(&actor)).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
@@ -2163,11 +2195,8 @@ impl PerspectiveInstance {
                 for owner in owners {
                     // As in `pubsub_publish_diff` (#1024): an owner who may
                     // not see both versions gets neither.
-                    if !link_visibility::decorated_visible_to(&decorated_old_link, Some(owner))
-                        || !link_visibility::decorated_visible_to(
-                            &decorated_new_link_expression,
-                            Some(owner),
-                        )
+                    if !event_reaches(&decorated_old_link, owner, Some(&actor))
+                        || !event_reaches(&decorated_new_link_expression, owner, Some(&actor))
                     {
                         continue;
                     }
@@ -2221,18 +2250,22 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Remove the links `context`'s user can see; see [`Self::remove_link`].
     pub async fn remove_links(
         &mut self,
         link_expressions: Vec<LinkExpression>,
         batch_id: Option<String>,
+        context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         let _handle = self.persisted.lock().await.clone();
+        let actor = did_for_context(context)?;
+        let store = self.sparql_store.read_as(Some(&actor));
 
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
             // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
+            if let Some(decorated_link) = store.get_link(
                 &link.data.source,
                 link.data.predicate.as_deref(),
                 &link.data.target,
@@ -2281,11 +2314,11 @@ impl PerspectiveInstance {
             let decorated_diff = DecoratedPerspectiveDiff::from_removals(decorated_links.clone());
 
             // Remove from SPARQL store (primary storage)
-            self.persist_link_diff(&persist_diff).await?;
+            self.persist_link_diff(&persist_diff, Some(&actor)).await?;
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
-            self.pubsub_publish_diff(decorated_diff).await;
+            self.pubsub_publish_diff(decorated_diff, Some(&actor)).await;
 
             // Only commit shared links by filtering decorated_links
             let shared_links: Vec<LinkExpression> = decorated_links
@@ -2446,14 +2479,12 @@ impl PerspectiveInstance {
             .collect())
     }
 
-    /// Read links in **executor scope**: every link in the perspective,
-    /// including other users' `Local` links.
+    /// Read links as this instance reads: the shared links plus the `Local`
+    /// links of its reader, the main agent unless the instance was scoped
+    /// with [`Self::read_as`].
     ///
-    /// This is the right call for the executor's own derivations (flow engine
-    /// state, auto-processor, SDNA loading, the Prolog fact base). Anything
-    /// serving a request on behalf of an agent — WS RPC, MCP — must call
-    /// [`Self::get_links_for_viewer`] with that agent's DID instead. See
-    /// [`link_visibility`](crate::perspectives::link_visibility).
+    /// Anything serving a request on behalf of an agent — WS RPC, MCP — calls
+    /// [`Self::get_links_for_viewer`] with that agent's DID instead.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
         self.get_links_for_viewer(q, None).await
     }
@@ -2520,6 +2551,7 @@ impl PerspectiveInstance {
     async fn remove_subject_class_shacl_links(
         &mut self,
         target_class_uris: &[String],
+        context: &AgentContext,
     ) -> Result<(), AnyError> {
         let mut to_remove: Vec<LinkExpression> = Vec::new();
 
@@ -2574,7 +2606,7 @@ impl PerspectiveInstance {
         }
 
         if !to_remove.is_empty() {
-            self.remove_links(to_remove, None).await?;
+            self.remove_links(to_remove, None, context).await?;
         }
 
         Ok(())
@@ -2687,7 +2719,7 @@ impl PerspectiveInstance {
                     "Class '{}' already exists — refreshing SHACL definition",
                     name
                 );
-                self.remove_subject_class_shacl_links(&existing_target_class_uris)
+                self.remove_subject_class_shacl_links(&existing_target_class_uris, context)
                     .await?;
             }
         }
@@ -3039,7 +3071,7 @@ impl PerspectiveInstance {
                 // Get all links for Simple mode. Use the decorated form
                 // directly — re-running signature verification per link was
                 // hot in the wind tunnel.
-                self.get_links_local_decorated(&LinkQuery::default())?
+                self.get_links_local_decorated_for_viewer(&LinkQuery::default(), Some(&user_did))?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -3051,11 +3083,6 @@ impl PerspectiveInstance {
             }
             _ => Vec::new(), // Should never reach here given the callers
         };
-
-        // Local links are private to their author, including in the fact base
-        // a user's Prolog query runs against (#1024). Executor-internal Prolog
-        // work goes through the shared pool, not this per-context path.
-        links.retain(|link| link_visibility::decorated_visible_to(link, Some(user_did.as_str())));
 
         // Filter to only show SDNA links created by this user
         links.retain(|link| {
@@ -3464,8 +3491,17 @@ impl PerspectiveInstance {
     /// text is caller-supplied, so it uses `query_arbitrary` rather than
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
-    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_arbitrary(&query)
+    ///
+    /// The query runs over `viewer_did`'s view (shared links plus their own
+    /// `Local` links); the text is not rewritten.
+    pub fn sparql_query(
+        &self,
+        query: String,
+        viewer_did: Option<&str>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store
+            .read_as(viewer_did)
+            .query_arbitrary(&query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3500,8 +3536,12 @@ impl PerspectiveInstance {
         &self,
         query: String,
         cancel: tokio_util::sync::CancellationToken,
+        viewer_did: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store.query_cancellable(&query, cancel).await
+        self.sparql_store
+            .read_as(viewer_did)
+            .query_cancellable(&query, cancel)
+            .await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3789,15 +3829,17 @@ impl PerspectiveInstance {
     /// Evaluate property getters for a batch of instances in-process.
     ///
     /// Returns a JSON string of `{ instanceId: { prop: value, ... } }`.
+    /// The getters read `viewer_did`'s view, as a model query does.
     pub fn evaluate_getters(
         &self,
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
+        viewer_did: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
-            &self.sparql_store,
+            &self.sparql_store.read_as(viewer_did),
             shape.as_ref(),
             instance_ids,
             property_names,
@@ -3808,7 +3850,16 @@ impl PerspectiveInstance {
         })
     }
 
-    pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {
+    /// Write `diff` to the store for `owner`, the user the write acts for:
+    /// their `Local` links go to their own graph and only their own `Local`
+    /// links are removed (see [`SparqlStore`](super::sparql_store::SparqlStore)).
+    /// `None` is for diffs that carry no `Local` link, such as the ones a link
+    /// language delivers; a `Local` link in them is refused.
+    pub(crate) async fn persist_link_diff(
+        &self,
+        diff: &PerspectiveDiff,
+        owner: Option<&str>,
+    ) -> Result<(), AnyError> {
         // IMPORTANT: Process removals BEFORE additions!
         // The remove_link function matches by source/predicate/target (not unique ID).
         // If we add first and remove second, we'd delete the newly added links too.
@@ -3820,13 +3871,27 @@ impl PerspectiveInstance {
 
         // Removals first
         for removal in &diff.removals {
-            if let Err(e) = self.sparql_store.remove_link(removal) {
+            let removed = match owner {
+                Some(owner) => self.sparql_store.remove_link_as(removal, owner),
+                None => self.sparql_store.remove_shared_link(removal),
+            };
+            if let Err(e) = removed {
                 log::warn!("Failed to remove link from SPARQL store: {:?}", e);
             }
         }
         // Additions after
         for addition in &diff.additions {
-            if let Err(e) = self.sparql_store.add_link(addition) {
+            let added = match (owner, &addition.status) {
+                (Some(owner), _) => self.sparql_store.add_link_as(addition, owner),
+                (None, Some(LinkStatus::Shared)) => self.sparql_store.add_link(addition),
+                (None, _) => Err(anyhow!(
+                    "a Local link needs the user it is written for: {} -[{}]-> {}",
+                    addition.data.source,
+                    addition.data.predicate.as_deref().unwrap_or(""),
+                    addition.data.target
+                )),
+            };
+            if let Err(e) = added {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
@@ -4094,7 +4159,14 @@ impl PerspectiveInstance {
                 // from deleted users or corrupted data.
                 match {
                     let query = n.trigger.clone();
-                    let result_json = self.sparql_store.query(&query);
+                    // A trigger matches what its user can see: shared links
+                    // and their own Local links (#1224).
+                    let context = match n.user_email.clone() {
+                        Some(email) => AgentContext::for_user_email(email),
+                        None => AgentContext::main_agent(),
+                    };
+                    let result_json = did_for_context(&context)
+                        .and_then(|did| self.sparql_store.read_as(Some(&did)).query(&query));
                     match result_json {
                         Ok(json) => serde_json::from_str::<Vec<serde_json::Value>>(&json)
                             .map_err(|e| anyhow::anyhow!(e)),
@@ -4714,7 +4786,7 @@ impl PerspectiveInstance {
                         )
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), batch_id.clone())
+                        self.remove_link(link_expression.into(), batch_id.clone(), context)
                             .await?;
                     }
                     // Also prune matching links from pending batch additions
@@ -4757,7 +4829,7 @@ impl PerspectiveInstance {
                         )
                         .await?;
                     for link_expression in link_expressions {
-                        self.remove_link(link_expression.into(), batch_id.clone())
+                        self.remove_link(link_expression.into(), batch_id.clone(), context)
                             .await?;
                     }
                     // Also prune matching links from pending batch additions so
@@ -4865,7 +4937,7 @@ impl PerspectiveInstance {
                         if !desired_set.contains(link.data.target.as_str())
                             && !already_removed.contains(&link.data.target)
                         {
-                            self.remove_link(link.clone().into(), batch_id.clone())
+                            self.remove_link(link.clone().into(), batch_id.clone(), context)
                                 .await?;
                         }
                     }
@@ -5625,7 +5697,8 @@ impl PerspectiveInstance {
             crate::agent::AgentContext::main_agent()
         };
         let result_string = if is_sparql_query(&query) {
-            self.sparql_query(query.clone())?
+            let viewer_did = did_for_context(&agent_context)?;
+            self.sparql_query(query.clone(), Some(&viewer_did))?
         } else {
             let initial_result = self
                 .prolog_query_subscription_with_context(query.clone(), &agent_context)
@@ -5673,7 +5746,7 @@ impl PerspectiveInstance {
             Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
             None => crate::agent::AgentContext::main_agent(),
         };
-        let viewer_did = link_visibility::viewer_did_for_context(&agent_context)?;
+        let viewer_did = super::viewer_reads::viewer_did_for_context(&agent_context)?;
         let initial_result = self
             .model_query_for_viewer(&class_name, &query_json, viewer_did.as_deref())
             .await?;
@@ -5920,7 +5993,8 @@ impl PerspectiveInstance {
                 // so every re-run has to stay in that agent's visibility
                 // scope — otherwise the first update after a co-owner writes
                 // a Local link would deliver what the initial query withheld.
-                let viewer_did = match link_visibility::viewer_did_for_context(&_agent_context) {
+                let viewer_did = match super::viewer_reads::viewer_did_for_context(&_agent_context)
+                {
                     Ok(did) => did,
                     Err(e) => {
                         log::error!("❌ 🔗 subscription viewer DID unresolved: {}", e);
@@ -5945,7 +6019,7 @@ impl PerspectiveInstance {
                         }
                     }
                 } else if is_sparql_query(&query_string) {
-                    match self_clone.sparql_query(query_string) {
+                    match self_clone.sparql_query(query_string, viewer_did.as_deref()) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
@@ -6632,7 +6706,8 @@ impl PerspectiveInstance {
             //log::info!("🔄 BATCH COMMIT: Starting DB + prolog updates - {} add, {} rem",
             //    combined_diff.additions.len(), combined_diff.removals.len());
 
-            self.persist_link_diff(&persist_diff).await?;
+            let actor = did_for_context(context)?;
+            self.persist_link_diff(&persist_diff, Some(&actor)).await?;
 
             // Update Prolog: subscription engine (immediate) + query engine (lazy)
             self.update_prolog_engines(combined_diff.clone()).await;
@@ -6645,7 +6720,8 @@ impl PerspectiveInstance {
             // paths. commit_batch never went through that publish step, so
             // batched diffs were never reaching WS subscribers — that's what
             // this call restores.
-            self.pubsub_publish_diff(combined_diff.clone()).await;
+            self.pubsub_publish_diff(combined_diff.clone(), Some(&actor))
+                .await;
 
             //log::info!("🔄 BATCH COMMIT: Prolog facts update completed in {:?}", prolog_start.elapsed());
         }
@@ -6655,6 +6731,13 @@ impl PerspectiveInstance {
         // Return combined diff
         Ok(combined_diff)
     }
+}
+
+/// Does an owner get the event for `link`, written by `actor`? A shared link
+/// is in every owner's view; a `Local` link only in the graph of the user who
+/// wrote it (#1224), so only that owner hears of it.
+fn event_reaches(link: &DecoratedLinkExpression, owner: &str, actor: Option<&str>) -> bool {
+    link.status != Some(LinkStatus::Local) || actor == Some(owner)
 }
 
 pub fn prolog_result(result: String) -> Value {
@@ -7348,7 +7431,7 @@ mod tests {
 
         // Remove the link from the perspective
         perspective
-            .remove_link(expression.clone().into(), None)
+            .remove_link(expression.clone().into(), None, &AgentContext::main_agent())
             .await
             .unwrap();
 
@@ -7373,7 +7456,12 @@ mod tests {
                 + chrono::Duration::minutes(i as i64))
             .to_rfc3339();
             let expression = perspective
-                .add_link_expression(LinkExpression::from(link.clone()), LinkStatus::Shared, None)
+                .add_link_expression(
+                    LinkExpression::from(link.clone()),
+                    LinkStatus::Shared,
+                    None,
+                    &AgentContext::main_agent(),
+                )
                 .await
                 .unwrap();
             all_links.push(expression);
@@ -7596,7 +7684,11 @@ mod tests {
             .await
             .unwrap();
         perspective
-            .remove_link(link0_expression.clone().into(), Some(batch_id.clone()))
+            .remove_link(
+                link0_expression.clone().into(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await
             .unwrap();
 
@@ -7643,7 +7735,11 @@ mod tests {
             status: None,
         };
         let result = perspective
-            .remove_link(non_existent_link.clone(), Some(batch_id.clone()))
+            .remove_link(
+                non_existent_link.clone(),
+                Some(batch_id.clone()),
+                &AgentContext::main_agent(),
+            )
             .await;
         assert!(result.is_err());
 
@@ -7840,7 +7936,7 @@ mod tests {
                 .await
                 .unwrap();
             perspective
-                .remove_link(LinkExpression::from(second), None)
+                .remove_link(LinkExpression::from(second), None, &ctx)
                 .await
                 .unwrap();
         }
@@ -9572,7 +9668,11 @@ mod tests {
         // Uncancelled — should return JSON with at least the inserted triple.
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+                cancel,
+                None,
+            )
             .await
             .expect("non-cancelled query should succeed");
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -9585,7 +9685,11 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
         let err = perspective
-            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
+            .sparql_query_cancellable(
+                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
+                cancel,
+                None,
+            )
             .await
             .expect_err("pre-cancelled query should error");
         assert!(

@@ -591,7 +591,7 @@ pub(crate) struct CascadeFailure {
 pub(crate) async fn remove_all_links_of(
     perspective: &mut PerspectiveInstance,
     uri: &str,
-    viewer_did: Option<&str>,
+    context: &crate::agent::AgentContext,
 ) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
     for query in [
@@ -604,7 +604,7 @@ pub(crate) async fn remove_all_links_of(
             ..Default::default()
         },
     ] {
-        let links = match perspective.get_links_for_viewer(&query, viewer_did).await {
+        let links = match perspective.get_links_for_context(&query, context).await {
             Ok(links) => links,
             Err(e) => {
                 return Err(CascadeFailure {
@@ -620,7 +620,7 @@ pub(crate) async fn remove_all_links_of(
                 link.data.predicate.as_deref().unwrap_or(""),
                 link.data.target
             );
-            if let Err(e) = perspective.remove_link(link.into(), None).await {
+            if let Err(e) = perspective.remove_link(link.into(), None, context).await {
                 return Err(CascadeFailure {
                     removed,
                     error: format!("removing link {described} failed: {e:#}"),

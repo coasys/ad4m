@@ -127,7 +127,12 @@ async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(peer_cache), LinkStatus::Shared, None)
+        .add_link_expression(
+            LinkExpression::from(peer_cache),
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
         .await
         .expect("sync a peer's currentState");
     // The peer's link really is on the graph, and really does say something
@@ -206,7 +211,7 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
         .collect();
     assert!(!cache.is_empty());
     f.perspective
-        .remove_links(cache, None)
+        .remove_links(cache, None, &f.ctx)
         .await
         .expect("drop the creator's local cache");
 
@@ -325,7 +330,7 @@ async fn drop_local_cache(f: &mut Fixture) {
         .map(LinkExpression::from)
         .collect();
     f.perspective
-        .remove_links(cache, None)
+        .remove_links(cache, None, &f.ctx)
         .await
         .expect("drop the local cache");
 }
@@ -337,7 +342,12 @@ async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[
     for uri in proposal_uris {
         for link in links_of(from, uri).await {
             to.perspective
-                .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+                .add_link_expression(
+                    LinkExpression::from(link),
+                    LinkStatus::Shared,
+                    None,
+                    &to.ctx,
+                )
                 .await
                 .expect("replicate a proposal link");
         }

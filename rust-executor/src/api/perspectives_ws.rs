@@ -120,7 +120,12 @@ async fn get_perspective_with_access(
         }
     }
 
-    Ok(perspective)
+    // Every read a handler makes through this handle runs in the requesting
+    // agent's view: the shared links plus their own Local links (#1224).
+    match viewer_did(ctx)? {
+        Some(did) => Ok(perspective.read_as(&did)),
+        None => Ok(perspective),
+    }
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
@@ -286,15 +291,14 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
-/// Visibility scope for a request on this surface.
+/// The user a request on this surface reads as.
 ///
-/// Every handler below serves a request on behalf of an agent, so reads go
-/// through the `*_for_viewer` entry points with this DID rather than the
-/// executor-scoped ones. See
-/// [`link_visibility`](crate::perspectives::link_visibility).
+/// Every handler below serves a request on behalf of an agent, so its reads
+/// run in that agent's view: the shared links plus the agent's own `Local`
+/// links (#1224).
 fn viewer_did(ctx: &RequestContext) -> Result<Option<String>, WsRpcError> {
     let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    crate::perspectives::link_visibility::viewer_did_for_context(&agent_context)
+    crate::perspectives::viewer_reads::viewer_did_for_context(&agent_context)
         .map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
@@ -537,6 +541,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
                 .remove_link(
                     LinkExpression::from_input_without_proof(link),
                     Some(batch_id.clone()),
+                    &agent_context,
                 )
                 .await
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -612,9 +617,10 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let status = parse_link_status(body.status.as_deref());
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let result = perspective
-        .add_link_expression(body.link, status, body.batch_id)
+        .add_link_expression(body.link, status, body.batch_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -666,10 +672,11 @@ async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
-        .remove_link(link_expr, body.batch_id)
+        .remove_link(link_expr, body.batch_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -727,6 +734,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let viewer = viewer_did(&ctx)?;
 
     match engine.as_str() {
         "sparql" => {
@@ -742,10 +750,15 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // historical timeout + spawn_blocking shape.
             let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
             let result = if let Some(cancel) = ctx.cancel_token.clone() {
-                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
-                    .await
+                tokio::time::timeout(
+                    timeout,
+                    perspective.sparql_query_cancellable(query, cancel, viewer.as_deref()),
+                )
+                .await
             } else {
-                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
+                let join = tokio::task::spawn_blocking(move || {
+                    perspective.sparql_query(query, viewer.as_deref())
+                });
                 tokio::time::timeout(timeout, async move {
                     join.await
                         .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
@@ -1242,13 +1255,19 @@ async fn evaluate_getters_handler(
         });
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let viewer = viewer_did(&ctx)?;
 
     // Run synchronous getter evaluation on a blocking thread with timeout
     // to avoid blocking the async runtime.
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
+            perspective.evaluate_getters(
+                &class_name,
+                &instance_ids,
+                property_names.as_deref(),
+                viewer.as_deref(),
+            )
         }),
     )
     .await;
@@ -2215,6 +2234,10 @@ async fn flow_valid_outputs_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let perspective = match viewer_did(&ctx)? {
+        Some(did) => perspective.read_as(&did),
+        None => perspective,
+    };
     let outputs = crate::perspectives::flow_instance::produced::flow_valid_outputs(
         &perspective,
         &flow,

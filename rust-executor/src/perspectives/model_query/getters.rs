@@ -25,10 +25,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use super::filtering::matches_condition;
 use super::hydration::{reorder_members, ORDERING_STASH_KEY};
-use super::sparql_builder::LinkGuard;
+use super::sparql_builder::{verified_link_exists, LinkGuard};
 use super::types::{IncludeValue, ModelShape, ShapeProperty};
 use super::utils::{parse_literal_value, validate_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Decode a SPARQL getter row's raw string based on the property's
 /// declared `sh:datatype`. When the property declares a datatype it
@@ -108,7 +109,8 @@ pub fn evaluate_getters_batch(
         &filtered_shape,
         None,
         true,
-        LinkGuard::default(),
+        None,
+        None,
     )?;
 
     let mut result = Map::new();
@@ -168,17 +170,15 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) 
     }
 }
 
-/// Add the query's [`LinkGuard`] to a relation getter that opens with the
-/// relation's own triple, `<Base> <predicate> ?target`: the #1113 proof
-/// filter, the #1116 `linkStatus` when the query has one, and the #1024
-/// viewer. All are checked on that triple's one link.
+/// Add the #1113 proof filter, and the #1116 `linkStatus` check when the query
+/// has one, to a relation getter that opens with the relation's own triple,
+/// `<Base> <predicate> ?target`. Both are checked on that triple's one link.
 ///
 /// That is the form of the conformance getter the SDK generates for a typed
 /// relation (`buildConformanceFilter` in `core/src/model/decorators.ts`). A
 /// relation with a getter is filled here instead of by the filtered hydration
-/// read, so without this a forged link, a Local link under
-/// `linkStatus: shared`, or another user's Local link would add a target to
-/// it.
+/// read, so without this a forged link, or a Local link under
+/// `linkStatus: shared`, would add a target to it.
 ///
 /// The triples after it, `?target <p> <v> .` for each flag and
 /// `?target <p> ?_vN .` for each required property, are the target class's
@@ -189,11 +189,18 @@ pub(super) fn convert_ask_to_batched_select(ask: &str, source_constraint: &str) 
 /// Any other getter is the model author's own SPARQL and runs as written. A
 /// getter that opens with the relation's triple but goes on differently gets
 /// the check on that first triple only.
-/// Unchanged as well when the guard is open: `includeUnverified`, no
-/// `linkStatus`, executor scope.
-pub(super) fn verify_relation_getter(getter: &str, predicate: &str, guard: LinkGuard) -> String {
+/// Unchanged as well when the query opts in with `includeUnverified` and sets
+/// no `linkStatus`.
+pub(super) fn verify_relation_getter(
+    getter: &str,
+    predicate: &str,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> String {
     let filter = match validate_iri(predicate) {
-        Ok(pred) => guard.exists("<Base>", &format!("<{pred}>"), "?target"),
+        Ok(pred) => {
+            verified_link_exists("<Base>", pred, "?target", link_status, include_unverified)
+        }
         Err(_) => return getter.to_string(),
     };
     if filter.is_empty() {
@@ -212,6 +219,10 @@ pub(super) fn verify_relation_getter(getter: &str, predicate: &str, guard: LinkG
     let generated = regex::Regex::new(&format!(r"(?s)^\s*\.(?:\s*{condition})*\s*\}}\s*$"))
         .expect("static pattern");
     let rest = if generated.is_match(rest) {
+        let guard = LinkGuard {
+            status: link_status,
+            include_unverified,
+        };
         regex::Regex::new(condition)
             .expect("static pattern")
             .replace_all(rest, |c: &regex::Captures| {
@@ -273,7 +284,8 @@ pub(super) fn evaluate_getters(
     shape: &ModelShape,
     _include: Option<&HashMap<String, IncludeValue>>,
     deep_query: bool,
-    guard: LinkGuard,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let getter_props: Vec<&ShapeProperty> = shape
         .properties
@@ -338,7 +350,7 @@ pub(super) fn evaluate_getters(
             }
         } else if upper.starts_with("SELECT") {
             let getter = if prop.is_collection || prop.is_scalar_relation {
-                verify_relation_getter(getter, &prop.predicate, guard)
+                verify_relation_getter(getter, &prop.predicate, link_status, include_unverified)
             } else {
                 getter.clone()
             };
@@ -453,7 +465,15 @@ pub(super) fn evaluate_getters(
             (Some(wf), Some(wp)) => (wf, wp),
             _ => continue,
         };
-        apply_where_filter_to_relation(store, instances, &prop.name, wf, wp, guard)?;
+        apply_where_filter_to_relation(
+            store,
+            instances,
+            &prop.name,
+            wf,
+            wp,
+            link_status,
+            include_unverified,
+        )?;
     }
 
     // Unconditional, and here rather than at the end of the pipeline: the stash
@@ -493,16 +513,17 @@ fn strip_stashed_entries(instances: &mut [Value]) {
 /// filters out targets that don't match the where conditions.  The relation
 /// arrays on each parent instance are updated in-place.
 ///
-/// The values are read through the query's [`LinkGuard`] (`linkStatus`, the
-/// #1113 proof filter and the viewer), so a withheld link on a target neither
-/// admits it nor, as the last row read, drops it.
+/// The values are read through the query's `linkStatus` and #1113 proof
+/// filter, so a withheld link on a target neither admits it nor, as the last
+/// row read, drops it.
 pub(super) fn apply_where_filter_to_relation(
     store: &SparqlStore,
     instances: &mut [Value],
     relation_name: &str,
     where_filter: &BTreeMap<String, super::types::WhereCondition>,
     where_predicates: &HashMap<String, String>,
-    guard: LinkGuard,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), Error> {
     let all_targets: Vec<String> = instances
         .iter()
@@ -559,7 +580,13 @@ pub(super) fn apply_where_filter_to_relation(
             "SELECT ?source ?val WHERE {{ {} ?source <{}> ?val .{} }}",
             target_constraint,
             predicate,
-            guard.exists("?source", &format!("<{predicate}>"), "?val")
+            verified_link_exists(
+                "?source",
+                predicate,
+                "?val",
+                link_status,
+                include_unverified
+            )
         );
 
         let result_json = store.query(&query)?;
@@ -683,23 +710,6 @@ mod decode_getter_target_tests {
 #[cfg(test)]
 mod verify_relation_getter_tests {
     use super::*;
-    use crate::types::LinkStatus;
-
-    const DEFAULT: LinkGuard = LinkGuard {
-        status: None,
-        include_unverified: None,
-        viewer: None,
-    };
-    const OPTED_IN: LinkGuard = LinkGuard {
-        status: None,
-        include_unverified: Some(true),
-        viewer: None,
-    };
-
-    /// `guard`'s check on one link, as the rewrite emits it.
-    fn check(guard: LinkGuard, subject: &str, predicate: &str, object: &str) -> String {
-        guard.exists(subject, &format!("<{predicate}>"), object)
-    }
 
     /// The exact getter `buildConformanceFilter` (`core/src/model/decorators.ts`)
     /// emits for `FlaggedTarget` in `core/src/model/relation-filtering.test.ts`,
@@ -723,40 +733,41 @@ mod verify_relation_getter_tests {
 
     #[test]
     fn verify_relation_getter_rewrites_the_sdk_conformance_getter() {
-        let filter = check(DEFAULT, "<Base>", "test://has_flagged", "?target");
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
         assert!(!filter.is_empty());
         assert_eq!(
-            verify_relation_getter(SDK_GETTER, "test://has_flagged", DEFAULT),
-            guarded_sdk_getter(|s, p, o| check(DEFAULT, s, p, o)),
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, None),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(s, p, o, None, None)),
             "the relation's triple and the target's conformance triples"
         );
         assert_eq!(
-            verify_relation_getter(SDK_GETTER, "test://has_flagged", OPTED_IN),
+            verify_relation_getter(SDK_GETTER, "test://has_flagged", None, Some(true)),
             SDK_GETTER,
             "the opt-in leaves the getter as written"
         );
-        let shared = LinkGuard {
-            status: Some(&LinkStatus::Shared),
-            ..OPTED_IN
-        };
-        assert!(check(shared, "<Base>", "test://has_flagged", "?target")
-            .contains("<ad4m://ontology/status> \"Shared\""));
+        let shared = verified_link_exists(
+            "<Base>",
+            "test://has_flagged",
+            "?target",
+            Some(&LinkStatus::Shared),
+            Some(true),
+        );
+        assert!(shared.contains("<ad4m://ontology/status> \"Shared\""));
         assert_eq!(
-            verify_relation_getter(SDK_GETTER, "test://has_flagged", shared),
-            guarded_sdk_getter(|s, p, o| check(shared, s, p, o)),
+            verify_relation_getter(
+                SDK_GETTER,
+                "test://has_flagged",
+                Some(&LinkStatus::Shared),
+                Some(true)
+            ),
+            guarded_sdk_getter(|s, p, o| verified_link_exists(
+                s,
+                p,
+                o,
+                Some(&LinkStatus::Shared),
+                Some(true)
+            )),
             "a status still applies under the opt-in"
-        );
-        let viewer = LinkGuard {
-            viewer: Some("did:key:z6MkBob"),
-            ..OPTED_IN
-        };
-        assert!(
-            check(viewer, "<Base>", "test://has_flagged", "?target").contains("did:key:z6MkBob")
-        );
-        assert_eq!(
-            verify_relation_getter(SDK_GETTER, "test://has_flagged", viewer),
-            guarded_sdk_getter(|s, p, o| check(viewer, s, p, o)),
-            "a viewer still applies under the opt-in"
         );
     }
 
@@ -764,9 +775,9 @@ mod verify_relation_getter_tests {
     fn verify_relation_getter_guards_only_the_first_triple_of_another_form() {
         let getter = "SELECT ?target WHERE { <Base> <test://has_flagged> ?target . \
                       OPTIONAL { ?target <test://type> <test://flagged_type> . } }";
-        let filter = check(DEFAULT, "<Base>", "test://has_flagged", "?target");
+        let filter = verified_link_exists("<Base>", "test://has_flagged", "?target", None, None);
         assert_eq!(
-            verify_relation_getter(getter, "test://has_flagged", DEFAULT),
+            verify_relation_getter(getter, "test://has_flagged", None, None),
             getter.replacen(
                 "<Base> <test://has_flagged> ?target",
                 &format!("<Base> <test://has_flagged> ?target{filter}"),
@@ -779,7 +790,7 @@ mod verify_relation_getter_tests {
     fn verify_relation_getter_leaves_a_hand_written_getter_alone() {
         let getter = "SELECT ?target WHERE { ?target <test://custom> <Base> . }";
         assert_eq!(
-            verify_relation_getter(getter, "test://custom", DEFAULT),
+            verify_relation_getter(getter, "test://custom", None, None),
             getter
         );
     }

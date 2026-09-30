@@ -1358,7 +1358,6 @@ async fn test_resolve_projections_count() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1415,7 +1414,6 @@ async fn test_resolve_projections_list() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1471,7 +1469,6 @@ async fn test_resolve_projections_scalar() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1519,7 +1516,6 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1597,7 +1593,6 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1672,7 +1667,6 @@ async fn test_resolve_projections_where_filter_by_author() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1953,7 +1947,8 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY);
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2524,7 +2519,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2603,7 +2598,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2730,7 +2725,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2802,7 +2797,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2872,7 +2867,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2965,7 +2960,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -3400,7 +3395,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3434,7 +3429,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3468,7 +3463,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3499,7 +3494,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3515,7 +3510,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3535,7 +3530,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -4948,7 +4943,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
-        None,
     )
     .await
     .unwrap();
@@ -4984,7 +4978,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
-        None,
     )
     .await
     .unwrap();

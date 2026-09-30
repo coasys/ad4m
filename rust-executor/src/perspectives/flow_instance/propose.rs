@@ -142,6 +142,9 @@ pub async fn propose_flow_transition(
     rationale: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<ProposeOutcome> {
+    // Everything below reads as the proposing user (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let flows = load_shacl_flows(perspective).await?;
     let instances = load_all_flow_instances(perspective).await?;
     let record = instances

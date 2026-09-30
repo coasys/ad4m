@@ -1265,6 +1265,15 @@ pub async fn run_engine_proposal_pass(
     if subjects.is_empty() {
         return Vec::new();
     }
+    // Everything below reads as the acting user (#1224).
+    let mut scoped = match perspective.read_as_context(context) {
+        Ok(scoped) => scoped,
+        Err(e) => {
+            log::warn!("run_engine_proposal_pass: no DID for the acting agent: {e:#}");
+            return Vec::new();
+        }
+    };
+    let perspective = &mut scoped;
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
         crate::perspectives::flow_context::retain_selected_flows(&mut flows_by_uri, flow_filter);

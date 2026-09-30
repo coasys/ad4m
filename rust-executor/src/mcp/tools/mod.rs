@@ -515,7 +515,7 @@ impl Ad4mMcpHandler {
             Some(token) if !token.is_empty() => AgentContext::from_auth_token(token),
             _ => AgentContext::main_agent(),
         };
-        crate::perspectives::link_visibility::viewer_did_for_context(&context)
+        crate::perspectives::viewer_reads::viewer_did_for_context(&context)
             .map_err(|e| e.to_string())
     }
 
@@ -589,6 +589,11 @@ impl Ad4mMcpHandler {
             return Err(format!("Capability error: {}", e));
         }
 
+        // Every read a tool makes through this handle runs in the caller's
+        // view: shared links plus their own Local links (#1224).
+        let perspective = perspective
+            .read_as_context(&agent_context)
+            .map_err(|e| json!({"error": e.to_string()}).to_string())?;
         Ok((perspective, agent_context))
     }
 
@@ -625,7 +630,12 @@ impl Ad4mMcpHandler {
             );
         }
 
-        Ok(perspective)
+        // Reads run in the caller's view (#1224); see `get_perspective_with_auth`.
+        match self.viewer_did().await {
+            Ok(Some(did)) => Ok(perspective.read_as(&did)),
+            Ok(None) => Ok(perspective),
+            Err(e) => Err(json!({"error": e}).to_string()),
+        }
     }
 
     /// Convenience wrapper for write operations (most common case)

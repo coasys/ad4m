@@ -568,7 +568,7 @@ async fn shacl_get_all_handles_target_class_unlinked_mid_walk() {
     );
     let tc_expr = LinkExpression::from(tc_links.into_iter().next().unwrap());
     perspective
-        .remove_link(tc_expr, None)
+        .remove_link(tc_expr, None, &ctx)
         .await
         .expect("remove targetClass mid-walk");
 

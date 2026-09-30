@@ -1,8 +1,8 @@
 //! Per-user derivation of a `FlowInstance`'s `currentState` on read.
 //!
 //! The `currentState` cache is a `Local` link, and on a multi-user host a
-//! Local link is private to its author (#1024, `link_visibility`). The engine
-//! writes the cache under whichever user's request ran the pass, so after Bob
+//! Local link lives in the graph of the user who wrote it (#1024, #1224). The
+//! engine writes the cache for whichever user's request ran the pass, so after Bob
 //! moved a flow, Alice — a co-owner of the same perspective — does not see
 //! Bob's cache. She must not: the cache is his. What she gets instead is her
 //! own derivation. When a user reads `FlowInstance` rows
@@ -20,6 +20,9 @@
 //! the rows outside the page stale, and a `where` on `currentState` itself
 //! must not be answered from a stale cache.
 //!
+//! The derivation reads as the user too ([`PerspectiveInstance::read_as_context`]):
+//! their proposals, votes and marks, never another user's Local links.
+//!
 //! The refresh is best effort ([`refresh_for_read`]). It is not billed and
 //! needs no credits (the writer skips `add_link`'s billing), a failure is
 //! logged and the query still answers from whatever cache the user holds,
@@ -36,7 +39,6 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{write_local_current_state, FLOW_INSTANCE_CLASS};
 use crate::perspectives::flow_context::{load_shacl_flows, parse_flow_instance_from_hydrated};
 use crate::perspectives::flow_instance::derive_states;
-use crate::perspectives::link_visibility::viewer_did_for_context;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 
 /// What a `FlowInstance` read did to the reader's own cache.
@@ -92,13 +94,11 @@ pub(crate) async fn sync_for_context(
     query_json: &str,
     context: &AgentContext,
 ) -> anyhow::Result<usize> {
-    let viewer = viewer_did_for_context(context)?;
+    // The rows, the flows and the derivation are all read as the viewer.
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let json = match perspective
-        .model_query_for_viewer(
-            FLOW_INSTANCE_CLASS,
-            &narrowed_query(query_json),
-            viewer.as_deref(),
-        )
+        .model_query(FLOW_INSTANCE_CLASS, &narrowed_query(query_json))
         .await
     {
         Ok(j) => j,

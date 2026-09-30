@@ -507,7 +507,7 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
         serde_json::from_value(json!({ "where": { "name": "x", "members": "sg://a/carol" } }))
             .unwrap();
     let super::super::types::InstanceQueryPlan::Single(sparql) =
-        super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None, None)
+        super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None)
     else {
         panic!("expected the single plan");
     };

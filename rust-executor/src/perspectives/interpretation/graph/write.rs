@@ -27,15 +27,20 @@ pub(crate) async fn replace_link(
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let existing = perspective
-        .get_links(&LinkQuery {
-            source: Some(base.to_string()),
-            predicate: Some(predicate.to_string()),
-            ..Default::default()
-        })
+        .get_links_for_context(
+            &LinkQuery {
+                source: Some(base.to_string()),
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            },
+            context,
+        )
         .await?;
     if !existing.is_empty() {
         let exprs: Vec<LinkExpression> = existing.into_iter().map(Into::into).collect();
-        perspective.remove_links(exprs, batch_id.clone()).await?;
+        perspective
+            .remove_links(exprs, batch_id.clone(), context)
+            .await?;
     }
     perspective
         .add_link(

@@ -35,8 +35,9 @@
 //!   emitted once per event per replica). Never an input to the fold.
 //!
 //! Both are written **`Local`** (#987): every replica — and, on a multi-user
-//! host, every user, since a Local link is private to its author (#1024) —
-//! materialises only its own derivation. Shared, they were a claim a UI would display unverified,
+//! host, every user, since a user's Local links are in their own graph and a
+//! pass reads as the one user it acts for (#1224) — materialises only its own
+//! derivation. Shared, they were a claim a UI would display unverified,
 //! a value two replicas with different partial views would overwrite in each
 //! other, and — for marks — a way for a forged link to mute another
 //! replica's once-only [`FireOutcome`]. Local, they are exactly what they
@@ -44,10 +45,10 @@
 //!
 //! ## Catch-up
 //!
-//! Because the marks are per replica, a replica that joins a flow with
-//! history would, on its first pass, find every settled edge unmarked and
-//! report each one as new. It must not: those events happened before this
-//! replica was watching. So the **first** pass a user runs over an
+//! Because the marks are per user, a user who joins a flow with history
+//! would, on their first pass, find every settled edge unmarked and report
+//! each one as new. They must not: those events happened before this user
+//! was watching. So the **first** pass a user runs over an
 //! instance, with no verified `Local` cache of their own on it yet, is a
 //! silent catch-up: it marks what has settled and writes
 //! the cache, and emits nothing. From then on the user *has* a cache, so
@@ -62,8 +63,9 @@
 //! `currentState` or mark with any value, so evidence someone else wrote
 //! would let them switch the catch-up off for everyone. The cost is that a
 //! user's first pass over an instance another user of this replica already
-//! derived is silent too; the edges it records were reported to that other
-//! user's pass, or settled before this user acted. See `first_pass_here` in
+//! derived is silent too; the edges it records settled before this user
+//! acted. It marks them in this user's graph only, so another user's pass
+//! still reports an edge it has not marked itself. See `first_pass_here` in
 //! [`run_flow_consensus_pass`].
 
 use super::{fold_read_set, FlowInstance};
@@ -107,6 +109,18 @@ pub async fn run_flow_consensus_pass(
     flow_filter: Option<&[String]>,
     instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
+    // The pass acts for one user and reads as that user (#1224): their
+    // proposals and votes, their marks and their cache, never another user's
+    // Local links.
+    let viewer_did = match crate::agent::did_for_context(context) {
+        Ok(did) => did,
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: no DID for the acting agent, skipping: {e:#}");
+            return Vec::new();
+        }
+    };
+    let mut scoped = perspective.read_as(&viewer_did);
+    let perspective = &mut scoped;
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);
@@ -128,14 +142,6 @@ pub async fn run_flow_consensus_pass(
         records.retain(|r| only.contains(&r.instance_uri));
     }
     records.sort_by(|a, b| a.instance_uri.cmp(&b.instance_uri));
-    // The cache this pass reads and writes is the acting user's own.
-    let viewer_did = match crate::agent::did_for_context(context) {
-        Ok(did) => did,
-        Err(e) => {
-            log::warn!("run_flow_consensus_pass: no DID for the acting agent, skipping: {e:#}");
-            return Vec::new();
-        }
-    };
 
     let mut outcomes = Vec::new();
     for record in &records {
