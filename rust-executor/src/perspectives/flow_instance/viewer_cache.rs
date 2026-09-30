@@ -26,6 +26,11 @@
 //! and a token that may only read the perspective gets no refresh at all:
 //! it must not make the executor sign links for the user.
 //!
+//! The refresh writes the cache and nothing else. It records no history (no
+//! fired marks), so it is not the reader's catch-up
+//! ([`crate::perspectives::flow_instance::pass::has_caught_up`]): their first
+//! pass or vote on an instance still records its history silently.
+//!
 //! [`crate::perspectives::flow_instance::derive_states`] is the derivation
 //! (`read_set` + `fold_read_set`), and
 //! [`crate::perspectives::flow_classes::write_local_current_state`] the
