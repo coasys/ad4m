@@ -454,6 +454,57 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
     );
 }
 
+/// Marks are per user (#1224). An edge settles after the main agent's last
+/// pass; Mallory, a second user of this replica, then runs her first pass,
+/// a silent catch-up that marks the edge. Her mark is in her own graph, so
+/// the main agent's next pass still finds the edge unmarked and reports it.
+///
+/// On #1058 the pass read every user's Local marks (executor scope), so
+/// Mallory's catch-up marked the edge for the whole replica and nobody
+/// reported it (finding A of Data's review, #1161).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_catch_up_does_not_swallow_an_edge_for_another_user() {
+    let mut f = seed_review_flow().await;
+    settle(&mut f, "h1", "review", "changes_requested").await;
+    let h2 = propose(&mut f, "h2", "changes_requested", "review").await;
+
+    let mallory = second_agent("mallory-marks@e2e.test");
+    let mallory_did = crate::agent::did_for_context(&mallory).expect("Mallory's DID");
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert!(
+        hers.is_empty(),
+        "Mallory's first pass is a silent catch-up: {hers:?}"
+    );
+    let marks_on_h2 = |viewer: String| {
+        let perspective = f.perspective.clone();
+        let h2 = h2.clone();
+        async move {
+            perspective
+                .get_links_for_viewer(
+                    &LinkQuery {
+                        source: Some(h2),
+                        predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+                        ..Default::default()
+                    },
+                    Some(&viewer),
+                )
+                .await
+                .expect("marks")
+                .len()
+        }
+    };
+    assert_eq!(marks_on_h2(mallory_did).await, 1, "her catch-up marked h2");
+    assert_eq!(
+        marks_on_h2(acting_did(&f)).await,
+        0,
+        "in her graph, not the main agent's"
+    );
+
+    let mine = consensus_pass(&mut f).await;
+    assert_eq!(mine.len(), 1, "the main agent still reports h2: {mine:?}");
+    assert!(mine[0].contributing_proposal_uris.contains(&h2));
+}
+
 /// A newcomer with nothing to catch up on: the first pass writes the cache
 /// (silently, trivially) and the FIRST edge to settle afterwards is
 /// reported — catch-up must not eat the first real event.

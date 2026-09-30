@@ -502,12 +502,10 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// Visibility scope for reads this MCP session makes on an agent's behalf.
+    /// The user this MCP session reads as.
     ///
-    /// MCP is a user-facing surface, so its reads go through the
-    /// `*_for_viewer` entry points with this DID and do not see other users'
-    /// `Local` links — see
-    /// [`link_visibility`](crate::perspectives::link_visibility). A session
+    /// MCP is a user-facing surface, so its reads run in this DID's view:
+    /// the shared links plus that user's own `Local` links (#1224). A session
     /// with no token is the single-user case, which resolves to the main
     /// agent.
     pub(crate) async fn viewer_did(&self) -> Result<Option<String>, String> {

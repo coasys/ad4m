@@ -201,19 +201,30 @@ mod tests {
         (ctx, did)
     }
 
-    /// Every `currentState` link on `uri`, in executor scope.
+    /// Every `currentState` link on `uri` the main agent and the other user
+    /// hold, each read in its own view: there is no executor scope any more
+    /// (#1224), so this is what the store holds for them.
     async fn cache_links(
         perspective: &PerspectiveInstance,
         uri: &str,
     ) -> Vec<DecoratedLinkExpression> {
-        perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.to_string()),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                ..Default::default()
-            })
+        let query = LinkQuery {
+            source: Some(uri.to_string()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        };
+        let (_, other_did) = other_user();
+        let mut all = perspective.get_links(&query).await.expect("get_links");
+        for link in perspective
+            .get_links_for_viewer(&query, Some(&other_did))
             .await
-            .expect("get_links")
+            .expect("get_links_for_viewer")
+        {
+            if !all.contains(&link) {
+                all.push(link);
+            }
+        }
+        all
     }
 
     fn state_of(link: &DecoratedLinkExpression) -> String {

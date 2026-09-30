@@ -1114,7 +1114,9 @@ pub(crate) fn delivery_flow_json_for(input_type: &str) -> String {
     .to_string()
 }
 
-/// Parse `flow_json` into links and add them all to `perspective`.
+/// Parse `flow_json` into links and add them all to `perspective`, Shared as
+/// `add_sdna` stores a flow definition, so every user of the perspective
+/// reads the flow (a Local definition would be its writer's alone, #1224).
 /// Panics on any parse or add_link error; only for test scaffolding.
 pub(crate) async fn seed_flow(
     perspective: &mut PerspectiveInstance,
@@ -1127,7 +1129,7 @@ pub(crate) async fn seed_flow(
         super::shacl_parser::parse_flow_to_links(flow_json, flow_name).expect("parse_flow_to_links")
     {
         perspective
-            .add_link(link, LinkStatus::Local, None, ctx)
+            .add_link(link, LinkStatus::Shared, None, ctx)
             .await
             .expect("add_link(flow definition)");
     }

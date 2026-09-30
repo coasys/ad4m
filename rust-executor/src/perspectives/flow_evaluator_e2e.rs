@@ -92,7 +92,8 @@ async fn seed_fixture_with_requires(
 /// Seed a perspective with one flow definition and one `FlowInstance` of it
 /// on [`BASE_URI`], sitting in `initial_state`. The definition goes in as
 /// production links via `parse_flow_to_links`, so the tests read exactly the
-/// shapes the writer emits.
+/// shapes the writer emits, and Shared as `add_sdna` stores it, so every user
+/// of the perspective reads the flow (#1224).
 pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str) -> Fixture {
     let (mut perspective, mut shapes, ctx) =
         setup_perspective_no_llm(&[("ns://Task", TASK_SDNA)]).await;
@@ -105,7 +106,7 @@ pub(super) async fn seed_flow(flow_json: serde_json::Value, initial_state: &str)
     let links = parse_flow_to_links(&flow_json.to_string(), name).expect("parse_flow_to_links");
     for link in links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx)
+            .add_link(link, LinkStatus::Shared, None, &ctx)
             .await
             .expect("add_link(flow definition)");
     }

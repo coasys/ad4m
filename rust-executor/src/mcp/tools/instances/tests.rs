@@ -2256,6 +2256,26 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
 /// Another managed user's Local link, written straight into the perspective's
 /// shared store as co-owning users do on a multi-user executor. The MCP
 /// handler in these tests acts as the main agent, so it must not see it.
+/// The links `query` finds for the main agent and for the other user of
+/// these tests, merged: what the store holds for them. There is no executor
+/// scope any more (#1224).
+async fn in_every_view(
+    perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
+    query: &LinkQuery,
+) -> Vec<crate::types::DecoratedLinkExpression> {
+    let mut all = perspective.get_links(query).await.unwrap();
+    for link in perspective
+        .get_links_for_viewer(query, Some("did:key:z6MkOtherManagedUser"))
+        .await
+        .unwrap()
+    {
+        if !all.contains(&link) {
+            all.push(link);
+        }
+    }
+    all
+}
+
 fn other_users_local_link(
     source: &str,
     predicate: &str,
@@ -2360,14 +2380,15 @@ async fn instance_remove_leaves_other_users_local_links() {
     );
     assert_eq!(removed["success"], true, "{removed}");
 
-    // Executor scope: what is really left in the store.
-    let left = perspective
-        .get_links(&LinkQuery {
+    // What is really left in the store, for either user.
+    let left = in_every_view(
+        &perspective,
+        &LinkQuery {
             source: Some(channel.clone()),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     assert_eq!(
         left.iter().map(|l| l.author.as_str()).collect::<Vec<_>>(),
         vec!["did:key:z6MkOtherManagedUser"],
@@ -2408,18 +2429,19 @@ async fn collection_membership_ignores_other_users_local_links() {
         let perspective = perspective.clone();
         let channel = channel.clone();
         async move {
-            let mut authors: Vec<String> = perspective
-                .get_links(&LinkQuery {
+            let mut authors: Vec<String> = in_every_view(
+                &perspective,
+                &LinkQuery {
                     source: Some(channel),
                     predicate: Some(HAS_CHILD.to_string()),
                     target: Some("ad4m://obj/private".to_string()),
                     ..Default::default()
-                })
-                .await
-                .unwrap()
-                .into_iter()
-                .map(|l| l.author)
-                .collect();
+                },
+            )
+            .await
+            .into_iter()
+            .map(|l| l.author)
+            .collect();
             authors.sort();
             authors
         }
@@ -2504,22 +2526,22 @@ async fn channel_with_other_users_local_link(
     channel
 }
 
-/// Targets of the other user's links from `source` on `predicate`, read in
-/// executor scope: what is really in the store.
+/// Targets of the other user's links from `source` on `predicate`: what is
+/// really in the store.
 async fn other_users_targets(uuid: &str, source: &str, predicate: &str) -> Vec<String> {
-    crate::perspectives::get_perspective(uuid)
-        .unwrap()
-        .get_links(&LinkQuery {
+    in_every_view(
+        &crate::perspectives::get_perspective(uuid).unwrap(),
+        &LinkQuery {
             source: Some(source.to_string()),
             predicate: Some(predicate.to_string()),
             ..Default::default()
-        })
-        .await
-        .unwrap()
-        .into_iter()
-        .filter(|l| l.author == "did:key:z6MkOtherManagedUser")
-        .map(|l| l.data.target)
-        .collect()
+        },
+    )
+    .await
+    .into_iter()
+    .filter(|l| l.author == "did:key:z6MkOtherManagedUser")
+    .map(|l| l.data.target)
+    .collect()
 }
 
 /// `{class}_update` replaces the values of a property. It must replace only
@@ -2595,14 +2617,14 @@ async fn dynamic_delete_leaves_other_users_local_links() {
     )
     .await;
 
-    let left = crate::perspectives::get_perspective(&uuid)
-        .unwrap()
-        .get_links(&LinkQuery {
+    let left = in_every_view(
+        &crate::perspectives::get_perspective(&uuid).unwrap(),
+        &LinkQuery {
             source: Some(channel.clone()),
             ..Default::default()
-        })
-        .await
-        .unwrap();
+        },
+    )
+    .await;
     assert_eq!(
         left.iter().map(|l| l.author.as_str()).collect::<Vec<_>>(),
         vec!["did:key:z6MkOtherManagedUser"],
@@ -2646,10 +2668,8 @@ async fn assert_only_other_users_copy_left(uuid: &str, channel: &str, item: &str
         target: Some(item.to_string()),
         ..Default::default()
     };
-    let authors: Vec<String> = perspective
-        .get_links(&query)
+    let authors: Vec<String> = in_every_view(&perspective, &query)
         .await
-        .unwrap()
         .into_iter()
         .map(|l| l.author)
         .collect();

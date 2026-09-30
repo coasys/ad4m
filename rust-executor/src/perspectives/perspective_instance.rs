@@ -7845,15 +7845,29 @@ mod tests {
         }
     }
 
-    /// Executor scope, so the assertion sees the store as it really is.
+    /// Every link on `predicate` as the users of these tests read it: the
+    /// main agent's view, `OTHER_USER`'s and the managed `other_user()`'s,
+    /// merged. There is no executor scope any more (#1224), so this is what
+    /// the store holds for them.
     async fn links_on(p: &PerspectiveInstance, predicate: &str) -> Vec<DecoratedLinkExpression> {
-        p.get_links(&LinkQuery {
+        let query = LinkQuery {
             source: Some(WRITE_SOURCE.to_string()),
             predicate: Some(predicate.to_string()),
             ..Default::default()
-        })
-        .await
-        .unwrap()
+        };
+        let mut all = p.get_links(&query).await.unwrap();
+        let managed = AgentService::get_user_did_by_email(OTHER_EMAIL).ok();
+        for viewer in [Some(OTHER_USER.to_string()), managed]
+            .into_iter()
+            .flatten()
+        {
+            for link in p.get_links_for_viewer(&query, Some(&viewer)).await.unwrap() {
+                if !all.contains(&link) {
+                    all.push(link);
+                }
+            }
+        }
+        all
     }
 
     async fn other_users_targets(p: &PerspectiveInstance, predicate: &str) -> Vec<String> {
@@ -8199,9 +8213,17 @@ mod tests {
 
     /// Is the bare `(WRITE_SOURCE, predicate, target)` triple still in the
     /// store, independent of any reifier?
-    fn bare_triple_exists(p: &PerspectiveInstance, predicate: &str, target: &str) -> bool {
+    /// Does `viewer` read the bare triple? Each user's Local copy has its
+    /// own in that user's graph (#1224).
+    fn bare_triple_exists(
+        p: &PerspectiveInstance,
+        predicate: &str,
+        target: &str,
+        viewer: &str,
+    ) -> bool {
         let rows = p
             .sparql_store
+            .read_as(Some(viewer))
             .query(&format!(
                 "SELECT ?p WHERE {{ <{WRITE_SOURCE}> ?p <{target}> . FILTER(?p = <{predicate}>) }}"
             ))
@@ -8271,7 +8293,7 @@ mod tests {
             "exactly the keeper's copy of {predicate} is left in the store"
         );
         assert!(
-            bare_triple_exists(p, predicate, SAME_TARGET),
+            bare_triple_exists(p, predicate, SAME_TARGET, &round.keeper_did),
             "the bare triple stays while the keeper's reifier still references it"
         );
     }

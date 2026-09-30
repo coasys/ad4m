@@ -14,7 +14,6 @@ use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::model_query::types::ShapeResolver;
 use crate::types::{DecoratedLinkExpression, LinkQuery};
 use chrono::DateTime;
-use deno_core::anyhow::Error as AnyhowError;
 use deno_core::error::AnyError;
 
 /// The viewer a request is read as: the DID of the agent it is attributed to.
@@ -22,7 +21,7 @@ use deno_core::error::AnyError;
 /// Fails closed: a request whose DID cannot be resolved is an error, not a
 /// read as the main agent. This includes the main agent itself:
 /// `is_main_agent` is true for every token that carries no user email.
-pub fn viewer_did_for_context(context: &AgentContext) -> Result<Option<String>, AnyhowError> {
+pub fn viewer_did_for_context(context: &AgentContext) -> Result<Option<String>, AnyError> {
     did_for_context(context).map(Some)
 }
 
@@ -259,5 +258,41 @@ impl PerspectiveInstance {
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::AgentService;
+
+    /// A main-agent request with no resolvable DID must be refused, not read
+    /// as some default view. `is_main_agent` is true for any token without a
+    /// user email, so this is not only the fresh-executor case.
+    #[test]
+    fn main_agent_without_a_did_fails_closed() {
+        crate::test_utils::setup_wallet();
+        AgentService::init_global_test_instance();
+
+        let saved = AgentService::with_mutable_global_instance(|a| a.did.take());
+        let result = viewer_did_for_context(&AgentContext::main_agent());
+        AgentService::with_mutable_global_instance(|a| a.did = saved);
+
+        assert!(
+            result.is_err(),
+            "an unresolvable main-agent DID must not become a read, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn main_agent_with_a_did_reads_as_that_did() {
+        crate::test_utils::setup_wallet();
+        AgentService::init_global_test_instance();
+
+        let did = AgentService::with_global_instance(|a| a.did.clone()).expect("test agent DID");
+        assert_eq!(
+            viewer_did_for_context(&AgentContext::main_agent()).unwrap(),
+            Some(did)
+        );
     }
 }

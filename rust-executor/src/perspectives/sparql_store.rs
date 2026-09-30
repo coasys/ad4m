@@ -1886,9 +1886,10 @@ mod tests {
         assert_eq!(all[0].author, signer.did);
     }
 
-    /// Two users' Local links on one `(s, p, t)` share the bare triple and
-    /// have a reifier each. Removing one link drops only its reifier; the bare
-    /// triple goes with the last reifier (#1058).
+    /// Two users' Local links on one `(s, p, t)`: each is in its writer's own
+    /// graph with its own reifier and its own copy of the bare triple
+    /// (#1224). Removing one link leaves the other user's link and triple;
+    /// the last removal leaves no triple anywhere (#1058).
     #[test]
     fn test_remove_link_keeps_other_authors_link_and_bare_triple() {
         let alice = TestSigner::generate();
@@ -1906,33 +1907,38 @@ mod tests {
             "each author has their own reifier"
         );
 
-        let bare_triple_present = || {
+        let bare_triple_in = |did: &str| {
             svc.store
                 .quads_for_pattern(
                     Some(NamedNodeRef::new_unchecked("ad4m://src").into()),
                     Some(NamedNodeRef::new_unchecked("ad4m://pred")),
                     Some(NamedNodeRef::new_unchecked("ad4m://tgt").into()),
-                    Some(GraphNameRef::DefaultGraph),
+                    Some(local_graph(did).as_ref().into()),
                 )
                 .next()
                 .is_some()
         };
-        assert!(bare_triple_present());
+        assert!(bare_triple_in(&alice.did) && bare_triple_in(&bob.did));
 
         svc.remove_link(&alices).unwrap();
-        let left = svc.get_all_links().unwrap();
+        let left = svc.read_as(Some(&bob.did)).get_all_links().unwrap();
         assert_eq!(left.len(), 1, "Bob's link survives Alice's removal");
         assert_eq!(left[0].author, bob.did);
         assert_eq!(left[0].status, Some(LinkStatus::Local));
         assert!(
-            bare_triple_present(),
+            bare_triple_in(&bob.did),
             "the bare triple stays while Bob's reifier references it"
         );
+        assert!(!bare_triple_in(&alice.did));
 
         svc.remove_link(&bobs).unwrap();
-        assert!(svc.get_all_links().unwrap().is_empty());
+        assert!(svc
+            .read_as(Some(&bob.did))
+            .get_all_links()
+            .unwrap()
+            .is_empty());
         assert!(
-            !bare_triple_present(),
+            !bare_triple_in(&bob.did),
             "the bare triple goes with the last reifier"
         );
     }
