@@ -1,4 +1,4 @@
-import { ApiClient, WsEvent } from "../apiClient";
+import { ApiClient, CallOptions, WsEvent, longCall } from "../apiClient";
 import { addListener, notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
@@ -86,8 +86,8 @@ export class AgentClient {
     return new AgentStatus(agentStatus);
   }
 
-  async generate(passphrase: string): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase });
+  async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
+    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase }, longCall(options));
     return new AgentStatus(result);
   }
 
@@ -101,8 +101,8 @@ export class AgentClient {
     return new AgentStatus(result);
   }
 
-  async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain });
+  async unlock(passphrase: string, holochain = true, options?: CallOptions): Promise<AgentStatus> {
+    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain }, longCall(options));
     return new AgentStatus(result);
   }
 

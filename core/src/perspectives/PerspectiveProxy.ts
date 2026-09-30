@@ -760,12 +760,14 @@ export class PerspectiveProxy {
      * @param transcript ordered `{ speaker, text }` turns
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
+     * @param options scopes, progress reporting, and `signal` / `timeoutMs`
+     *   (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretation(
         transcript: TranscriptTurn[],
         basePrefix: string,
         classes?: string[],
-        options?: {
+        options?: CallOptions & {
             existingScope?: RawScope,
             mintScope?: RawScope,
             /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
@@ -776,14 +778,16 @@ export class PerspectiveProxy {
         // The scopes were already unreachable from here for that reason, and a fourth, fifth and
         // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
         // to ask for the only one of them most callers want.
+        const { existingScope, mintScope, observe, ...callOptions } = options ?? {}
         return await this.#client.runInterpretation(
             this.#handle.uuid,
             transcript,
             basePrefix,
             classes,
-            options?.existingScope,
-            options?.mintScope,
-            options?.observe,
+            existingScope,
+            mintScope,
+            observe,
+            callOptions,
         )
     }
 
@@ -802,6 +806,7 @@ export class PerspectiveProxy {
      *   classic single-shot path)
      * @param classes local names of the subject classes to extract into; omit for all
      * @param modelOverride optional model override; omit for the default LLM
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretationWithHarness(
         transcript: TranscriptTurn[],
@@ -817,6 +822,7 @@ export class PerspectiveProxy {
         // live in a UI. Absent = fast headless path (no telemetry cost).
         observationId?: string,
         emitDebugEvents?: boolean,
+        options?: CallOptions,
     ): Promise<string[]> {
         return await this.#client.runInterpretationWithHarness(
             this.#handle.uuid,
@@ -828,6 +834,7 @@ export class PerspectiveProxy {
             undefined,
             observationId,
             emitDebugEvents,
+            options,
         )
     }
 
