@@ -1,3 +1,5 @@
+import { callSafely } from './notifyListeners'
+
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
     type: string
@@ -200,9 +202,7 @@ export class ApiClient {
 
             // Server-push event (no id, or id not in pending) → route to subscribers
             for (const cb of this._wsCallbacks) {
-                try { cb(parsed) } catch (e) {
-                    console.error('Error in WebSocket event callback:', e)
-                }
+                callSafely(cb, 'Error in WebSocket event callback:', parsed)
             }
         }
 
