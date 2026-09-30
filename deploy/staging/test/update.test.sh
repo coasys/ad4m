@@ -2,7 +2,8 @@
 # Runs deploy/staging/update.sh against a throwaway git remote, with pnpm,
 # cargo, systemctl, curl, node and sleep replaced by stubs, and checks each
 # decision it makes: wait, deploy, skip, roll back, keep a failed build out,
-# recover from a failed step after the stop, ignore a tag named like the branch.
+# recover from a failed step after the stop, ignore a tag named like the branch,
+# start nothing when a restore fails, clean up after a deploy killed in its gate.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -61,19 +62,37 @@ cat >"$T/stubs/curl" <<'EOF'
 EOF
 cat >"$T/stubs/node" <<'EOF'
 #!/usr/bin/env bash
-# agent.mjs status: a build marked bad never unlocks.
+# agent.mjs status: a build marked bad never unlocks. With $STUB_DIR/kill-gate,
+# update.sh is killed during the gate, as by a reboot or the OOM killer.
+if [[ -f $STUB_DIR/kill-gate ]]; then
+  rm "$STUB_DIR/kill-gate"
+  kill -9 "$(cat "$STUB_DIR/update.pid")"
+  exit 1
+fi
 sha=$(cat "$STUB_DIR/running")
 if [[ -f $STUB_DIR/bad-$sha ]]; then echo locked; else cat "$STUB_DIR/agent"; fi
 EOF
 cat >"$T/stubs/cp" <<'EOF'
 #!/usr/bin/env bash
-# With $STUB_DIR/fail-snapshot, copying into snapshots/ fails half-way, as on a full disk.
-if [[ -f $STUB_DIR/fail-snapshot && ${*: -1} == */snapshots/* ]]; then
+# With $STUB_DIR/fail-snapshot, copying into snapshots/ fails half-way, as on a
+# full disk; with $STUB_DIR/fail-restore, so does copying a snapshot back.
+if [[ -f $STUB_DIR/fail-snapshot && ${*: -1} == */snapshots/* ]] ||
+  [[ -f $STUB_DIR/fail-restore && ${*: -1} == "$AD4M_STAGING_DATA" ]]; then
   mkdir -p "${*: -1}"
+  echo partial >"${*: -1}/written-by"
   echo "cp: error writing: No space left on device" >&2
   exit 1
 fi
 exec /bin/cp "$@"
+EOF
+cat >"$T/stubs/mv" <<'EOF'
+#!/usr/bin/env bash
+# With $STUB_DIR/fail-move, moving the data dir aside fails.
+if [[ -f $STUB_DIR/fail-move && $* == "$AD4M_STAGING_DATA $AD4M_STAGING_DATA.failed" ]]; then
+  echo "mv: cannot move: Input/output error" >&2
+  exit 1
+fi
+exec /bin/mv "$@"
 EOF
 printf '#!/bin/sh\n' >"$T/stubs/sleep"
 chmod +x "$T/stubs/"*
@@ -105,8 +124,14 @@ export STUB_DIR=$T PATH=$T/stubs:$PATH
 export AD4M_STAGING_REPO=$T/repo AD4M_STAGING_SRC=$T/src AD4M_STAGING_STATE=$T/state
 export AD4M_STAGING_CONFIG=$T/config AD4M_STAGING_DATA=$T/data
 export AD4M_STAGING_PUBLIC_STATUS=$T/www/status.json AD4M_STAGING_GATE_SECONDS=1
-run() { : >"$T/calls"; "$UPDATE" "$@" >"$T/out" 2>&1 || echo "exit $?" >>"$T/out"; }
+run() {
+  : >"$T/calls"
+  "$UPDATE" "$@" >"$T/out" 2>&1 &
+  echo $! >"$T/update.pid"
+  { wait $!; } 2>/dev/null || echo "exit $?" >>"$T/out"
+}
 called() { grep -q "$1" "$T/calls"; }
+exited_non_zero() { grep -q '^exit [1-9]' "$T/out"; }
 
 # 1. A staging without #1215 PR1: record why, build and start nothing.
 run
@@ -259,6 +284,97 @@ echo no-agent >"$T/agent"
 rm "$T/bad-$(git -C "$T/work" rev-parse HEAD)"
 run
 check "a node without an agent deploys" [ "$(jq -r .last_result "$T/state3/status.json")" = "deployed (no agent yet)" ]
+
+# 14. A failed gate, and then the restore of the snapshot fails: start
+# nothing, rather than the old build on a torn data dir.
+export AD4M_STAGING_STATE=$T/state4 AD4M_STAGING_DATA=$T/data4 AD4M_STAGING_SRC=$T/src4
+echo unlocked >"$T/agent"
+one=$(git -C "$T/work" rev-parse HEAD)
+run
+check "a fresh node deploys" [ "$(jq -r .deployed_sha "$T/state4/status.json")" = "$one" ]
+torn=$(commit "fails the gate, restore fails" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$torn" "$T/fail-restore"
+run
+rm "$T/fail-restore"
+check "a failed restore exits non-zero" exited_non_zero
+check "a failed restore starts nothing" [ ! -e "$T/running" ]
+check "a failed restore leaves no current build" [ ! -e "$T/state4/current" ]
+check "a failed restore leaves no partial data dir" [ ! -e "$T/data4" ]
+check "a failed restore is recorded" [ "$(jq -r .last_result "$T/state4/status.json")" = \
+  "error: could not restore the data of $one; staging is stopped" ]
+check "the failed build's data is kept aside" grep -q "$torn" "$T/data4.failed/written-by"
+check "the snapshot is kept" bash -c "find '$T/state4/snapshots' -mindepth 1 -maxdepth 1 -name '*-$one' | grep -q ."
+# The next commit is not deployed while current names no build.
+commit "after the failed restore" "AD4M_UNLOCK_PASSPHRASE_FILE" >/dev/null
+run
+check "no deploy after a failed restore" exited_non_zero
+check "and nothing is built or started" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "and the restore error stays in status.json" [ "$(jq -r .last_result "$T/state4/status.json")" = \
+  "error: could not restore the data of $one; staging is stopped" ]
+
+# 15. A rollback by hand whose restore fails: exit non-zero, start nothing.
+export AD4M_STAGING_STATE=$T/state5 AD4M_STAGING_DATA=$T/data5 AD4M_STAGING_SRC=$T/src5
+push_staging() { git -C "$T/work" push -q -f origin "$1:refs/heads/staging"; }
+push_staging "$one"
+run
+two=$(commit "second build" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "two builds deploy" [ "$(jq -r '.deployed_sha + "/" + .previous_sha' "$T/state5/status.json")" = "$two/$one" ]
+touch "$T/fail-restore"
+run rollback
+rm "$T/fail-restore"
+check "a rollback with a failed restore exits non-zero" exited_non_zero
+check "and starts nothing" [ ! -e "$T/running" ]
+check "and leaves no current build" [ ! -e "$T/state5/current" ]
+check "and says so" [ "$(jq -r .last_result "$T/state5/status.json")" = \
+  "error: could not restore the data of $one; staging is stopped" ]
+check "and deployed_sha stays" [ "$(jq -r .deployed_sha "$T/state5/status.json")" = "$two" ]
+
+# 16. A rollback by hand that cannot move the data dir aside: the snapshot is
+# not copied into it, nothing starts.
+export AD4M_STAGING_STATE=$T/state6 AD4M_STAGING_DATA=$T/data6 AD4M_STAGING_SRC=$T/src6
+push_staging "$one"
+run
+push_staging "$two"
+run
+touch "$T/fail-move"
+run rollback
+rm "$T/fail-move"
+check "a failed move exits non-zero" exited_non_zero
+check "and starts nothing" [ ! -e "$T/running" ]
+check "and copies no snapshot into the data dir" \
+  [ "$(find "$T/data6" -mindepth 1 -maxdepth 1 -type d | wc -l)" = 0 ]
+check "and says so" [ "$(jq -r .last_result "$T/state6/status.json")" = \
+  "error: could not restore the data of $one; staging is stopped" ]
+
+# 17. A deploy killed during its gate: the next run does not snapshot the new
+# build's data under the old build's name; it rolls back as for a failed gate.
+export AD4M_STAGING_STATE=$T/state7 AD4M_STAGING_DATA=$T/data7 AD4M_STAGING_SRC=$T/src7
+run
+killed=$(commit "killed during the gate" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/kill-gate"
+run
+flock "$T/state7/update.lock" true
+check "the killed deploy left the new build running" \
+  [ "$(cat "$T/running")/$(jq -r .deployed_sha "$T/state7/status.json")" = "$killed/$two" ]
+run
+check "the next run rolls the interrupted deploy back" [ "$(cat "$T/running")" = "$two" ]
+check "and records it as failed" [ "$(jq -r .last_failed_sha "$T/state7/status.json")" = "$killed" ]
+check "and says so" [ "$(jq -r .last_result "$T/state7/status.json")" = \
+  "rolled_back: the deploy of $killed was interrupted; $two runs again" ]
+check "and restores the old build's data" bash -c "! grep -q '$killed' '$T/data7/written-by'"
+next=$(commit "fails after the interrupted one" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$next"
+run
+check "a later failed gate rolls back to data without the interrupted build's writes" \
+  bash -c "[ \"\$(cat '$T/running')\" = '$two' ] && ! grep -q '$killed' '$T/data7/written-by'"
+
+# 18. A rollback by hand while an update runs fails, instead of reporting success.
+(
+  flock 9
+  run rollback
+) 9>"$T/state7/update.lock"
+check "a rollback while an update runs exits non-zero" exited_non_zero
 
 echo "$failures failed"
 ((failures == 0))
