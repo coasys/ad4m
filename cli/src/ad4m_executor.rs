@@ -163,7 +163,17 @@ enum Domain {
         /// For tests and local development only: start without an admin
         /// credential. An empty token then has full admin access, so anyone
         /// who can reach the executor's port controls it.
-        #[arg(long, env = "AD4M_INSECURE_NO_ADMIN_CREDENTIAL")]
+        /// AD4M_INSECURE_NO_ADMIN_CREDENTIAL enables it only with `true`;
+        /// an empty value, `false`, `0`, `no` or `off` leave it off.
+        #[arg(
+            long,
+            env = "AD4M_INSECURE_NO_ADMIN_CREDENTIAL",
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+            value_parser = parse_insecure_flag
+        )]
         insecure_no_admin_credential: bool,
         #[arg(long, action)]
         localhost: Option<bool>,
@@ -318,6 +328,21 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Only the literal `true` enables the insecure mode. An unset-but-present
+/// variable (a compose `${VAR}` with `VAR` unset gives `""`) and the usual
+/// "off" spellings disable it, so neither blocks a node that has a credential
+/// nor turns the mode on by accident. Anything else is an error rather than
+/// a guess.
+fn parse_insecure_flag(value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "" | "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "`{other}`: use `true` to enable, or `false`, `0`, `no`, `off` or an empty value to disable"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +425,47 @@ mod tests {
         std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", "false");
         assert!(!run_insecure_no_admin_credential(&["ad4m-executor", "run"]));
         std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
+    }
+
+    /// An empty or "off" variable leaves the mode off without an error, so a
+    /// templated `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=` does not stop a node
+    /// that has a credential from starting. Anything but `true` never enables
+    /// it; unknown values are rejected.
+    #[test]
+    fn only_true_enables_the_testing_flag() {
+        let _env = lock_admin_credential_env();
+        for off in ["", "0", "false", "no", "off"] {
+            std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", off);
+            assert!(
+                !run_insecure_no_admin_credential(&[
+                    "ad4m-executor",
+                    "run",
+                    "--admin-credential",
+                    "secret"
+                ]),
+                "{off:?}"
+            );
+        }
+        for invalid in ["1", "TRUE", "yes"] {
+            std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", invalid);
+            assert!(
+                ClapApp::try_parse_from(["ad4m-executor", "run"]).is_err(),
+                "{invalid:?}"
+            );
+        }
+        std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
+        assert!(!run_insecure_no_admin_credential(&[
+            "ad4m-executor",
+            "run",
+            "--insecure-no-admin-credential=false"
+        ]));
+        assert!(run_insecure_no_admin_credential(&[
+            "ad4m-executor",
+            "run",
+            "--insecure-no-admin-credential",
+            "--localhost",
+            "true"
+        ]));
     }
 
     /// The help text must not echo the variable's value.
