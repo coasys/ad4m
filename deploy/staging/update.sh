@@ -11,7 +11,11 @@
 #     |                           (fails --> current back, old build started again)
 #   init -- start -- gate: /health and the agent unlocked, within 180 s
 #     | ok                        (fails --> stop, restore the snapshot,
-#   deployed_sha = <sha>                     current -> the old build, start)
+#   deployed_sha = <sha>                     current -> the old build, start;
+#                                 restore fails --> nothing runs, no current)
+#
+# A run killed after the swap leaves `current` != deployed_sha; the next run
+# rolls that build back first, as if it had failed the gate.
 #
 # Every outcome is written to status.json in the state dir and copied to
 # $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),
@@ -77,6 +81,8 @@ mkdir -p "$STATE/releases" "$STATE/snapshots" "$STATE/logs"
 exec 9>"$STATE/update.lock"
 if ! flock -n 9; then
   log "another update is running"
+  # A rollback by hand that did nothing must not look like one that worked.
+  [[ $COMMAND == rollback ]] && exit 1
   exit 0
 fi
 
@@ -174,23 +180,34 @@ start_and_gate() {
 # roll_back <failed sha> <data> <sha to run instead or "">: stops the failed
 # build, restores the data dir and starts the other build. <data> is a
 # snapshot to restore, "none" when there was no data dir before, or "" to
-# keep the data dir as it is. Returns 1 if the other build fails the gate too.
+# keep the data dir as it is. Returns 1 if the other build fails the gate too,
+# 2 if the data dir could not be restored; then nothing runs and `current` is
+# gone, so neither a restart nor the next deploy runs on a torn data dir.
+# Callers run it as a condition, which turns errexit off inside it: every
+# step checks its own result.
 roll_back() {
   systemctl --user stop "$UNIT" || true
+  set_status last_failed_sha "$1"
   if [[ -n $2 && -d $DATA ]]; then
     # Keep what the failed build left, for debugging, until the next rollback.
-    rm -rf "${DATA:?}.failed"
-    mv "$DATA" "$DATA.failed"
+    if ! { rm -rf "${DATA:?}.failed" && mv "$DATA" "$DATA.failed"; }; then
+      rm -f "$STATE/current"
+      return 2
+    fi
   fi
-  if [[ -n $2 && $2 != none ]]; then cp -a --reflink=auto "$2" "$DATA"; fi
-  set_status last_failed_sha "$1"
+  if [[ -n $2 && $2 != none ]] && ! cp -a --reflink=auto "$2" "$DATA"; then
+    rm -rf "${DATA:?}"
+    rm -f "$STATE/current"
+    return 2
+  fi
   if [[ -z $3 ]]; then
     rm -f "$STATE/current"
     return 0
   fi
-  link current "$3"
+  link current "$3" || return 1
   start_and_gate
 }
+restore_failed() { fail "error: could not restore the data of $1; staging is stopped"; }
 
 # --- rollback: back to the previous build, by hand
 if [[ $COMMAND == rollback ]]; then
@@ -207,14 +224,42 @@ if [[ $COMMAND == rollback ]]; then
   # The staging head counts as failed, so the timer stays on $previous
   # until staging moves.
   failed=$(field staging_sha)
-  if ! roll_back "${failed:-$current}" "$snapshot" "$previous"; then
-    fail "rolled_back by hand: $current; $previous failed the gate too (agent: ${agent_state:-no answer})"
-  fi
+  rc=0
+  roll_back "${failed:-$current}" "$snapshot" "$previous" || rc=$?
+  ((rc != 2)) || restore_failed "$previous"
+  ((rc == 0)) || fail "rolled_back by hand: $current; $previous failed the gate too (agent: ${agent_state:-no answer})"
   rm -f "$STATE/previous"
   set_status deployed_sha "$previous" subject "$(git -C "$SRC" log -1 --format=%s "$previous" 2>/dev/null || true)" \
     deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" previous_sha null last_result "rolled_back by hand: $current; $previous runs again"
   log "$previous runs again"
   exit 0
+fi
+
+# --- An earlier run that ended between the swap and its result
+# `current` names the build that runs. If it is not deployed_sha, the last
+# deploy was killed during its gate (a reboot, the OOM killer) or its
+# rollback could not restore the data. A snapshot taken now would label the
+# unchecked build's data as the deployed build's.
+deployed=$(field deployed_sha)
+live=$(readlink "$STATE/current" || true)
+live=${live#releases/}
+if [[ $live != "$deployed" ]]; then
+  if [[ -z $live ]]; then
+    # status.json keeps the error of the failed restore.
+    log "no build is current while $deployed is deployed: a restore failed; staging stays stopped until an operator restores the data (runbook: Roll back)"
+    exit 1
+  fi
+  log "the deploy of $live was interrupted before its check; rolling back"
+  snapshot=$(find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -name "*-${deployed:-none}" | sort | tail -n 1)
+  if [[ -z $snapshot && -n $deployed ]]; then
+    fail "error: the deploy of $live was interrupted, and there is no snapshot of the data of $deployed; left to the operator"
+  fi
+  rc=0
+  roll_back "$live" "${snapshot:-none}" "$deployed" || rc=$?
+  ((rc != 2)) || restore_failed "${deployed:-the node before $live}"
+  [[ -n $deployed ]] || fail "rolled_back: the deploy of $live was interrupted; there is no previous build, staging is stopped"
+  ((rc == 0)) || fail "rolled_back: the deploy of $live was interrupted, and $deployed failed the gate after the rollback"
+  fail "rolled_back: the deploy of $live was interrupted; $deployed runs again"
 fi
 
 # --- Fetch
@@ -332,11 +377,9 @@ fi
 
 # --- Roll back
 log "$sha failed the gate (agent: ${agent_state:-no answer}); rolling back"
-if [[ -z $deployed ]]; then
-  roll_back "$sha" "${snapshot:-none}" ""
-  fail "rolled_back: $sha failed the gate; there is no previous build, staging is stopped"
-fi
-if roll_back "$sha" "${snapshot:-none}" "$deployed"; then
-  fail "rolled_back: $sha failed the gate; $deployed runs again"
-fi
-fail "rolled_back: $sha failed the gate, and $deployed failed it again after the rollback"
+rc=0
+roll_back "$sha" "${snapshot:-none}" "$deployed" || rc=$?
+((rc != 2)) || restore_failed "${deployed:-the node before $sha}"
+[[ -n $deployed ]] || fail "rolled_back: $sha failed the gate; there is no previous build, staging is stopped"
+((rc == 0)) || fail "rolled_back: $sha failed the gate, and $deployed failed it again after the rollback"
+fail "rolled_back: $sha failed the gate; $deployed runs again"
