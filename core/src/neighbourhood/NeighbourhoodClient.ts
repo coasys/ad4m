@@ -95,7 +95,7 @@ export class NeighbourhoodClient {
             { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
-        await this.#apiClient.waitForSubscription()
+        await this.#apiClient.watchApplied()
     }
 
     async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {

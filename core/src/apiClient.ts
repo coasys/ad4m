@@ -155,7 +155,7 @@ export class ApiClient {
                 this._onClose(ws)
             }
         })
-        // Only waitForSubscription() awaits this; a close before open is not an error otherwise.
+        // Only watchApplied() awaits this; a close before open is not an error otherwise.
         this._wsOpen.catch(() => {})
 
         ws.onmessage = (event) => {
@@ -366,9 +366,13 @@ export class ApiClient {
         }
     }
 
-    /** Wait until the WebSocket is open and the executor has the current
-     *  event interest. */
-    async waitForSubscription(): Promise<void> {
+    /**
+     * Resolves once the socket is open and the executor has applied this
+     * client's current `events.watch`. After it, every event the registered
+     * handlers need reaches them. Only events other peers cause (signals)
+     * need this: a call already sends the watch ahead of itself.
+     */
+    async watchApplied(): Promise<void> {
         this._ensureWs()
         if (this._ws!.readyState !== 1 /* OPEN */) await this._wsOpen
         await this._watchDone
