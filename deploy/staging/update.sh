@@ -3,20 +3,20 @@
 # it has moved. Run by ad4m-staging-update.service; runbook in
 # docs-src/headless-executor.md.
 #
-#   fetch origin/staging -- deployed, or failed last time? -- yes --> exit
+#   fetch the staging branch head -- deployed, or failed last time? -- yes --> exit
 #     | no
 #   build in ~/ad4m-staging-src (detached worktree, own target/)
 #     | ok                        (fails --> last_failed_sha; the old build keeps running)
-#   stop -- snapshot data dir -- init -- current -> releases/<sha> -- start
-#     |
-#   gate: /health, and the agent unlocked (or no agent yet), within 180 s
+#   stop -- snapshot data dir -- current -> releases/<sha>
+#     |                           (fails --> current back, old build started again)
+#   init -- start -- gate: /health and the agent unlocked, within 180 s
 #     | ok                        (fails --> stop, restore the snapshot,
-#   deployed_sha = <sha>                     current -> previous, start)
+#   deployed_sha = <sha>                     current -> the old build, start)
 #
-# Every outcome is written to status.json in the state dir and next to it at
-# $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json).
-# The script reads no secret value itself: agent.mjs reads the admin credential
-# from its file for the unlock check.
+# Every outcome is written to status.json in the state dir and copied to
+# $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),
+# so no message names a local path. The script reads no secret value itself:
+# agent.mjs reads the admin credential from its file for the unlock check.
 #
 # Environment (defaults in brackets):
 #   AD4M_STAGING_REPO           repo the source worktree is created from [~/nico/ad4m]
@@ -31,8 +31,9 @@
 #   AD4M_STAGING_BUILD_TIMEOUT  build time limit, timeout(1) syntax [3h]
 #   AD4M_STAGING_GATE_SECONDS   time the new build has to become healthy [180]
 #   AD4M_STAGING_RETRY=1        build the last failed SHA again
+#   AD4M_STAGING_KEEP_DATA=1    rollback: go back without a snapshot, on the current data
 #
-# Usage: update.sh [deploy]   deploy origin/staging if it moved (the timer runs this)
+# Usage: update.sh [deploy]   deploy the staging branch if it moved (the timer runs this)
 #        update.sh rollback   go back to the previous build and its data snapshot
 set -euo pipefail
 umask 022
@@ -55,10 +56,15 @@ URL=${AD4M_STAGING_URL:-http://127.0.0.1:12400}
 BUILD_TIMEOUT=${AD4M_STAGING_BUILD_TIMEOUT:-3h}
 GATE_SECONDS=${AD4M_STAGING_GATE_SECONDS:-180}
 RETRY=${AD4M_STAGING_RETRY:-0}
+KEEP_DATA=${AD4M_STAGING_KEEP_DATA:-0}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STATUS=$STATE/status.json
 REQUIRED_SECRETS=(admin-credential unlock-passphrase)
+# The branch head is fetched into a ref of its own and always named in full:
+# a short name like origin/staging also matches a tag of that name, which
+# anyone who can push a tag could point at any commit.
+REF=refs/ad4m-staging/$BRANCH
 
 log() { echo "update: $*"; }
 
@@ -108,32 +114,51 @@ fail() {
 }
 
 # --- Preconditions: config and secrets in place
-[[ -f $CONFIG/executor-config.json ]] || fail "error: $CONFIG/executor-config.json is missing"
+[[ -f $CONFIG/executor-config.json ]] || fail "error: executor-config.json is missing from the config directory"
 for name in "${REQUIRED_SECRETS[@]}"; do
   file=$CONFIG/secrets/$name
-  [[ -s $file ]] || fail "error: secret file $file is missing or empty"
+  [[ -s $file ]] || fail "error: secret file $name is missing or empty"
   mode=$(stat -c %a "$file")
-  [[ $mode == 600 || $mode == 400 ]] || fail "error: secret file $file has mode $mode, needs 600 or 400"
+  [[ $mode == 600 || $mode == 400 ]] || fail "error: secret file $name has mode $mode, needs 600 or 400"
 done
 
 # --- Deploy steps shared by `deploy` and `rollback`
 link() { ln -sfn "releases/$2" "$STATE/$1.new" && mv -T "$STATE/$1.new" "$STATE/$1"; }
+
+# Snapshots are named <time>-<sha>, <sha> being the build whose data they
+# hold. prune_snapshots <sha>...: keeps the newest snapshot of each SHA
+# given, deletes every other one.
+prune_snapshots() {
+  local name sha kept=' '
+  find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r >"$STATE/snapshots.list"
+  while read -r name; do
+    sha=${name##*-}
+    if [[ " $* " == *" $sha "* && $kept != *" $sha "* ]]; then
+      kept+="$sha "
+    else
+      rm -rf "${STATE:?}/snapshots/$name"
+    fi
+  done <"$STATE/snapshots.list"
+  rm -f "$STATE/snapshots.list"
+}
 
 # `init` writes the network seed of this build and clears state the build
 # can no longer read, as the launcher does on every start.
 init_data() { "$STATE/current/ad4m-executor" init --data-path "$DATA"; }
 
 # /health only shows that the HTTP server is up; the agent has to unlock from
-# the passphrase file too. A node with no agent yet passes on /health alone.
+# the passphrase file too. A node that never had an agent passes on /health
+# alone; once an agent has been seen unlocked, a build that finds none fails.
 agent_state=
 gate() {
-  local deadline=$((SECONDS + GATE_SECONDS))
+  local deadline=$((SECONDS + GATE_SECONDS)) accept=unlocked
+  [[ $(field agent) == unlocked ]] || accept='unlocked no-agent'
   agent_state=
   while ((SECONDS < deadline)); do
     if curl -fsS --max-time 5 "$URL/health" >/dev/null 2>&1; then
       agent_state=$(AD4M_URL=$URL AD4M_ADMIN_CREDENTIAL_FILE=$CONFIG/secrets/admin-credential \
         timeout 30 node "$HERE/agent.mjs" status 2>/dev/null) || agent_state=
-      [[ $agent_state == unlocked || $agent_state == no-agent ]] && return 0
+      [[ -n $agent_state && " $accept " == *" $agent_state "* ]] && return 0
     fi
     sleep 5
   done
@@ -175,8 +200,14 @@ if [[ $COMMAND == rollback ]]; then
     fail "error: no previous build to roll back to"
   # The snapshot taken when $current replaced $previous holds $previous's data.
   snapshot=$(find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -name "*-$previous" | sort | tail -n 1)
-  log "rolling back from $current to $previous (data: ${snapshot:-kept, no snapshot of $previous})"
-  if ! roll_back "$current" "$snapshot" "$previous"; then
+  if [[ -z $snapshot && $KEEP_DATA != 1 ]]; then
+    fail "error: no snapshot of the data of $previous; AD4M_STAGING_KEEP_DATA=1 rolls back on the current data"
+  fi
+  log "rolling back from $current to $previous (data: ${snapshot:+snapshot }${snapshot:-kept})"
+  # The staging head counts as failed, so the timer stays on $previous
+  # until staging moves.
+  failed=$(field staging_sha)
+  if ! roll_back "${failed:-$current}" "$snapshot" "$previous"; then
     fail "rolled_back by hand: $current; $previous failed the gate too (agent: ${agent_state:-no answer})"
   fi
   rm -f "$STATE/previous"
@@ -187,23 +218,22 @@ if [[ $COMMAND == rollback ]]; then
 fi
 
 # --- Fetch
+fetch() { git -C "$1" fetch --no-tags --quiet origin "+refs/heads/$BRANCH:$REF"; }
 if [[ ! -e $SRC/.git ]]; then
-  git -C "$REPO" fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" ||
-    fail "error: git fetch of origin/$BRANCH failed"
-  git -C "$REPO" worktree add --quiet --detach "$SRC" "origin/$BRANCH"
+  fetch "$REPO" || fail "error: git fetch of $BRANCH failed"
+  git -C "$REPO" worktree add --quiet --detach "$SRC" "$(git -C "$REPO" rev-parse --verify "$REF^{commit}")"
 fi
-git -C "$SRC" fetch --quiet origin "+refs/heads/$BRANCH:refs/remotes/origin/$BRANCH" ||
-  fail "error: git fetch of origin/$BRANCH failed"
-sha=$(git -C "$SRC" rev-parse "origin/$BRANCH")
+fetch "$SRC" || fail "error: git fetch of $BRANCH failed"
+sha=$(git -C "$SRC" rev-parse --verify "$REF^{commit}")
 subject=$(git -C "$SRC" log -1 --format=%s "$sha")
 
 if [[ $sha == "$(field deployed_sha)" ]]; then
-  log "origin/$BRANCH is $sha, already deployed"
+  log "$BRANCH is $sha, already deployed"
   set_status staging_sha "$sha"
   exit 0
 fi
 if [[ $sha == "$(field last_failed_sha)" && $RETRY != 1 ]]; then
-  log "origin/$BRANCH is $sha, which failed before; AD4M_STAGING_RETRY=1 builds it again"
+  log "$BRANCH is $sha, which failed before; AD4M_STAGING_RETRY=1 builds it again"
   set_status staging_sha "$sha"
   exit 0
 fi
@@ -211,7 +241,7 @@ fi
 # The unit needs `run --config`, AD4M_*_FILE secrets and the unlock at
 # startup, all added by coasys/ad4m#1215 PR1. An older staging cannot run it.
 if ! git -C "$SRC" grep -q AD4M_UNLOCK_PASSPHRASE_FILE "$sha" -- cli/src; then
-  log "origin/$BRANCH ($sha) predates #1215 PR1; nothing deployed"
+  log "$BRANCH ($sha) predates #1215 PR1; nothing deployed"
   set_status staging_sha "$sha" last_result "waiting: origin/$BRANCH lacks #1215 PR1 (--config)"
   exit 0
 fi
@@ -225,6 +255,7 @@ build_log=$STATE/logs/build-$sha.log
 if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   cd "$1"
   git checkout --quiet --force --detach "$2"
+  [[ $(git rev-parse HEAD) == "$2" ]]
   export CARGO_TARGET_DIR=$1/target
   pnpm install --no-frozen-lockfile
   pnpm build-dapp
@@ -233,7 +264,7 @@ if ! timeout "$BUILD_TIMEOUT" bash -euo pipefail -c '
   (cd cli && cargo build --release)
 ' build "$SRC" "$sha" >"$build_log" 2>&1; then
   set_status last_failed_sha "$sha"
-  fail "build failed for $sha (log: $build_log)"
+  fail "build failed for $sha (logs/build-$sha.log in the state directory)"
 fi
 # Keep the logs of the last five builds.
 find "$STATE/logs" -name 'build-*.log' -printf '%T@ %p\n' | sort -rn | tail -n +6 | cut -d' ' -f2- | xargs -r rm -f
@@ -242,43 +273,70 @@ mkdir -p "$STATE/releases/$sha"
 install -m 0755 "$SRC/target/release/ad4m-executor" "$SRC/target/release/ad4m" "$STATE/releases/$sha/"
 
 # --- Swap: stop, snapshot, point current at the new build
-previous=$(field deployed_sha)
+deployed=$(field deployed_sha)
+before=$(field previous_sha)
+snapshot=
+partial=
+# Between the stop and the gate, a failing step (a full disk during the
+# snapshot, say) must not leave staging down: put the old build back.
+# shellcheck disable=SC2317 # run by the EXIT trap
+restore_on_error() {
+  local rc=$?
+  trap - EXIT
+  ((rc == 0)) && return
+  set +e
+  log "deploying $sha failed before its check (exit $rc); starting ${deployed:-nothing} again"
+  [[ -n $partial ]] && rm -rf "$partial"
+  if [[ -n $deployed ]]; then
+    link current "$deployed"
+    systemctl --user start "$UNIT"
+  else
+    rm -f "$STATE/current"
+  fi
+  set_status last_failed_sha "$sha" last_result "error: deploying $sha failed before its check; ${deployed:-nothing} runs again"
+  exit "$rc"
+}
 log "stopping $UNIT"
 systemctl --user stop "$UNIT"
-snapshot=
+trap restore_on_error EXIT
 if [[ -d $DATA ]]; then
-  snapshot=$STATE/snapshots/$(date -u +%Y%m%dT%H%M%S.%NZ)-${previous:-none}
+  snapshot=$STATE/snapshots/$(date -u +%Y%m%dT%H%M%S.%NZ)-${deployed:-none}
   log "snapshot of $DATA to $snapshot"
+  partial=$snapshot
   cp -a --reflink=auto "$DATA" "$snapshot"
-  # Keep the two newest snapshots.
-  find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort -r | tail -n +3 |
-    while read -r old; do rm -rf "${STATE:?}/snapshots/$old"; done
+  partial=
+  # The snapshot of the running build's data is needed if this deploy fails,
+  # the one of the build before it for a rollback by hand.
+  prune_snapshots "${deployed:-none}" "$before"
 fi
 link current "$sha"
-if [[ -n $previous ]]; then link previous "$previous"; fi
+trap - EXIT
 
 # --- Gate
 if start_and_gate; then
   note=
   [[ $agent_state == no-agent ]] && note=" (no agent yet)"
   log "deployed $sha$note"
+  if [[ -n $deployed ]]; then link previous "$deployed"; fi
   set_status deployed_sha "$sha" subject "$subject" deployed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    previous_sha "${previous:-null}" last_result "deployed$note"
-  # Drop releases that are neither current nor previous.
+    previous_sha "${deployed:-null}" last_result "deployed$note"
+  [[ $agent_state == unlocked ]] && set_status agent unlocked
+  # Keep what a rollback by hand to $deployed needs: its build and its data.
+  prune_snapshots "${deployed:-none}"
   find "$STATE/releases" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' |
     while read -r old; do
-      [[ $old == "$sha" || $old == "$previous" ]] || rm -rf "${STATE:?}/releases/$old"
+      [[ $old == "$sha" || $old == "$deployed" ]] || rm -rf "${STATE:?}/releases/$old"
     done
   exit 0
 fi
 
 # --- Roll back
 log "$sha failed the gate (agent: ${agent_state:-no answer}); rolling back"
-if [[ -z $previous ]]; then
+if [[ -z $deployed ]]; then
   roll_back "$sha" "${snapshot:-none}" ""
   fail "rolled_back: $sha failed the gate; there is no previous build, staging is stopped"
 fi
-if roll_back "$sha" "${snapshot:-none}" "$previous"; then
-  fail "rolled_back: $sha failed the gate; $previous runs again"
+if roll_back "$sha" "${snapshot:-none}" "$deployed"; then
+  fail "rolled_back: $sha failed the gate; $deployed runs again"
 fi
-fail "rolled_back: $sha failed the gate, and $previous failed it again after the rollback"
+fail "rolled_back: $sha failed the gate, and $deployed failed it again after the rollback"
