@@ -291,6 +291,9 @@ outcome.
 | `waiting: origin/staging lacks #1215 PR1 (--config)` | `staging` cannot run this unit yet; nothing deployed |
 | `error: deploying <sha> failed before its check; <old sha> runs again` | A step after the stop failed (the snapshot, for example); the old build was started again; `journalctl --user -u ad4m-staging-update` has the error |
 | `rolled_back: the deploy of <sha> was interrupted; <previous> runs again` | An update was killed during the check of `<sha>` (a reboot, the OOM killer, a stopped update service); the next run rolled it back as if it had failed the check |
+| `error: current is <sha>, but status.json names no deployed build (an interrupted first deploy, or a lost status.json); left to the operator` | `status.json` has no `deployed_sha`, but `current` names a build. Nothing was stopped, moved or built, and every run stops here until this is resolved by hand; see "Roll back" |
+| `rolling back by hand from <new sha> to <previous sha>` | A rollback by hand is running |
+| `rolled_back by hand: <new sha>; <previous sha> failed the gate too (agent: …)` / `error: the rollback by hand from <new sha> to <previous sha> was interrupted; left to the operator` | A rollback by hand failed its check or was killed during it. `<previous sha>` is current, on its restored data. The timer deploys nothing until this is resolved by hand; see "Roll back" |
 | `error: could not restore the data of <sha>; staging is stopped` | A rollback could not move the data directory aside or copy the snapshot back (a full disk, most likely). Nothing runs, `current` is removed, and the timer deploys nothing until the data is restored by hand; see "Roll back" |
 | `error: …` (other) | A precondition failed (missing config or secret, wrong file mode, `git fetch` failed); nothing changed |
 
@@ -378,7 +381,32 @@ S=~/.local/share/ad4m-staging; sha=<sha>; snap=$(ls -d "$S"/snapshots/*-"$sha" |
 
 Then run health check 3. If `<sha>` is not the `deployed_sha` in
 `status.json` (a rollback by hand), also set it:
-`jq --arg s "$sha" '.deployed_sha = $s | .previous_sha = null' "$S/status.json" > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
+`jq --arg s "$sha" '.deployed_sha = $s | .previous_sha = null | .in_flight = null' "$S/status.json" > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
+
+**A rollback by hand that did not finish** (`… failed the gate too` or
+`error: the rollback by hand from <new sha> to <previous sha> was interrupted`):
+`current` is the previous build, on the restored snapshot, and the newer
+build's data is in `~/.ad4m-staging.failed`. Run health check 3. If the
+previous build is up and unlocked now, record it with the `jq` command
+above (`sha=<previous sha>`). Otherwise go forward again: stop
+`ad4m-staging`, move `~/.ad4m-staging` aside, move `~/.ad4m-staging.failed`
+back to `~/.ad4m-staging`, run `ln -sfn "releases/<new sha>" "$S/current"`,
+start `ad4m-staging`, and run
+`jq '.in_flight = null' "$S/status.json" > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
+
+**`error: current is <sha>, but status.json names no deployed build`**:
+either `status.json` was lost or reset, or the very first deploy was killed
+before its check. `update.sh` cannot tell the two apart, so it touches
+nothing. Run health check 3.
+- If `<sha>` runs and prints `unlocked`, `status.json` was lost. Write it
+  again (drop `agent` if the check printed `no-agent`):
+  `S=~/.local/share/ad4m-staging; p=$(readlink "$S/previous" || true); jq -n --arg s "<sha>" --arg p "${p#releases/}" '{deployed_sha: $s, previous_sha: (if $p == "" then null else $p end), agent: "unlocked"}' > "$S/status.json.new" && mv "$S/status.json.new" "$S/status.json"`.
+  The next run then treats `<sha>` as deployed, and `rollback` can still
+  go back to `previous`.
+- If this was the first deploy, stop `ad4m-staging`, move `~/.ad4m-staging`
+  aside (it holds only what the unchecked build wrote) and
+  `rm ~/.local/share/ad4m-staging/current`. The next run deploys the head
+  of `staging` again as the first deploy.
 
 What it does: stops the executor, moves the data directory to
 `~/.ad4m-staging.failed` (replacing an older one), restores the snapshot
