@@ -3,7 +3,9 @@
 # cargo, systemctl, curl, node and sleep replaced by stubs, and checks each
 # decision it makes: wait, deploy, skip, roll back, keep a failed build out,
 # recover from a failed step after the stop, ignore a tag named like the branch,
-# start nothing when a restore fails, clean up after a deploy killed in its gate.
+# start nothing when a restore fails, clean up after a deploy killed in its gate,
+# leave a lost status.json, a failed status write or an unfinished rollback by
+# hand to the operator.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -93,6 +95,16 @@ if [[ -f $STUB_DIR/fail-move && $* == "$AD4M_STAGING_DATA $AD4M_STAGING_DATA.fai
   exit 1
 fi
 exec /bin/mv "$@"
+EOF
+# With $STUB_DIR/fail-jq, a status.json write of last_failed_sha fails, as on
+# a full disk.
+cat >"$T/stubs/jq" <<EOF
+#!/usr/bin/env bash
+if [[ -f \$STUB_DIR/fail-jq && \$* == *'.["last_failed_sha"] ='* ]]; then
+  echo "jq: error: No space left on device" >&2
+  exit 2
+fi
+exec $(command -v jq) "\$@"
 EOF
 printf '#!/bin/sh\n' >"$T/stubs/sleep"
 chmod +x "$T/stubs/"*
@@ -375,6 +387,89 @@ check "a later failed gate rolls back to data without the interrupted build's wr
   run rollback
 ) 9>"$T/state7/update.lock"
 check "a rollback while an update runs exits non-zero" exited_non_zero
+
+# 19. status.json is lost on a healthy node: the next run touches nothing
+# and leaves it to the operator, rather than taking `current` for an
+# interrupted first deploy and moving the live data aside.
+export AD4M_STAGING_STATE=$T/state8 AD4M_STAGING_DATA=$T/data8 AD4M_STAGING_SRC=$T/src8
+push_staging "$one"
+run
+push_staging "$two"
+run
+rm "$T/state8/status.json"
+before8=$(cat "$T/data8/written-by")
+run
+check "a lost status.json exits non-zero" exited_non_zero
+check "and says why" [ "$(jq -r .last_result "$T/state8/status.json")" = \
+  "error: current is $two, but status.json names no deployed build (an interrupted first deploy, or a lost status.json); left to the operator" ]
+check "and stops nothing" bash -c "! grep -q systemctl '$T/calls'"
+check "and keeps current" [ "$(readlink "$T/state8/current")" = "releases/$two" ]
+check "and keeps the live data in place" [ "$(cat "$T/data8/written-by")" = "$before8" ]
+check "and moves nothing aside" [ ! -e "$T/data8.failed" ]
+commit "after status.json was lost" "AD4M_UNLOCK_PASSPHRASE_FILE" >/dev/null
+run
+check "the next commit is not deployed on top" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "and the live data stays" [ "$(cat "$T/data8/written-by")" = "$before8" ]
+
+# 20. A status.json write fails during a rollback (errexit is off there):
+# status.json keeps its last good content, and the next run keeps the
+# deployed build and its data.
+export AD4M_STAGING_STATE=$T/state9 AD4M_STAGING_DATA=$T/data9 AD4M_STAGING_SRC=$T/src9
+push_staging "$one"
+run
+push_staging "$two"
+run
+nowrite=$(commit "fails the gate, status write fails" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$nowrite" "$T/fail-jq"
+run
+rm "$T/fail-jq"
+check "a failed status write exits non-zero" exited_non_zero
+check "and leaves status.json whole" [ "$(jq -r .deployed_sha "$T/state9/status.json")" = "$two" ]
+check "and says it could not record the failed build" grep -q "could not record $nowrite as failed" "$T/out"
+check "and still rolls back" [ "$(cat "$T/running")/$(readlink "$T/state9/current")" = "$two/releases/$two" ]
+before9=$(cat "$T/data9/written-by")
+run
+check "the next run keeps the deployed build's data" \
+  [ "$(head -n -1 "$T/data9/written-by" 2>/dev/null)" = "$before9" ]
+check "and has the failed build recorded after its second gate" \
+  [ "$(jq -r '.deployed_sha + "/" + .last_failed_sha' "$T/state9/status.json")" = "$two/$nowrite" ]
+rm "$T/bad-$nowrite"
+
+# 21. A rollback by hand killed during its gate is labelled as a rollback on
+# the next run, and nothing is touched.
+export AD4M_STAGING_STATE=$T/state10 AD4M_STAGING_DATA=$T/data10 AD4M_STAGING_SRC=$T/src10
+push_staging "$one"
+run
+push_staging "$two"
+run
+touch "$T/kill-gate"
+run rollback
+flock "$T/state10/update.lock" true
+before10=$(cat "$T/data10/written-by")
+run
+check "an interrupted rollback exits non-zero" exited_non_zero
+check "and is named as a rollback" [ "$(jq -r .last_result "$T/state10/status.json")" = \
+  "error: the rollback by hand from $two to $one was interrupted; left to the operator" ]
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and the data stays" [ "$(cat "$T/data10/written-by")" = "$before10" ]
+
+# 22. A rollback by hand whose build fails the gate: the next run keeps that
+# result instead of calling it an interrupted deploy.
+export AD4M_STAGING_STATE=$T/state11 AD4M_STAGING_DATA=$T/data11 AD4M_STAGING_SRC=$T/src11
+push_staging "$one"
+run
+push_staging "$two"
+run
+touch "$T/bad-$one"
+run rollback
+check "a rollback whose build fails the gate says so" [ "$(jq -r .last_result "$T/state11/status.json")" = \
+  "rolled_back by hand: $two; $one failed the gate too (agent: locked)" ]
+run
+rm "$T/bad-$one"
+check "the next run exits non-zero" exited_non_zero
+check "and keeps the rollback's result" [ "$(jq -r .last_result "$T/state11/status.json")" = \
+  "rolled_back by hand: $two; $one failed the gate too (agent: locked)" ]
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
 
 echo "$failures failed"
 ((failures == 0))
