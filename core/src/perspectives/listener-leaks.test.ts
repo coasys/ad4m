@@ -27,9 +27,14 @@ class FakeWebSocket {
   push(event: Record<string, unknown>) { this.onmessage?.({ data: JSON.stringify(event) }); }
 }
 
+// Closed after each test, so a failed assertion cannot leave a ping timer that hangs jest.
+const apis: ApiClient[] = [];
+afterEach(() => apis.splice(0).forEach(api => api.closeAll()));
+
 function setup() {
   FakeWebSocket.instances = [];
   const api = new ApiClient('http://localhost:12000', undefined, FakeWebSocket as any);
+  apis.push(api);
   const client = new PerspectiveClient('http://localhost:12000', undefined, api);
   const ws = () => FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
   const proxy = (uuid = 'uuid-1') => new PerspectiveProxy(
@@ -113,6 +118,18 @@ describe('PerspectiveProxy listener registration (L1–L3)', () => {
     p.removeListener('link-added', added);
     ws().push({ type: 'link-added', perspectiveUuid: 'uuid-1', link: link('e') });
     expect(added).toHaveBeenCalledTimes(1);
+    api.closeAll();
+  });
+
+  it('removing a listener that was never added leaves the others', () => {
+    const { proxy, ws, api } = setup();
+    const p = proxy();
+    const kept = jest.fn();
+    p.addListener('link-added', kept);
+    ws().open();
+    p.removeListener('link-added', jest.fn()); // never registered
+    ws().push({ type: 'link-added', perspectiveUuid: 'uuid-1', link: link('a') });
+    expect(kept).toHaveBeenCalledTimes(1);
     api.closeAll();
   });
 
