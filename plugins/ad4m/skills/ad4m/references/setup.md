@@ -253,7 +253,7 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
+Remember: an executor only starts without an admin credential when it is run with `--insecure-no-admin-credential` (tests and local development only). An empty token then resolves to full access, which is exactly why such a node must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`; remote/external mode: your `executorUrl` host and port, not localhost)
 
 ## Appendix: running an executor by hand (node operators only)

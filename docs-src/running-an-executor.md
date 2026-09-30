@@ -79,7 +79,7 @@ ad4m-executor run \
 | `--app-data-path` | (required) | Data directory |
 | `--port` | 12000 | API port (WebSocket RPC + HTTP) |
 | `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none, **required**) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it (or with an empty value) `run` exits with an error |
-| `--insecure-no-admin-credential` / `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true` | off | Tests and local development only: start without a credential. An empty token then has admin access. Never set it on an executor anyone else can reach |
+| `--insecure-no-admin-credential` / `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true` | off | Tests and local development only: start without a credential. An empty token then has admin access. Never set it on an executor anyone else can reach. Only `true` enables it; an empty value, `false`, `0`, `no` or `off` leave it off, and other values are an error |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
 | `--hc-admin-port` | 2000 | Holochain admin port |
