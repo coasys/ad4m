@@ -30,6 +30,9 @@
     "url": "https://github.com/coasys/ad4m/issues"
   },
   "homepage": "https://ad4m.dev",
+  "engines": {
+    "node": ">=22"
+  },
   "dependencies": {
     "@holochain/client": "0.16.0",
     "base64-js": "*",
