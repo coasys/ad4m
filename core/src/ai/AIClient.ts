@@ -9,7 +9,7 @@ export class AIClient {
     #apiClient: ApiClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
