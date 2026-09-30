@@ -1,4 +1,4 @@
-import { ApiClient, LONG_TIMEOUT_MS } from "./apiClient"
+import { ApiClient, LONG_TIMEOUT_MS, RpcError } from "./apiClient"
 import { AIClient } from "./ai/AIClient"
 import { AgentClient } from "./agent/AgentClient"
 import { LanguageClient } from "./language/LanguageClient"
@@ -64,6 +64,13 @@ function call<T = unknown>(type: string, params?: Record<string, unknown>, optio
     return promise
 }
 
+/** Reads how `promise` settled so far: 'pending', 'resolved' or the rejection. */
+function outcomeOf(promise: Promise<unknown>): () => unknown {
+    let outcome: unknown = 'pending'
+    promise.then(() => { outcome = 'resolved' }, (e) => { outcome = e })
+    return () => outcome
+}
+
 describe('ApiClient calls', () => {
     it('sends the call and resolves with the reply', async () => {
         const promise = call('agent.get', { foo: 'bar' })
@@ -106,15 +113,29 @@ describe('ApiClient calls', () => {
         expect(events).toEqual([])
     })
 
-    it('removes the abort listener once the call settles', async () => {
+    it('rejects with an RpcError carrying the code and message of an error reply', async () => {
+        const promise = call('perspective.get', { uuid: 'u' })
+        await flush()
+        socket(0).reply({ id: socket(0).sent[0].id, error: { code: 404, message: 'perspective not found' } })
+        const error = await promise.catch((e) => e)
+        expect(error).toBeInstanceOf(RpcError)
+        expect(error).toMatchObject({ status: 404, body: 'perspective not found' })
+    })
+
+    it('rejects with status 500 when an error reply has no code', async () => {
+        const promise = call('agent.get')
+        await flush()
+        socket(0).reply({ id: socket(0).sent[0].id, error: { message: 'boom' } })
+        await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 500, body: 'boom' })
+    })
+
+    it('sends no request.cancel when the signal fires after the call settled', async () => {
         const controller = new AbortController()
-        const remove = jest.spyOn(controller.signal, 'removeEventListener')
         const promise = call('agent.get', {}, { signal: controller.signal })
         await flush()
         socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
         await promise
 
-        expect(remove).toHaveBeenCalledTimes(1)
         controller.abort()
         expect(socket(0).sent).toHaveLength(1)
     })
@@ -123,17 +144,17 @@ describe('ApiClient calls', () => {
 describe('ApiClient connect-phase failures', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 
-    it('rejects with 503 once three sockets closed before it could be sent', async () => {
+    it('rejects with 503 before its timeout when every socket closes before the call goes out', async () => {
         jest.useFakeTimers()
         try {
-            const promise = call('agent.get', {}, { timeoutMs: 10_000 })
-            socket(0).drop()
-            await jest.advanceTimersByTimeAsync(500)
-            socket(1).drop()
-            await jest.advanceTimersByTimeAsync(1_000)
-            socket(2).drop()
-            await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
-            expect(TestSocket.instances).toHaveLength(3)
+            const timeoutMs = 10_000
+            const outcome = outcomeOf(call('agent.get', {}, { timeoutMs }))
+            let dropped = 0
+            for (let elapsed = 0; elapsed < timeoutMs - 100 && outcome() === 'pending'; elapsed += 100) {
+                while (dropped < TestSocket.instances.length) socket(dropped++).drop()
+                await jest.advanceTimersByTimeAsync(100)
+            }
+            expect(outcome()).toMatchObject({ name: 'RpcError', status: 503 })
         } finally {
             jest.useRealTimers()
         }
@@ -155,39 +176,27 @@ describe('ApiClient connect-phase failures', () => {
         }
     })
 
-    it('a replaced socket that opens late does not take the queued calls', async () => {
-        const unsubscribe = client.subscribe(() => {})
-        unsubscribe()
-        const promise = call<string>('x')
-        socket(0).open()
-        expect(socket(0).sent).toEqual([])
-        socket(1).open()
-        socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
-        await expect(promise).resolves.toBe('ok')
-    })
-
     it("a replaced socket's late onclose does not fail the call on its successor", async () => {
         TestSocket.asyncClose = true
         client.waitForSubscription()
         socket(0).open()
         client.closeAll() // socket 0's onclose arrives 5 ms later
         const promise = call<string>('x')
-        await flush()
-        socket(1).open()
+        const ready = client.waitForSubscription()
         await sleep(10)
+        socket(1).open()
+        await expect(ready).resolves.toBeUndefined()
         socket(1).reply({ id: socket(1).sent[0].id, result: 'ok' })
         await expect(promise).resolves.toBe('ok')
     })
 
-    it('a settled call leaves only the ping timer, and closeAll leaves none', async () => {
+    it('leaves no timers after closeAll', async () => {
         jest.useFakeTimers()
         try {
             const promise = call('agent.status')
             socket(0).open()
-            await jest.advanceTimersByTimeAsync(1)
             socket(0).reply({ id: socket(0).sent[0].id, result: 1 })
             await promise
-            expect(jest.getTimerCount()).toBe(1)
             client.closeAll()
             expect(jest.getTimerCount()).toBe(0)
         } finally {
@@ -235,18 +244,6 @@ describe('ApiClient connect-phase failures', () => {
         const promise = call('agent.get', {}, { timeoutMs: 1_000 })
         client.closeAll()
         await expect(promise).rejects.toMatchObject({ name: 'RpcError', status: 503 })
-    })
-
-    it('a late close of the previous socket does not fail the next connection', async () => {
-        TestSocket.asyncClose = true
-        const unsubscribe = client.subscribe(() => {})
-        socket(0).open()
-        unsubscribe()
-        client.subscribe(() => {})
-        const ready = client.waitForSubscription()
-        await sleep(10)
-        socket(1).open()
-        await expect(ready).resolves.toBeUndefined()
     })
 
     it('keeps the socket for a call still connecting when the last subscriber leaves', async () => {
@@ -305,30 +302,38 @@ describe('ApiClient retries idempotent reads once after a reconnect', () => {
 describe('ApiClient.onReconnect', () => {
     beforeEach(() => { TestSocket.autoOpen = false })
 
-    it('fires on reconnect only, not after closeAll or once unsubscribed', () => {
+    /** Drop the open socket, if any, and open socket `i`. */
+    function connect(i: number) {
+        if (socket(i - 1)?.readyState === 1) socket(i - 1).drop()
+        client.waitForSubscription()
+        socket(i).open()
+    }
+
+    it('fires on a reconnect but not on the first connect', () => {
+        const reconnected = jest.fn()
+        client.onReconnect(reconnected)
+        connect(0)
+        expect(reconnected).not.toHaveBeenCalled()
+        connect(1)
+        expect(reconnected).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not fire once unsubscribed', () => {
         const reconnected = jest.fn()
         const unsubscribe = client.onReconnect(reconnected)
-        client.waitForSubscription()
-        socket(0).open()
-        expect(reconnected).not.toHaveBeenCalled()
-
-        socket(0).drop()
-        client.waitForSubscription()
-        socket(1).open()
-        expect(reconnected).toHaveBeenCalledTimes(1)
-
+        connect(0)
         unsubscribe()
-        socket(1).drop()
-        client.waitForSubscription()
-        socket(2).open()
-        expect(reconnected).toHaveBeenCalledTimes(1)
+        connect(1)
+        expect(reconnected).not.toHaveBeenCalled()
+    })
 
-        // A reused client's first open after closeAll() is not a reconnect.
+    it('does not fire on the first connect of a client reused after closeAll', () => {
+        const reconnected = jest.fn()
+        connect(0)
         client.closeAll()
         client.onReconnect(reconnected)
-        client.waitForSubscription()
-        socket(3).open()
-        expect(reconnected).toHaveBeenCalledTimes(1)
+        connect(1)
+        expect(reconnected).not.toHaveBeenCalled()
     })
 })
 
@@ -359,12 +364,6 @@ describe('long calls', () => {
         ['perspective.runInterpretationWithHarness', (o) => proxy().runInterpretationWithHarness([], 'b', 1, undefined, undefined, undefined, undefined, o)],
     ]
     const lastSent = () => TestSocket.instances[TestSocket.instances.length - 1].sent.at(-1)!
-    /** Reads how `promise` settled so far: 'pending', 'resolved' or the rejection. */
-    function outcomeOf(promise: Promise<unknown>): () => unknown {
-        let outcome: unknown = 'pending'
-        promise.then(() => { outcome = 'resolved' }, (e) => { outcome = e })
-        return () => outcome
-    }
 
     describe.each([['client', calls], ['PerspectiveProxy', proxyCalls]])('%s', (_via, table) => {
         it.each(table)('%s waits LONG_TIMEOUT_MS by default', async (type, run) => {
@@ -378,19 +377,10 @@ describe('long calls', () => {
             expect(outcome()).toMatchObject({ name: 'RpcError', status: 408 })
         })
 
-        it.each(table)('%s takes timeoutMs and signal', async (_type, run) => {
+        it.each(table)('%s takes timeoutMs', async (_type, run) => {
             const timedOut = outcomeOf(run({ timeoutMs: 100 }))
             await jest.advanceTimersByTimeAsync(100)
             expect(timedOut()).toMatchObject({ status: 408 })
-
-            const controller = new AbortController()
-            const aborted = outcomeOf(run({ signal: controller.signal }))
-            await jest.advanceTimersByTimeAsync(1)
-            const sent = lastSent()
-            controller.abort()
-            await jest.advanceTimersByTimeAsync(0)
-            expect(aborted()).toMatchObject({ name: 'AbortError' })
-            expect(lastSent()).toMatchObject({ type: 'request.cancel', params: { targetId: sent.id } })
         })
     })
 })

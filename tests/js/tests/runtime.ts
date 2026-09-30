@@ -168,6 +168,13 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(error.status, error.message).to.equal(400)
         })
 
+        it("unytVersionInfo() reports the bundled version and the install state", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const info = await ad4mClient.runtime.unytVersionInfo()
+            expect(info.bundled).to.be.a('string').that.is.not.empty
+            expect(info).to.have.all.keys('installed', 'bundled', 'installError')
+        })
+
         it("can get runtimeInfo", async () => {
             const ad4mClient = testContext.ad4mClient!
             const runtimeInfo = await ad4mClient.runtime.info();

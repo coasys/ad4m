@@ -602,7 +602,7 @@ async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(Value::Bool(true))
 }
 
-pub(crate) fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
+fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
     let mut seen = std::collections::HashSet::new();
     rates
         .into_iter()
