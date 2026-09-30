@@ -1268,6 +1268,13 @@ describe("Lightweight fingerprint optimization", () => {
 
 
 
+/** Turn a LiveQuery's update listener into `push(result)`: each push sends the
+ *  next revision of `subscriptionId` with the whole result. */
+function updatesFor(subscriptionId: string, listener: (update: any) => void) {
+  let revision = 0;
+  return (result: any) => listener({ subscriptionId, revision: ++revision, result });
+}
+
 // ── Subscribe callback timing ──────────────────────────────────────────
 describe("ModelQueryBuilder subscribe callback timing", () => {
   it("subscribe should not invoke callback synchronously before Promise resolves", async () => {
@@ -1280,13 +1287,14 @@ describe("ModelQueryBuilder subscribe callback timing", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        updateCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        updateCallback = updatesFor(mockSubscriptionId, cb);
         return () => {}; // unsubscribe function
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1339,12 +1347,13 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
+      onQueryUpdate: jest.fn().mockImplementation((_cb: any) => {
         return () => {};
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1394,13 +1403,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1462,13 +1472,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1531,13 +1542,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1602,13 +1614,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       const mockClient = {
         modelSubscribe: jest.fn().mockResolvedValue({
           subscriptionId: mockSubscriptionId,
+          revision: 0,
           result: { instances: [], totalCount: 0 },
         }),
-        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-          capturedCallback = cb;
+        onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+          capturedCallback = updatesFor(mockSubscriptionId, cb);
           return () => {};
         }),
-        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        onReconnect: jest.fn(() => () => {}),
         disposeQuerySubscription: jest.fn().mockResolvedValue(true),
       };
 
@@ -1673,13 +1686,14 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const mockClient = {
       modelSubscribe: jest.fn().mockResolvedValue({
         subscriptionId: mockSubscriptionId,
+        revision: 0,
         result: { instances: [], totalCount: 0 },
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
-        capturedCallback = cb;
+      onQueryUpdate: jest.fn().mockImplementation((cb: any) => {
+        capturedCallback = updatesFor(mockSubscriptionId, cb);
         return () => {};
       }),
-      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      onReconnect: jest.fn(() => () => {}),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
@@ -1746,44 +1760,30 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
 });
 
 // ============================================================================
-// Subscription keepalive recovery tests
+// Subscriptions after a reconnect (the executor ends a socket's subscriptions
+// when it closes; there is no keepalive)
 // ============================================================================
 
-describe("ModelQueryBuilder keepalive recovery", () => {
-  beforeEach(() => jest.useFakeTimers());
-  afterEach(() => jest.useRealTimers());
-
-  /**
-   * Helper: build a mock perspective whose keepAliveQuery rejects after
-   * `failAfter` successful calls, simulating a server-side subscription
-   * eviction (returns "Subscription not found").  On resubscribe (a second
-   * modelSubscribe call) it returns a *new* subscription ID.
-   */
-  function buildMocks(failAfter = 0) {
-    let keepaliveCallCount = 0;
-    let modelSubscribeCallCount = 0;
-
+describe("ModelQueryBuilder reconnect", () => {
+  function buildMocks() {
+    let subscribeCount = 0;
+    const reconnectListeners = new Set<() => void>();
     const mockClient = {
       modelSubscribe: jest.fn().mockImplementation(async () => {
-        modelSubscribeCallCount++;
+        subscribeCount++;
         return {
-          subscriptionId: `sub-${modelSubscribeCallCount}`,
-          result: { instances: [], totalCount: 0 },
+          subscriptionId: `sub-${subscribeCount}`,
+          revision: 0,
+          result: { instances: [], totalCount: subscribeCount },
         };
       }),
-      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, _cb: any) => {
-        return () => {};
-      }),
-      keepAliveQuery: jest.fn().mockImplementation(async () => {
-        keepaliveCallCount++;
-        if (keepaliveCallCount > failAfter) {
-          throw new Error("RPC error 500: Subscription not found");
-        }
-        return true;
+      onQueryUpdate: jest.fn(() => () => {}),
+      onReconnect: jest.fn((cb: () => void) => {
+        reconnectListeners.add(cb);
+        return () => reconnectListeners.delete(cb);
       }),
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
-
     const mockPerspective = {
       uuid: "test-uuid",
       client: mockClient,
@@ -1794,125 +1794,63 @@ describe("ModelQueryBuilder keepalive recovery", () => {
       modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
       getLinks: jest.fn().mockResolvedValue([]),
     } as any;
-
-    return { mockClient, mockPerspective, getKeepaliveCount: () => keepaliveCallCount, getSubscribeCount: () => modelSubscribeCallCount };
+    const reconnect = async () => {
+      reconnectListeners.forEach(cb => cb());
+      await new Promise(r => setTimeout(r, 0));
+    };
+    return { mockClient, mockPerspective, reconnect, subscribeCount: () => subscribeCount };
   }
 
-  it("subscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(/* failAfter */ 1);
-
+  function testModel(name: string) {
     const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "KeepaliveRecoveryTest" })
-    class KeepaliveRecoveryTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://ka" })
-      type: string = "test://ka";
+    @Model({ name })
+    class M extends Ad4mModel {
+      @Flag({ through: "test://type", value: `test://${name}` })
+      type: string = `test://${name}`;
       @Property({ through: "test://name" })
       name: string = "";
     }
+    return M;
+  }
 
-    const builder = KeepaliveRecoveryTest.query(mockPerspective);
+  it("subscribe re-opens after a reconnect", async () => {
+    const { mockClient, mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectSubscribe").query(mockPerspective);
     await builder.subscribe(() => {});
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
 
-    // Initial subscription
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — succeeds (failAfter=1)
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(1);
-
-    // Second keepalive at 60s — fails → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(2);
-
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    // A second modelSubscribe call means recovery happened
-    expect(getSubscribeCount()).toBe(2);
-
-    // Clean up
+  it("countSubscribe delivers the count from the re-opened subscription", async () => {
+    const { mockPerspective, reconnect } = buildMocks();
+    const counts: number[] = [];
+    const builder = testModel("ReconnectCount").query(mockPerspective);
+    expect(await builder.countSubscribe(c => counts.push(c))).toBe(1);
+    await reconnect();
+    expect(counts).toEqual([2]);
     builder.dispose();
   });
 
-  it("countSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0); // fail immediately
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "CountKeepaliveTest" })
-    class CountKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://cka" })
-      type: string = "test://cka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = CountKeepaliveTest.query(mockPerspective);
-    await builder.countSubscribe(() => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    // First keepalive at 30s — fails immediately → should trigger resubscribe
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
+  it("paginateSubscribe re-reads the page after a reconnect", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const pages: any[] = [];
+    const builder = testModel("ReconnectPaginate").query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, p => pages.push(p));
+    await reconnect();
+    expect(subscribeCount()).toBe(2);
+    expect(pages).toHaveLength(1);
     builder.dispose();
   });
 
-  it("paginateSubscribe: resubscribes when keepalive gets 'Subscription not found'", async () => {
-    const { mockClient, mockPerspective, getSubscribeCount } = buildMocks(0);
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "PaginateKeepaliveTest" })
-    class PaginateKeepaliveTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://pka" })
-      type: string = "test://pka";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = PaginateKeepaliveTest.query(mockPerspective);
-    await builder.paginateSubscribe(10, 1, () => {});
-
-    expect(getSubscribeCount()).toBe(1);
-
-    await jest.advanceTimersByTimeAsync(30_000);
-    // Allow exponential backoff (2000ms for first retry) + microtask queue to settle
-    await jest.advanceTimersByTimeAsync(2500);
-
-    expect(getSubscribeCount()).toBe(2);
-
-    builder.dispose();
-  });
-
-  it("subscribe: stops retrying after dispose()", async () => {
-    const { mockClient, mockPerspective } = buildMocks(Infinity); // keepalive always succeeds
-
-    const { Ad4mModel, Model, Flag, Property } = require("./index");
-
-    @Model({ name: "DisposeTest" })
-    class DisposeTest extends Ad4mModel {
-      @Flag({ through: "test://type", value: "test://disp" })
-      type: string = "test://disp";
-      @Property({ through: "test://name" })
-      name: string = "";
-    }
-
-    const builder = DisposeTest.query(mockPerspective);
+  it("a disposed subscription does not re-open", async () => {
+    const { mockPerspective, reconnect, subscribeCount } = buildMocks();
+    const builder = testModel("ReconnectDisposed").query(mockPerspective);
     await builder.subscribe(() => {});
-
     builder.dispose();
-
-    // Advance well past multiple keepalive intervals
-    await jest.advanceTimersByTimeAsync(120_000);
-
-    // No keepalive calls should have happened after dispose
-    expect(mockClient.keepAliveQuery).toHaveBeenCalledTimes(0);
+    await reconnect();
+    expect(subscribeCount()).toBe(1);
   });
 });
 

@@ -10,7 +10,7 @@ import { Perspective } from "./Perspective";
 import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
-import { AllInstancesResult } from "../model/types";
+import type { QueryLagged, QueryUpdate, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
@@ -32,20 +32,6 @@ export interface LinkUpdate {
 export type LinkUpdatedCallback = (update: LinkUpdate) => void
 export type SyncStateChangeCallback = (state: PerspectiveState) => void
 
-function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
-    let finalResult: unknown = raw
-
-    if (typeof finalResult === 'string') {
-        try {
-            finalResult = JSON.parse(finalResult)
-        } catch (e) {
-            console.error(errorContext, e)
-        }
-    }
-
-    return finalResult as AllInstancesResult
-}
-
 export class PerspectiveClient {
     #apiClient: ApiClient
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
@@ -55,7 +41,6 @@ export class PerspectiveClient {
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
     #linkUnsubscribers: Map<string, (() => void)[]>
-    #querySubscriptionUnsubscribers: Map<string, () => void>
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
@@ -63,7 +48,6 @@ export class PerspectiveClient {
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
         this.#linkUnsubscribers = new Map()
-        this.#querySubscriptionUnsubscribers = new Map()
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -127,56 +111,24 @@ export class PerspectiveClient {
         return JSON.parse(result) as T
     }
 
-    async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
-        const response = await this.#apiClient.call<{ subscriptionId: string, result: unknown }>(
-            'perspective.subscribeQuery', { uuid, query }
-        )
-        const { subscriptionId, result } = response
-        const parsed = normalizeQueryResult(result, 'Error parsing subscribeQuery result:')
-        return { subscriptionId, result: parsed }
+    /** Open a live SPARQL/Prolog query. Updates arrive through {@link onQueryUpdate}. */
+    async subscribeQuery(uuid: string, query: string): Promise<Subscribed> {
+        return this.#apiClient.call<Subscribed>('perspective.subscribeQuery', { uuid, query })
     }
 
-    async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** Every `query-subscription-update` event on this client's socket. */
+    onQueryUpdate(cb: (update: QueryUpdate | QueryLagged) => void): () => void {
+        return this.#apiClient.subscribe((data) => {
+            if (data.type === 'query-subscription-update') cb(data as unknown as QueryUpdate | QueryLagged)
+        })
     }
 
-    async perspectiveDisposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
-            'perspective.disposeQuery', { uuid, subscriptionId }
-        )
-    }
-
-    subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                const event = data as Record<string, unknown>
-                if (event.type !== 'query-subscription-update') return
-
-                const eventSubscriptionId = event.subscriptionId || event.subscription_id
-                if (eventSubscriptionId !== subscriptionId) return
-
-                const parsed = normalizeQueryResult(event.result, 'Error parsing query subscription:')
-                onData(parsed)
-            }
-        )
-        this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
-        return unsub
-    }
-
-    async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
-            'perspective.keepAliveQuery', { uuid, subscriptionId }
-        )
+    /** The current result and revision of a live query, after a revision gap. */
+    async resyncSubscription(uuid: string, subscriptionId: string): Promise<{ revision: number, result: any }> {
+        return this.#apiClient.call('perspective.resyncSubscription', { uuid, subscriptionId })
     }
 
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        const unsub = this.#querySubscriptionUnsubscribers.get(subscriptionId)
-        if (unsub) {
-            unsub()
-            this.#querySubscriptionUnsubscribers.delete(subscriptionId)
-        }
         return this.#apiClient.call<boolean>(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
@@ -212,14 +164,11 @@ export class PerspectiveClient {
         return JSON.parse(resultJson)
     }
 
-    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        const response = await this.#apiClient.call<{ subscription_id: string, result: string }>(
+    /** Open a live model query. Updates arrive through {@link onQueryUpdate}. */
+    async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<Subscribed> {
+        return this.#apiClient.call<Subscribed>(
             'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
         )
-        return {
-            subscriptionId: response.subscription_id,
-            result: JSON.parse(response.result)
-        }
     }
 
     async add(name: string): Promise<PerspectiveProxy> {

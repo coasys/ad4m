@@ -290,6 +290,26 @@ export default function perspectiveTests(testContext: TestContext) {
                 }
             })
 
+            it('a SPARQL live query follows a link that is added, then removed', async () => {
+                const ad4mClient: Ad4mClient = testContext.ad4mClient!
+                const p = await ad4mClient.perspective.add("live sparql rows")
+                const subscription = await p.subscribeQuery('SELECT ?target WHERE { <test://live-source> <test://live-predicate> ?target . }')
+                const rows = () => subscription.result as unknown as any[]
+                try {
+                    expect(rows()).to.eql([])
+
+                    const link = await p.add(new Link({ source: 'test://live-source', predicate: 'test://live-predicate', target: 'test://live-target' }))
+                    await pollUntil(() => rows().length === 1, { label: 'live query row for the added link' })
+                    expect(JSON.stringify(rows()[0])).to.include('test://live-target')
+
+                    await p.remove(link)
+                    await pollUntil(() => rows().length === 0, { label: 'live query row removed with the link' })
+                } finally {
+                    subscription.dispose()
+                    await ad4mClient.perspective.remove(p.uuid)
+                }
+            })
+
             it('subscriptions', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
 
@@ -339,53 +359,6 @@ export default function perspectiveTests(testContext: TestContext) {
                 await sleep(1000)
                 expect(linkRemoved.called).to.be.true;
                 //expect(linkRemoved.getCall(0).args[0]).to.eql(copiedUpdatedLinkExpression)
-            })
-
-            // SdnaOnly doesn't load links into prolog engine
-            it.skip('shares subscription between identical prolog queries', async () => {
-                const ad4mClient: Ad4mClient = testContext.ad4mClient!
-                const p = await ad4mClient.perspective.add("Subscription test")
-
-                const query = 'triple(X, _, "test://target").'
-                
-                // Create first subscription
-                const sub1 = await p.subscribeInfer(query)
-                const sub1Id = sub1.id
-                const callback1 = sinon.fake()
-                sub1.onResult(callback1)
-
-                // Create second subscription with same query
-                const sub2 = await p.subscribeInfer(query) 
-                const sub2Id = sub2.id
-                const callback2 = sinon.fake()
-                sub2.onResult(callback2)
-
-                // Assert they got same subscription ID
-                expect(sub1Id).to.equal(sub2Id)
-
-                // Wait for the subscriptions to be established
-                // it's sending the initial result a couple of times
-                // to allow clients to wait and ensure for the subscription to be established
-                await sleep(1000)
-
-                // Add a link that matches the query
-                await p.add(new Link({
-                    source: "test://source",
-                    target: "test://target"
-                }))
-
-                await sleep(1000)
-
-                // Verify both callbacks were called
-                expect(callback1.called).to.be.true
-                expect(callback2.called).to.be.true
-
-                // Verify both got same result
-                const result1 = callback1.getCall(callback1.callCount - 1).args[0]
-                const result2 = callback2.getCall(callback2.callCount - 1).args[0]
-                console.log("result1", result1)
-                expect(result1).to.deep.equal(result2)
-                expect(result1[0].X).to.equal("test://source")
             })
 
             // SdnaOnly doesn't load links into prolog engine

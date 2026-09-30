@@ -32,6 +32,10 @@ pub struct RequestContext {
     /// — handlers should treat the absence of a token as "no cancellation
     /// signalling available" and proceed normally.
     pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Id of the WS RPC connection the request arrived on, generated once
+    /// per socket. Live queries belong to it and end when it closes. `None`
+    /// outside the WS RPC socket.
+    pub connection_id: Option<String>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
@@ -1372,26 +1376,4 @@ impl ImportResult {
 pub struct QuerySubscription {
     pub subscription_id: String,
     pub result: String,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct PerspectiveQuerySubscriptionFilter {
-    pub uuid: String,
-    pub subscription_id: String,
-    pub result: String,
-}
-
-impl GetValue for PerspectiveQuerySubscriptionFilter {
-    type Value = String;
-
-    fn get_value(&self) -> Self::Value {
-        self.result.clone()
-    }
-}
-
-impl GetFilter for PerspectiveQuerySubscriptionFilter {
-    fn get_filter(&self) -> Option<String> {
-        Some(self.subscription_id.clone())
-    }
 }
