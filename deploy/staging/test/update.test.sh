@@ -48,9 +48,17 @@ EOF
 cat >"$T/stubs/systemctl" <<'EOF'
 #!/usr/bin/env bash
 # `start` runs whatever `current` points at; the build writes into the data dir.
+# With $STUB_DIR/kill-stop, update.sh is killed as it stops the executor,
+# which keeps running.
 echo "systemctl $*" >>"$STUB_DIR/calls"
 case $2 in
-  stop) rm -f "$STUB_DIR/running" ;;
+  stop)
+    if [[ -f $STUB_DIR/kill-stop ]]; then
+      rm "$STUB_DIR/kill-stop"
+      kill -9 "$(cat "$STUB_DIR/update.pid")"
+      exit 1
+    fi
+    rm -f "$STUB_DIR/running" ;;
   start)
     sha=$(basename "$(readlink "$AD4M_STAGING_STATE/current")")
     echo "$sha" >"$STUB_DIR/running"
@@ -547,6 +555,10 @@ run
 push_staging "$two"
 run
 before13=$(cat "$T/data13/written-by")
+# failed_data left from an earlier rollback of the same build must not make
+# this look like a rollback killed after the move.
+seed_failed_data() { jq --arg s "$2" '.failed_data = $s' "$1/status.json" >"$1/status.json.new" && mv "$1/status.json.new" "$1/status.json"; }
+seed_failed_data "$T/state13" "$two"
 touch "$T/kill-move"
 run rollback
 flock "$T/state13/update.lock" true
@@ -557,6 +569,12 @@ check "and is named as a rollback" [ "$(jq -r .last_result "$T/state13/status.js
 check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
 check "and the data stays in place" [ "$(cat "$T/data13/written-by")" = "$before13" ]
 check "and status.json names no data moved aside" [ "$(jq -r .failed_data "$T/state13/status.json")" = null ]
+# The runbook's third case: the data was not moved, so rolling back again
+# is allowed and finishes.
+run rollback
+check "a rollback again after a kill before the move rolls back" \
+  [ "$(jq -r '.deployed_sha + "/" + (.in_flight | tostring)' "$T/state13/status.json")/$(cat "$T/running")" = "$one/null/$one" ]
+check "and keeps the newer build's data aside" [ "$(cat "$T/data13.failed/written-by")" = "$before13" ]
 
 # 25. After a rollback by hand that worked, the timer deploys the next commit.
 export AD4M_STAGING_STATE=$T/state14 AD4M_STAGING_DATA=$T/data14 AD4M_STAGING_SRC=$T/src14
@@ -623,6 +641,33 @@ check "and starts no build" [ ! -e "$T/state17/current" ]
 check "and keeps the restore error" [ "$(jq -r .last_result "$T/state17/status.json")" = \
   "error: could not restore the data of $two; staging is stopped" ]
 check "and keeps the failed build's data aside" grep -q "$torn17" "$T/data17.failed/written-by"
+
+# 29. Neither kind of rollback leaves a stale failed_data in place until its
+# own move: a rollback by hand killed as it stops staging (which keeps
+# running), and a failed gate's rollback killed before it moves the data.
+export AD4M_STAGING_STATE=$T/state18 AD4M_STAGING_DATA=$T/data18 AD4M_STAGING_SRC=$T/src18
+push_staging "$one"
+run
+push_staging "$two"
+run
+seed_failed_data "$T/state18" "$two"
+touch "$T/kill-stop"
+run rollback
+flock "$T/state18/update.lock" true
+check "a rollback by hand killed at the stop leaves staging running" [ "$(cat "$T/running")" = "$two" ]
+check "and status.json names no data moved aside" [ "$(jq -r .failed_data "$T/state18/status.json")" = null ]
+export AD4M_STAGING_STATE=$T/state19 AD4M_STAGING_DATA=$T/data19 AD4M_STAGING_SRC=$T/src19
+push_staging "$one"
+run
+bad19=$(commit "fails the gate, killed before the move" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$bad19"
+seed_failed_data "$T/state19" "$bad19"
+touch "$T/kill-move"
+run
+flock "$T/state19/update.lock" true
+rm "$T/bad-$bad19"
+check "a failed gate's rollback killed before the move names no data moved aside" \
+  [ "$(jq -r .failed_data "$T/state19/status.json")" = null ]
 
 echo "$failures failed"
 ((failures == 0))
