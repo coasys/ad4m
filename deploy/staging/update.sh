@@ -16,8 +16,9 @@
 #
 # A deploy killed after the swap leaves `current` != deployed_sha; the next
 # run rolls that build back first, as if it had failed the gate. An
-# unfinished rollback by hand, or a `current` that status.json does not
-# account for, is left to the operator.
+# unfinished rollback by hand (in_flight: rollback, from its first step on),
+# or a `current` that status.json does not account for, is left to the
+# operator.
 #
 # Every outcome is written to status.json in the state dir and copied to
 # $AD4M_STAGING_PUBLIC_STATUS (served as https://staging.ad4m.dev/status.json),
@@ -119,9 +120,11 @@ set_status() {
   fi
 }
 
+# fail <message> [key value ...]: records the message as last_result, with
+# the other fields given, and exits 1.
 fail() {
   log "$1"
-  set_status last_result "$1" || true
+  set_status last_result "$1" "${@:2}" || true
   exit 1
 }
 
@@ -162,19 +165,22 @@ init_data() { "$STATE/current/ad4m-executor" init --data-path "$DATA"; }
 # the passphrase file too. A node that never had an agent passes on /health
 # alone; once an agent has been seen unlocked, a build that finds none fails.
 agent_state=
+# It probes at least once, so a slow machine cannot use up the time before
+# the first probe.
 gate() {
-  local deadline=$((SECONDS + GATE_SECONDS)) accept=unlocked
+  local deadline accept=unlocked
   [[ $(field agent) == unlocked ]] || accept='unlocked no-agent'
   agent_state=
-  while ((SECONDS < deadline)); do
+  deadline=$((SECONDS + GATE_SECONDS))
+  while :; do
     if curl -fsS --max-time 5 "$URL/health" >/dev/null 2>&1; then
       agent_state=$(AD4M_URL=$URL AD4M_ADMIN_CREDENTIAL_FILE=$CONFIG/secrets/admin-credential \
         timeout 30 node "$HERE/agent.mjs" status 2>/dev/null) || agent_state=
       [[ -n $agent_state && " $accept " == *" $agent_state "* ]] && return 0
     fi
+    ((SECONDS < deadline)) || return 1
     sleep 5
   done
-  return 1
 }
 
 start_and_gate() {
@@ -189,19 +195,25 @@ start_and_gate() {
 # keep the data dir as it is. Returns 1 if the other build fails the gate too,
 # 2 if the data dir could not be restored; then nothing runs and `current` is
 # gone, so neither a restart nor the next deploy runs on a torn data dir.
+# failed_data names the build whose data is in $DATA.failed; it is null
+# until the move is done, so an operator can tell a rollback killed before
+# it from one killed after it.
 # Callers run it as a condition, which turns errexit off inside it: every
 # step checks its own result. A failed status write does not stop the
 # restore: the old build and its data matter more, and without the record
 # the next run only tries the failed build again.
 roll_back() {
+  local ran
+  ran=$(readlink "$STATE/current") || ran=
   systemctl --user stop "$UNIT" || true
-  set_status last_failed_sha "$1" || log "could not record $1 as failed; the next run tries it again"
+  set_status last_failed_sha "$1" failed_data null || log "could not record $1 as failed; the next run tries it again"
   if [[ -n $2 && -d $DATA ]]; then
     # Keep what the failed build left, for debugging, until the next rollback.
     if ! { rm -rf "${DATA:?}.failed" && mv "$DATA" "$DATA.failed"; }; then
       rm -f "$STATE/current"
       return 2
     fi
+    set_status failed_data "${ran#releases/}" || true
   fi
   if [[ -n $2 && $2 != none ]] && ! cp -a --reflink=auto "$2" "$DATA"; then
     rm -rf "${DATA:?}"
@@ -215,7 +227,7 @@ roll_back() {
   link current "$3" || return 1
   start_and_gate
 }
-restore_failed() { fail "error: could not restore the data of $1; staging is stopped"; }
+restore_failed() { fail "error: could not restore the data of $1; staging is stopped" "${@:2}"; }
 
 # --- rollback: back to the previous build, by hand
 if [[ $COMMAND == rollback ]]; then
@@ -232,9 +244,10 @@ if [[ $COMMAND == rollback ]]; then
   # The staging head counts as failed, so the timer stays on $previous
   # until staging moves.
   failed=$(field staging_sha)
-  # in_flight tells the next run that `current` != deployed_sha is this
-  # rollback, not an interrupted deploy.
-  set_status in_flight rollback last_result "rolling back by hand from $current to $previous"
+  # in_flight tells the next run that this rollback did not finish, whether
+  # it was killed before `current` moved or after: every run stops until an
+  # operator has looked (runbook: Roll back).
+  set_status in_flight rollback failed_data null last_result "rolling back by hand from $current to $previous"
   rc=0
   roll_back "${failed:-$current}" "$snapshot" "$previous" || rc=$?
   ((rc != 2)) || restore_failed "$previous"
@@ -256,17 +269,23 @@ fi
 deployed=$(field deployed_sha)
 live=$(readlink "$STATE/current" || true)
 live=${live#releases/}
+# A rollback by hand moves `current` only after it has stopped staging and
+# restored the data, so one killed before that leaves `current` =
+# deployed_sha on a stopped node and maybe a half-copied data dir. Its
+# target is previous_sha: `current` may still be the newer build. Without a
+# `current`, the failed restore below keeps its own message.
+if [[ -n $live && $(field in_flight) == rollback ]]; then
+  previous=$(field previous_sha)
+  log "the rollback by hand from $deployed to $previous did not finish; staging is left as it is for an operator (runbook: Roll back)"
+  # A rollback whose gate failed has written its result; keep it.
+  [[ $(field last_result) == "rolled_back by hand: "* ]] && exit 1
+  fail "error: the rollback by hand from $deployed to $previous was interrupted; left to the operator"
+fi
 if [[ $live != "$deployed" ]]; then
   if [[ -z $live ]]; then
     # status.json keeps the error of the failed restore.
     log "no build is current while $deployed is deployed: a restore failed; staging stays stopped until an operator restores the data (runbook: Roll back)"
     exit 1
-  fi
-  if [[ $(field in_flight) == rollback ]]; then
-    log "the rollback by hand from $deployed to $live did not finish; staging is left as it is for an operator (runbook: Roll back)"
-    # A rollback whose gate failed has written its result; keep it.
-    [[ $(field last_result) == "rolled_back by hand: "* ]] && exit 1
-    fail "error: the rollback by hand from $deployed to $live was interrupted; left to the operator"
   fi
   # Without a deployed build there is no data to go back to, and a lost
   # status.json looks the same as an interrupted first deploy: touch nothing.
@@ -278,9 +297,9 @@ if [[ $live != "$deployed" ]]; then
     fail "error: the deploy of $live was interrupted, and there is no snapshot of the data of $deployed; left to the operator"
   rc=0
   roll_back "$live" "$snapshot" "$deployed" || rc=$?
-  ((rc != 2)) || restore_failed "$deployed"
-  ((rc == 0)) || fail "rolled_back: the deploy of $live was interrupted, and $deployed failed the gate after the rollback"
-  fail "rolled_back: the deploy of $live was interrupted; $deployed runs again"
+  ((rc != 2)) || restore_failed "$deployed" in_flight null
+  ((rc == 0)) || fail "rolled_back: the deploy of $live was interrupted, and $deployed failed the gate after the rollback" in_flight null
+  fail "rolled_back: the deploy of $live was interrupted; $deployed runs again" in_flight null
 fi
 
 # --- Fetch
@@ -359,10 +378,13 @@ restore_on_error() {
   else
     rm -f "$STATE/current"
   fi
-  set_status last_failed_sha "$sha" last_result "error: deploying $sha failed before its check; ${deployed:-nothing} runs again" ||
+  set_status last_failed_sha "$sha" in_flight null \
+    last_result "error: deploying $sha failed before its check; ${deployed:-nothing} runs again" ||
     log "could not record $sha as failed"
   exit "$rc"
 }
+# Only this deploy's own outcomes clear it; nothing reads the value
+# `deploy`, it tells a reader of status.json what the stop was for.
 set_status in_flight deploy
 log "stopping $UNIT"
 systemctl --user stop "$UNIT"
@@ -402,7 +424,7 @@ fi
 log "$sha failed the gate (agent: ${agent_state:-no answer}); rolling back"
 rc=0
 roll_back "$sha" "${snapshot:-none}" "$deployed" || rc=$?
-((rc != 2)) || restore_failed "${deployed:-the node before $sha}"
-[[ -n $deployed ]] || fail "rolled_back: $sha failed the gate; there is no previous build, staging is stopped"
-((rc == 0)) || fail "rolled_back: $sha failed the gate, and $deployed failed it again after the rollback"
-fail "rolled_back: $sha failed the gate; $deployed runs again"
+((rc != 2)) || restore_failed "${deployed:-the node before $sha}" in_flight null
+[[ -n $deployed ]] || fail "rolled_back: $sha failed the gate; there is no previous build, staging is stopped" in_flight null
+((rc == 0)) || fail "rolled_back: $sha failed the gate, and $deployed failed it again after the rollback" in_flight null
+fail "rolled_back: $sha failed the gate; $deployed runs again" in_flight null

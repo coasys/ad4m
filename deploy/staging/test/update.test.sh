@@ -361,6 +361,10 @@ check "and leaves no current build" [ ! -e "$T/state5/current" ]
 check "and says so" [ "$(jq -r .last_result "$T/state5/status.json")" = \
   "error: could not restore the data of $one; staging is stopped" ]
 check "and deployed_sha stays" [ "$(jq -r .deployed_sha "$T/state5/status.json")" = "$two" ]
+run
+check "the next run after it exits non-zero" exited_non_zero
+check "and keeps the restore error" [ "$(jq -r .last_result "$T/state5/status.json")" = \
+  "error: could not restore the data of $one; staging is stopped" ]
 
 # 16. A rollback by hand that cannot move the data dir aside: the snapshot is
 # not copied into it, nothing starts.
