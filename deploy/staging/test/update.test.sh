@@ -5,7 +5,7 @@
 # recover from a failed step after the stop, ignore a tag named like the branch,
 # start nothing when a restore fails, clean up after a deploy killed in its gate,
 # leave a lost status.json, a failed status write or an unfinished rollback by
-# hand to the operator.
+# hand (killed in its gate, in its restore or before it) to the operator.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -85,6 +85,15 @@ if [[ -f $STUB_DIR/fail-snapshot && ${*: -1} == */snapshots/* ]] ||
   echo "cp: error writing: No space left on device" >&2
   exit 1
 fi
+# With $STUB_DIR/kill-restore, update.sh is killed half-way through copying a
+# snapshot back into the data dir.
+if [[ -f $STUB_DIR/kill-restore && ${*: -1} == "$AD4M_STAGING_DATA" ]]; then
+  rm "$STUB_DIR/kill-restore"
+  mkdir -p "${*: -1}"
+  echo partial >"${*: -1}/written-by"
+  kill -9 "$(cat "$STUB_DIR/update.pid")"
+  exit 1
+fi
 exec /bin/cp "$@"
 EOF
 cat >"$T/stubs/mv" <<'EOF'
@@ -94,12 +103,21 @@ if [[ -f $STUB_DIR/fail-move && $* == "$AD4M_STAGING_DATA $AD4M_STAGING_DATA.fai
   echo "mv: cannot move: Input/output error" >&2
   exit 1
 fi
+# With $STUB_DIR/kill-move, update.sh is killed after the stop, before it moves
+# the data dir aside.
+if [[ -f $STUB_DIR/kill-move && $* == "$AD4M_STAGING_DATA $AD4M_STAGING_DATA.failed" ]]; then
+  rm "$STUB_DIR/kill-move"
+  kill -9 "$(cat "$STUB_DIR/update.pid")"
+  exit 1
+fi
 exec /bin/mv "$@"
 EOF
 # With $STUB_DIR/fail-jq, a status.json write of last_failed_sha fails, as on
-# a full disk.
+# a full disk. With $STUB_DIR/slow-jq, reading the agent field takes 1.2 s, as
+# on a loaded machine: longer than the tests' whole gate time.
 cat >"$T/stubs/jq" <<EOF
 #!/usr/bin/env bash
+if [[ -f \$STUB_DIR/slow-jq && \$* == *'--arg k agent'* ]]; then $(command -v sleep) 1.2; fi
 if [[ -f \$STUB_DIR/fail-jq && \$* == *'.["last_failed_sha"] ='* ]]; then
   echo "jq: error: No space left on device" >&2
   exit 2
@@ -179,6 +197,7 @@ check "the good build runs again" [ "$(cat "$T/running")" = "$first" ]
 check "data dir is the snapshot, without the bad build's writes" \
   [ "$(cat "$T/data/written-by")" = "$(printf '%s\n%s' "$first" "$first")" ]
 check "the bad build's data is kept aside" grep -q "$bad" "$T/data.failed/written-by"
+check "a failed gate leaves no deploy in flight" [ "$(jq -r .in_flight "$T/www/status.json")" = null ]
 
 # 5. The failed SHA is not built again, unless asked to.
 run
@@ -267,6 +286,7 @@ check "the old build runs again" [ "$(cat "$T/running")" = "$head" ]
 check "current points at it" [ "$(readlink "$T/state/current")" = "releases/$head" ]
 check "the SHA is recorded as failed" [ "$(status last_failed_sha)" = "$full" ]
 check "the result says so" [ "$(status last_result)" = "error: deploying $full failed before its check; $head runs again" ]
+check "and leaves no deploy in flight" [ "$(jq -r .in_flight "$T/state/status.json")" = null ]
 check "no partial snapshot is left" bash -c "! find '$T/state/snapshots' -mindepth 1 -maxdepth 1 -name '*-$head' | grep -q ."
 
 # 10. A secret file others can read stops the update before anything else.
@@ -375,6 +395,7 @@ check "and records it as failed" [ "$(jq -r .last_failed_sha "$T/state7/status.j
 check "and says so" [ "$(jq -r .last_result "$T/state7/status.json")" = \
   "rolled_back: the deploy of $killed was interrupted; $two runs again" ]
 check "and restores the old build's data" bash -c "! grep -q '$killed' '$T/data7/written-by'"
+check "and leaves no deploy in flight" [ "$(jq -r .in_flight "$T/state7/status.json")" = null ]
 next=$(commit "fails after the interrupted one" "AD4M_UNLOCK_PASSPHRASE_FILE")
 touch "$T/bad-$next"
 run
@@ -470,6 +491,74 @@ check "the next run exits non-zero" exited_non_zero
 check "and keeps the rollback's result" [ "$(jq -r .last_result "$T/state11/status.json")" = \
   "rolled_back by hand: $two; $one failed the gate too (agent: locked)" ]
 check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+
+# 23. A rollback by hand killed while it copies the snapshot back: `current`
+# is still the newer build, the data dir is half a snapshot. The next runs
+# name it as an unfinished rollback and touch nothing, and a new commit is
+# not deployed onto the half-copied data.
+export AD4M_STAGING_STATE=$T/state12 AD4M_STAGING_DATA=$T/data12 AD4M_STAGING_SRC=$T/src12
+push_staging "$one"
+run
+push_staging "$two"
+run
+touch "$T/kill-restore"
+run rollback
+flock "$T/state12/update.lock" true
+check "the killed rollback left current at the newer build" \
+  [ "$(readlink "$T/state12/current")/$(jq -r .deployed_sha "$T/state12/status.json")" = "releases/$two/$two" ]
+run
+check "a rollback killed in the restore stops the next run" exited_non_zero
+check "and is named as a rollback" [ "$(jq -r .last_result "$T/state12/status.json")" = \
+  "error: the rollback by hand from $two to $one was interrupted; left to the operator" ]
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and the half-copied data dir stays" [ "$(cat "$T/data12/written-by")" = partial ]
+check "and status.json names the build whose data was moved aside" \
+  [ "$(jq -r .failed_data "$T/state12/status.json")" = "$two" ]
+commit "after the killed rollback" "AD4M_UNLOCK_PASSPHRASE_FILE" >/dev/null
+run
+check "the next commit is not deployed onto the half-copied data" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+check "and the newer build's data stays aside" grep -q "$two" "$T/data12.failed/written-by"
+
+# 24. A rollback by hand killed between the stop and moving the data aside:
+# the data is whole, staging is down. The next run does not say "already
+# deployed" and exit 0.
+export AD4M_STAGING_STATE=$T/state13 AD4M_STAGING_DATA=$T/data13 AD4M_STAGING_SRC=$T/src13
+push_staging "$one"
+run
+push_staging "$two"
+run
+before13=$(cat "$T/data13/written-by")
+touch "$T/kill-move"
+run rollback
+flock "$T/state13/update.lock" true
+run
+check "a rollback killed before the move stops the next run" exited_non_zero
+check "and is named as a rollback" [ "$(jq -r .last_result "$T/state13/status.json")" = \
+  "error: the rollback by hand from $two to $one was interrupted; left to the operator" ]
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and the data stays in place" [ "$(cat "$T/data13/written-by")" = "$before13" ]
+check "and status.json names no data moved aside" [ "$(jq -r .failed_data "$T/state13/status.json")" = null ]
+
+# 25. After a rollback by hand that worked, the timer deploys the next commit.
+export AD4M_STAGING_STATE=$T/state14 AD4M_STAGING_DATA=$T/data14 AD4M_STAGING_SRC=$T/src14
+push_staging "$one"
+run
+push_staging "$two"
+run
+run rollback
+check "a rollback by hand leaves nothing in flight" [ "$(jq -r .in_flight "$T/state14/status.json")" = null ]
+after=$(commit "after a rollback by hand" "AD4M_UNLOCK_PASSPHRASE_FILE")
+run
+check "the next commit deploys after a rollback by hand" [ "$(jq -r .deployed_sha "$T/state14/status.json")" = "$after" ]
+
+# 26. A slow status.json read before the gate (a loaded machine) does not use
+# up the gate time: a healthy build is probed at least once.
+export AD4M_STAGING_STATE=$T/state15 AD4M_STAGING_DATA=$T/data15 AD4M_STAGING_SRC=$T/src15
+push_staging "$one"
+touch "$T/slow-jq"
+run
+rm "$T/slow-jq"
+check "a healthy build passes the gate after a slow read" [ "$(jq -r .last_result "$T/state15/status.json")" = deployed ]
 
 echo "$failures failed"
 ((failures == 0))
