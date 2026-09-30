@@ -377,4 +377,56 @@ mod tests {
         assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
         assert!(!help.contains("s3cret-value"), "{help}");
     }
+    fn parse_run(argv: &[&str]) -> RunArgs {
+        match ClapApp::try_parse_from(argv).expect("argv parses").domain {
+            Domain::Run(run) => run,
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+    }
+
+    /// A config file's SMTP block, with the password from the environment,
+    /// reaches the executor's `Ad4mConfig.smtp_config`, so a headless node
+    /// can send verification emails like the launcher does.
+    #[test]
+    fn run_config_takes_smtp_from_the_config_file() {
+        let _env = lock_admin_credential_env();
+        let dir = std::env::temp_dir().join(format!("ad4m-cli-smtp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("executor-config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "multi_user_config": {
+                    "enabled": true,
+                    "tls_config": null,
+                    "smtp_config": {
+                        "enabled": true,
+                        "host": "smtp.example",
+                        "port": 465,
+                        "username": "ad4m@example",
+                        "from_address": "ad4m@example"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("AD4M_CONFIG", &path);
+        std::env::set_var("AD4M_SMTP_PASSWORD", "smtp-secret");
+        let config = run_config(parse_run(&["ad4m-executor", "run"]));
+        std::env::remove_var("AD4M_CONFIG");
+        std::env::remove_var("AD4M_SMTP_PASSWORD");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let config = config.expect("the config resolves");
+        assert_eq!(config.enable_multi_user, Some(true));
+        let smtp = config
+            .smtp_config
+            .expect("the config file's SMTP settings reach Ad4mConfig");
+        assert!(smtp.enabled);
+        assert_eq!(smtp.host, "smtp.example");
+        assert_eq!(smtp.port, 465);
+        assert_eq!(smtp.username, "ad4m@example");
+        assert_eq!(smtp.from_address, "ad4m@example");
+        assert_eq!(smtp.password, "smtp-secret");
+    }
 }
