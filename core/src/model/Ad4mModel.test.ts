@@ -2747,20 +2747,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2843,7 +2830,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2852,7 +2839,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
     });
   });
@@ -2872,20 +2858,19 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       @HasMany({ through: "test://has_tag" })
       tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
     }
 
-    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
       const perspective = makePerspective();
 
-      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      const initialValues = perspective.createSubject.mock.calls[0][2];
-      expect(initialValues).toEqual({ title: "hello" });
-      expect(initialValues).not.toHaveProperty("_baseExpression");
-      expect(initialValues).not.toHaveProperty("_perspective");
-      expect(initialValues).not.toHaveProperty("type");
-      expect(initialValues).not.toHaveProperty("tags");
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
     });
   });
 

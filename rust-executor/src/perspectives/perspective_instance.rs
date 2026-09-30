@@ -7621,6 +7621,60 @@ mod tests {
         assert_eq!(links_after.len(), 2);
     }
 
+    /// A class whose properties are all optional has empty constructor and
+    /// destructor lists. The writer must still store both links, or
+    /// `create_subject` fails with "No SHACL constructor found".
+    #[tokio::test]
+    async fn create_subject_works_for_a_shape_with_empty_constructor() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Memo",
+            "properties": [{
+                "path": "t://body",
+                "name": "body",
+                "max_count": 1,
+                "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://body", "target": "value"}]
+            }],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Memo".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Memo".to_string()),
+                    query: None,
+                },
+                "t://memo/1".to_string(),
+                Some(serde_json::json!({ "body": "hi" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let body = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://memo/1".to_string()),
+                predicate: Some("t://body".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 1);
+    }
+
     /// The collection-expansion gate in `create_subject` / `update_subject`:
     /// a JSON array on a property whose setter actions are all `addLink`
     /// becomes one link per element, while an array on a `setSingleTarget`
