@@ -6,7 +6,8 @@
 //   node agent.mjs status     prints one word: unlocked | locked | no-agent
 //   node agent.mjs generate   creates the main agent with the unlock passphrase
 //
-// AD4M_URL                     executor base URL (default http://127.0.0.1:12400)
+// AD4M_URL                     executor base URL (default http://127.0.0.1:12400);
+//                              with a non-empty credential it must be loopback
 // AD4M_ADMIN_CREDENTIAL_FILE   admin credential (required)
 // AD4M_UNLOCK_PASSPHRASE_FILE  agent passphrase (generate only)
 //
@@ -26,7 +27,15 @@ function secret(variable) {
 
 function call(type, params, timeoutMs) {
   const base = (process.env.AD4M_URL || "http://127.0.0.1:12400").replace(/^http/, "ws");
-  const token = encodeURIComponent(secret("AD4M_ADMIN_CREDENTIAL_FILE"));
+  const credential = secret("AD4M_ADMIN_CREDENTIAL_FILE");
+  // The RPC takes the token only in the URL, and a proxy logs URLs: send the
+  // admin credential to this host's own listener only.
+  const host = new URL(base).hostname;
+  if (credential && !["127.0.0.1", "localhost", "[::1]"].includes(host)) {
+    console.error(`refusing to send the admin credential to ${host}; use 127.0.0.1`);
+    process.exit(2);
+  }
+  const token = encodeURIComponent(credential);
   const ws = new WebSocket(`${base}/api/v1/ws?token=${token}`);
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
