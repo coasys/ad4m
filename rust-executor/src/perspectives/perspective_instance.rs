@@ -1415,8 +1415,7 @@ impl PerspectiveInstance {
                     &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
                     &serde_json::to_string(&PerspectiveStateFilter {
                         perspective: handle,
-                        state: serde_json::to_string(&state)
-                            .expect("must be able to serialze PerspectiveState"),
+                        state: state.clone(),
                     })
                     .unwrap(),
                 )

@@ -809,7 +809,7 @@ pub struct LinkUpdated {
 #[derive(Default, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PerspectiveStateFilter {
-    pub state: String,
+    pub state: PerspectiveState,
     pub perspective: PerspectiveHandle,
 }
 
@@ -1041,7 +1041,7 @@ impl GetFilter for PerspectiveLinkUpdatedWithOwner {
 
 // Implement the trait for the `PerspectiveStateFilter` struct
 impl GetValue for PerspectiveStateFilter {
-    type Value = String;
+    type Value = PerspectiveState;
 
     fn get_value(&self) -> Self::Value {
         self.state.clone()
