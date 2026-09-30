@@ -230,6 +230,9 @@ pub(super) fn build_instance_sparql(
                 ));
             }
         }
+        // Instances that tie on the sort key (created in the same millisecond, equal
+        // values) keep one order, so a page never swaps them between queries.
+        suffix.push_str(" ASC(?source)");
         if let Some(offset) = pg.offset {
             if offset > 0 {
                 suffix.push_str(&format!("\n    OFFSET {offset}"));
@@ -1911,6 +1914,29 @@ mod tests {
             sparql.contains("DESC(?_proj_sort)"),
             "ORDER BY should use DESC: {sparql}"
         );
+    }
+
+    /// Instances that tie on the sort key must keep one order across queries,
+    /// or a page can swap or repeat them.
+    #[test]
+    fn test_pagination_orders_ties_by_source() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        for (key, dir) in [
+            (SortKey::Timestamp, OrderDirection::ASC),
+            (SortKey::Timestamp, OrderDirection::DESC),
+            (
+                SortKey::Projection("test://has-like".to_string()),
+                OrderDirection::DESC,
+            ),
+        ] {
+            let sparql = pagination_subquery(&s, &make_pg(key, dir));
+            let order = &sparql[sparql.find("ORDER BY").expect("ORDER BY")..];
+            let order = order.lines().next().unwrap();
+            assert!(
+                order.ends_with(" ASC(?source)"),
+                "tie-breaker last: {order}"
+            );
+        }
     }
 
     #[test]
