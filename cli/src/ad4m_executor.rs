@@ -120,69 +120,73 @@ enum Domain {
         #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
     },
-    Run {
-        #[arg(short, long, action)]
-        app_data_path: Option<String>,
-        #[arg(short, long, action)]
-        network_bootstrap_seed: Option<String>,
-        #[arg(short, long, action)]
-        language_language_only: Option<bool>,
-        #[arg(long, action)]
-        run_dapp_server: Option<bool>,
-        #[arg(short = 'p', long = "port", action)]
-        port: Option<u16>,
-        #[arg(long, action)]
-        hc_admin_port: Option<u16>,
-        #[arg(long, action)]
-        hc_app_port: Option<u16>,
-        #[arg(long, action)]
-        hc_use_bootstrap: Option<bool>,
-        #[arg(long, action)]
-        hc_use_local_proxy: Option<bool>,
-        #[arg(long, action)]
-        hc_use_mdns: Option<bool>,
-        #[arg(long, action)]
-        hc_use_proxy: Option<bool>,
-        #[arg(long, action)]
-        hc_proxy_url: Option<String>,
-        #[arg(long, action)]
-        hc_bootstrap_url: Option<String>,
-        #[arg(long, action)]
-        hc_relay_url: Option<String>,
-        #[arg(short, long, action)]
-        connect_holochain: Option<bool>,
-        #[arg(long, action)]
-        run_holochain: Option<bool>,
-        /// Admin credential granting full capabilities to whoever presents it.
-        /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
-        /// visible to every user on the host via `ps` and stays in shell history.
-        #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
-        admin_credential: Option<String>,
-        #[arg(long, action)]
-        localhost: Option<bool>,
-        #[arg(long, action)]
-        tls_cert_file: Option<String>,
-        #[arg(long, action)]
-        tls_key_file: Option<String>,
-        #[arg(long, action)]
-        tls_port: Option<u16>,
-        #[arg(long, action)]
-        log_holochain_metrics: Option<bool>,
-        #[arg(long, action)]
-        enable_multi_user: Option<bool>,
-        #[arg(long, action)]
-        enable_mcp: Option<bool>,
-        #[arg(long, action)]
-        mcp_port: Option<u16>,
-        /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
-        /// over MCP in addition to the static instance_* tools. Default: false.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-        dynamic_class_tools: Option<bool>,
-        /// Write the executor PID to this file on startup (removed on clean shutdown).
-        /// Useful for test harnesses that need targeted process cleanup.
-        #[arg(long)]
-        pid_file: Option<String>,
-    },
+    Run(RunArgs),
+}
+
+/// Flags of `ad4m-executor run`.
+#[derive(clap::Args, Debug)]
+struct RunArgs {
+    #[arg(short, long, action)]
+    app_data_path: Option<String>,
+    #[arg(short, long, action)]
+    network_bootstrap_seed: Option<String>,
+    #[arg(short, long, action)]
+    language_language_only: Option<bool>,
+    #[arg(long, action)]
+    run_dapp_server: Option<bool>,
+    #[arg(short = 'p', long = "port", action)]
+    port: Option<u16>,
+    #[arg(long, action)]
+    hc_admin_port: Option<u16>,
+    #[arg(long, action)]
+    hc_app_port: Option<u16>,
+    #[arg(long, action)]
+    hc_use_bootstrap: Option<bool>,
+    #[arg(long, action)]
+    hc_use_local_proxy: Option<bool>,
+    #[arg(long, action)]
+    hc_use_mdns: Option<bool>,
+    #[arg(long, action)]
+    hc_use_proxy: Option<bool>,
+    #[arg(long, action)]
+    hc_proxy_url: Option<String>,
+    #[arg(long, action)]
+    hc_bootstrap_url: Option<String>,
+    #[arg(long, action)]
+    hc_relay_url: Option<String>,
+    #[arg(short, long, action)]
+    connect_holochain: Option<bool>,
+    #[arg(long, action)]
+    run_holochain: Option<bool>,
+    /// Admin credential granting full capabilities to whoever presents it.
+    /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
+    /// visible to every user on the host via `ps` and stays in shell history.
+    #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
+    admin_credential: Option<String>,
+    #[arg(long, action)]
+    localhost: Option<bool>,
+    #[arg(long, action)]
+    tls_cert_file: Option<String>,
+    #[arg(long, action)]
+    tls_key_file: Option<String>,
+    #[arg(long, action)]
+    tls_port: Option<u16>,
+    #[arg(long, action)]
+    log_holochain_metrics: Option<bool>,
+    #[arg(long, action)]
+    enable_multi_user: Option<bool>,
+    #[arg(long, action)]
+    enable_mcp: Option<bool>,
+    #[arg(long, action)]
+    mcp_port: Option<u16>,
+    /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
+    /// over MCP in addition to the static instance_* tools. Default: false.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    dynamic_class_tools: Option<bool>,
+    /// Write the executor PID to this file on startup (removed on clean shutdown).
+    /// Useful for test harnesses that need targeted process cleanup.
+    #[arg(long)]
+    pid_file: Option<String>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -209,7 +213,34 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    if let Domain::Run {
+    if let Domain::Run(run_args) = args.domain {
+        let config = run_config(run_args)?;
+        let _ = tokio::spawn(async move {
+            rust_executor::run(config).await;
+        })
+        .await;
+
+        let _ = ctrlc::set_handler(move || {
+            println!("Received CTRL-C! Exiting...");
+            exit(0);
+        });
+
+        use ctrlc;
+        use std::process::exit;
+        use std::time::Duration;
+        use tokio::time::sleep;
+
+        loop {
+            sleep(Duration::from_secs(2)).await;
+        }
+    };
+
+    Ok(())
+}
+
+/// The `Ad4mConfig` that `run` starts the executor with.
+fn run_config(args: RunArgs) -> Result<Ad4mConfig> {
+    let RunArgs {
         app_data_path,
         network_bootstrap_seed,
         language_language_only,
@@ -237,71 +268,49 @@ async fn main() -> Result<()> {
         mcp_port,
         dynamic_class_tools,
         pid_file,
-    } = args.domain
-    {
-        let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
-            Some(TlsConfig {
-                cert_file_path: tls_cert_file.unwrap(),
-                key_file_path: tls_key_file.unwrap(),
-                tls_port: tls_port.unwrap_or(12001),
-            })
-        } else {
-            if tls_cert_file.is_some() || tls_key_file.is_some() {
-                println!("To active TLS encryption, please provide arguments: tls_cert_file and tls_key_file!");
-            }
-            None
-        };
-        let _ = tokio::spawn(async move {
-            rust_executor::run(Ad4mConfig {
-                app_data_path,
-                network_bootstrap_seed,
-                language_language_only,
-                run_dapp_server,
-                port,
-                hc_admin_port,
-                hc_app_port,
-                hc_use_bootstrap,
-                hc_use_local_proxy,
-                hc_use_mdns,
-                hc_use_proxy,
-                hc_proxy_url,
-                hc_bootstrap_url,
-                hc_relay_url,
-                connect_holochain,
-                run_holochain,
-                admin_credential,
-                localhost,
-                auto_permit_cap_requests: Some(true),
-                tls,
-                log_holochain_metrics,
-                enable_multi_user,
-                smtp_config: None,
-                enable_mcp,
-                mcp_port,
-                dynamic_class_tools,
-                pid_file,
-                ..Default::default()
-            })
-            .await;
+    } = args;
+    let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
+        Some(TlsConfig {
+            cert_file_path: tls_cert_file.unwrap(),
+            key_file_path: tls_key_file.unwrap(),
+            tls_port: tls_port.unwrap_or(12001),
         })
-        .await;
-
-        let _ = ctrlc::set_handler(move || {
-            println!("Received CTRL-C! Exiting...");
-            exit(0);
-        });
-
-        use ctrlc;
-        use std::process::exit;
-        use std::time::Duration;
-        use tokio::time::sleep;
-
-        loop {
-            sleep(Duration::from_secs(2)).await;
+    } else {
+        if tls_cert_file.is_some() || tls_key_file.is_some() {
+            println!("To active TLS encryption, please provide arguments: tls_cert_file and tls_key_file!");
         }
+        None
     };
-
-    Ok(())
+    Ok(Ad4mConfig {
+        app_data_path,
+        network_bootstrap_seed,
+        language_language_only,
+        run_dapp_server,
+        port,
+        hc_admin_port,
+        hc_app_port,
+        hc_use_bootstrap,
+        hc_use_local_proxy,
+        hc_use_mdns,
+        hc_use_proxy,
+        hc_proxy_url,
+        hc_bootstrap_url,
+        hc_relay_url,
+        connect_holochain,
+        run_holochain,
+        admin_credential,
+        localhost,
+        auto_permit_cap_requests: Some(true),
+        tls,
+        log_holochain_metrics,
+        enable_multi_user,
+        smtp_config: None,
+        enable_mcp,
+        mcp_port,
+        dynamic_class_tools,
+        pid_file,
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -325,9 +334,7 @@ mod tests {
     fn run_admin_credential(argv: &[&str]) -> Option<String> {
         let app = ClapApp::try_parse_from(argv).expect("argv parses");
         match app.domain {
-            Domain::Run {
-                admin_credential, ..
-            } => admin_credential,
+            Domain::Run(run) => run.admin_credential,
             other => panic!("expected the run subcommand, got {other:?}"),
         }
     }
