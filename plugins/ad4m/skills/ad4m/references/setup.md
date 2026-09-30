@@ -287,6 +287,7 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `App data path not set` panic | Missing `--app-data-path` | Always pass the flag |
+| `run` exits: `no admin credential` | `AD4M_ADMIN_CREDENTIAL` unset or empty | Export the credential; `--insecure-no-admin-credential` is for tests only |
 | `mainnet_seed.seed` not found | Skipped `init` | Run `ad4m-executor init` first |
 | `Failed to spawn Lair keystore` | Stale lair socket/pid | Delete `h/c/ks/pid_file` and `h/c/ks/socket` |
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |

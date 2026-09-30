@@ -24,17 +24,20 @@ Unlike the Launcher which provides a GUI, the executor is designed for command-l
 
 The executor uses a secure authentication handshake system. When a client attempts to connect, the executor generates a random number that must be used to complete the authentication. This number is printed in the executor's logs.
 
-For automated scenarios where manual authentication is impractical, you can provide an admin credential that bypasses the handshake:
+`run` requires an admin credential. Whoever presents it has every capability and skips the handshake, which is how scripts, CI pipelines and management UIs (the Launcher generates one on each start) talk to the executor. Pass it through the environment, so it does not show up in `ps` or the shell history:
 
 ```bash
-ad4m-executor run --admin-credential your-secret-here
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
+ad4m-executor run
 ```
 
-This is particularly useful for:
-- Scripts managing the executor
-- CI/CD pipelines
-- Integration testing
-- Management UIs (the Launcher uses this internally)
+Without a credential, or with an empty one, `run` exits with an error naming both ways out. For tests and local development there is an explicit opt-out:
+
+```bash
+ad4m-executor run --insecure-no-admin-credential   # or AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true
+```
+
+In that mode an empty token is the operator: any client that can reach the executor's port has full admin access. Never use it on an executor other users or other machines can reach.
 
 ### Configuration Parameters
 
@@ -44,11 +47,10 @@ The executor supports various configuration parameters to customize its behavior
 # Basic configuration
 ad4m-executor run \
   --port 12000 \
-  --admin-credential secret \
   --app-data-path ./data \
   --run-dapp-server true
 # --port: API port (default: 12000)
-# --admin-credential: Bypass authentication handshake
+# AD4M_ADMIN_CREDENTIAL (or --admin-credential): required, see above
 # --app-data-path: Custom data directory (default: ~/.ad4m)
 # --run-dapp-server: Run the DApp server (default: false)
 
@@ -73,6 +75,7 @@ ad4m-executor run \
 For development and testing, you might want to run multiple AD4M executors on the same machine. Here's how to configure two executors to run simultaneously:
 
 ```bash
+# Both need AD4M_ADMIN_CREDENTIAL in the environment (see above)
 # First executor (default ports)
 ad4m-executor run
 
@@ -102,8 +105,9 @@ ad4m-executor init
 ```
 This creates the necessary directory structure and configuration in `~/.ad4m`.
 
-2. Start the executor:
+2. Start the executor with an admin credential:
 ```bash
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"
 ad4m-executor run
 ```
 
