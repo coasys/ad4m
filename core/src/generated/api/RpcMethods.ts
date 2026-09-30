@@ -43,6 +43,7 @@ import type { FireOutcome } from "./FireOutcome";
 import type { FriendsListRequest } from "./FriendsListRequest";
 import type { GenerateAgentRequest } from "./GenerateAgentRequest";
 import type { GenerateJwtRequest } from "./GenerateJwtRequest";
+import type { HostRate } from "./HostRate";
 import type { HostingInfoResult } from "./HostingInfoResult";
 import type { HostingRequestPaymentResult } from "./HostingRequestPaymentResult";
 import type { HostingWalletResult } from "./HostingWalletResult";
@@ -128,12 +129,15 @@ import type { RuntimeSendFriendMessageParams } from "./RuntimeSendFriendMessageP
 import type { RuntimeSetFreeHostingEnabledParams } from "./RuntimeSetFreeHostingEnabledParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
+import type { SetUnytMembraneProofRequest } from "./SetUnytMembraneProofRequest";
 import type { SetUserFreeAccessRequest } from "./SetUserFreeAccessRequest";
 import type { SignMessageRequest } from "./SignMessageRequest";
 import type { TrustedAgentsWrapper } from "./TrustedAgentsWrapper";
 import type { UnlockAgentRequest } from "./UnlockAgentRequest";
+import type { UnytVersionInfo } from "./UnytVersionInfo";
 import type { UpdateProfileRequest } from "./UpdateProfileRequest";
 import type { UserCreationResult } from "./UserCreationResult";
 import type { UserStatistics } from "./UserStatistics";
@@ -279,7 +283,7 @@ export interface RpcMethods {
   "runtime.friends": { params: Record<string, never>; result: Array<string> };
   "runtime.grantNotification": { params: RuntimeGrantNotificationParams; result: boolean };
   "runtime.hcAgentInfos": { params: Record<string, never>; result: Array<string> };
-  "runtime.hostRates": { params: Record<string, never>; result: null };
+  "runtime.hostRates": { params: Record<string, never>; result: Array<HostRate> };
   "runtime.importData": { params: ImportRequest; result: RuntimeImportResult };
   "runtime.inbox": { params: Record<string, never>; result: Array<PerspectiveExpression> };
   "runtime.info": { params: Record<string, never>; result: RuntimeInfo };
@@ -294,15 +298,15 @@ export interface RpcMethods {
   "runtime.restartHolochain": { params: Record<string, never>; result: boolean };
   "runtime.sendFriendMessage": { params: RuntimeSendFriendMessageParams; result: boolean };
   "runtime.setFreeHostingEnabled": { params: RuntimeSetFreeHostingEnabledParams; result: boolean };
-  "runtime.setHostRates": { params: Record<string, never>; result: null };
+  "runtime.setHostRates": { params: SetHostRatesRequest; result: boolean };
   "runtime.setStatus": { params: Record<string, never>; result: null };
+  "runtime.setUnytMembraneProof": { params: SetUnytMembraneProofRequest; result: boolean };
   "runtime.tlsDomain": { params: Record<string, never>; result: string | null };
   "runtime.unytAgentKey": { params: Record<string, never>; result: null };
   "runtime.unytHotAgentPubkey": { params: Record<string, never>; result: null };
-  "runtime.unytMembraneProof": { params: Record<string, never>; result: null };
   "runtime.unytReinstallDna": { params: Record<string, never>; result: null };
   "runtime.unytSendHot": { params: Record<string, never>; result: null };
-  "runtime.unytVersionInfo": { params: Record<string, never>; result: null };
+  "runtime.unytVersionInfo": { params: Record<string, never>; result: UnytVersionInfo };
   "runtime.unytWalletBalance": { params: Record<string, never>; result: null };
   "runtime.unytWalletHistory": { params: Record<string, never>; result: null };
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
@@ -383,7 +387,6 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.tlsDomain",
   "runtime.unytAgentKey",
   "runtime.unytHotAgentPubkey",
-  "runtime.unytMembraneProof",
   "runtime.unytVersionInfo",
   "runtime.unytWalletBalance",
   "runtime.unytWalletHistory",

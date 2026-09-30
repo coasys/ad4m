@@ -1,5 +1,6 @@
 //! Runtime WS-native handlers.
 
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -16,9 +17,10 @@ use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::types::{
-    AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest,
+    AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest, HostRate,
     ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
-    OpenLinkRequest, VerifySignatureRequest,
+    OpenLinkRequest, SetHostRatesRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
@@ -590,18 +592,103 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "PUT /runtime/host-rates is not yet implemented on the server",
-    ))
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetHostRatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let rates = validate_host_rates(body.rates)?;
+
+    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rates))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
 }
 
-async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "GET /runtime/host-rates is not yet implemented on the server",
-    ))
+fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
+    let mut seen = std::collections::HashSet::new();
+    rates
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            if r.description.is_empty() || !r.price_in_hot.is_finite() || r.price_in_hot < 0.0 {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} needs a description and a non-negative priceInHOT",
+                    i
+                )));
+            }
+            // `description` is the table's primary key.
+            if !seen.insert(r.description.clone()) {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} repeats description '{}'",
+                    i, r.description
+                )));
+            }
+            Ok((r.description, r.price_in_hot))
+        })
+        .collect()
+}
+
+async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+
+    let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|(description, price_in_hot)| HostRate {
+            description,
+            price_in_hot,
+        })
+        .collect();
+
+    Ok(serde_json::to_value(rates)?)
+}
+
+/// Stores the membrane proof for the Unyt alliance DNA, then installs the DNA
+/// in the background: installation waits for Holochain and can outlast the call.
+/// `runtime.unytVersionInfo` reports the outcome.
+async fn set_unyt_membrane_proof(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.proof.is_empty() {
+        return Err(WsRpcError::bad_request("'proof' must not be empty"));
+    }
+    // The install decodes it later and, if that fails, installs without a proof.
+    if let Err(e) = base64::engine::general_purpose::STANDARD.decode(&body.proof) {
+        return Err(WsRpcError::bad_request(format!(
+            "'proof' is not valid base64: {}",
+            e
+        )));
+    }
+
+    crate::unyt_service::set_membrane_proof(&body.proof)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    tokio::spawn(async {
+        match crate::unyt_service::ensure_installed().await {
+            Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
+            Err(e) => log::error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+
+    Ok(Value::Bool(true))
+}
+
+async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let (installed, bundled) = crate::unyt_service::version_info();
+    Ok(serde_json::to_value(UnytVersionInfo {
+        installed,
+        bundled,
+        install_error: crate::unyt_service::install_error(),
+    })?)
 }
 
 // ── Stubs for unyt endpoints ──
@@ -691,10 +778,16 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.setFreeHostingEnabled",
         set_free_hosting_enabled,
     );
-    // Always error: host rates and the unyt endpoints have no implementation yet.
-    map.method::<NoParams, ()>("runtime.hostRates", get_host_rates)
+    map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
         .read();
-    map.method::<NoParams, ()>("runtime.setHostRates", set_host_rates);
+    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
+    map.method::<SetUnytMembraneProofRequest, bool>(
+        "runtime.setUnytMembraneProof",
+        set_unyt_membrane_proof,
+    );
+    map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
+        .read();
+    // Always error: the remaining unyt endpoints have no implementation yet.
     map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
         .read();
     map.method::<NoParams, ()>("runtime.unytSendHot", stub_not_impl);
@@ -702,11 +795,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         .read();
     map.method::<NoParams, ()>("runtime.unytWalletHistory", stub_not_impl)
         .read();
-    map.method::<NoParams, ()>("runtime.unytVersionInfo", stub_not_impl)
-        .read();
     map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
-        .read();
-    map.method::<NoParams, ()>("runtime.unytMembraneProof", stub_not_impl)
         .read();
     map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
 }

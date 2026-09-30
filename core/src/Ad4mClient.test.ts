@@ -232,14 +232,14 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
 
     // ── Runtime: host rates & Unyt ──
-    'runtime.getHostRates': JSON.stringify([{ description: 'Link write', priceInHOT: 0.001 }]),
+    'runtime.hostRates': [{ description: 'Link write', priceInHOT: 0.001 }],
     'runtime.setHostRates': true,
     'runtime.unytAgentKey': 'unyt-agent-key-123',
     'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
     'runtime.unytWalletBalance': '1000.50',
     'runtime.unytWalletHistory': '[]',
-    'runtime.unytVersionInfo': '{"version":"0.1.0"}',
-    'runtime.unytSetMembraneProof': { success: true, message: 'ok' },
+    'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
+    'runtime.setUnytMembraneProof': true,
     'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
     'runtime.unytSendHot': { success: true, message: 'sent' },
 };
@@ -1291,16 +1291,20 @@ describe('Multi-user and Hosting', () => {
         expect(lastRpcCall!.params.action).toBe('clear-codes');
     });
 
-    test('getHostRates() returns parsed rates', async () => {
-        const rates = await ad4m.runtime.getHostRates();
+    test('hostRates() returns the rates', async () => {
+        const rates = await ad4m.runtime.hostRates();
+        expect(lastRpcCall!.type).toBe('runtime.hostRates');
         expect(rates).toHaveLength(1);
         expect(rates[0].description).toBe('Link write');
         expect(rates[0].priceInHOT).toBe(0.001);
     });
 
-    test('setHostRates() sends rates JSON', async () => {
-        const result = await ad4m.runtime.setHostRates(JSON.stringify([{ description: 'test', priceInHOT: 1 }]));
+    test('setHostRates() sends the rates', async () => {
+        const rates = [{ description: 'test', priceInHOT: 1 }];
+        const result = await ad4m.runtime.setHostRates(rates);
         expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setHostRates');
+        expect(lastRpcCall!.params).toEqual({ rates });
     });
 });
 
@@ -1326,14 +1330,16 @@ describe('Unyt Integration', () => {
         expect(history).toBe('[]');
     });
 
-    test('unytVersionInfo() returns version info', async () => {
+    test('unytVersionInfo() returns version info and the install error', async () => {
         const info = await ad4m.runtime.unytVersionInfo();
-        expect(info).toContain('version');
+        expect(lastRpcCall!.type).toBe('runtime.unytVersionInfo');
+        expect(info).toEqual({ installed: null, bundled: '0.61.0', installError: 'install failed' });
     });
 
-    test('unytSetMembraneProof() sets proof', async () => {
-        const result = await ad4m.runtime.unytSetMembraneProof('proof-data');
-        expect(result.success).toBe(true);
+    test('setUnytMembraneProof() sets proof', async () => {
+        const result = await ad4m.runtime.setUnytMembraneProof('proof-data');
+        expect(result).toBe(true);
+        expect(lastRpcCall!.type).toBe('runtime.setUnytMembraneProof');
         expect(lastRpcCall!.params.proof).toBe('proof-data');
     });
 
