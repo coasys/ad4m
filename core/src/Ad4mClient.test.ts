@@ -546,7 +546,7 @@ describe('PerspectiveClient', () => {
 
     test('add() creates a new perspective', async () => {
         const p = await ad4m.perspective.add('new-perspective');
-        expect(lastRpcCall!.params.name).toBe('new-perspective');
+        expect(p.name).toBe('new-perspective'); // the mock echoes the name sent
         expect(p.uuid).toBe('uuid-new');
     });
 

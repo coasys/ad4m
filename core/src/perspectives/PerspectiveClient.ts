@@ -1,4 +1,4 @@
-import { ApiClient, WsEvent, CallOptions, RpcError } from "../apiClient";
+import { ApiClient, WsEvent, CallOptions, RpcError, longCall } from "../apiClient";
 import { addListener, notifyListeners } from "../notifyListeners"
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
@@ -218,8 +218,7 @@ export class PerspectiveClient {
      *
      * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
      * retries on parse failure), so it can legitimately take minutes on slower
-     * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
-     * (matches the CI `--timeout 1200000` for the interpretation tests).
+     * or CPU-only models, so it defaults to {@link LONG_TIMEOUT_MS}.
      *
      * `existingScope` and `mintScope` match the AutoProcessor semantics:
      * `existingScope` constrains the dedup lookup to instances under a
@@ -235,22 +234,16 @@ export class PerspectiveClient {
         existingScope?: RawScope,
         mintScope?: RawScope,
         observe?: RunInterpretationObserveOptions,
+        options?: CallOptions,
     ): Promise<string[]> {
-        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretation',
             {
                 uuid, transcript, basePrefix, classes, existingScope, mintScope,
-                // Spread rather than always-present, so a client talking to a pre-#903
-                // executor sends exactly the params it sent before. `serde` would ignore
-                // the extra keys anyway; keeping the wire identical means a bug report
-                // from an older node cannot be about these.
-                ...(observe ? {
-                    observationId: observe.observationId,
-                    emitDebugEvents: observe.emitDebugEvents ?? false,
-                } : {}),
+                observationId: observe?.observationId,
+                emitDebugEvents: observe?.emitDebugEvents,
             },
-            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
+            longCall(options),
         )
     }
 
@@ -265,9 +258,7 @@ export class PerspectiveClient {
      * the harness to a no-op final-answer step; use {@link runInterpretation}
      * for the classic single-shot path.
      *
-     * Same 20-minute RPC timeout as the single-shot path — an LLM loop
-     * that calls several tools can legitimately take longer than one plain
-     * generation.
+     * Defaults to {@link LONG_TIMEOUT_MS}, like the single-shot path.
      */
     async runInterpretationWithHarness(
         uuid: string,
@@ -285,8 +276,8 @@ export class PerspectiveClient {
         // (nothing to key against); the server gates on both.
         observationId?: string,
         emitDebugEvents?: boolean,
+        options?: CallOptions,
     ): Promise<string[]> {
-        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretationWithHarness',
             {
@@ -300,7 +291,7 @@ export class PerspectiveClient {
                 observationId,
                 emitDebugEvents,
             },
-            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
+            longCall(options),
         )
     }
 
