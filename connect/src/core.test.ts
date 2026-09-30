@@ -19,7 +19,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
     loginUser: vi.fn().mockResolvedValue('jwt-from-login'),
     createUser: vi.fn().mockResolvedValue({ success: true }),
     signMessage: vi.fn().mockResolvedValue({ signature: 'sig', publicKey: 'pk' }),
-    addHostingUserInfoChangedListener: vi.fn(),
     computeLog: vi.fn().mockResolvedValue([]),
     requestPayment: vi.fn().mockResolvedValue({ success: true, amountHOT: '100' }),
   };
@@ -31,6 +30,7 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 
   const mockClientInstance = {
     close: vi.fn(),
+    on: vi.fn(),
     agent: mockAgent,
     runtime: mockRuntime,
   };
@@ -329,13 +329,14 @@ describe('Ad4mConnect', () => {
       const conn = new Ad4mConnect(defaultOptions);
       await conn.connect();
       const release = vi.fn();
-      mockAgent.addHostingUserInfoChangedListener.mockClear().mockReturnValue(release);
+      mockClientInstance.on.mockClear().mockReturnValue(release);
 
       conn.startCreditSubscription();
       conn.startCreditSubscription();
       conn.stopCreditPolling();
 
-      expect(mockAgent.addHostingUserInfoChangedListener).toHaveBeenCalledTimes(2);
+      expect(mockClientInstance.on).toHaveBeenCalledTimes(2);
+      expect(mockClientInstance.on).toHaveBeenCalledWith('hosting-user-info-changed', expect.any(Function));
       expect(release).toHaveBeenCalledTimes(1);
     });
 

@@ -67,8 +67,8 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 const other = await alice.perspective.add("sync-state-other");
                 const sharedStates: PerspectiveState[] = [];
                 const otherStates: PerspectiveState[] = [];
-                await shared.addSyncStateChangeListener(state => { sharedStates.push(state); });
-                await other.addSyncStateChangeListener(state => { otherStates.push(state); });
+                shared.on('sync-state-change', ({ state }) => { sharedStates.push(state); });
+                other.on('sync-state-change', ({ state }) => { otherStates.push(state); });
                 try {
                     const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's sync-state listener test");
                     await alice.neighbourhood.publishFromPerspective(shared.uuid, socialContext.address, new Perspective());
@@ -306,7 +306,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //         return null;
             //     };
 
-            //     aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
+            //     aliceP1.on('sync-state-change', ({ state }) => aliceSyncChangeHandler(state));
 
             //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
@@ -324,7 +324,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //     let bobP1 = await testContext.bob.perspective.byUUID(bobHandler.uuid);
             //     expect(bobP1?.state).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
 
-            //     bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
+            //     bobP1!.on('sync-state-change', ({ state }) => bobSyncChangeHandler(state));
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 

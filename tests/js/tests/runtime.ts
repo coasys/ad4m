@@ -223,7 +223,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 }
             });
 
-            await ad4mClient.runtime.addExceptionCallback(mockFunction);
+            ad4mClient.on('exception-occurred', ({ exception }) => mockFunction(exception));
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
@@ -297,7 +297,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(granted).to.be.true
 
             const mockFunction = sinon.stub();
-            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+            ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
             // Negative: ensuring no false positives — control link should NOT trigger
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
@@ -366,7 +366,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(granted).to.be.true
 
             const mockFunction = sinon.stub();
-            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+            ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
             // Negative: message without mention should NOT trigger
             const noMentionContent = "Hello world, nice day!"

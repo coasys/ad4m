@@ -293,11 +293,11 @@ export default function perspectiveTests(testContext: TestContext) {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
 
                 const perspectiveAdded = sinon.fake()
-                ad4mClient.perspective.addPerspectiveAddedListener(perspectiveAdded)
+                ad4mClient.on('perspective-added', ({ perspective }) => perspectiveAdded(perspective))
                 const perspectiveUpdated = sinon.fake()
-                ad4mClient.perspective.addPerspectiveUpdatedListener(perspectiveUpdated)
+                ad4mClient.on('perspective-updated', ({ perspective }) => perspectiveUpdated(perspective))
                 const perspectiveRemoved = sinon.fake()
-                ad4mClient.perspective.addPerspectiveRemovedListener(perspectiveRemoved)
+                ad4mClient.on('perspective-removed', ({ perspectiveUuid }) => perspectiveRemoved(perspectiveUuid))
 
                 const name = "Subscription Test Perspective"
                 const p = await ad4mClient.perspective.add(name)
@@ -316,11 +316,11 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(pSeenInUpdateCB.state).to.equal(PerspectiveState.Private)
 
                 const linkAdded = sinon.fake()
-                ad4mClient.perspective.addPerspectiveLinkAddedListener(p1.uuid, [linkAdded])
+                ad4mClient.on('link-added', ({ link }) => linkAdded(link), { perspective: p1.uuid })
                 const linkRemoved = sinon.fake()
-                ad4mClient.perspective.addPerspectiveLinkRemovedListener(p1.uuid, [linkRemoved])
+                ad4mClient.on('link-removed', ({ link }) => linkRemoved(link), { perspective: p1.uuid })
                 const linkUpdated = sinon.fake()
-                ad4mClient.perspective.addPerspectiveLinkUpdatedListener(p1.uuid, [linkUpdated])
+                ad4mClient.on('link-updated', ({ oldLink, newLink }) => linkUpdated({ oldLink, newLink }), { perspective: p1.uuid })
 
                 const linkExpression = await ad4mClient.perspective.addLink(p1.uuid , {source: 'ad4m://root', target: 'lang://123'})
                 await pollUntil(() => linkAdded.called, { timeoutMs: 5000, label: "linkAdded callback fires" });
@@ -838,17 +838,17 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(await proxy.get(all)).to.eql([])
             })
 
-            it('a listener fires without awaiting addListener; dispose stops it and leaves a second proxy listening', async () => {
+            it('an on() handler fires without awaiting; dispose stops it and leaves a second proxy listening', async () => {
                 const p = await ad4mClient.perspective.add("proxy listener test")
                 try {
                     const first = sinon.fake()
-                    p.addListener('link-added', first)
+                    p.on('link-added', ({ link }) => first(link))
                     await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://one' }))
                     await pollUntil(() => first.callCount === 1, { label: 'link-added on the first proxy' })
 
                     const other = (await ad4mClient.perspective.byUUID(p.uuid))!
                     const second = sinon.fake()
-                    other.addListener('link-added', second)
+                    other.on('link-added', ({ link }) => second(link))
                     p.dispose()
                     await p.add(new Link({ source: 'test://listener', predicate: 'test://p', target: 'test://two' }))
                     await pollUntil(() => second.callCount === 1, { label: 'link-added on the second proxy' })
