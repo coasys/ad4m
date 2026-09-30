@@ -199,8 +199,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         get_many_expressions,
     )
     .read();
-    map.method::<CreateExpressionRequest, String>("expression.create", create_expression)
-        .long();
+    map.method::<CreateExpressionRequest, String>("expression.create", create_expression);
     map.method::<ExpressionUrlRequest, Vec<InteractionMeta>>(
         "expression.interactions",
         get_interactions,

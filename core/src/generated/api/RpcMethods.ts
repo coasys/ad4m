@@ -191,5 +191,4 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
 
 /** Calls that can run for minutes: the client's default timeout is its long one. */
 export const LONG_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
-  "expression.create",
 ]);
