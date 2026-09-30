@@ -329,6 +329,7 @@ impl AgentService {
                     connect_holochain: None,
                     run_holochain: None,
                     admin_credential: None,
+                    insecure_no_admin_credential: None,
                     localhost: None,
                     auto_permit_cap_requests: None,
                     tls: None,

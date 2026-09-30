@@ -83,7 +83,14 @@ pub struct Ad4mConfig {
     /// When false, skip Holochain conductor startup entirely.
     /// Bootstrap languages must not depend on Holochain (use local bootstrap languages).
     pub run_holochain: Option<bool>,
+    /// Grants every capability to whoever presents it. Required: `run`
+    /// refuses to start without one (an empty string counts as none) unless
+    /// `insecure_no_admin_credential` is set. See [`Ad4mConfig::check_admin_credential`].
     pub admin_credential: Option<String>,
+    /// Tests and local development only: start without an admin credential.
+    /// The empty token is then the operator (every capability), so anyone who
+    /// can reach the listener controls the executor.
+    pub insecure_no_admin_credential: Option<bool>,
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
     pub tls: Option<TlsConfig>,
@@ -242,10 +249,34 @@ impl Ad4mConfig {
         }
     }
 
+    /// Secure by default: an executor without an admin credential serves every
+    /// caller as the operator, so it only starts that way when the testing
+    /// flag says so. `Some("")` counts as no credential, on every listener
+    /// (loopback included). Called by `run()` before any service starts, so
+    /// every entry point (CLI, launcher, library) goes through it.
+    pub fn check_admin_credential(&self) -> Result<(), String> {
+        let has_credential = self
+            .admin_credential
+            .as_deref()
+            .is_some_and(|credential| !credential.is_empty());
+        if has_credential || self.insecure_no_admin_credential == Some(true) {
+            return Ok(());
+        }
+        Err(NO_ADMIN_CREDENTIAL_ERROR.to_string())
+    }
+
     pub fn get_json(&self) -> String {
         serde_json::to_string(self).expect("Could not convert config to json")
     }
 }
+
+/// Why `run` refused to start; names both ways out.
+pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
+    "Refusing to start: no admin credential is set, and without one every caller \
+     gets full admin access. Set AD4M_ADMIN_CREDENTIAL (or --admin-credential, \
+     `adminCredential` in the config) to a secret, or, for tests and local \
+     development only, pass --insecure-no-admin-credential \
+     (AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true).";
 
 /// Validate that a shared-backend URL uses HTTPS for production security.
 /// Local development addresses (localhost, 127.0.0.1, [::1], host.docker.internal)
@@ -329,6 +360,7 @@ impl Default for Ad4mConfig {
             connect_holochain: None,
             run_holochain: None,
             admin_credential: None,
+            insecure_no_admin_credential: None,
             localhost: None,
             auto_permit_cap_requests: None,
             tls: None,
@@ -355,6 +387,62 @@ impl Default for Ad4mConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn with_credential(
+        admin_credential: Option<&str>,
+        insecure_no_admin_credential: Option<bool>,
+    ) -> Ad4mConfig {
+        Ad4mConfig {
+            admin_credential: admin_credential.map(str::to_string),
+            insecure_no_admin_credential,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn no_admin_credential_refuses_without_the_testing_flag() {
+        for flag in [None, Some(false)] {
+            let err = with_credential(None, flag)
+                .check_admin_credential()
+                .expect_err("no credential, no flag");
+            assert_eq!(err, NO_ADMIN_CREDENTIAL_ERROR);
+        }
+    }
+
+    #[test]
+    fn empty_admin_credential_counts_as_none() {
+        assert!(with_credential(Some(""), None)
+            .check_admin_credential()
+            .is_err());
+        assert!(with_credential(Some(""), Some(true))
+            .check_admin_credential()
+            .is_ok());
+    }
+
+    #[test]
+    fn admin_credential_or_testing_flag_starts() {
+        assert!(with_credential(Some("secret"), None)
+            .check_admin_credential()
+            .is_ok());
+        assert!(with_credential(Some("secret"), Some(false))
+            .check_admin_credential()
+            .is_ok());
+        assert!(with_credential(None, Some(true))
+            .check_admin_credential()
+            .is_ok());
+    }
+
+    #[test]
+    fn the_refusal_names_both_options() {
+        for option in [
+            "AD4M_ADMIN_CREDENTIAL",
+            "--admin-credential",
+            "--insecure-no-admin-credential",
+            "AD4M_INSECURE_NO_ADMIN_CREDENTIAL",
+        ] {
+            assert!(NO_ADMIN_CREDENTIAL_ERROR.contains(option), "{option}");
+        }
+    }
 
     #[test]
     fn test_validate_https_url() {

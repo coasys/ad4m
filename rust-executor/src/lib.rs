@@ -291,6 +291,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     crate::logging::init_cli_logging(None);
     config.prepare();
 
+    if let Err(message) = config.check_admin_credential() {
+        error!("{}", message);
+        panic!("{}", message);
+    }
+
     // Write PID file if requested via config.
     // Test harnesses can set pid_file to get a reliable PID for targeted cleanup.
     if let Some(ref pid_file) = config.pid_file {
@@ -502,12 +507,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         .map(|s| s.is_empty())
         .unwrap_or(true)
     {
+        // Only reachable with insecure_no_admin_credential (checked above).
         warn!("╔══════════════════════════════════════════════════════════════╗");
-        warn!("║  SECURITY WARNING: no adminCredential configured             ║");
+        warn!("║  SECURITY WARNING: --insecure-no-admin-credential is set     ║");
         warn!("║  Every request — including unauthenticated ones — receives  ║");
         warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
         warn!("║  This mode is intended for local testing ONLY.               ║");
-        warn!("║  Set adminCredential in your config before going to prod.    ║");
         warn!("╚══════════════════════════════════════════════════════════════╝");
     }
 
