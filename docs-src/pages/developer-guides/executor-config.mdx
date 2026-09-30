@@ -100,6 +100,12 @@ Settings with no config key are flags only, each with its
 The variable name is the flag in upper case with `-` as `_`, prefixed with
 `AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
 
+A variable that is set but empty stops `run` with an error that names it
+(`AD4M_APP_DATA_PATH is set but empty`), and so does an empty flag value.
+Neither is laid over the file: `AD4M_APP_DATA_PATH=${DATA_DIR}` with
+`DATA_DIR` unset would otherwise put the data directory under the working
+directory. Unset the variable to use the file's value.
+
 ## Secrets
 
 The config file never holds a secret value. An `admin_credential` key or a

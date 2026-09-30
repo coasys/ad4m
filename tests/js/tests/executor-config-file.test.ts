@@ -4,8 +4,9 @@
  * effect, the admin credential comes from AD4M_ADMIN_CREDENTIAL_FILE, and
  * with AD4M_UNLOCK_PASSPHRASE_FILE a restarted executor unlocks its agent
  * without anyone calling agent.unlock. A config file holding a secret value,
- * or an empty admin credential file, stops `run`. Holochain is off (AD4M_RUN_HOLOCHAIN=false): the conductor is
- * not what these settings are about.
+ * an empty admin credential file, or an empty AD4M_<FLAG> variable stops
+ * `run`. Holochain is off (AD4M_RUN_HOLOCHAIN=false): the conductor is not
+ * what these settings are about.
  */
 import path from "path";
 import os from "os";
@@ -190,7 +191,7 @@ describe("Executor config file", () => {
         let stderr = "";
         proc.stderr!.on("data", (d) => (stderr += d.toString()));
         proc.stdout!.on("data", (d) => (stderr += d.toString()));
-        const code = await new Promise<number | null>((resolve) => proc.once("exit", resolve));
+        const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
         expect(code).to.not.equal(0);
         expect(stderr).to.include("admin_credential is not allowed in the config file");
         expect(stderr).to.not.include("inline-secret-value");
@@ -209,8 +210,24 @@ describe("Executor config file", () => {
         let stderr = "";
         proc.stderr!.on("data", (d) => (stderr += d.toString()));
         proc.stdout!.on("data", (d) => (stderr += d.toString()));
-        const code = await new Promise<number | null>((resolve) => proc.once("exit", resolve));
+        const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
         expect(code).to.not.equal(0);
         expect(stderr).to.include(`the secret in ${empty} is empty`);
+    });
+
+    it("refuses an empty AD4M_APP_DATA_PATH instead of laying it over the file", async () => {
+        await stop();
+        // `AD4M_APP_DATA_PATH=${DATA_DIR}` with DATA_DIR unset would
+        // otherwise put the data directory relative to the working directory.
+        const proc = spawn(executorBinary(), ["run", "--config", configPath], {
+            stdio: ["ignore", "pipe", "pipe"],
+            env: { ...process.env, AD4M_RUN_HOLOCHAIN: "false", AD4M_APP_DATA_PATH: "" },
+        });
+        let stderr = "";
+        proc.stderr!.on("data", (d) => (stderr += d.toString()));
+        proc.stdout!.on("data", (d) => (stderr += d.toString()));
+        const code = await new Promise<number | null>((resolve) => proc.once("close", resolve));
+        expect(code).to.not.equal(0);
+        expect(stderr).to.include("AD4M_APP_DATA_PATH is set but empty");
     });
 });
