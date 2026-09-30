@@ -495,6 +495,14 @@ check "the next run exits non-zero" exited_non_zero
 check "and keeps the rollback's result" [ "$(jq -r .last_result "$T/state11/status.json")" = \
   "rolled_back by hand: $two; $one failed the gate too (agent: locked)" ]
 check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+# The newer build's data is in .failed; a second rollback would replace it.
+echo marker11 >>"$T/data11.failed/written-by"
+run rollback
+check "a second rollback after a failed one is refused" exited_non_zero
+check "and keeps the newer build's data aside" grep -q marker11 "$T/data11.failed/written-by"
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and keeps the rollback's result" [ "$(jq -r .last_result "$T/state11/status.json")" = \
+  "rolled_back by hand: $two; $one failed the gate too (agent: locked)" ]
 
 # 23. A rollback by hand killed while it copies the snapshot back: `current`
 # is still the newer build, the data dir is half a snapshot. The next runs
@@ -522,6 +530,13 @@ commit "after the killed rollback" "AD4M_UNLOCK_PASSPHRASE_FILE" >/dev/null
 run
 check "the next commit is not deployed onto the half-copied data" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
 check "and the newer build's data stays aside" grep -q "$two" "$T/data12.failed/written-by"
+echo marker12 >>"$T/data12.failed/written-by"
+run rollback
+check "a second rollback after a killed one is refused" exited_non_zero
+check "and keeps the newer build's data aside" grep -q marker12 "$T/data12.failed/written-by"
+check "and leaves the half-copied data dir" [ "$(cat "$T/data12/written-by")" = partial ]
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and status.json still names the data aside" [ "$(jq -r .failed_data "$T/state12/status.json")" = "$two" ]
 
 # 24. A rollback by hand killed between the stop and moving the data aside:
 # the data is whole, staging is down. The next run does not say "already
@@ -563,6 +578,51 @@ touch "$T/slow-jq"
 run
 rm "$T/slow-jq"
 check "a healthy build passes the gate after a slow read" [ "$(jq -r .last_result "$T/state15/status.json")" = deployed ]
+
+# 27. A rollback by hand while a deploy killed in its gate is unfinished
+# (`current` is the unchecked build) is refused: moving that data aside and
+# rolling back past the deployed build would leave the deployed build's data
+# only in a snapshot the next deploy prunes. The timer's next run recovers.
+export AD4M_STAGING_STATE=$T/state16 AD4M_STAGING_DATA=$T/data16 AD4M_STAGING_SRC=$T/src16
+push_staging "$one"
+run
+push_staging "$two"
+run
+three=$(commit "killed during the gate, then a rollback by hand" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/kill-gate"
+run
+flock "$T/state16/update.lock" true
+before16=$(cat "$T/data16/written-by")
+run rollback
+check "a rollback during an unfinished deploy is refused" exited_non_zero
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and current stays" [ "$(readlink "$T/state16/current")" = "releases/$three" ]
+check "and the data stays in place" [ "$(cat "$T/data16/written-by")" = "$before16" ]
+check "and nothing is moved aside" [ ! -e "$T/data16.failed" ]
+run
+check "the timer's next run still rolls the deploy back" \
+  [ "$(jq -r .last_result "$T/state16/status.json")" = "rolled_back: the deploy of $three was interrupted; $two runs again" ]
+
+# 28. A rollback by hand after an automatic rollback could not restore the
+# data is refused: the deployed build's data is only in its snapshot, which
+# the operator restores (runbook: Roll back).
+export AD4M_STAGING_STATE=$T/state17 AD4M_STAGING_DATA=$T/data17 AD4M_STAGING_SRC=$T/src17
+push_staging "$one"
+run
+push_staging "$two"
+run
+torn17=$(commit "fails the gate, restore fails, then a rollback by hand" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$torn17" "$T/fail-restore"
+run
+rm "$T/fail-restore" "$T/bad-$torn17"
+check "the automatic restore failed" [ ! -e "$T/state17/current" ]
+run rollback
+check "a rollback after a failed restore is refused" exited_non_zero
+check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
+check "and starts no build" [ ! -e "$T/state17/current" ]
+check "and keeps the restore error" [ "$(jq -r .last_result "$T/state17/status.json")" = \
+  "error: could not restore the data of $two; staging is stopped" ]
+check "and keeps the failed build's data aside" grep -q "$torn17" "$T/data17.failed/written-by"
 
 echo "$failures failed"
 ((failures == 0))
