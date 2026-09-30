@@ -235,6 +235,21 @@ if [[ $COMMAND == rollback ]]; then
   previous=$(field previous_sha)
   [[ -n $current && -n $previous && -x $STATE/releases/$previous/ad4m-executor ]] ||
     fail "error: no previous build to roll back to"
+  # Refusals below leave status.json alone: its last_result says how the
+  # unfinished step ended. A deploy killed in its gate, a rollback that
+  # moved `current` or a failed restore leave `current` != deployed_sha;
+  # the timer's next run or the operator resolves those (runbook: Roll back).
+  live=$(readlink "$STATE/current" || true)
+  if [[ ${live#releases/} != "$current" ]]; then
+    log "error: current is ${live:-missing}, not the deployed $current; an unfinished deploy or rollback comes first (runbook: Roll back)"
+    exit 1
+  fi
+  # An unfinished rollback that moved the data aside holds the only copy of
+  # the newer build's data in $DATA.failed; a second one would replace it.
+  if [[ $(field in_flight) == rollback && -n $(field failed_data) ]]; then
+    log "error: the unfinished rollback by hand keeps the data of $(field failed_data) in $DATA.failed; resolve it by hand first (runbook: Roll back)"
+    exit 1
+  fi
   # The snapshot taken when $current replaced $previous holds $previous's data.
   snapshot=$(find "$STATE/snapshots" -mindepth 1 -maxdepth 1 -type d -name "*-$previous" | sort | tail -n 1)
   if [[ -z $snapshot && $KEEP_DATA != 1 ]]; then
