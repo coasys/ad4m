@@ -8,6 +8,7 @@ import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, st
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { ExceptionInfo } from "@coasys/ad4m";
+import { callMcpTool, initializeMcp } from './mcp-utils';
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -74,6 +75,55 @@ describe("Authentication integration tests", () => {
 
         it("an empty credential counts as no credential", async () => {
             expectRefusal(await runWithoutCredential(["--admin-credential", ""]));
+        })
+
+        // With the testing flag, an empty credential is the same as none for
+        // every reader, not only the startup check: MCP binds loopback and
+        // lets a tokenless caller read, as REST does. Before, MCP took "" for
+        // a real credential, bound 0.0.0.0 and rejected the caller.
+        it("an empty credential with the testing flag is no credential for MCP either", async () => {
+            const [apiPort, mcpPort] = await getFreePorts(2);
+            registerPorts([apiPort, mcpPort]);
+            const childEnv = { ...process.env };
+            delete childEnv.AD4M_ADMIN_CREDENTIAL;
+            delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;
+            delete childEnv.MCP_HOST;
+            const child = spawn(executorBin, [
+                "run",
+                "--app-data-path", appDataPath,
+                "--port", String(apiPort),
+                "--run-dapp-server", "false",
+                "--run-holochain", "false",
+                "--admin-credential", "",
+                "--insecure-no-admin-credential",
+                "--enable-mcp", "true",
+                "--mcp-port", String(mcpPort),
+            ], { stdio: ["ignore", "pipe", "pipe"], env: childEnv });
+            let output = "";
+            child.stdout!.on("data", (d) => { output += d.toString(); });
+            child.stderr!.on("data", (d) => { output += d.toString(); });
+            try {
+                await pollUntil(async () => output.includes("MCP HTTP server listening"),
+                    { timeoutMs: 120000, label: "MCP server listening" });
+                expect(output).to.contain(`MCP HTTP server listening on 127.0.0.1:${mcpPort}`);
+
+                // REST: the empty token is the operator.
+                const client = new Ad4mClient(`http://127.0.0.1:${apiPort}`, "");
+                await pollUntil(async () => { await client.agent.status(); return true; },
+                    { timeoutMs: 15000, label: "executor API ready" });
+                await client.agent.generate("test-passphrase");
+                const perspective = await client.perspective.add("empty-credential");
+
+                // MCP: the same tokenless caller reads that perspective.
+                const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
+                const { sessionId } = await initializeMcp(mcpUrl);
+                const links = await callMcpTool(mcpUrl, "query_links",
+                    { perspective_id: perspective.uuid }, sessionId);
+                expect(links, JSON.stringify(links)).to.be.an("array");
+            } finally {
+                await stopChildProcess(child);
+                deregisterPorts([apiPort, mcpPort]);
+            }
         })
     })
 
