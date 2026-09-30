@@ -12,8 +12,13 @@
 //!
 //! The file holds no secret values, only paths to them: an inline
 //! `admin_credential` or `smtp_config.password` fails the parse, and so does
-//! any other key this module does not know. A secret file must not be
-//! readable by group or others (mode 0600 or 0400).
+//! any other key this module does not know. That check lives in
+//! [`ExecutorConfigFile::parse`], not on the types: the launcher reads its
+//! `launcher-state.json` through [`MultiUserSettings`] and [`TlsSettings`]
+//! too, and must keep reading a file a later launcher added keys to.
+//!
+//! A secret must not be empty, and a secret file must not be readable by
+//! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
 use serde::{Deserialize, Serialize};
@@ -45,6 +50,14 @@ pub enum ConfigFileError {
         value_var: String,
         file_var: String,
     },
+    UnknownKey {
+        path: PathBuf,
+        key: String,
+    },
+    /// `source` names the variable or file.
+    EmptySecret {
+        source: String,
+    },
     MissingSmtpPassword,
     TlsPortOverflow,
 }
@@ -70,6 +83,14 @@ impl fmt::Display for ConfigFileError {
                 value_var,
                 file_var,
             } => write!(f, "both {value_var} and {file_var} are set; set only one"),
+            Self::UnknownKey { path, key } => {
+                write!(
+                    f,
+                    "invalid config file {}: unknown key `{key}`",
+                    path.display()
+                )
+            }
+            Self::EmptySecret { source } => write!(f, "the secret in {source} is empty"),
             Self::MissingSmtpPassword => write!(
                 f,
                 "smtp_config is enabled but no SMTP password is set: use \
@@ -96,6 +117,10 @@ impl ConfigFileError {
                 path: file.to_path_buf(),
                 message,
             },
+            Self::UnknownKey { key, .. } => Self::UnknownKey {
+                path: file.to_path_buf(),
+                key,
+            },
             other => other,
         }
     }
@@ -103,7 +128,6 @@ impl ConfigFileError {
 
 /// `multi_user_config.tls_config`: the HTTPS/WSS listener.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct TlsSettings {
     pub enabled: bool,
     pub cert_file_path: String,
@@ -116,7 +140,6 @@ pub struct TlsSettings {
 /// are sent from. The password is not a field: it comes from
 /// `password_file` or the environment (see [`ExecutorSecrets::from_env`]).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SmtpSettings {
     pub enabled: bool,
     pub host: String,
@@ -131,7 +154,6 @@ pub struct SmtpSettings {
 /// keeps its own keyring-encrypted password inside `smtp_config`; the
 /// config file uses [`SmtpSettings`].
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct MultiUserSettings<Smtp = SmtpSettings> {
     pub enabled: bool,
     pub smtp_config: Option<Smtp>,
@@ -141,7 +163,6 @@ pub struct MultiUserSettings<Smtp = SmtpSettings> {
 /// The config file. Every key is optional; an unset key keeps the
 /// executor's default.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ExecutorConfigFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub app_data_path: Option<String>,
@@ -261,6 +282,9 @@ fn secret_from_env(
             value_var: value_var.unwrap_or_default().to_string(),
             file_var: file_var.to_string(),
         }),
+        (Some(value), None) if value.is_empty() => Err(ConfigFileError::EmptySecret {
+            source: value_var.unwrap_or_default().to_string(),
+        }),
         (Some(value), None) => Ok(Some(value)),
         (None, Some(path)) => read_secret_file(Path::new(&path)).map(Some),
         (None, None) => config_file_path
@@ -271,7 +295,7 @@ fn secret_from_env(
 
 /// Reads a secret from `path`, which must not be readable by group or
 /// others. One trailing newline (`\n` or `\r\n`) is dropped, so
-/// `echo secret > file` works.
+/// `echo secret > file` works; what is left must not be empty.
 pub fn read_secret_file(path: &Path) -> Result<String, ConfigFileError> {
     let read_error = |error| ConfigFileError::Read {
         path: path.to_path_buf(),
@@ -299,7 +323,29 @@ pub fn read_secret_file(path: &Path) -> Result<String, ConfigFileError> {
             secret.pop();
         }
     }
+    if secret.is_empty() {
+        return Err(ConfigFileError::EmptySecret {
+            source: path.display().to_string(),
+        });
+    }
     Ok(secret)
+}
+
+/// A key's path in the file, `multi_user_config.tls_config.tls_prot`.
+fn key_path(path: &serde_ignored::Path) -> String {
+    use serde_ignored::Path;
+    let join = |parent: &Path, key: &dyn fmt::Display| match key_path(parent) {
+        parent if parent.is_empty() => key.to_string(),
+        parent => format!("{parent}.{key}"),
+    };
+    match path {
+        Path::Root => String::new(),
+        Path::Seq { parent, index } => join(parent, index),
+        Path::Map { parent, key } => join(parent, key),
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => key_path(parent),
+    }
 }
 
 impl ExecutorConfigFile {
@@ -312,7 +358,7 @@ impl ExecutorConfigFile {
     }
 
     /// Parses a config file's text: [`INLINE_SECRETS`] first, then the
-    /// shape, rejecting unknown keys.
+    /// shape, rejecting any key the types do not know, at any depth.
     pub fn parse(text: &str) -> Result<Self, ConfigFileError> {
         let unlocated = |error| ConfigFileError::Parse {
             path: PathBuf::new(),
@@ -328,7 +374,18 @@ impl ExecutorConfigFile {
                 message,
             });
         }
-        serde_json::from_value(json).map_err(unlocated)
+        let mut unknown = None;
+        let file = serde_ignored::deserialize(json, |path| {
+            unknown.get_or_insert_with(|| key_path(&path));
+        })
+        .map_err(unlocated)?;
+        match unknown {
+            Some(key) => Err(ConfigFileError::UnknownKey {
+                path: PathBuf::new(),
+                key,
+            }),
+            None => Ok(file),
+        }
     }
 
     /// The executor config these settings and secrets describe. A key the

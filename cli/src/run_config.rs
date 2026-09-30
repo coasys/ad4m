@@ -54,8 +54,14 @@ pub struct RunArgs {
     /// Admin credential granting full capabilities to whoever presents it.
     /// Prefer AD4M_ADMIN_CREDENTIAL_FILE (or the AD4M_ADMIN_CREDENTIAL
     /// environment variable): a flag value is visible to every user on the
-    /// host via `ps` and stays in shell history.
-    #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
+    /// host via `ps` and stays in shell history. Must not be empty.
+    #[arg(
+        long,
+        action,
+        env = "AD4M_ADMIN_CREDENTIAL",
+        hide_env_values = true,
+        value_parser = clap::builder::NonEmptyStringValueParser::new()
+    )]
     pub admin_credential: Option<String>,
     #[arg(long, action, env = "AD4M_LOCALHOST")]
     pub localhost: Option<bool>,
