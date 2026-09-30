@@ -1,4 +1,4 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import path from "path";
 import fs from "fs";
 import { sleep } from '../utils/utils';
@@ -54,13 +54,18 @@ export default function languageTests(testContext: TestContext) {
 
             it('Alice can install her own non HC published language', async () => {
                 let sourceLanguageMeta: LanguageMetaInput = new LanguageMetaInput("Newly published perspective-language", "..here for you template");
-                let socialContextData = fs.readFileSync("./tst-tmp/languages/perspective-language/build/bundle.js").toString();
+                // The perspective-language from bootstrap-languages/, not the
+                // seed's (which in the local suite is local/perspective-language.js,
+                // without icons): this test checks the icons of an installed language.
+                // A copy with a comment appended, so the address is new.
+                const perspectiveLanguageCopy = path.join(__dirname, "../tst-tmp/perspective-language-with-icons.js");
+                let socialContextData = fs.readFileSync(path.join(__dirname, "../../../bootstrap-languages/perspective-language/build/bundle.js")).toString();
                 socialContextData = socialContextData + "\n//Test";
-                fs.writeFileSync("./tst-tmp/languages/perspective-language/build/bundle.js", socialContextData);
+                fs.writeFileSync(perspectiveLanguageCopy, socialContextData);
 
                 //Publish a source language to start working from
                 nonHCSourceLanguage = await ad4mClient.languages.publish(
-                    path.join(__dirname, "../tst-tmp/languages/perspective-language/build/bundle.js").replace(/\\/g, "/"),
+                    perspectiveLanguageCopy.replace(/\\/g, "/"),
                     sourceLanguageMeta
                 )
                 expect(nonHCSourceLanguage.name).to.be.equal(nonHCSourceLanguage.name);

@@ -4,15 +4,22 @@ import unzipper from "https://esm.sh/v135/unzipper@0.10.14";
 import path from "node:path";
 import os from "node:os";
 
-const languages = {
+// --local flag: use all-local bootstrap languages (no Holochain)
+const useLocal = Deno.args.includes("--local");
+
+// Holochain mode (default): HC agent/p-diff-sync/perspective. Both modes use
+// the local language-language and neighbourhood store; startExecutor() puts
+// them in shared mode (utils/sharedStores.ts) so executors see each other's
+// published languages and neighbourhoods.
+const hcLanguages = {
   "agent-expression-store": {
     bundle: "../../bootstrap-languages/agent-language/build/bundle.js",
   },
   languages: {
-    bundle: "../../bootstrap-languages/local-language-persistence-0.0.9.js",
+    bundle: "../../bootstrap-languages/local/language-language.js",
   },
   "neighbourhood-store": {
-    bundle: "../../bootstrap-languages/local-neighbourhood-persistence-0.0.6.js",
+    bundle: "../../bootstrap-languages/local/neighbourhood-language.js",
   },
   "perspective-diff-sync": {
     bundle: "../../bootstrap-languages/p-diff-sync/build/bundle.js",
@@ -25,8 +32,33 @@ const languages = {
   }
 };
 
+// Local mode: all languages from bootstrap-languages/local/ (no Holochain)
+const localLanguages = {
+  "agent-expression-store": {
+    bundle: "../../bootstrap-languages/local/agent-language.js",
+  },
+  languages: {
+    bundle: "../../bootstrap-languages/local/language-language.js",
+  },
+  "neighbourhood-store": {
+    bundle: "../../bootstrap-languages/local/neighbourhood-language.js",
+  },
+  "perspective-diff-sync": {
+    bundle: "../../bootstrap-languages/local/link-language.js",
+  },
+  "perspective-language": {
+    bundle: "../../bootstrap-languages/local/perspective-language.js",
+  },
+  "server-link-language": {
+    bundle: "../../bootstrap-languages/server-link-language/build/bundle.js"
+  }
+};
+
+const languages = useLocal ? localLanguages : hcLanguages;
 
 async function main() {
+  console.log(`get-builtin-test-langs: ${useLocal ? "LOCAL" : "HOLOCHAIN"} mode`);
+
   for (const lang in languages) {
     const targetDir = fs.readFileSync('./scripts/download-languages-path').toString()
     const dir = path.join(targetDir, lang)
