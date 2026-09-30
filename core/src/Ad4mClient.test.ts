@@ -632,9 +632,9 @@ describe('PerspectiveClient', () => {
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
 
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
-        await freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
-        await freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
+        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [linkAddedCallback]);
+        freshClient.perspective.addPerspectiveLinkRemovedListener('uuid-1', [linkRemovedCallback]);
+        freshClient.perspective.addPerspectiveLinkUpdatedListener('uuid-1', [linkUpdatedCallback]);
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
@@ -1218,6 +1218,18 @@ describe('Ad4mClient', () => {
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
     });
 
+    test('calls go through the injected webSocketImpl', async () => {
+        class InjectedWebSocket extends MockWebSocket {}
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', { webSocketImpl: InjectedWebSocket as any });
+
+        const agent = await freshClient.agent.me();
+
+        expect(agent.did).toBeDefined();
+        expect(MockWebSocket.instances.length).toBeGreaterThan(0);
+        for (const ws of MockWebSocket.instances) expect(ws).toBeInstanceOf(InjectedWebSocket);
+        freshClient.close();
+    });
+
     test('a listener on a new client receives each default event exactly once', async () => {
         const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const listeners = {
@@ -1311,7 +1323,7 @@ describe('Ad4mClient', () => {
         freshClient.perspective.addPerspectiveAddedListener(() => { throw new Error('listener bug'); });
         freshClient.perspective.addPerspectiveAddedListener(third);
         const linkThird = jest.fn();
-        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
+        freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
             () => { throw new Error('link listener bug'); },
             linkThird,
         ]);
