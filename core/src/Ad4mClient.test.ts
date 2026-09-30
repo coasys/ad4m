@@ -347,7 +347,7 @@ let ad4m: Ad4mClient;
 beforeAll(() => {
     (global as any).WebSocket = MockWebSocket as any;
     // Ad4mClient takes an HTTP base URL; apiClient converts to ws:// internally
-    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
 });
 
 afterAll(() => {
@@ -466,10 +466,9 @@ describe('AgentClient', () => {
     });
 
     test('agent-updated event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         freshClient.agent.addUpdatedListener(callback);
-        freshClient.agent.subscribeAgentUpdated();
 
         const ws = lastOf(MockWebSocket.instances);
 
@@ -486,10 +485,9 @@ describe('AgentClient', () => {
     });
 
     test('agent-status-changed event unwraps nested agent payload', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         freshClient.agent.addAgentStatusChangedListener(callback);
-        freshClient.agent.subscribeAgentStatusChanged();
 
         const ws = lastOf(MockWebSocket.instances);
 
@@ -613,7 +611,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('onQueryUpdate() routes through the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const callback = jest.fn();
         const unsubscribe = freshClient.perspective.onQueryUpdate(callback);
         const ws = lastOf(MockWebSocket.instances);
@@ -625,16 +623,15 @@ describe('PerspectiveClient', () => {
     });
 
     test('perspective lifecycle subscriptions use the WebSocket endpoint', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         freshClient.perspective.addPerspectiveAddedListener(jest.fn());
-        freshClient.perspective.subscribePerspectiveAdded();
 
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
     });
 
     test('perspective-scoped link subscriptions ignore events for other perspectives', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const linkAddedCallback = jest.fn();
         const linkRemovedCallback = jest.fn();
         const linkUpdatedCallback = jest.fn();
@@ -692,33 +689,8 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledTimes(1);
     });
 
-    test('runtime exception subscriptions normalize PascalCase exception types', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
-        const callback = jest.fn(() => null);
-        freshClient.runtime.addExceptionCallback(callback);
-        freshClient.runtime.subscribeExceptionOccurred();
-
-        const ws = lastOf(MockWebSocket.instances);
-        ws.emit({
-            type: 'exception-occurred',
-            exception: {
-                title: 'Request to authenticate application',
-                message: 'demo-app is waiting for authentication',
-                type: 'CapabilityRequested',
-                addon: '{}',
-            },
-        });
-
-        expect(callback).toHaveBeenCalledWith({
-            title: 'Request to authenticate application',
-            message: 'demo-app is waiting for authentication',
-            type: 'CAPABILITY_REQUESTED',
-            addon: '{}',
-        });
-    });
-
-    test('a client asks the executor for exactly the events its listeners need', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    test('a client asks the executor for the events its listeners need', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const first = MockWebSocket.instances.length;
         const watches = () => MockWebSocket.instances.slice(first).flatMap(ws => ws.rpc)
             .filter(c => c.type === 'events.watch').map(c => c.params);
@@ -729,28 +701,27 @@ describe('PerspectiveClient', () => {
         // Two listeners added in the same tick make one events.watch.
         freshClient.perspective.addPerspectiveLinkAddedListener('B', [jest.fn()]);
         freshClient.runtime.addExceptionCallback(jest.fn(() => null));
-        freshClient.runtime.subscribeExceptionOccurred();
         await freshClient.perspective.addPerspectiveLinkRemovedListener('A', [jest.fn()]);
         expect(watches()).toHaveLength(2);
         expect(lastOf(watches())).toEqual({
-            'exception-occurred': null, 'link-added': ['A', 'B'], 'link-removed': ['A'],
+            'exception-occurred': null, 'message-received': null, 'notification-triggered': null, 'link-added': ['A', 'B'], 'link-removed': ['A'],
         });
 
         freshClient.perspective.removeAllListeners('A');
         await new Promise(r => setTimeout(r, 10));
-        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'link-added': ['B'] });
+        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'message-received': null, 'notification-triggered': null, 'link-added': ['B'] });
 
         // A new socket starts with no interest: the client registers again.
         const before = watches().length;
         lastOf(MockWebSocket.instances).close();
         await new Promise(r => setTimeout(r, 700));
         expect(watches()).toHaveLength(before + 1);
-        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'link-added': ['B'] });
+        expect(lastOf(watches())).toEqual({ 'exception-occurred': null, 'message-received': null, 'notification-triggered': null, 'link-added': ['B'] });
     });
 
     test('a call made right after adding a listener is sent after the events.watch it needs', async () => {
         // First use: the listener and the call both wait for the socket.
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         freshClient.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
         await freshClient.perspective.snapshotByUUID('A');
         const ws = lastOf(MockWebSocket.instances);
@@ -786,7 +757,7 @@ describe('PerspectiveClient', () => {
         try {
             // The executor rejects the watch once (404: not a closed socket), then accepts it.
             delete MOCK_RESPONSES['events.watch'];
-            const recovering = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token', false));
+            const recovering = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token'));
             recovering.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
             await jest.advanceTimersByTimeAsync(10);
             const ws = lastOf(MockWebSocket.instances);
@@ -799,7 +770,7 @@ describe('PerspectiveClient', () => {
 
             // An executor that keeps rejecting it gets the first try and five retries.
             delete MOCK_RESPONSES['events.watch'];
-            const failing = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token', false));
+            const failing = await opened(new Ad4mClient('http://127.0.0.1:12000', 'test-token'));
             failing.perspective.addPerspectiveLinkAddedListener('A', [jest.fn()]);
             for (let i = 0; i < 20; i++) await jest.advanceTimersByTimeAsync(1_000);
             expect(watchCount(lastOf(MockWebSocket.instances))).toBe(6);
@@ -811,7 +782,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('sync-state and signal listeners only fire for their perspective', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const syncState = jest.fn(() => null);
         await freshClient.perspective.addPerspectiveSyncStateChangeListener('A', [syncState]);
         const signal = jest.fn();
@@ -831,7 +802,7 @@ describe('PerspectiveClient', () => {
     });
 
     test('a live query applies updates and resyncs on a revision gap', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         const subscription = await freshClient.perspective.byUUID('uuid-1')
             .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
         const results: unknown[] = [];
@@ -1353,10 +1324,126 @@ describe('Ad4mClient', () => {
     });
 
     test('token is passed via WebSocket URL query param', async () => {
-        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token', false);
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'my-secret-token');
         await freshClient.agent.me();
         const ws = lastOf(MockWebSocket.instances);
         expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=my-secret-token');
+    });
+
+    test('a listener on a new client receives each default event exactly once', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        const listeners = {
+            agentUpdated: jest.fn(), agentStatus: jest.fn(), apps: jest.fn(),
+            hosting: jest.fn(),
+            added: jest.fn(), updated: jest.fn(), removed: jest.fn(),
+            message: jest.fn(), exception: jest.fn(), notification: jest.fn(),
+        };
+        freshClient.agent.addUpdatedListener(listeners.agentUpdated);
+        freshClient.agent.addAgentStatusChangedListener(listeners.agentStatus);
+        freshClient.agent.addAppChangedListener(listeners.apps);
+        freshClient.agent.addHostingUserInfoChangedListener(listeners.hosting);
+        freshClient.perspective.addPerspectiveAddedListener(listeners.added);
+        freshClient.perspective.addPerspectiveUpdatedListener(listeners.updated);
+        freshClient.perspective.addPerspectiveRemovedListener(listeners.removed);
+        freshClient.runtime.addMessageCallback(listeners.message);
+        freshClient.runtime.addExceptionCallback(listeners.exception);
+        freshClient.runtime.addNotificationTriggeredCallback(listeners.notification);
+        await freshClient.agent.me(); // wait for the socket to open
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'agent-updated', agent: { did: 'did:test:upd' } });
+        ws.emit({ type: 'agent-status-changed', agent: { did: 'did:test:upd' } });
+        ws.emit({ type: 'apps-changed' });
+        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c', remainingCredits: '1', freeAccess: false });
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-a' } });
+        ws.emit({ type: 'perspective-updated', perspective: { uuid: 'uuid-a' } });
+        ws.emit({ type: 'perspective-removed', uuid: 'uuid-a' });
+        ws.emit({ type: 'message-received', message: { author: 'did:test:1' } });
+        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
+        ws.emit({ type: 'notification-triggered', notification: { id: 'n-1' } });
+
+        for (const listener of Object.values(listeners)) {
+            expect(listener).toHaveBeenCalledTimes(1);
+        }
+        expect(listeners.added).toHaveBeenCalledWith({ uuid: 'uuid-a' });
+        expect(listeners.removed).toHaveBeenCalledWith('uuid-a');
+        expect(listeners.exception).toHaveBeenCalledWith({ title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' });
+        freshClient.close();
+    });
+
+    test('the agent client offers no compute-log listener (the executor sends no such event)', () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        // @ts-expect-error removed: compute-log-updated never reaches the socket
+        expect(freshClient.agent.addComputeLogUpdatedListener).toBeUndefined();
+    });
+
+    test('agent and runtime listener registrations return a function that removes the listener', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        const hosting = jest.fn();
+        const exception = jest.fn();
+        freshClient.agent.addHostingUserInfoChangedListener(hosting)();
+        freshClient.runtime.addExceptionCallback(exception)();
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'hosting-user-info-changed', email: 'a@b.c' });
+        ws.emit({ type: 'exception-occurred', exception: { title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } });
+
+        expect(hosting).not.toHaveBeenCalled();
+        expect(exception).not.toHaveBeenCalled();
+        freshClient.close();
+    });
+
+    test('a listener added after close() receives events again', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        freshClient.perspective.addPerspectiveAddedListener(jest.fn());
+        freshClient.close();
+        const added = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(added);
+        await freshClient.agent.me();
+
+        lastOf(MockWebSocket.instances).emit({ type: 'perspective-added', perspective: { uuid: 'uuid-c' } });
+
+        expect(added).toHaveBeenCalledTimes(1);
+        freshClient.close();
+    });
+
+    test('a client without listeners opens no event subscription', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        expect(MockWebSocket.instances).toHaveLength(0);
+        freshClient.close();
+    });
+
+    test('a throwing listener does not stop later listeners for the same event', async () => {
+        const freshClient = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+        const first = jest.fn();
+        const third = jest.fn();
+        freshClient.perspective.addPerspectiveAddedListener(first);
+        freshClient.perspective.addPerspectiveAddedListener(() => { throw new Error('listener bug'); });
+        freshClient.perspective.addPerspectiveAddedListener(third);
+        const linkThird = jest.fn();
+        await freshClient.perspective.addPerspectiveLinkAddedListener('uuid-1', [
+            () => { throw new Error('link listener bug'); },
+            linkThird,
+        ]);
+        await freshClient.agent.me();
+
+        const ws = lastOf(MockWebSocket.instances);
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-d' } });
+        ws.emit({
+            type: 'link-added',
+            perspectiveUuid: 'uuid-1',
+            link: { author: 'did:test:123', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 's', predicate: 'p', target: 't' }, proof: { valid: true } },
+        });
+
+        expect(first).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledTimes(1);
+        expect(third).toHaveBeenCalledWith({ uuid: 'uuid-d' });
+        expect(linkThird).toHaveBeenCalledTimes(1);
+        expect(errorSpy).toHaveBeenCalled();
+        errorSpy.mockRestore();
+        freshClient.close();
     });
 
     test('WS RPC message contains type and params', async () => {

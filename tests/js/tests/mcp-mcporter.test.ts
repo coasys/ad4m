@@ -77,7 +77,7 @@ describe("MCP mcporter Integration Tests", function() {
         await sleep(3000);
 
         // Generate agent via REST
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via REST");
 

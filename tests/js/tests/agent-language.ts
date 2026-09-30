@@ -1,10 +1,15 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import { sleep } from '../utils/utils'
 import { expect } from "chai";
 
-export default function agentLanguageTests(testContext: TestContext) {
+// `crossAgentLookup`: run the cross-agent profile lookup. The local suite
+// passes true: its agent-language is the local one in shared storagePath mode
+// (utils/sharedStores.ts), so Bob reading Alice's profile is deterministic.
+// The Holochain suite passes false: over the DHT the lookup depends on gossip
+// timing and was flaky, which is why it was skipped there (21df0114a).
+export default function agentLanguageTests(testContext: TestContext, crossAgentLookup: boolean = false) {
     return () => {
-        it.skip("works across remote agents", async function() {
+        (crossAgentLookup ? it : it.skip)("works across remote agents", async function() {
             this.retries(2)
             const alice = testContext.alice!
             const didAlice = (await alice.agent.status()).did!

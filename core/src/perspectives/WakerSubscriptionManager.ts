@@ -297,14 +297,10 @@ export class WakerSubscriptionManager {
           try {
             const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const parentResult = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            const bindings = parentResult?.results?.bindings;
-            if (Array.isArray(bindings)) {
-              for (const binding of bindings) {
-                if (binding?.source?.value) {
-                  parents.push(binding.source.value);
-                }
-              }
+            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
+            if (Array.isArray(rows)) {
+              // A row omits a variable left unbound in its solution.
+              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
             }
           } catch (err: any) {
             this.logger.warn(

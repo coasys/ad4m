@@ -225,3 +225,55 @@ describe('ApiClient AbortSignal support', () => {
         FakeWebSocket.last = null
     })
 })
+
+describe('ApiClient event dispatch', () => {
+    beforeEach(() => {
+        FakeWebSocket.last = null
+    })
+
+    it('keeps delivering an event to later subscribers when one subscriber throws', async () => {
+        const client = new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            FakeWebSocket as unknown as new (url: string) => WebSocket,
+        )
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const received: string[] = []
+        client.subscribe(() => { received.push('first') })
+        client.subscribe(() => { throw new Error('boom') })
+        client.subscribe(() => { received.push('third') })
+        await flushMicrotasks()
+
+        FakeWebSocket.last!.serverPush({ type: 'perspective-added', perspective: { uuid: 'u' } })
+
+        expect(received).toEqual(['first', 'third'])
+        expect(errorSpy).toHaveBeenCalled()
+        errorSpy.mockRestore()
+        client.closeAll()
+    })
+
+    it('logs a rejection from an async subscriber instead of leaving it unhandled', async () => {
+        const client = new ApiClient(
+            'http://localhost:1234',
+            undefined,
+            FakeWebSocket as unknown as new (url: string) => WebSocket,
+        )
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const unhandled = jest.fn()
+        process.on('unhandledRejection', unhandled)
+        const received: string[] = []
+        client.subscribe(async () => { throw new Error('async boom') })
+        client.subscribe(() => { received.push('second') })
+        await flushMicrotasks()
+
+        FakeWebSocket.last!.serverPush({ type: 'perspective-added', perspective: { uuid: 'u' } })
+        await new Promise((r) => setTimeout(r, 0))
+
+        expect(received).toEqual(['second'])
+        expect(errorSpy).toHaveBeenCalledWith('Error in WebSocket event callback:', expect.objectContaining({ message: 'async boom' }))
+        expect(unhandled).not.toHaveBeenCalled()
+        process.off('unhandledRejection', unhandled)
+        errorSpy.mockRestore()
+        client.closeAll()
+    })
+})
