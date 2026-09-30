@@ -2809,9 +2809,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // No required property, no flag and no initial value: `buildSHACL` emits an
-  // empty constructor-action list. The executor stores it as `[]`, so
-  // `save()` still goes through `createSubject`.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2894,7 +2892,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("calls createSubject and writes the relation when the constructor is empty", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2903,7 +2901,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
     });
   });

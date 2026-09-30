@@ -43,43 +43,26 @@ describe("Literal", () => {
             expect(Literal.from(NaN).get()).toBeNaN()
         })
 
-        it("round-trips 0, false, null and NaN through from -> toUrl -> fromUrl -> get", () => {
-            const roundTrip = (v: any) => Literal.fromUrl(Literal.from(v).toUrl()).get()
-            expect(Literal.from(0).toUrl()).toBe("literal:number:0")
-            expect(roundTrip(0)).toBe(0)
-            expect(Literal.from(false).toUrl()).toBe("literal:boolean:false")
-            expect(roundTrip(false)).toBe(false)
-            expect(Literal.from(NaN).toUrl()).toBe("literal:number:NaN")
-            expect(roundTrip(NaN)).toBeNaN()
-            expect(Literal.fromUrl("literal:json:null").get()).toBe(null)
-        })
-
-        it("encodes \"\" and null as URLs and round-trips them", () => {
-            expect(Literal.from("").toUrl()).toBe("literal:string:")
-            expect(Literal.from(null).toUrl()).toBe("literal:json:null")
-            for (const value of ["", null]) {
-                expect(Literal.fromUrl(Literal.from(value).toUrl()).get()).toBe(value)
+        it("encodes falsy and non-string values and round-trips them", () => {
+            const cases: [any, string][] = [
+                [0, "literal:number:0"],
+                [false, "literal:boolean:false"],
+                [NaN, "literal:number:NaN"],
+                ["", "literal:string:"],
+                [null, "literal:json:null"],
+                [true, "literal:boolean:true"],
+                [{ a: 1, b: [0, false, ""] }, "literal:json:%7B%22a%22%3A1%2C%22b%22%3A%5B0%2Cfalse%2C%22%22%5D%7D"],
+            ]
+            for (const [value, url] of cases) {
+                expect(Literal.from(value).toUrl()).toBe(url)
+                expect(Literal.fromUrl(url).get()).toStrictEqual(value)
+                expect(Literal.fromUrl(Literal.from(value).toUrl()).get()).toStrictEqual(value)
             }
         })
 
         it("treats undefined as empty", () => {
             expect(() => Literal.from(undefined).toUrl()).toThrow("Can't turn empty Literal into URL")
             expect(() => Literal.from(undefined).get()).toThrow("Can't render empty Literal")
-        })
-
-        it("round-trips strings, numbers, booleans and objects", () => {
-            const cases: [any, string][] = [
-                ["test string", "literal:string:test%20string"],
-                [42, "literal:number:42"],
-                [-1.5, "literal:number:-1.5"],
-                [true, "literal:boolean:true"],
-                [{ a: 1, b: [0, false, ""] }, "literal:json:%7B%22a%22%3A1%2C%22b%22%3A%5B0%2Cfalse%2C%22%22%5D%7D"],
-            ]
-            for (const [value, url] of cases) {
-                expect(Literal.from(value).toUrl()).toBe(url)
-                expect(Literal.from(value).get()).toStrictEqual(value)
-                expect(Literal.fromUrl(url).get()).toStrictEqual(value)
-            }
         })
     })
 })

@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import {
     SHACLShape,
+    SHACLFlow,
     LinkQuery,
     Ad4mModel,
     Flag,
@@ -200,6 +201,52 @@ export default function shaclRpcTests(testContext: TestContext) {
                         expect((await perspective.getShacl("Memo"))!.nodeShapeUri).to.equal("shapes://MemoShape");
                         await perspective.createSubject("Memo", "memo://1", { body: "hi" });
                         expect(await perspective.get(new LinkQuery({ source: "memo://1", predicate: "memo://body" }))).to.have.length(1);
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
+                });
+
+                it("addShacl() rejects a shape URI that does not end with `{name}Shape`", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-bad-shape-uri");
+                    try {
+                        let error: Error | undefined;
+                        try {
+                            await perspective.addShacl("Note", new SHACLShape("shapes://MemoShape", "note://Note"));
+                        } catch (e) {
+                            error = e as Error;
+                        }
+                        expect(error?.message).to.contain("NoteShape");
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
+                });
+
+                it("addFlow() replaces the stored transitions when a flow is re-added", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-flow-readd");
+                    try {
+                        const todoFlow = () => {
+                            const flow = new SHACLFlow("Todo", "todo://");
+                            flow.addState({ name: "ready", value: 0 });
+                            flow.addState({ name: "done", value: 1 });
+                            flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
+                            return flow;
+                        };
+                        const transitions = async () =>
+                            (await perspective.getFlow("Todo"))!.transitions.map((t) => `${t.fromState}->${t.toState}:${t.actionName}`);
+
+                        // A flow stored with the old `{from}To{to}` transition URIs.
+                        const legacy = todoFlow().toLinks().map((l) => ({
+                            ...l,
+                            source: l.source.replace(/\.transition\/.*$/, ".readyTodone"),
+                            target: l.target.replace(/\.transition\/.*$/, ".readyTodone"),
+                        }));
+                        await perspective.addLinks(legacy);
+
+                        await perspective.addFlow("Todo", todoFlow());
+                        expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
+
+                        await perspective.addFlow("Todo", todoFlow());
+                        expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
                     } finally {
                         await testContext.ad4mClient.perspective.remove(perspective.uuid);
                     }

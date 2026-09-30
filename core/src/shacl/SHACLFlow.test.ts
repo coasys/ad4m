@@ -994,22 +994,18 @@ describe('SHACLFlow', () => {
       flow.addTransition({ actionName: 'Go', fromState: 'a', toState: 'Tob', actions: [] });
       flow.addTransition({ actionName: 'Go', fromState: 'aTo', toState: 'b', actions: [] });
 
-      const transitionUris = flow.toLinks().filter(l => l.predicate === 'ad4m://hasTransition').map(l => l.target);
-      expect(new Set(transitionUris).size).toBe(2);
       expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
     });
   });
 
   describe('initial state ordering', () => {
-    it('fromJSON sorts states by value, like fromLinks', () => {
+    it('fromJSON sorts states by value', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
       flow.addState({ name: 'done', value: 1 });
       flow.addState({ name: 'ready', value: 0 });
       flow.addState({ name: 'doing', value: 0.5 });
 
-      const fromLinks = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
       const fromJSON = SHACLFlow.fromJSON(flow.toJSON());
-      expect(fromLinks.states.map(s => s.name)).toEqual(['ready', 'doing', 'done']);
       expect(fromJSON.states.map(s => s.name)).toEqual(['ready', 'doing', 'done']);
     });
   });

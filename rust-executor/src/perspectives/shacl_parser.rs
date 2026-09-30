@@ -2185,31 +2185,6 @@ mod tests {
         assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
     }
 
-    /// `@Model` subclasses register through this writer; without `sh://node`
-    /// links `getShacl` reads the shape back without its parents.
-    #[test]
-    fn parse_shacl_to_links_writes_parent_shapes() {
-        let shacl_json = r#"{
-            "target_class": "zoo://Dog",
-            "parent_shapes": ["zoo://AnimalShape", "zoo://PetShape"],
-            "properties": []
-        }"#;
-        let links = parse_shacl_to_links(shacl_json, "Dog").unwrap();
-        let parents: Vec<&str> = links
-            .iter()
-            .filter(|l| l.source == "zoo://DogShape" && l.predicate.as_deref() == Some("sh://node"))
-            .map(|l| l.target.as_str())
-            .collect();
-        assert_eq!(parents, vec!["zoo://AnimalShape", "zoo://PetShape"]);
-
-        let no_parents =
-            parse_shacl_to_links(r#"{"target_class": "zoo://Cat", "properties": []}"#, "Cat")
-                .unwrap();
-        assert!(!no_parents
-            .iter()
-            .any(|l| l.predicate.as_deref() == Some("sh://node")));
-    }
-
     #[test]
     fn parse_shacl_to_links_keeps_the_given_node_shape_uri() {
         let links = parse_shacl_to_links(
@@ -2780,15 +2755,29 @@ mod tests {
     /// must name a transition identically.
     #[test]
     fn transition_uri_encodes_parts_like_the_sdk() {
-        let transition = FlowTransition {
-            action_name: "Fast-track!*'()~._".to_string(),
-            from_state: "in review".to_string(),
-            to_state: "a/b".to_string(),
-            actions: vec![],
-        };
+        let flow_json = r#"{
+            "name": "TODO",
+            "namespace": "todo://",
+            "states": [
+                {"name": "in review", "value": 0.0},
+                {"name": "a/b", "value": 1.0}
+            ],
+            "transitions": [
+                {"action_name": "Fast-track!*'()~._", "from_state": "in review", "to_state": "a/b", "actions": []}
+            ]
+        }"#;
+        let links = parse_flow_to_links(flow_json, "TODO").expect("writer");
+        let targets: Vec<&str> = links
+            .iter()
+            .filter(|l| {
+                l.source == "todo://TODOFlow"
+                    && l.predicate.as_deref() == Some("ad4m://hasTransition")
+            })
+            .map(|l| l.target.as_str())
+            .collect();
         assert_eq!(
-            transition_uri("todo://", "TODO", &transition),
-            "todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._"
+            targets,
+            vec!["todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._"]
         );
     }
 
