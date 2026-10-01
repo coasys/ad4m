@@ -562,6 +562,11 @@ mod tests {
         .await
         .expect("BatchReady signal");
         assert_eq!(
+            ready.agent_did.as_deref(),
+            Some(crate::agent::did_for_context(&ctx).unwrap().as_str()),
+            "BatchReady names the acting agent, as every later step does"
+        );
+        assert_eq!(
             ready.item_ids.len(),
             2,
             "the pass transcript must be capped at batch_max; got {:?}",
