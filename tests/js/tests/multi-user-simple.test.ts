@@ -998,6 +998,31 @@ describe("Multi-User Simple integration tests", () => {
             expect(bobsLatest, "and not Alice's Local link").to.not.contain("alice-secret");
             subscription.dispose();
         });
+
+        // #1224: storing a shared link Local would hide it from every other
+        // user here, so the executor refuses it and the client gets the error.
+        it("refuses to store a shared link as local and tells the caller (#1224)", async function () {
+            this.timeout(120000);
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privrefuse1@example.com", "password1");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privrefuse1@example.com", "password1"), false);
+            const handle = await alice.perspective.add("Local Link Privacy: refusal");
+            const source = `priv://refuse/${uuidv4()}`;
+            const added = await alice.perspective.addLink(handle.uuid, new Link({ source, predicate: "priv://value", target: "priv://shared" }), "shared");
+            const expression = {
+                author: added.author,
+                timestamp: added.timestamp,
+                data: added.data,
+                proof: { key: added.proof.key, signature: added.proof.signature },
+            } as LinkExpression;
+
+            await expect(alice.perspective.addLinkExpression(handle.uuid, expression, "local"))
+                .to.be.rejectedWith(/Refusing to store a shared link Local/);
+
+            const links = await alice.perspective.queryLinks(handle.uuid, new LinkQuery({ source }));
+            expect(links.map((l) => [l.data.target, String(l.status).toLowerCase()])).to.deep.equal([["priv://shared", "shared"]]);
+        });
     });
 
     describe("Agent Profiles and Status", () => {

@@ -3955,7 +3955,8 @@ impl PerspectiveInstance {
     /// Evaluate property getters for a batch of instances in-process.
     ///
     /// Returns a JSON string of `{ instanceId: { prop: value, ... } }`.
-    /// The getters read `viewer_did`'s view, as a model query does.
+    /// The getters read this handle's view (its reader, or the main agent),
+    /// as a model query does.
     pub fn evaluate_getters(
         &self,
         class_name: &str,
@@ -3980,6 +3981,10 @@ impl PerspectiveInstance {
     /// links are removed (see [`SparqlStore`](super::sparql_store::SparqlStore)).
     /// `None` is for diffs that carry no `Local` link, such as the ones a link
     /// language delivers; a `Local` link in them is refused.
+    ///
+    /// A diff that stores a shared link `Local` is refused as a whole, before
+    /// anything is written, and the error goes to the caller (see
+    /// [`SparqlStore::check_local_writes`](super::sparql_store::SparqlStore::check_local_writes)).
     pub(crate) async fn persist_link_diff(
         &self,
         diff: &PerspectiveDiff,
@@ -3993,6 +3998,9 @@ impl PerspectiveInstance {
         // `proof.valid` is a read view; the store writes from the signed expression
         // and computes the verdict itself. Callers decorate *after* persist for
         // pubsub/prolog, rather than decorating and converting back here.
+        if owner.is_some() {
+            self.sparql_store.check_local_writes(&diff.additions)?;
+        }
 
         // Removals first
         for removal in &diff.removals {
@@ -6784,6 +6792,11 @@ impl PerspectiveInstance {
         //    shared_diff.additions.len(), shared_diff.removals.len(),
         //    local_diff.additions.len(), local_diff.removals.len());
 
+        // Refuse the whole batch before its shared links reach the link
+        // language, as `persist_link_diff` would refuse it below.
+        self.sparql_store
+            .check_local_writes(&persist_diff.additions)?;
+
         // Apply shared changes
         if !shared_diff.additions.is_empty() || !shared_diff.removals.is_empty() {
             //let db_start = std::time::Instant::now();
@@ -8103,6 +8116,163 @@ mod tests {
         };
         assert_eq!(targets_for(&mains), vec!["test://main-local".to_string()]);
         assert_eq!(targets_for(&bobs), vec!["test://bob-local".to_string()]);
+    }
+
+    /// A link expression `signer` signed, as a client hands it to
+    /// `add_link_expression`.
+    fn signed_expression(signer: &TestSigner, target: &str) -> LinkExpression {
+        LinkExpression::from(signer.sign(Link {
+            source: "test://q2".to_string(),
+            predicate: Some("test://q2-p".to_string()),
+            target: target.to_string(),
+        }))
+    }
+
+    /// `(target, status)` of every `test://q2` link `viewer` reads.
+    async fn q2_links_seen_by(p: &PerspectiveInstance, viewer: &str) -> Vec<(String, LinkStatus)> {
+        let mut links: Vec<(String, LinkStatus)> = p
+            .read_as(viewer)
+            .get_links(&LinkQuery {
+                source: Some("test://q2".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| (l.data.target, l.status.unwrap()))
+            .collect();
+        links.sort_by(|a, b| a.0.cmp(&b.0));
+        links
+    }
+
+    /// Adding a link that is already shared as `Local` is refused, and the
+    /// caller gets the error: `addLinkExpression` must not report a `Local`
+    /// link the store keeps shared.
+    #[tokio::test]
+    async fn a_local_write_of_a_shared_link_fails_for_the_caller() {
+        let mut perspective = setup().await;
+        let main = AgentContext::main_agent();
+        let main_did = did_for_context(&main).unwrap();
+        let shared = signed_expression(&TestSigner::generate(), "test://shared");
+        perspective
+            .add_link_expression(shared.clone(), LinkStatus::Shared, None, &main)
+            .await
+            .unwrap();
+
+        let result = perspective
+            .add_link_expression(shared.clone(), LinkStatus::Local, None, &main)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "the API reported {:?}, the store holds {:?}",
+            result.map(|l| l.status),
+            q2_links_seen_by(&perspective, &main_did).await
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Refusing to store a shared link Local"));
+        assert_eq!(
+            q2_links_seen_by(&perspective, &main_did).await,
+            vec![("test://shared".to_string(), LinkStatus::Shared)]
+        );
+    }
+
+    /// A diff with one refused link writes none of its links: every write
+    /// path (`add_links`, `link_mutations`, `commit_batch`) stores its diff
+    /// through `persist_link_diff`, so a batch fails as a whole.
+    #[tokio::test]
+    async fn a_diff_with_one_refused_link_writes_none_of_its_links() {
+        let perspective = setup().await;
+        let main = AgentContext::main_agent();
+        let main_did = did_for_context(&main).unwrap();
+        let peer = TestSigner::generate();
+        let shared = signed_expression(&peer, "test://shared");
+        perspective
+            .persist_link_diff(
+                &PerspectiveDiff::from_additions(vec![LinkExpression {
+                    status: Some(LinkStatus::Shared),
+                    ..shared.clone()
+                }]),
+                None,
+            )
+            .await
+            .unwrap();
+        let before = q2_links_seen_by(&perspective, &main_did).await;
+
+        let diff = PerspectiveDiff::from_additions(vec![
+            LinkExpression {
+                status: Some(LinkStatus::Local),
+                ..signed_expression(&peer, "test://new-local")
+            },
+            LinkExpression {
+                status: Some(LinkStatus::Shared),
+                ..signed_expression(&peer, "test://new-shared")
+            },
+            LinkExpression {
+                status: Some(LinkStatus::Local),
+                ..shared
+            },
+        ]);
+        assert!(perspective
+            .persist_link_diff(&diff, Some(&main_did))
+            .await
+            .is_err());
+        assert_eq!(
+            q2_links_seen_by(&perspective, &main_did).await,
+            before,
+            "nothing of the diff was written"
+        );
+
+        // The same link Shared and Local in one diff is refused too.
+        let twice = signed_expression(&peer, "test://twice");
+        let diff = PerspectiveDiff::from_additions(vec![
+            LinkExpression {
+                status: Some(LinkStatus::Shared),
+                ..twice.clone()
+            },
+            LinkExpression {
+                status: Some(LinkStatus::Local),
+                ..twice
+            },
+        ]);
+        assert!(perspective
+            .persist_link_diff(&diff, Some(&main_did))
+            .await
+            .is_err());
+        assert_eq!(q2_links_seen_by(&perspective, &main_did).await, before);
+    }
+
+    /// A Local link goes to the graph of the user who writes it, not of the
+    /// author it names: Bob storing a link Alice signed sees it, Alice does
+    /// not.
+    #[tokio::test]
+    async fn a_local_link_another_agent_signed_goes_to_the_writers_view() {
+        let mut perspective = setup().await;
+        let bob_email = "q2-bob@test.local";
+        AgentService::ensure_user_key_exists(bob_email).unwrap();
+        let bob = AgentContext::for_user_email(bob_email.to_string());
+        let bob_did = did_for_context(&bob).unwrap();
+        let alice = TestSigner::generate();
+        let main_did = did_for_context(&AgentContext::main_agent()).unwrap();
+
+        perspective
+            .add_link_expression(
+                signed_expression(&alice, "test://alices"),
+                LinkStatus::Local,
+                None,
+                &bob,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            q2_links_seen_by(&perspective, &bob_did).await,
+            vec![("test://alices".to_string(), LinkStatus::Local)]
+        );
+        assert_eq!(q2_links_seen_by(&perspective, &alice.did).await, vec![]);
+        assert_eq!(q2_links_seen_by(&perspective, &main_did).await, vec![]);
     }
 
     #[tokio::test]

@@ -8,6 +8,7 @@ use oxigraph::sparql::{QueryResults, SparqlEvaluator};
 use oxigraph::store::Store;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 const ONT_AUTHOR: &str = "ad4m://ontology/author";
@@ -640,28 +641,18 @@ impl SparqlStore {
         // A link is stored shared or in user graphs, never both (see the type
         // docs). Storing it shared takes it out of every user graph: its
         // owners still see it, now as shared. Storing a shared link Local is
-        // refused: its writer already sees it, and taking it out of the
-        // shared graph would hide it from every other user here without
-        // removing it from the neighbourhood.
-        let elsewhere: Vec<Quad> = self
-            .store
-            .quads_for_pattern(Some(reifier_iri.as_ref().into()), None, None, None)
-            .filter(|q| match (q, &graph) {
-                (Ok(q), GraphName::DefaultGraph) => !q.graph_name.is_default_graph(),
-                (Ok(q), _) => q.graph_name.is_default_graph(),
-                (Err(_), _) => true,
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        if !graph.is_default_graph() && !elsewhere.is_empty() {
-            return Err(anyhow!(
-                "Refusing to store a shared link Local: {} -[{}]-> {} is already shared",
-                link.data.source,
-                link.data.predicate.as_deref().unwrap_or(""),
-                link.data.target
-            ));
-        }
-        for quad in &elsewhere {
-            self.store.remove(quad)?;
+        // refused (see `check_local_writes`).
+        if graph.is_default_graph() {
+            let in_user_graphs: Vec<Quad> = self
+                .store
+                .quads_for_pattern(Some(reifier_iri.as_ref().into()), None, None, None)
+                .filter(|q| !matches!(q, Ok(q) if q.graph_name.is_default_graph()))
+                .collect::<Result<Vec<_>, _>>()?;
+            for quad in &in_user_graphs {
+                self.store.remove(quad)?;
+            }
+        } else {
+            self.check_local_writes(std::slice::from_ref(link))?;
         }
 
         // 1. Reifier: <link:HASH> rdf:reifies <<( source predicate target )>>
@@ -750,6 +741,47 @@ impl SparqlStore {
         let mut tx = self.store.start_transaction()?;
         settle_direct_triple_in(&mut tx, triple)?;
         tx.commit()?;
+        Ok(())
+    }
+
+    /// Refuse `additions` if one of them stores a shared link `Local`: a
+    /// link already in the shared graph, or added `Shared` by the same diff.
+    /// Its writer already sees it, and taking it out of the shared graph
+    /// would hide it from every other user here without removing it from the
+    /// neighbourhood. Write paths call this before they write anything, so a
+    /// diff with one refused link writes none of its links.
+    pub fn check_local_writes(&self, additions: &[LinkExpression]) -> Result<(), Error> {
+        let shared_in_diff: HashSet<NamedNode> = additions
+            .iter()
+            .filter(|l| l.status == Some(LinkStatus::Shared))
+            .map(make_reifier_iri)
+            .collect();
+        for link in additions {
+            if link.status != Some(LinkStatus::Local) {
+                continue;
+            }
+            let reifier_iri = make_reifier_iri(link);
+            let shared = shared_in_diff.contains(&reifier_iri)
+                || self
+                    .store
+                    .quads_for_pattern(
+                        Some(reifier_iri.as_ref().into()),
+                        None,
+                        None,
+                        Some(GraphNameRef::DefaultGraph),
+                    )
+                    .next()
+                    .transpose()?
+                    .is_some();
+            if shared {
+                return Err(anyhow!(
+                    "Refusing to store a shared link Local: {} -[{}]-> {} is already shared",
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -1581,18 +1613,14 @@ impl SparqlStore {
     /// default graph and the settling of its direct triple commit together,
     /// so a crash leaves the link either where it was or moved, never half
     /// removed (a half-removed link loses its status quad first and would
-    /// stay readable by every user). A link that is already in a user graph
-    /// and still has quads in the default graph is a move an earlier,
-    /// non-transactional run did not finish; it is finished here, keeping
-    /// the user graphs it reached. A second run finds nothing to move, so it
-    /// is idempotent by construction rather than by a marker.
+    /// stay readable by every user). A second run finds nothing to move, so
+    /// it is idempotent by construction rather than by a marker.
     pub fn move_local_links_to_user_graphs(
         &self,
         owners_of: impl Fn(&str) -> Vec<String>,
     ) -> Result<usize, Error> {
-        use std::collections::HashSet;
         let status_local = literal(status_str(&LinkStatus::Local));
-        let mut reifiers: HashSet<NamedOrBlankNode> = self
+        let reifiers: Vec<NamedOrBlankNode> = self
             .store
             .quads_for_pattern(
                 None,
@@ -1602,32 +1630,6 @@ impl SparqlStore {
             )
             .map(|q| q.map(|q| q.subject))
             .collect::<Result<_, _>>()?;
-        // Half-done moves: a reifier in a user graph with quads left in the
-        // default graph.
-        for quad in self.store.quads_for_pattern(
-            None,
-            Some(NamedNodeRef::new_unchecked(RDF_REIFIES)),
-            None,
-            None,
-        ) {
-            let quad = quad?;
-            if quad.graph_name.is_default_graph() {
-                continue;
-            }
-            let left_behind = self
-                .store
-                .quads_for_pattern(
-                    Some(quad.subject.as_ref()),
-                    None,
-                    None,
-                    Some(GraphNameRef::DefaultGraph),
-                )
-                .next()
-                .is_some();
-            if left_behind {
-                reifiers.insert(quad.subject);
-            }
-        }
 
         let mut moved = 0;
         for reifier in &reifiers {
@@ -1640,29 +1642,18 @@ impl SparqlStore {
                     Some(GraphNameRef::DefaultGraph),
                 )
                 .collect::<Result<_, _>>()?;
-            let reached: HashSet<GraphName> = tx
-                .quads_for_pattern(Some(reifier.as_ref()), None, None, None)
-                .map(|q| q.map(|q| q.graph_name))
-                .collect::<Result<HashSet<_>, _>>()?
-                .into_iter()
-                .filter(|g| !g.is_default_graph())
+            let author = quads
+                .iter()
+                .find(|q| q.predicate.as_str() == ONT_AUTHOR)
+                .and_then(|q| match &q.object {
+                    Term::Literal(l) => Some(l.value().to_string()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            let graphs: Vec<GraphName> = owners_of(&author)
+                .iter()
+                .map(|owner| GraphName::from(local_graph(owner)))
                 .collect();
-            let graphs: Vec<GraphName> = if reached.is_empty() {
-                let author = quads
-                    .iter()
-                    .find(|q| q.predicate.as_str() == ONT_AUTHOR)
-                    .and_then(|q| match &q.object {
-                        Term::Literal(l) => Some(l.value().to_string()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                owners_of(&author)
-                    .iter()
-                    .map(|owner| GraphName::from(local_graph(owner)))
-                    .collect()
-            } else {
-                reached.into_iter().collect()
-            };
             if graphs.is_empty() {
                 return Err(anyhow!("no owner for the Local link {reifier}"));
             }
@@ -1695,11 +1686,23 @@ impl SparqlStore {
             for triple in &triples {
                 settle_direct_triple_in(&mut tx, triple)?;
             }
+            #[cfg(test)]
+            if ABORT_MOVE_BEFORE_COMMIT.with(|n| n.get()) == Some(moved) {
+                return Err(anyhow!("test: move aborted before commit {}", moved + 1));
+            }
             tx.commit()?;
             moved += 1;
         }
         Ok(moved)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only: `Some(n)` makes `move_local_links_to_user_graphs` stop
+    /// before its (n+1)th commit, as a crash there would.
+    pub(crate) static ABORT_MOVE_BEFORE_COMMIT: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
 }
 
 /// [`SparqlStore::settle_direct_triple`] inside `tx`, so a caller can make it
@@ -1708,7 +1711,6 @@ fn settle_direct_triple_in(
     tx: &mut oxigraph::store::Transaction<'_>,
     triple: &Triple,
 ) -> Result<(), Error> {
-    use std::collections::HashSet;
     let rdf_reifies = NamedNodeRef::new_unchecked(RDF_REIFIES);
     let asserted_in: HashSet<GraphName> = tx
         .quads_for_pattern(None, Some(rdf_reifies), Some(TermRef::Triple(triple)), None)
