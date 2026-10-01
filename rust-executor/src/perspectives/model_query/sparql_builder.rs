@@ -231,8 +231,13 @@ pub(super) fn build_instance_sparql(
             }
         }
         // Instances that tie on the sort key (created in the same millisecond, equal
-        // values) keep one order, so a page never swaps them between queries.
+        // values) keep one order, so a page never swaps them between queries. With
+        // per-anchor grouping a source is one row per anchor, so the anchor breaks
+        // the remaining tie.
         suffix.push_str(" ASC(?source)");
+        if per_anchor_limit(query).is_some() || level_limits(query).is_some() {
+            suffix.push_str(&format!(" ASC(?{ANCHOR_VAR})"));
+        }
         if let Some(offset) = pg.offset {
             if offset > 0 {
                 suffix.push_str(&format!("\n    OFFSET {offset}"));
@@ -3197,6 +3202,31 @@ mod traverse_scope_tests {
             limit_per_anchor,
             levels: None,
         }
+    }
+
+    /// A source reachable from two anchors is two rows; the anchor breaks the
+    /// tie the source leaves, so each anchor keeps the same top-N.
+    #[test]
+    fn per_anchor_pages_order_ties_by_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a", "test://b"],
+            false,
+            ScopeDirection::Out,
+            Some(3),
+        ));
+        let pg = make_pg(SortKey::Timestamp, OrderDirection::ASC);
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("expected a paged plan"),
+        };
+        let order = sparql
+            .lines()
+            .find(|l| l.contains("ORDER BY"))
+            .expect("ORDER BY");
+        assert!(order.ends_with(" ASC(?source) ASC(?_anchor)"), "{order}");
     }
 
     #[test]
