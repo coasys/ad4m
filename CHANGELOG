@@ -6,6 +6,8 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- Release binaries ship without symbols [#1244](https://github.com/coasys/ad4m/pull/1244)
+  - The `ad4m-executor` asset drops from about 368 MB to 293 MB. A panic in a shipped binary still reports its file and line, but its backtrace no longer names functions. Local `cargo build --release` is unchanged.
 - **Breaking: model queries select instances by the same links they hydrate from** [#1150](https://github.com/coasys/ad4m/pull/1150)
   - Fixes [#1120](https://github.com/coasys/ad4m/issues/1120). A link withheld from hydration (unverified by default, or of the other status under `linkStatus`) no longer decides which instances match: not a `where` condition pushed into SPARQL (including a nested or side-by-side `author`, relation membership and `NOT`), the class's flags, `count` / `totalCount`, which instances land on a page and in which order, a parent scope's link, or what a `$` projection counts or lists (including its `where` and `transitive` projections, which are now walked one verified step at a time).
   - So a forged `agent` link that claims an admin as its author no longer satisfies `{ agent: { eq: did, author: admin } }`, a forged flag no longer makes a node an instance, and a forged link no longer excludes an instance through `NOT`. `includeUnverified: true` restores the old selection for display.
