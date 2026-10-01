@@ -1982,10 +1982,32 @@ impl Ad4mDb {
     pub fn remove_model(&self, id: &str) -> Ad4mDbResult<()> {
         self.conn
             .execute("DELETE FROM models WHERE id = ?1", params![id])?;
+        // A default left pointing at a removed model would name a model nobody can use.
+        self.conn.execute(
+            "DELETE FROM default_models WHERE model_id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 
+    /// Make `model_id` the default for `model_type`. Refused unless the model exists and has
+    /// that type, so an LLM cannot become the default embedding model.
     pub fn set_default_model(&self, model_type: ModelType, model_id: &str) -> Ad4mDbResult<()> {
+        let model = self.get_model(model_id.to_string())?.ok_or_else(|| {
+            anyhow!(
+                "Cannot set default {:?} model: no model with id {}",
+                model_type,
+                model_id
+            )
+        })?;
+        if model.model_type != model_type {
+            return Err(anyhow!(
+                "Cannot set default {:?} model: model {} is a {:?} model",
+                model_type,
+                model_id,
+                model.model_type
+            ));
+        }
         self.conn.execute(
             "INSERT INTO default_models (model_type, model_id) 
              VALUES (?1, ?2)
@@ -5061,6 +5083,43 @@ mod tests {
         // Clean up
         db.remove_model(&model.name).unwrap();
         db.remove_model(&model2.name).unwrap();
+    }
+
+    #[test]
+    fn default_model_must_exist_have_its_type_and_go_with_it() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let llm = ModelInput {
+            name: "an-llm".to_string(),
+            api: Some(ModelApiInput {
+                base_url: "https://api.test.com".to_string(),
+                api_key: "test-key".to_string(),
+                model: "llama".to_string(),
+                api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
+        let llm_id = db.add_model(&llm).unwrap();
+
+        assert!(
+            db.set_default_model(ModelType::Embedding, &llm_id).is_err(),
+            "an LLM is not an embedding model"
+        );
+        assert!(
+            db.set_default_model(ModelType::Llm, "no-such-model")
+                .is_err(),
+            "a default must name a model that exists"
+        );
+        assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
+
+        db.set_default_model(ModelType::Llm, &llm_id).unwrap();
+        db.remove_model(&llm_id).unwrap();
+        assert_eq!(
+            db.get_default_model(ModelType::Llm).unwrap(),
+            None,
+            "removing a model clears the default that pointed at it"
+        );
     }
 
     #[test]
