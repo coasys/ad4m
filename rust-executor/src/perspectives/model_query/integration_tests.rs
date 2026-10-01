@@ -9619,8 +9619,8 @@ async fn links_inside_an_include_sub_query() {
 // member's own class.
 // ---------------------------------------------------------------------------
 
-/// Two placements: one points at a task carrying two signals, one at a note
-/// whose class declares no `signals` relation at all.
+/// Two placements: one points at a task carrying two signals (one `like`, one
+/// `flag`), one at a note whose class declares no `signals` relation at all.
 async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Arc<ModelShape>) {
     let store = SparqlStore::new(None).unwrap();
     for uri in [
@@ -9665,6 +9665,16 @@ async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Ar
     store
         .add_link(&make_link("we://task/1", "we://signal", "we://sig/2", "6"))
         .unwrap();
+    for (sig, kind) in [("we://sig/1", "like"), ("we://sig/2", "flag")] {
+        store
+            .add_link(&make_link(
+                sig,
+                "we://kind",
+                &format!("literal:string:{kind}"),
+                "6",
+            ))
+            .unwrap();
+    }
     store
         .add_link(&make_link(
             "we://note/1",
@@ -9698,9 +9708,19 @@ async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Ar
                  "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://task_block"},
                  "title":{"predicate":"we://title","resolveLanguage":"literal"}
                },"relations":{
-                 "signals":{"predicate":"we://signal","kind":"hasMany","targetClassName":""}
+                 "signals":{"predicate":"we://signal","kind":"hasMany","targetClassName":"Signal"}
                }}"#,
             "TaskBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(
+            r#"{"className":"Signal","properties":{
+                 "kind":{"predicate":"we://kind","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Signal",
         )
         .unwrap(),
     );
@@ -9768,4 +9788,32 @@ async fn test_projection_on_a_polymorphic_include_is_read_per_member_class() {
 
     assert_eq!(placed(&result, "we://p/1")["$signalsCount"], 2);
     assert!(placed(&result, "we://p/2").get("$signalsCount").is_none());
+}
+
+/// A projection's `where` on a polymorphic include is read against the target
+/// each member's own class declares for `from`.
+///
+/// The SDK leaves such a projection untagged: the members are of several
+/// classes, so there is no one target to name. Without a target the property
+/// filter matched no predicate and was dropped, and the count came back 2.
+/// A list stays a list of IRIs: only the filter reads the target.
+#[tokio::test]
+async fn test_projection_where_on_a_polymorphic_include_reads_the_member_class_target() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": {
+            "$likes": { "from": "signals", "count": true, "where": { "kind": "like" } },
+            "$liked": { "from": "signals", "where": { "kind": "like" } }
+        }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    assert_eq!(task["$likes"], 1, "the `kind` filter applies: {task}");
+    assert_eq!(task["$liked"], json!(["we://sig/1"]));
+    assert!(placed(&result, "we://p/2").get("$likes").is_none());
 }

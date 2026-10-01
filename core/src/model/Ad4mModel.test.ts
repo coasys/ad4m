@@ -2649,13 +2649,26 @@ describe("IncludeProjection type guard and key splitting", () => {
   // projection belongs in the sub-query's own `projections`. Left in `include`
   // it named no relation and was skipped: no error, and no field.
 
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
   @Model({ name: "Board" })
   class Board extends Ad4mModel {
     @HasMany({ through: "board://post", target: () => Post })
     posts: Post[] = [];
 
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
     @HasMany({ through: "board://item", polymorphic: true })
     items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
   }
 
   it("moves a $-key inside a nested include into that sub-query's projections", async () => {
@@ -2684,6 +2697,37 @@ describe("IncludeProjection type guard and key splitting", () => {
 
     expect(posts.include).toEqual({ signals: true });
     expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
   });
 
   it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
