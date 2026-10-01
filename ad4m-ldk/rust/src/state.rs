@@ -4,7 +4,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use futures::lock::Mutex;
+use futures::channel::oneshot;
+use futures::future::{select, Either, FutureExt, Shared};
+use futures::lock::{Mutex, MutexGuard};
 
 use crate::errors::{LanguageError, LanguageResult};
 
@@ -80,10 +82,49 @@ macro_rules! language_state {
 /// No path in the slot panics. A panic in the language's own code still
 /// aborts the WASM module, which does not unwind: a call that held the
 /// lock never releases it. Without the panic record, every later async
-/// call (and `teardown`) would wait for that lock forever.
+/// call (and `teardown`) would wait for that lock forever. A call that
+/// already waits for the lock when the panic happens is woken by the
+/// panic signal (see `Instance::lock`).
 pub struct LanguageSlot<T: 'static> {
     inner: RefCell<Option<Rc<Mutex<T>>>>,
     panicked: RefCell<Option<String>>,
+    // Created on the first `get`, because `new` is `const`. `mark_panicked`
+    // sends the panic message on it, which wakes every waiting `lock`.
+    panic_tx: RefCell<Option<oneshot::Sender<String>>>,
+    panic_rx: RefCell<Option<PanicSignal>>,
+}
+
+type PanicSignal = Shared<oneshot::Receiver<String>>;
+
+/// The instance an async shim locks, with the slot's panic signal.
+pub struct Instance<T: 'static> {
+    mutex: Rc<Mutex<T>>,
+    panicked: PanicSignal,
+}
+
+impl<T: 'static> std::fmt::Debug for Instance<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Instance").finish_non_exhaustive()
+    }
+}
+
+impl<T: 'static> Instance<T> {
+    /// Wait for the instance lock. Fails with the "panicked" error when
+    /// the module panics while this call waits, because the call that
+    /// panicked never releases the lock.
+    pub async fn lock(&self, op: &str) -> LanguageResult<MutexGuard<'_, T>> {
+        match select(self.mutex.lock(), self.panicked.clone()).await {
+            Either::Left((guard, _)) => Ok(guard),
+            Either::Right((Ok(message), _)) => Err(panicked(op, &message)),
+            // The sender only drops with the slot. Keep waiting for the lock.
+            Either::Right((Err(oneshot::Canceled), lock)) => Ok(lock.await),
+        }
+    }
+
+    /// The lock if no call holds it.
+    pub fn try_lock(&self) -> Option<MutexGuard<'_, T>> {
+        self.mutex.try_lock()
+    }
 }
 
 impl<T: 'static> Default for LanguageSlot<T> {
@@ -97,6 +138,8 @@ impl<T: 'static> LanguageSlot<T> {
         Self {
             inner: RefCell::new(None),
             panicked: RefCell::new(None),
+            panic_tx: RefCell::new(None),
+            panic_rx: RefCell::new(None),
         }
     }
 
@@ -107,23 +150,37 @@ impl<T: 'static> LanguageSlot<T> {
     }
 
     /// The shared instance, or a "panicked" / "not initialized" error.
-    pub fn get(&self, op: &str) -> LanguageResult<Rc<Mutex<T>>> {
+    pub fn get(&self, op: &str) -> LanguageResult<Instance<T>> {
         if let Some(message) = self.panic_message() {
-            return Err(LanguageError::internal(format!(
-                "Language unusable: {op} refused because an earlier call panicked: {message}"
-            )));
+            return Err(panicked(op, &message));
         }
-        self.inner
+        let mutex = self
+            .inner
             .borrow()
             .clone()
-            .ok_or_else(|| not_initialized(op))
+            .ok_or_else(|| not_initialized(op))?;
+        Ok(Instance {
+            mutex,
+            panicked: self.panic_signal(),
+        })
+    }
+
+    fn panic_signal(&self) -> PanicSignal {
+        self.panic_rx
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                let (tx, rx) = oneshot::channel();
+                *self.panic_tx.borrow_mut() = Some(tx);
+                rx.shared()
+            })
+            .clone()
     }
 
     /// Run a sync call against the instance. Fails with a "busy" error
     /// when an async call holds the instance.
     pub fn try_with<R>(&self, op: &str, f: impl FnOnce(&mut T) -> R) -> LanguageResult<R> {
-        let m = self.get(op)?;
-        let mut guard = m.try_lock().ok_or_else(|| {
+        let instance = self.get(op)?;
+        let mut guard = instance.try_lock().ok_or_else(|| {
             LanguageError::transient(format!(
                 "Language busy: {op} called while an async call is in progress"
             ))
@@ -133,21 +190,32 @@ impl<T: 'static> LanguageSlot<T> {
 
     /// Remove the instance from the slot. Later calls fail with "not
     /// initialized". Returns `None` when the slot is empty.
-    pub fn take(&self) -> Option<Rc<Mutex<T>>> {
-        self.inner.borrow_mut().take()
+    pub fn take(&self) -> Option<Instance<T>> {
+        let mutex = self.inner.borrow_mut().take()?;
+        Some(Instance {
+            mutex,
+            panicked: self.panic_signal(),
+        })
     }
 
     pub fn is_set(&self) -> bool {
         self.inner.borrow().is_some()
     }
 
-    /// Record that the module panicked. Called from the panic hook, so it
-    /// must not panic itself: it skips the record when the cell is
-    /// borrowed and keeps the first message.
+    /// Record that the module panicked and wake every call that waits
+    /// for the lock. Called from the panic hook, so it must not panic
+    /// itself: it skips the record when a cell is borrowed and keeps the
+    /// first message.
     pub fn mark_panicked(&self, message: &str) {
+        let message: String = message.chars().take(500).collect();
         if let Ok(mut p) = self.panicked.try_borrow_mut() {
             if p.is_none() {
-                *p = Some(message.chars().take(500).collect());
+                *p = Some(message.clone());
+            }
+        }
+        if let Ok(mut tx) = self.panic_tx.try_borrow_mut() {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(message);
             }
         }
     }
@@ -173,6 +241,12 @@ pub fn install_panic_marker(mark: fn(&str)) {
     }));
 }
 
+fn panicked(op: &str, message: &str) -> LanguageError {
+    LanguageError::internal(format!(
+        "Language unusable: {op} refused because an earlier call panicked: {message}"
+    ))
+}
+
 fn not_initialized(op: &str) -> LanguageError {
     LanguageError::internal(format!(
         "Language not initialized: {op} called before init() or after teardown()"
@@ -186,6 +260,9 @@ mod tests {
     use futures::channel::oneshot;
     use futures::executor::block_on;
     use futures::future::join;
+    use futures::task::noop_waker_ref;
+    use std::future::Future;
+    use std::task::{Context, Poll};
 
     #[derive(Debug)]
     struct Counter {
@@ -212,7 +289,7 @@ mod tests {
         // after the second call has started waiting.
         let first = async {
             let m = slot.get("first").unwrap();
-            let mut g = m.lock().await;
+            let mut g = m.lock("first").await.unwrap();
             g.log.push("first:start");
             rx.await.unwrap();
             g.log.push("first:end");
@@ -220,7 +297,7 @@ mod tests {
         let second = async {
             let m = slot.get("second").unwrap();
             tx.send(()).unwrap();
-            let mut g = m.lock().await;
+            let mut g = m.lock("second").await.unwrap();
             g.log.push("second");
         };
         block_on(join(first, second));
@@ -235,7 +312,7 @@ mod tests {
         let slot = LanguageSlot::new();
         slot.set(Counter { log: vec![] });
         let m = slot.get("async").unwrap();
-        let guard = block_on(m.lock());
+        let guard = block_on(m.lock("async")).unwrap();
 
         let e = slot.try_with("perspectiveCommit", |l| l.log.push("sync")).unwrap_err();
         assert!(matches!(e.code, ErrorCode::Transient));
@@ -251,14 +328,14 @@ mod tests {
         let slot = LanguageSlot::new();
         slot.set(Counter { log: vec![] });
         let held = slot.get("async").unwrap();
-        let guard = block_on(held.lock());
+        let guard = block_on(held.lock("async")).unwrap();
 
         let taken = slot.take().expect("instance");
         assert!(!slot.is_set());
         assert!(slot.get("expressionGet").is_err());
         assert!(taken.try_lock().is_none());
         drop(guard);
-        assert!(block_on(taken.lock()).log.is_empty());
+        assert!(block_on(taken.lock("teardown")).unwrap().log.is_empty());
     }
 
     #[test]
@@ -267,7 +344,7 @@ mod tests {
         slot.set(Counter { log: vec![] });
         // A call that panicked in WASM never releases its guard.
         let held = slot.get("expressionGet").unwrap();
-        std::mem::forget(block_on(held.lock()));
+        std::mem::forget(block_on(held.lock("expressionGet")).unwrap());
         slot.mark_panicked("boom at lib.rs:1");
         slot.mark_panicked("a later panic");
 
@@ -287,6 +364,48 @@ mod tests {
             .try_with("interactions", |_| ())
             .expect_err("try_with() must refuse after a panic");
         assert!(e.message.contains("earlier call panicked"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_call_waiting_for_the_lock_fails_when_the_holder_panics() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter { log: vec![] });
+        let held = slot.get("expressionCreate").unwrap();
+        let guard = block_on(held.lock("expressionCreate")).unwrap();
+
+        // Both wait for the lock before the panic: a shim call, and a
+        // teardown that has already taken the instance from the slot.
+        let waiting = slot.get("expressionGet").unwrap();
+        let mut call = Box::pin(waiting.lock("expressionGet"));
+        let taken = slot.take().expect("instance");
+        let mut teardown = Box::pin(taken.lock("teardown"));
+        let mut cx = Context::from_waker(noop_waker_ref());
+        assert!(call.as_mut().poll(&mut cx).is_pending());
+        assert!(teardown.as_mut().poll(&mut cx).is_pending());
+
+        // The holder panics in WASM: it never releases the guard.
+        std::mem::forget(guard);
+        slot.mark_panicked("boom at lib.rs:7");
+
+        assert_refused_after_panic("expressionGet", call.as_mut().poll(&mut cx));
+        assert_refused_after_panic("teardown", teardown.as_mut().poll(&mut cx));
+    }
+
+    fn assert_refused_after_panic<G>(op: &str, polled: Poll<LanguageResult<G>>) {
+        match polled {
+            Poll::Ready(Err(e)) => {
+                assert!(matches!(e.code, ErrorCode::Internal));
+                assert!(e.message.contains(op), "{}", e.message);
+                assert!(
+                    e.message
+                        .contains("earlier call panicked: boom at lib.rs:7"),
+                    "{}",
+                    e.message
+                );
+            }
+            Poll::Ready(Ok(_)) => panic!("{op} must not get the lock of a panicked call"),
+            Poll::Pending => panic!("{op} still waits for a lock that is never released"),
+        }
     }
 
     thread_local! {
