@@ -62,9 +62,7 @@ macro_rules! ad4m_language {
         /// the other.
         fn __ad4m_instance(
             op: &str,
-        ) -> $crate::errors::LanguageResult<
-            ::std::rc::Rc<$crate::__futures::lock::Mutex<$lang>>,
-        > {
+        ) -> $crate::errors::LanguageResult<$crate::state::Instance<$lang>> {
             __AD4M_LANG_STATE.with(|slot| slot.get(op))
         }
 
@@ -108,14 +106,16 @@ macro_rules! ad4m_language {
         /// Async so it can wait for an in-flight async call to finish
         /// before the teardown hook runs. The runtime always awaits
         /// `language.teardown()`. The slot empties first, so calls that
-        /// arrive during teardown get "not initialized". After a panic it
-        /// skips the hook: the aborted call never releases the lock.
+        /// arrive during teardown get "not initialized". After a panic,
+        /// including one while teardown waits, it skips the hook: the
+        /// aborted call never releases the lock.
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "teardown")]
         pub async fn __ad4m_teardown() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let (taken, panicked) = __AD4M_LANG_STATE.with(|slot| (slot.take(), slot.has_panicked()));
-            if let (Some(m), false) = (taken, panicked) {
-                let mut guard = m.lock().await;
-                <$lang as $crate::traits::Language>::teardown(&mut *guard)?;
+            if let (Some(instance), false) = (taken, panicked) {
+                if let Ok(mut guard) = instance.lock("teardown").await {
+                    <$lang as $crate::traits::Language>::teardown(&mut *guard)?;
+                }
             }
             Ok(())
         }
@@ -179,7 +179,7 @@ macro_rules! __ad4m_cap {
             let v: ::serde_json::Value = ::serde_wasm_bindgen::from_value(content)
                 .map_err($crate::errors::LanguageError::from)?;
             let m = __ad4m_instance("expressionCreate")?;
-            let mut guard = m.lock().await;
+            let mut guard = m.lock("expressionCreate").await?;
             Ok(<$lang as $crate::traits::ExpressionCapability>::expression_create(&mut *guard, v).await?)
         }
 
@@ -189,7 +189,7 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let m = __ad4m_instance("expressionGet")?;
             let exp = {
-                let mut guard = m.lock().await;
+                let mut guard = m.lock("expressionGet").await?;
                 <$lang as $crate::traits::ExpressionCapability>::expression_get(&mut *guard, address).await?
             };
             Ok($crate::__serde::to_js(&exp).map_err($crate::errors::LanguageError::from)?)
@@ -280,7 +280,7 @@ macro_rules! __ad4m_cap {
             address: String,
         ) -> ::std::result::Result<String, ::wasm_bindgen::JsValue> {
             let m = __ad4m_instance("languageGetSource")?;
-            let mut guard = m.lock().await;
+            let mut guard = m.lock("languageGetSource").await?;
             Ok(<$lang as $crate::traits::LanguageSourceCapability>::language_get_source(&mut *guard, address).await?)
         }
     };
