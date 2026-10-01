@@ -2643,6 +2643,77 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
   // --- result passthrough ---
 
   it("returns $-keyed projection values attached by Rust on instances", async () => {
