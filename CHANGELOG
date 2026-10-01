@@ -34,6 +34,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- ad4m-connect: a guest can join from a page served over plain HTTP, and `connectAsGuest` no longer needs capabilities [#PR](https://github.com/coasys/ad4m/pull/PR)
+  - Minting a guest identity called `crypto.randomUUID`, which browsers withhold outside secure contexts, so a guest link to a node on a LAN or a tailnet failed. It now falls back to `crypto.getRandomValues`.
+  - A new guest's account address is `guest-<id>@guest.invalid` instead of `@flux.demo` on every host. `.invalid` is reserved and can never receive mail. Guests created before keep the address stored for them.
+  - `connectAsGuest(options, hostUrl)` takes `capabilities` as optional: a guest is logged in as a user and never requests any.
 - Holochain zome calls no longer queue behind each other node-wide [#1133](https://github.com/coasys/ad4m/issues/1133)
   - The Holochain service loop awaited every request to completion, so a cheap telepresence `send_broadcast` waited behind every other space's `sync()`/`pull`, and presence, call signalling and cursors stalled for 10–30 s. Requests are now dispatched concurrently (bounded at 32 in flight); only `InstallApp`/`RemoveApp`/`EnableApp`/`Shutdown` serialize, and they wait for in-flight calls and hold back new ones for their duration only.
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import Ad4mConnect from './core';
+import Ad4mConnect, { randomId } from './core';
 import { setLocal, getLocal } from './utils';
 
 const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
@@ -352,6 +352,47 @@ describe('Ad4mConnect', () => {
     it('throws when not connected', async () => {
       const conn = new Ad4mConnect(defaultOptions);
       await expect(conn.requestTopUp(100)).rejects.toThrow('Not connected');
+    });
+  });
+  describe('connectAsGuest()', () => {
+    // A page served over plain HTTP from anywhere but localhost, as a node on a LAN or a
+    // tailnet often is, has no `crypto.randomUUID`.
+    function withoutRandomUUID<T>(run: () => Promise<T>): Promise<T> {
+      const original = crypto.randomUUID;
+      Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });
+      return run().finally(() =>
+        Object.defineProperty(crypto, 'randomUUID', { value: original, configurable: true }),
+      );
+    }
+
+    it('creates a guest outside a secure context, with an address that cannot receive mail', async () => {
+      await withoutRandomUUID(async () => {
+        const conn = new Ad4mConnect(defaultOptions);
+        await conn.connectAsGuest('http://192.168.1.20:12000');
+      });
+
+      const [email, password] = mockAgent.createUser.mock.calls[0];
+      expect(email).toMatch(/^guest-[0-9a-f-]{36}@guest\.invalid$/);
+      expect(password).toMatch(/^[0-9a-f-]{36}$/);
+      expect(mockAgent.loginUser).toHaveBeenCalledWith(email, password);
+    });
+  });
+
+  describe('randomId()', () => {
+    it('is a v4 UUID whether or not randomUUID exists', async () => {
+      const v4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+      expect(randomId()).toMatch(v4);
+      const fallback = await (async () => {
+        const original = crypto.randomUUID;
+        Object.defineProperty(crypto, 'randomUUID', { value: undefined, configurable: true });
+        try {
+          return [randomId(), randomId()];
+        } finally {
+          Object.defineProperty(crypto, 'randomUUID', { value: original, configurable: true });
+        }
+      })();
+      expect(fallback[0]).toMatch(v4);
+      expect(fallback[0]).not.toBe(fallback[1]);
     });
   });
 });
