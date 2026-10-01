@@ -637,8 +637,10 @@ export default class Ad4mConnect extends EventTarget {
    * refreshing the page reuses the same guest account.
    *
    * Tries loginUser first (returning visitor); falls back to createUser +
-   * loginUser (first visit). No email verification required — password-based
-   * accounts on multi-user executors skip the email code step entirely.
+   * loginUser (first visit). Logging in needs no email code: password-based
+   * accounts on multi-user executors skip that step. A host with email
+   * enabled still tries to send a verification mail to the guest's
+   * `.invalid` address when the account is created.
    */
   async connectAsGuest(hostUrl: string): Promise<Ad4mClient> {
     this.url = hostUrl;
