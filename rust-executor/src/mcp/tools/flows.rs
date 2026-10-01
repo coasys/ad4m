@@ -926,4 +926,101 @@ mod tests {
             serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
         assert_eq!(out["state"], "identified", "{out}");
     }
+
+    /// The MCP flow tools read in the caller's view (#1224): the handles
+    /// from `get_readable_perspective` (`get_flows`) and
+    /// `get_perspective_with_auth` (`flow_proposal_reject`). Bob, a managed
+    /// user, does not see the main agent's Local links and does see his own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_tools_read_the_callers_view() {
+        use crate::agent::capabilities::defs::ALL_CAPABILITY;
+        use crate::agent::AgentContext;
+        use crate::mcp::server::McpContext;
+        use crate::types::Link;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let bob_email = "mcp-flows-bob@test.local";
+        crate::agent::AgentService::ensure_user_key_exists(bob_email).unwrap();
+        let bob = AgentContext::for_user_email(bob_email.to_string());
+        let bob_did = crate::agent::did_for_context(&bob).unwrap();
+        perspective.persisted.lock().await.owners =
+            Some(vec![crate::agent::did(), bob_did.clone()]);
+        let uuid = perspective.uuid.clone();
+        crate::perspectives::register_perspective(uuid.clone(), perspective.clone());
+
+        let mut p = perspective.clone();
+        let link = |source: &str, predicate: &str, target: &str| Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        p.add_link(
+            link("ad4m://self", "ad4m://has_flow", "literal:string:MainFlow"),
+            LinkStatus::Local,
+            None,
+            &AgentContext::main_agent(),
+        )
+        .await
+        .unwrap();
+        p.add_link(
+            link("ad4m://self", "ad4m://has_flow", "literal:string:BobFlow"),
+            LinkStatus::Local,
+            None,
+            &bob,
+        )
+        .await
+        .unwrap();
+        p.add_link(
+            link("test://bobs-proposal", "test://vote", "test://yes"),
+            LinkStatus::Local,
+            None,
+            &bob,
+        )
+        .await
+        .unwrap();
+
+        let was_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true)).unwrap();
+        let token = crate::test_utils::user_jwt_token_with(
+            bob_email,
+            serde_json::json!({
+                "appName": "test",
+                "appDesc": "test",
+                "capabilities": [*ALL_CAPABILITY],
+            }),
+        );
+        let handler = Ad4mMcpHandler::new(McpContext {
+            admin_credential: Some("test-admin".to_string()),
+            auth_token: Arc::new(RwLock::new(Some(token))),
+            dynamic_class_tools: false,
+        });
+
+        let flows = handler
+            .get_flows(Parameters(GetFlowsParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await;
+        let rejected = handler
+            .flow_proposal_reject(Parameters(FlowProposalParams {
+                perspective_id: uuid.clone(),
+                proposal_uri: "test://bobs-proposal".to_string(),
+            }))
+            .await;
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(was_multi_user))
+            .unwrap();
+        crate::perspectives::unregister_perspective(&uuid);
+
+        let flows: serde_json::Value = serde_json::from_str(&flows).expect(&flows);
+        assert_eq!(
+            flows["flows"],
+            serde_json::json!(["literal:string:BobFlow"]),
+            "{flows}"
+        );
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).expect(&rejected);
+        assert_eq!(rejected["retracted_links"], 1, "{rejected}");
+    }
 }

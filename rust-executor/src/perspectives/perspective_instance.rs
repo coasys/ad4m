@@ -7887,6 +7887,77 @@ mod tests {
     /// on a perspective it co-owns with `OTHER_USER`. The main agent receives
     /// all six events; `OTHER_USER` receives the three for the Shared link and
     /// none for the Local one.
+    /// A notification trigger matches what its user can see (#1224): the
+    /// main agent's Local link matches the main agent's trigger and not the
+    /// same trigger registered by a managed user; the user's own Local link
+    /// matches theirs.
+    #[tokio::test]
+    async fn a_notification_trigger_matches_only_its_users_view() {
+        let mut perspective = setup().await;
+        let uuid = perspective.uuid.clone();
+        let bob_email = "notify-bob@test.local";
+        AgentService::ensure_user_key_exists(bob_email).unwrap();
+        let bob = AgentContext::for_user_email(bob_email.to_string());
+        let trigger = "SELECT ?t WHERE { <test://notify> <test://notify-p> ?t }";
+        let register = |user_email: Option<String>| {
+            Ad4mDb::with_global_instance(|db| {
+                db.add_notification(
+                    crate::types::NotificationInput {
+                        description: "test".to_string(),
+                        app_name: "test".to_string(),
+                        app_url: "test".to_string(),
+                        app_icon_path: "test".to_string(),
+                        trigger: trigger.to_string(),
+                        perspective_ids: vec![uuid.clone()],
+                        webhook_url: String::new(),
+                        webhook_auth: String::new(),
+                    },
+                    user_email,
+                )
+            })
+            .unwrap()
+        };
+        let mains = register(None);
+        let bobs = register(Some(bob_email.to_string()));
+        let add = |target: &str| Link {
+            source: "test://notify".to_string(),
+            predicate: Some("test://notify-p".to_string()),
+            target: target.to_string(),
+        };
+        perspective
+            .add_link(
+                add("test://main-local"),
+                LinkStatus::Local,
+                None,
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap();
+        perspective
+            .add_link(add("test://bob-local"), LinkStatus::Local, None, &bob)
+            .await
+            .unwrap();
+
+        let matches = perspective
+            .calc_notification_trigger_matches()
+            .await
+            .unwrap();
+        let targets_for = |id: &str| -> Vec<String> {
+            let (_, rows) = matches
+                .iter()
+                .find(|(n, _)| n.id == id)
+                .expect("the notification is evaluated");
+            let mut t: Vec<String> = rows
+                .iter()
+                .filter_map(|r| r["t"].as_str().map(str::to_string))
+                .collect();
+            t.sort();
+            t
+        };
+        assert_eq!(targets_for(&mains), vec!["test://main-local".to_string()]);
+        assert_eq!(targets_for(&bobs), vec!["test://bob-local".to_string()]);
+    }
+
     #[tokio::test]
     async fn link_events_reach_only_the_owners_who_may_see_the_link() {
         let mut perspective = setup().await;

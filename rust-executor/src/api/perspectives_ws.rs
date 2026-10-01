@@ -2402,7 +2402,10 @@ pub(crate) async fn resolve_shacl_target_class(
 /// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
 /// in-process — one handler call replaces one `queryLinks` round trip, plus
 /// deduplication happens server-side.
-async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+pub(crate) async fn get_shacl_names(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,

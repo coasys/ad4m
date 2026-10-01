@@ -595,3 +595,67 @@ async fn shacl_get_all_handles_target_class_unlinked_mid_walk() {
         "app://ShapeA.x".into(),
     )));
 }
+
+/// The WS handlers read in the requesting agent's view (#1224): here the
+/// perspective handle from `get_perspective_with_access`. The main agent's
+/// Local SHACL link is not in a managed user's view, so `getShaclNames`
+/// through the real handler does not list it for Bob, and does list Bob's
+/// own.
+#[tokio::test]
+async fn shacl_names_through_the_ws_handler_read_the_requesting_users_view() {
+    use crate::agent::capabilities::defs::ALL_CAPABILITY;
+    use crate::types::RequestContext;
+    use std::sync::Arc;
+
+    let perspective = setup_perspective().await;
+    let bob_email = "shacl-ws-bob@test.local";
+    AgentService::ensure_user_key_exists(bob_email).unwrap();
+    let bob = AgentContext::for_user_email(bob_email.to_string());
+    let bob_did = crate::agent::did_for_context(&bob).unwrap();
+    let main_did = crate::agent::did();
+    perspective.persisted.lock().await.owners = Some(vec![main_did, bob_did.clone()]);
+    let uuid = perspective.uuid.clone();
+    crate::perspectives::register_perspective(uuid.clone(), perspective.clone());
+
+    let mut p = perspective.clone();
+    for (name, ctx) in [
+        ("MainSecret", AgentContext::main_agent()),
+        ("BobOwn", bob.clone()),
+    ] {
+        p.add_link(
+            Link {
+                source: "ad4m://self".into(),
+                predicate: Some("ad4m://has_shacl".into()),
+                target: format!("literal:string:shacl://{name}"),
+            },
+            LinkStatus::Local,
+            None,
+            &ctx,
+        )
+        .await
+        .unwrap();
+    }
+
+    // A user token names its user only in multi-user mode.
+    let was_multi_user =
+        Ad4mDb::with_global_instance(|db| db.get_multi_user_enabled().unwrap_or(false));
+    Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true)).unwrap();
+    let ctx = RequestContext {
+        capabilities: Ok(vec![ALL_CAPABILITY.clone()]),
+        auto_permit_cap_requests: false,
+        auth_token: crate::test_utils::user_jwt_token(bob_email),
+        is_admin_credential: false,
+        user_email: Some(bob_email.to_string()),
+        user_did: Some(bob_did),
+        cancel_token: None,
+    };
+    let names = crate::api::perspectives_ws::get_shacl_names(
+        serde_json::json!({ "uuid": uuid }),
+        Arc::new(ctx),
+    )
+    .await;
+    Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(was_multi_user)).unwrap();
+    crate::perspectives::unregister_perspective(&uuid);
+    let names: Vec<String> = serde_json::from_value(names.expect("getShaclNames")).unwrap();
+    assert_eq!(names, vec!["BobOwn".to_string()]);
+}

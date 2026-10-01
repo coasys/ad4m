@@ -505,6 +505,38 @@ async fn a_co_owners_catch_up_does_not_swallow_an_edge_for_another_user() {
     assert!(mine[0].contributing_proposal_uris.contains(&h2));
 }
 
+/// The mirror image: the main agent's marks do not swallow an edge for a
+/// co-owner either. Mallory has passed once (her cache exists), `h2`
+/// settles, the main agent's pass reports and marks it; Mallory's next pass
+/// reads her own view, finds `h2` unmarked there and reports it too.
+///
+/// This pins the pass's own scoping (`run_flow_consensus_pass` reading as
+/// the user it acts for): unscoped, the pass reads as the main agent and
+/// its mark.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_main_agents_marks_do_not_swallow_an_edge_for_a_co_owner() {
+    let mut f = seed_review_flow().await;
+    settle(&mut f, "h1", "review", "changes_requested").await;
+    let mallory = second_agent("mallory-mirror@e2e.test");
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert!(
+        hers.is_empty(),
+        "Mallory's first pass is a silent catch-up: {hers:?}"
+    );
+
+    let h2 = propose(&mut f, "h2", "changes_requested", "review").await;
+    let mine = consensus_pass(&mut f).await;
+    assert_eq!(
+        mine.len(),
+        1,
+        "the main agent reports and marks h2: {mine:?}"
+    );
+
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert_eq!(hers.len(), 1, "Mallory still reports h2: {hers:?}");
+    assert!(hers[0].contributing_proposal_uris.contains(&h2));
+}
+
 /// A newcomer with nothing to catch up on: the first pass writes the cache
 /// (silently, trivially) and the FIRST edge to settle afterwards is
 /// reported — catch-up must not eat the first real event.
