@@ -73,11 +73,17 @@ macro_rules! language_state {
 ///   * sync calls (`try_with`) cannot wait, so they fail with a
 ///     "busy" `LanguageError` while an async call holds the lock;
 ///   * every call before `init()` (or after `teardown()`) fails with a
-///     "not initialized" `LanguageError`.
+///     "not initialized" `LanguageError`;
+///   * every call after a panic fails with a "panicked" `LanguageError`
+///     (see `mark_panicked`).
 ///
-/// No path panics, so one bad call cannot abort the WASM module.
+/// No path in the slot panics. A panic in the language's own code still
+/// aborts the WASM module, which does not unwind: a call that held the
+/// lock never releases it. Without the panic record, every later async
+/// call (and `teardown`) would wait for that lock forever.
 pub struct LanguageSlot<T: 'static> {
     inner: RefCell<Option<Rc<Mutex<T>>>>,
+    panicked: RefCell<Option<String>>,
 }
 
 impl<T: 'static> Default for LanguageSlot<T> {
@@ -88,7 +94,10 @@ impl<T: 'static> Default for LanguageSlot<T> {
 
 impl<T: 'static> LanguageSlot<T> {
     pub const fn new() -> Self {
-        Self { inner: RefCell::new(None) }
+        Self {
+            inner: RefCell::new(None),
+            panicked: RefCell::new(None),
+        }
     }
 
     /// Store a new instance. A call that still holds the old instance
@@ -97,8 +106,13 @@ impl<T: 'static> LanguageSlot<T> {
         *self.inner.borrow_mut() = Some(Rc::new(Mutex::new(value)));
     }
 
-    /// The shared instance, or a "not initialized" error.
+    /// The shared instance, or a "panicked" / "not initialized" error.
     pub fn get(&self, op: &str) -> LanguageResult<Rc<Mutex<T>>> {
+        if let Some(message) = self.panic_message() {
+            return Err(LanguageError::internal(format!(
+                "Language unusable: {op} refused because an earlier call panicked: {message}"
+            )));
+        }
         self.inner
             .borrow()
             .clone()
@@ -126,6 +140,37 @@ impl<T: 'static> LanguageSlot<T> {
     pub fn is_set(&self) -> bool {
         self.inner.borrow().is_some()
     }
+
+    /// Record that the module panicked. Called from the panic hook, so it
+    /// must not panic itself: it skips the record when the cell is
+    /// borrowed and keeps the first message.
+    pub fn mark_panicked(&self, message: &str) {
+        if let Ok(mut p) = self.panicked.try_borrow_mut() {
+            if p.is_none() {
+                *p = Some(message.chars().take(500).collect());
+            }
+        }
+    }
+
+    pub fn has_panicked(&self) -> bool {
+        self.panic_message().is_some()
+    }
+
+    fn panic_message(&self) -> Option<String> {
+        self.panicked.try_borrow().ok().and_then(|p| p.clone())
+    }
+}
+
+/// Install a panic hook that calls `mark` with the panic message, then
+/// the hook that was installed before. `ad4m_language!` calls this once,
+/// after `Language::init()`, so it wraps a hook the language set there
+/// (e.g. `console_error_panic_hook`).
+pub fn install_panic_marker(mark: fn(&str)) {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        mark(&info.to_string());
+        previous(info);
+    }));
 }
 
 fn not_initialized(op: &str) -> LanguageError {
@@ -214,5 +259,58 @@ mod tests {
         assert!(taken.try_lock().is_none());
         drop(guard);
         assert!(block_on(taken.lock()).log.is_empty());
+    }
+
+    #[test]
+    fn calls_after_a_panic_error_instead_of_waiting_for_the_lock() {
+        let slot = LanguageSlot::new();
+        slot.set(Counter { log: vec![] });
+        // A call that panicked in WASM never releases its guard.
+        let held = slot.get("expressionGet").unwrap();
+        std::mem::forget(block_on(held.lock()));
+        slot.mark_panicked("boom at lib.rs:1");
+        slot.mark_panicked("a later panic");
+
+        assert!(slot.has_panicked());
+        let e = slot
+            .get("expressionGet")
+            .expect_err("get() must refuse after a panic, not hand out the locked instance");
+        assert!(matches!(e.code, ErrorCode::Internal));
+        assert!(e.message.contains("expressionGet"), "{}", e.message);
+        assert!(
+            e.message
+                .contains("earlier call panicked: boom at lib.rs:1"),
+            "{}",
+            e.message
+        );
+        let e = slot
+            .try_with("interactions", |_| ())
+            .expect_err("try_with() must refuse after a panic");
+        assert!(e.message.contains("earlier call panicked"), "{}", e.message);
+    }
+
+    thread_local! {
+        static HOOKED: LanguageSlot<Counter> = const { LanguageSlot::new() };
+    }
+
+    fn mark_hooked(message: &str) {
+        let _ = HOOKED.try_with(|slot| slot.mark_panicked(message));
+    }
+
+    #[test]
+    fn panic_marker_records_the_panic_message() {
+        HOOKED.with(|slot| slot.set(Counter { log: vec![] }));
+        install_panic_marker(mark_hooked);
+        let r = std::panic::catch_unwind(|| panic!("probe panic in a language method"));
+        assert!(r.is_err());
+
+        let e = HOOKED
+            .with(|slot| slot.get("expressionGet"))
+            .expect_err("the hook must record the panic on the slot");
+        assert!(
+            e.message.contains("probe panic in a language method"),
+            "{}",
+            e.message
+        );
     }
 }
