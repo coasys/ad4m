@@ -34,7 +34,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
-- ad4m-connect: a guest can join from a page served over plain HTTP, and `connectAsGuest` no longer needs capabilities [#PR](https://github.com/coasys/ad4m/pull/PR)
+- ad4m-connect: a guest can join from a page served over plain HTTP, and `connectAsGuest` no longer needs capabilities [#1245](https://github.com/coasys/ad4m/pull/1245)
   - Minting a guest identity called `crypto.randomUUID`, which browsers withhold outside secure contexts, so a guest link to a node on a LAN or a tailnet failed. It now falls back to `crypto.getRandomValues`.
   - A new guest's account address is `guest-<id>@guest.invalid` instead of `@flux.demo` on every host. `.invalid` is reserved and can never receive mail. Guests created before keep the address stored for them.
   - `connectAsGuest(options, hostUrl)` takes `capabilities` as optional: a guest is logged in as a user and never requests any.
