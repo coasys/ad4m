@@ -463,6 +463,12 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         }
     });
 
+    // Notifications of older executors name their owner by email; move them to DIDs.
+    if let Some(main_agent_did) = AgentService::with_global_instance(|a| a.did.clone()) {
+        Ad4mDb::with_global_instance(|db| db.migrate_notification_owners(&main_agent_did))
+            .expect("Failed to migrate notification owners");
+    }
+
     // Spawn background task to clean up expired verification codes every 5 minutes
     tokio::spawn(async {
         loop {

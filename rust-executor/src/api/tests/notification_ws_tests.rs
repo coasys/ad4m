@@ -148,9 +148,21 @@ fn all_stored() -> Vec<Notification> {
     Ad4mDb::with_global_instance(|db| db.get_notifications()).expect("db read")
 }
 
+fn main_agent_did() -> String {
+    AgentService::with_global_instance(|a| a.did.clone()).expect("main agent did")
+}
+
+/// The DID that owns a notification of the managed user `email`, or of the
+/// main agent for `None`.
+fn owner(email: Option<&str>) -> String {
+    email.map_or_else(main_agent_did, |email| {
+        AgentService::get_user_did_by_email(email).expect("user did")
+    })
+}
+
 /// Writes a notification row directly, as any write path could have left it.
 fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> String {
-    let id = Ad4mDb::with_global_instance(|db| {
+    Ad4mDb::with_global_instance(|db| {
         db.add_notification(
             NotificationInput {
                 description: "stored notification".to_string(),
@@ -162,15 +174,11 @@ fn store(perspective_ids: &[&str], user_email: Option<&str>, granted: bool) -> S
                 webhook_url: "https://webhook.test".to_string(),
                 webhook_auth: "secret".to_string(),
             },
-            user_email.map(str::to_string),
+            &owner(user_email),
+            granted,
         )
     })
-    .expect("add notification");
-    let mut notification = stored(&id).expect("stored notification");
-    notification.granted = granted;
-    Ad4mDb::with_global_instance(|db| db.update_notification(id.clone(), &notification))
-        .expect("set granted");
-    id
+    .expect("add notification")
 }
 
 async fn add_matching_link(perspective: &mut PerspectiveInstance) {
@@ -310,7 +318,7 @@ async fn create_refuses_a_perspective_the_caller_cannot_read() {
     let alice_did = user(ALICE);
     let bob_did = user(BOB);
     let mut perspectives = Perspectives::default();
-    let alices = perspectives.add(Some(vec![alice_did]));
+    let alices = perspectives.add(Some(vec![alice_did.clone()]));
     let bobs = perspectives.add(Some(vec![bob_did]));
     let main = perspectives.add(None);
 
@@ -339,7 +347,7 @@ async fn create_refuses_a_perspective_the_caller_cannot_read() {
         .await
         .expect("Alice lists their own perspective");
     let notification = stored(&id).unwrap();
-    assert_eq!(notification.user_email.as_deref(), Some(ALICE));
+    assert_eq!(notification.owner_did, alice_did);
     assert!(notification.granted);
 }
 
@@ -417,7 +425,7 @@ async fn update_cannot_change_granted_or_owner() {
     let alice_did = user(ALICE);
     let mut perspectives = Perspectives::default();
     let main = perspectives.add(None);
-    let alices = perspectives.add(Some(vec![alice_did]));
+    let alices = perspectives.add(Some(vec![alice_did.clone()]));
 
     // The caller's `granted` is ignored.
     let main_id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
@@ -446,7 +454,7 @@ async fn update_cannot_change_granted_or_owner() {
     let alice_id = create(user_ctx(ALICE), &[&alices.uuid]).await.unwrap();
     let mut params = update_params(&alice_id, &[&alices.uuid]);
     params["description"] = json!("edited");
-    params["userEmail"] = json!(null);
+    params["ownerDid"] = json!(main_agent_did());
     call(
         "runtime.updateNotification",
         params.clone(),
@@ -455,7 +463,7 @@ async fn update_cannot_change_granted_or_owner() {
     .await
     .unwrap();
     let notification = stored(&alice_id).unwrap();
-    assert_eq!(notification.user_email.as_deref(), Some(ALICE));
+    assert_eq!(notification.owner_did, alice_did);
     assert!(notification.granted);
     assert_eq!(notification.description, "edited");
 
@@ -464,7 +472,7 @@ async fn update_cannot_change_granted_or_owner() {
         .await
         .unwrap();
     let notification = stored(&alice_id).unwrap();
-    assert_eq!(notification.user_email.as_deref(), Some(ALICE));
+    assert_eq!(notification.owner_did, alice_did);
     assert!(!notification.granted);
 }
 
@@ -582,4 +590,60 @@ async fn only_the_admin_credential_grants_notifications() {
     .await
     .expect("the operator grants it");
     assert!(stored(&id).unwrap().granted);
+}
+
+// Listing returns the caller's own notifications: a user's, or the main agent's for the operator.
+#[tokio::test]
+async fn each_caller_lists_only_its_own_notifications() {
+    setup();
+    let alice_did = user(ALICE);
+    user(BOB);
+    let mut perspectives = Perspectives::default();
+    let alices = perspectives.add(Some(vec![alice_did]));
+    let main = perspectives.add(None);
+    let alice_id = create(user_ctx(ALICE), &[&alices.uuid]).await.unwrap();
+    let main_id = create(admin_ctx(), &[&main.uuid]).await.unwrap();
+
+    let ids = |listed: Value| -> Vec<String> {
+        let mut ids: Vec<String> = listed
+            .as_array()
+            .expect("list")
+            .iter()
+            .map(|n| n["id"].as_str().unwrap().to_string())
+            .filter(|id| *id == alice_id || *id == main_id)
+            .collect();
+        ids.sort();
+        ids
+    };
+    let listed = |ctx| call("runtime.notifications", json!({}), ctx);
+    assert_eq!(
+        ids(listed(user_ctx(ALICE)).await.unwrap()),
+        vec![alice_id.clone()]
+    );
+    assert_eq!(
+        ids(listed(user_ctx(BOB)).await.unwrap()),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ids(listed(admin_ctx()).await.unwrap()),
+        vec![main_id.clone()]
+    );
+    assert_eq!(
+        ids(listed(app_ctx(vec![AGENT_UPDATE_CAPABILITY.clone()]))
+            .await
+            .unwrap()),
+        vec![main_id]
+    );
+}
+
+// A managed user's session without a DID must not fall back to the main agent's.
+#[tokio::test]
+async fn a_user_session_without_a_did_is_refused() {
+    setup();
+    let mut ctx = context(get_user_default_capabilities(), false, None);
+    ctx.user_email = Some("nobody@notifications.test".to_string());
+    let err = call("runtime.notifications", json!({}), ctx)
+        .await
+        .expect_err("no DID, no notifications");
+    assert_eq!(err.code, 403);
 }

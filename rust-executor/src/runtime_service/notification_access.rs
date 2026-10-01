@@ -1,8 +1,9 @@
 //! Access rules for notifications.
 //!
 //! A notification posts trigger matches from the perspectives it lists to a
-//! webhook URL. It belongs to the managed user in `user_email`, or to the main
-//! agent when that is `None`.
+//! webhook URL. It belongs to the DID in `owner_did`: a managed user's, or the
+//! main agent's for the operator's notifications. Every rule compares DIDs;
+//! the operator's sessions act as the main agent.
 //!
 //! - Grant: a main-agent notification fires only after the operator approves
 //!   it with `runtime.grantNotification`, which only the admin credential may
@@ -20,44 +21,46 @@
 //!   rows that never passed the checks above (older executors, DB import) and
 //!   ownership that changed after the grant.
 
-use std::collections::HashMap;
-
-use crate::agent::AgentService;
-use crate::helpers::can_access_perspective_with_did;
 use crate::types::{Notification, PerspectiveHandle};
 
-/// True when the caller may update or delete `notification`: a managed user
-/// only their own, an operator (`caller_email` is `None`) any.
-pub(crate) fn caller_may_manage(
-    notification: &Notification,
-    caller_email: &Option<String>,
+/// True when `owner_did` may read `perspective`. The main agent also reads
+/// unowned perspectives.
+pub(crate) fn owner_may_read(
+    owner_did: &str,
+    main_agent_did: &str,
+    perspective: &PerspectiveHandle,
 ) -> bool {
-    caller_email.is_none() || notification.user_email == *caller_email
+    perspective.is_owned_by(owner_did) || (owner_did == main_agent_did && perspective.is_unowned())
 }
 
-/// The grant `stored` keeps when the caller in `caller_email` updates it.
-pub(crate) fn granted_after_update(stored: &Notification, caller_email: &Option<String>) -> bool {
-    stored.granted && stored.user_email.is_some() && stored.user_email == *caller_email
+/// True when `caller_did` may update or delete `notification`: a managed user
+/// only their own, the operator (the main agent) any.
+pub(crate) fn caller_may_manage(
+    notification: &Notification,
+    caller_did: &str,
+    main_agent_did: &str,
+) -> bool {
+    caller_did == main_agent_did || notification.owner_did == caller_did
+}
+
+/// The grant `stored` keeps when `caller_did` updates it.
+pub(crate) fn granted_after_update(
+    stored: &Notification,
+    caller_did: &str,
+    main_agent_did: &str,
+) -> bool {
+    stored.granted && stored.owner_did != main_agent_did && stored.owner_did == caller_did
 }
 
 /// The notifications that fire for a change in `perspective`.
 pub(crate) fn notifications_to_fire(
     notifications: Vec<Notification>,
     perspective: &PerspectiveHandle,
+    main_agent_did: &str,
 ) -> Vec<Notification> {
-    // One wallet lookup per user, not one per notification.
-    let mut user_dids: HashMap<String, Option<String>> = HashMap::new();
     notifications
         .into_iter()
         .filter(|n| n.granted && n.perspective_ids.contains(&perspective.uuid))
-        .filter(|n| match &n.user_email {
-            None => can_access_perspective_with_did(&None, perspective),
-            // A user without a key (deleted) reads nothing.
-            Some(email) => user_dids
-                .entry(email.clone())
-                .or_insert_with(|| AgentService::get_user_did_by_email(email).ok())
-                .as_ref()
-                .is_some_and(|did| perspective.is_owned_by(did)),
-        })
+        .filter(|n| owner_may_read(&n.owner_did, main_agent_did, perspective))
         .collect()
 }

@@ -162,16 +162,16 @@ pub(crate) async fn build_event_stream(
     let d_apps = resolved_did.clone();
     let d_trans = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
-    let notification_email = user_email.clone();
 
     // Auto-processor uses `LazyDid` instead of a captured `Option<String>` so
     // a client that connected before `agent.generate()` can still receive its
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
-    // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
+    // #881: "Resolve the DID after it becomes available"). The auto-processor
+    // and notification streams share one lazy cell.
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_notif = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -370,8 +370,6 @@ pub(crate) async fn build_event_stream(
         "message-received",
         "message"
     );
-    // Keyed on the session's user email, not its DID: a notification records
-    // its owner by email, and a main-agent session has no email at all.
     let s_notif = {
         let rx = pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
@@ -379,12 +377,16 @@ pub(crate) async fn build_event_stream(
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let email = notification_email.clone();
+                let did = d_notif.clone();
                 async move {
                     match result {
-                        Ok(ref msg) if matches_notification_owner(msg, email.as_deref()) => Some(
-                            wrap_event_nested("notification-triggered", "notification", msg),
-                        ),
+                        Ok(ref msg) if matches_notification_owner(msg, did.get().as_deref()) => {
+                            Some(wrap_event_nested(
+                                "notification-triggered",
+                                "notification",
+                                msg,
+                            ))
+                        }
                         _ => None,
                     }
                 }
@@ -691,13 +693,14 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
 }
 
 /// A triggered notification carries its owner's trigger matches and webhook
-/// secret, so only the owner's sessions receive it: the managed user named in
-/// `notification.userEmail`, or main-agent sessions (no user email) when that
-/// is null. The perspective's other owners do not. A malformed event reaches
-/// nobody.
-pub(crate) fn matches_notification_owner(msg: &str, session_email: Option<&str>) -> bool {
-    serde_json::from_str::<crate::types::TriggeredNotification>(msg)
-        .is_ok_and(|event| event.notification.user_email.as_deref() == session_email)
+/// secret, so only sessions whose DID equals `notification.ownerDid` receive
+/// it. The perspective's other owners do not. A session without a DID, or a
+/// malformed event, matches nothing.
+pub(crate) fn matches_notification_owner(msg: &str, session_did: Option<&str>) -> bool {
+    session_did.is_some_and(|did| {
+        serde_json::from_str::<crate::types::TriggeredNotification>(msg)
+            .is_ok_and(|event| event.notification.owner_did == did)
+    })
 }
 
 pub(crate) fn matches_query_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
@@ -1144,7 +1147,7 @@ mod notification_owner_filter_tests {
     use super::matches_notification_owner;
     use crate::types::{Notification, TriggeredNotification};
 
-    fn event(owner: Option<&str>) -> String {
+    fn event(owner: &str) -> String {
         serde_json::to_string(&TriggeredNotification {
             notification: Notification {
                 id: "notification".to_string(),
@@ -1157,7 +1160,7 @@ mod notification_owner_filter_tests {
                 perspective_ids: vec!["perspective".to_string()],
                 webhook_url: String::new(),
                 webhook_auth: "secret".to_string(),
-                user_email: owner.map(str::to_string),
+                owner_did: owner.to_string(),
             },
             perspective_id: "perspective".to_string(),
             trigger_match: "[]".to_string(),
@@ -1167,22 +1170,32 @@ mod notification_owner_filter_tests {
 
     #[test]
     fn triggered_notification_reaches_only_its_owners_sessions() {
-        let main_agents = event(None);
-        assert!(matches_notification_owner(&main_agents, None));
-        assert!(!matches_notification_owner(&main_agents, Some("alice@x")));
+        let main_agents = event("did:key:main");
+        assert!(matches_notification_owner(
+            &main_agents,
+            Some("did:key:main")
+        ));
+        assert!(!matches_notification_owner(
+            &main_agents,
+            Some("did:key:alice")
+        ));
 
-        let alices = event(Some("alice@x"));
-        assert!(matches_notification_owner(&alices, Some("alice@x")));
-        assert!(!matches_notification_owner(&alices, Some("bob@x")));
+        let alices = event("did:key:alice");
+        assert!(matches_notification_owner(&alices, Some("did:key:alice")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:bob")));
+        assert!(!matches_notification_owner(&alices, Some("did:key:main")));
         assert!(!matches_notification_owner(&alices, None));
     }
 
     #[test]
     fn malformed_event_reaches_nobody() {
-        assert!(!matches_notification_owner("not json", None));
+        assert!(!matches_notification_owner(
+            "not json",
+            Some("did:key:main")
+        ));
         assert!(!matches_notification_owner(
             r#"{"perspectiveId":"p"}"#,
-            None
+            Some("did:key:main")
         ));
     }
 }
