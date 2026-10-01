@@ -33,6 +33,22 @@ function originAllowed(allowedOrigins: string[], origin: string): boolean {
   });
 }
 
+/**
+ * A random v4 UUID, also outside a secure context.
+ *
+ * `crypto.randomUUID` is withheld from pages served over plain HTTP from
+ * anywhere but localhost, which is how a node on a LAN or a tailnet is often
+ * reached. `crypto.getRandomValues` is not, and is just as random.
+ */
+export function randomId(): string {
+  if (typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
+  bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 export default class Ad4mConnect extends EventTarget {
   options: Ad4mConnectOptions;
   embedded: boolean;
@@ -621,8 +637,10 @@ export default class Ad4mConnect extends EventTarget {
    * refreshing the page reuses the same guest account.
    *
    * Tries loginUser first (returning visitor); falls back to createUser +
-   * loginUser (first visit). No email verification required — password-based
-   * accounts on multi-user executors skip the email code step entirely.
+   * loginUser (first visit). Logging in needs no email code: password-based
+   * accounts on multi-user executors skip that step. A host with email
+   * enabled still tries to send a verification mail to the guest's
+   * `.invalid` address when the account is created.
    */
   async connectAsGuest(hostUrl: string): Promise<Ad4mClient> {
     this.url = hostUrl;
@@ -643,8 +661,10 @@ export default class Ad4mConnect extends EventTarget {
       email    = storedEmail;
       password = storedPassword;
     } else {
-      email    = `guest-${crypto.randomUUID()}@flux.demo`;
-      password = crypto.randomUUID();
+      // `.invalid` is reserved (RFC 2606): the address is only an account key
+      // on the host and can never receive mail, whichever app is the guest's.
+      email    = `guest-${randomId()}@guest.invalid`;
+      password = randomId();
       // Credentials are written to localStorage only after successful
       // account creation below — not here — so a failed createUser call
       // leaves localStorage clean and the next attempt gets fresh credentials.

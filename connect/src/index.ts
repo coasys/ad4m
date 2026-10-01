@@ -46,13 +46,22 @@ export function getAd4mConnect(options: Ad4mConnectOptions): { core: Ad4mConnect
  * Credentials are persisted in localStorage so refreshing the page reuses the
  * same guest identity. Pass the full HTTP URL of the AD4M executor as `hostUrl`.
  *
+ * Over plain HTTP the guest's password and session token cross the network
+ * unencrypted, so anyone on the path can take over that guest account. Use
+ * HTTPS for anything beyond a trusted local network.
+ *
  * @example
  * ```typescript
  * const ad4mClient = await connectAsGuest(options, 'https://your-host.ad4m.dev');
  * ```
  */
-export async function connectAsGuest(options: Ad4mConnectOptions, hostUrl: string): Promise<Ad4mClient> {
-  const core = new Ad4mConnect({ ...options, url: hostUrl, hosting: false });
+export async function connectAsGuest(
+  // A guest is logged in as a user of the host and holds what the host grants
+  // its users; it never requests capabilities, so it need not name any.
+  options: Omit<Ad4mConnectOptions, 'capabilities'> & Partial<Pick<Ad4mConnectOptions, 'capabilities'>>,
+  hostUrl: string,
+): Promise<Ad4mClient> {
+  const core = new Ad4mConnect({ ...options, capabilities: options.capabilities ?? [], url: hostUrl, hosting: false });
   return core.connectAsGuest(hostUrl);
 }
 
