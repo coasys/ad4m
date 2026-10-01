@@ -184,11 +184,11 @@ export interface TraverseOptions {
    * happened to return first. A global `limit`/`offset` is applied to the
    * sliced union afterwards, not before it.
    *
-   * A `where` the store cannot evaluate (an `author` condition, for one) is
-   * applied after hydration, so after the slice: a row it removes has still
-   * taken one of its anchor's places, and that anchor comes back with fewer
-   * than N even when more matching rows exist. Filtering first would mean
-   * fetching every anchor's rows whole, which is what the limit avoids.
+   * A `where` the store cannot evaluate (a bare `author` condition, for one)
+   * is applied after hydration, so after the slice: a row it removes has
+   * still taken one of its anchor's places, and that anchor comes back with
+   * fewer than N even when more matching rows exist. Filtering first would
+   * mean fetching every anchor's rows whole, which is what the limit avoids.
    *
    * Refused alongside `levels`, which applies its own per-anchor limit at
    * every depth.
