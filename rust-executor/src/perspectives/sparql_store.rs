@@ -37,17 +37,6 @@ pub fn local_graph(did: &str) -> NamedNode {
     })
 }
 
-/// The DID of the executor's main agent, if it has one yet.
-///
-/// A read that names no user reads as the main agent: it is the executor's
-/// own identity, and on a single-user executor the only user. See
-/// [`SparqlStore`].
-pub(crate) fn main_agent_did() -> Option<String> {
-    let service = crate::agent::AgentService::global_instance();
-    let guard = service.lock().ok()?;
-    guard.as_ref()?.did.clone()
-}
-
 /// Datatype IRI for AD4M JSON literals — used when a property holds a JSON
 /// payload (objects/arrays) that should round-trip through the store without
 /// being coerced into `xsd:string`.
@@ -463,7 +452,7 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 /// reader's graph only. There is no reader that sees every graph.
 ///
 /// A handle without a reader (every handle [`Self::new`] makes) reads as the
-/// main agent, the executor's own identity ([`main_agent_did`]), and sees
+/// main agent, the executor's own identity ([`crate::agent::cached_main_agent_did`]), and sees
 /// shared links only while the executor has no main agent.
 ///
 /// Each direct triple is in the reader's view at most once: it is kept in the
@@ -556,12 +545,17 @@ impl SparqlStore {
         }
     }
 
+    /// The DID of the user this handle reads as: its reader, or else the
+    /// main agent (`None` while the executor has none).
+    pub fn reader(&self) -> Option<Arc<str>> {
+        self.reader
+            .clone()
+            .or_else(crate::agent::cached_main_agent_did)
+    }
+
     /// The graph of the user this handle reads as, if any.
     fn reader_graph(&self) -> Option<NamedNode> {
-        match &self.reader {
-            Some(did) => Some(local_graph(did)),
-            None => main_agent_did().map(|did| local_graph(&did)),
-        }
+        self.reader().map(|did| local_graph(&did))
     }
 
     /// The graphs a read sees: the default graph, then the reader's graph.

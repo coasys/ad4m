@@ -502,19 +502,16 @@ impl Ad4mMcpHandler {
         }
     }
 
-    /// The user this MCP session reads as.
+    /// The agent this MCP session reads as.
     ///
-    /// MCP is a user-facing surface, so its reads run in this DID's view:
-    /// the shared links plus that user's own `Local` links (#1224). A session
-    /// with no token is the single-user case, which resolves to the main
-    /// agent.
-    pub(crate) async fn viewer_did(&self) -> Result<Option<String>, String> {
-        let context = match self.get_auth_token().await {
+    /// MCP is a user-facing surface, so its reads run in this agent's view:
+    /// the shared links plus its own `Local` links (#1224). A session with
+    /// no token is the single-user case, which is the main agent.
+    pub(crate) async fn reader_context(&self) -> AgentContext {
+        match self.get_auth_token().await {
             Some(token) if !token.is_empty() => AgentContext::from_auth_token(token),
             _ => AgentContext::main_agent(),
-        };
-        crate::perspectives::viewer_reads::viewer_did_for_context(&context)
-            .map_err(|e| e.to_string())
+        }
     }
 
     /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
@@ -629,11 +626,9 @@ impl Ad4mMcpHandler {
         }
 
         // Reads run in the caller's view (#1224); see `get_perspective_with_auth`.
-        match self.viewer_did().await {
-            Ok(Some(did)) => Ok(perspective.read_as(&did)),
-            Ok(None) => Ok(perspective),
-            Err(e) => Err(json!({"error": e}).to_string()),
-        }
+        perspective
+            .read_as_context(&self.reader_context().await)
+            .map_err(|e| json!({"error": e.to_string()}).to_string())
     }
 
     /// Convenience wrapper for write operations (most common case)
@@ -816,6 +811,64 @@ impl Ad4mMcpHandler {
                 );
                 Self::encode_literal(value)
             }
+        }
+    }
+}
+
+/// An MCP session of a managed user, for tests of what a user reads.
+#[cfg(test)]
+pub(crate) mod test_session {
+    use super::Ad4mMcpHandler;
+    use crate::agent::capabilities::defs::ALL_CAPABILITY;
+    use crate::agent::AgentContext;
+    use crate::mcp::server::McpContext;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// Multi-user mode on for the session's lifetime (restored on drop),
+    /// and a handler authenticated as `email` with every capability.
+    pub(crate) struct UserSession {
+        pub handler: Ad4mMcpHandler,
+        pub context: AgentContext,
+        pub did: String,
+        was_multi_user: bool,
+    }
+
+    impl UserSession {
+        pub(crate) fn new(email: &str, dynamic_class_tools: bool) -> Self {
+            crate::agent::AgentService::ensure_user_key_exists(email).unwrap();
+            let context = AgentContext::for_user_email(email.to_string());
+            let did = crate::agent::did_for_context(&context).unwrap();
+            let was_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
+                db.get_multi_user_enabled().unwrap_or(false)
+            });
+            crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(true)).unwrap();
+            let token = crate::test_utils::user_jwt_token_with(
+                email,
+                serde_json::json!({
+                    "appName": "test",
+                    "appDesc": "test",
+                    "capabilities": [*ALL_CAPABILITY],
+                }),
+            );
+            let handler = Ad4mMcpHandler::new(McpContext {
+                admin_credential: Some("test-admin".to_string()),
+                auth_token: Arc::new(RwLock::new(Some(token))),
+                dynamic_class_tools,
+            });
+            UserSession {
+                handler,
+                context,
+                did,
+                was_multi_user,
+            }
+        }
+    }
+
+    impl Drop for UserSession {
+        fn drop(&mut self) {
+            let was = self.was_multi_user;
+            let _ = crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(was));
         }
     }
 }

@@ -137,8 +137,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //    FlowInstance's subject (J#1, PR #929 James review — the fix
     //    replaced `Option<&Scope>` on the dedup axis with
     //    `subjects: &[String]` sourced from the batch cursor).
-    let contexts =
-        gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, None).await;
+    let contexts = gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None).await;
     assert_eq!(
         contexts.len(),
         1,
@@ -171,7 +170,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         base_uri.to_string(),
         "ad4m://task/other-batch-item".to_string(),
     ];
-    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None, None).await;
+    let scoped = gather_active_flow_contexts(&perspective, &multi_matching, None).await;
     assert_eq!(
         scoped.len(),
         1,
@@ -182,13 +181,9 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     // 6) Subjects that don't include the instance's base URI: empty.
     //    This is the property that lets batch-scoped passes ignore
     //    flows running on unrelated bases.
-    let other = gather_active_flow_contexts(
-        &perspective,
-        &["ad4m://task/unrelated".to_string()],
-        None,
-        None,
-    )
-    .await;
+    let other =
+        gather_active_flow_contexts(&perspective, &["ad4m://task/unrelated".to_string()], None)
+            .await;
     assert!(
         other.is_empty(),
         "batch narrowed to a different subject must drop the running flow, got {other:?}"
@@ -198,7 +193,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
     //     used to sweep every FlowInstance on the perspective and
     //     inject it into every prompt (unbounded). The fix makes empty
     //     mean empty — no flow context, no unbounded sweep.
-    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None, None).await;
+    let empty = gather_active_flow_contexts(&perspective, &[] as &[String], None).await;
     assert!(
         empty.is_empty(),
         "empty subjects must not surface any flows, got {empty:?}"
@@ -288,9 +283,12 @@ async fn gather_active_flow_contexts_cache_first_skips_derive() {
         .expect("advance_flow_instance_state to scoped");
 
     let own_did = crate::agent::did_for_context(&ctx).expect("DID");
-    let contexts =
-        gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, Some(&own_did))
-            .await;
+    let contexts = gather_active_flow_contexts(
+        &perspective.read_as(&own_did),
+        &[base_uri.to_string()],
+        None,
+    )
+    .await;
     assert_eq!(
         contexts.len(),
         1,
@@ -335,13 +333,15 @@ async fn gather_active_flow_contexts_ignores_a_co_owners_cache() {
 
     // The run acts for the main agent, who holds no cache of their own.
     let own_did = crate::agent::did_for_context(&ctx).expect("DID");
-    for viewer in [Some(own_did.as_str()), None] {
-        let contexts =
-            gather_active_flow_contexts(&perspective, &[base_uri.to_string()], None, viewer).await;
+    for (viewer, reader) in [
+        ("the main agent, named", perspective.read_as(&own_did)),
+        ("the main agent, unnamed", perspective.clone()),
+    ] {
+        let contexts = gather_active_flow_contexts(&reader, &[base_uri.to_string()], None).await;
         assert_eq!(contexts.len(), 1, "{contexts:?}");
         assert_eq!(
             contexts[0].current_state, "identified",
-            "viewer {viewer:?}: the fold (no proposals: genesis), not the co-owner's cache"
+            "{viewer}: the fold (no proposals: genesis), not the co-owner's cache"
         );
     }
 }

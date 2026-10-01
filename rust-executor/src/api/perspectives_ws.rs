@@ -122,10 +122,9 @@ async fn get_perspective_with_access(
 
     // Every read a handler makes through this handle runs in the requesting
     // agent's view: the shared links plus their own Local links (#1224).
-    match viewer_did(ctx)? {
-        Some(did) => Ok(perspective.read_as(&did)),
-        None => Ok(perspective),
-    }
+    perspective
+        .read_as_context(&AgentContext::from_auth_token(ctx.auth_token.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
@@ -291,17 +290,6 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
-/// The user a request on this surface reads as.
-///
-/// Every handler below serves a request on behalf of an agent, so its reads
-/// run in that agent's view: the shared links plus the agent's own `Local`
-/// links (#1224).
-fn viewer_did(ctx: &RequestContext) -> Result<Option<String>, WsRpcError> {
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    crate::perspectives::viewer_reads::viewer_did_for_context(&agent_context)
-        .map_err(|e| WsRpcError::internal(e.to_string()))
-}
-
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -316,19 +304,15 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
         Err(e) => return Err(e),
     };
-    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links_for_viewer(
-            &LinkQuery {
-                source: None,
-                target: None,
-                predicate: None,
-                from_date: None,
-                until_date: None,
-                limit: None,
-            },
-            viewer.as_deref(),
-        )
+        .get_links(&LinkQuery {
+            source: None,
+            target: None,
+            predicate: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        })
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
@@ -376,9 +360,8 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .map(|v| v as i32),
     };
 
-    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links_for_viewer(&query, viewer.as_deref())
+        .get_links(&query)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(links)?)
@@ -734,7 +717,6 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .opt_str("engine")
         .unwrap_or_else(|| "sparql".to_string());
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let viewer = viewer_did(&ctx)?;
 
     match engine.as_str() {
         "sparql" => {
@@ -750,15 +732,10 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             // historical timeout + spawn_blocking shape.
             let timeout = Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS);
             let result = if let Some(cancel) = ctx.cancel_token.clone() {
-                tokio::time::timeout(
-                    timeout,
-                    perspective.sparql_query_cancellable(query, cancel, viewer.as_deref()),
-                )
-                .await
+                tokio::time::timeout(timeout, perspective.sparql_query_cancellable(query, cancel))
+                    .await
             } else {
-                let join = tokio::task::spawn_blocking(move || {
-                    perspective.sparql_query(query, viewer.as_deref())
-                });
+                let join = tokio::task::spawn_blocking(move || perspective.sparql_query(query));
                 tokio::time::timeout(timeout, async move {
                     join.await
                         .map_err(|e| deno_core::anyhow::anyhow!("Task join error: {}", e))?
@@ -1179,7 +1156,6 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let query_json = params.require_str("query_json")?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let viewer = viewer_did(&ctx)?;
 
     // A `FlowInstance` read is where a user learns a flow's state, and the
     // `currentState` cache is a Local link private to whoever's request wrote
@@ -1203,7 +1179,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query_for_viewer(&class_name, &query_json, viewer.as_deref()),
+        perspective.model_query(&class_name, &query_json),
     )
     .await;
 
@@ -1255,19 +1231,13 @@ async fn evaluate_getters_handler(
         });
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let viewer = viewer_did(&ctx)?;
 
     // Run synchronous getter evaluation on a blocking thread with timeout
     // to avoid blocking the async runtime.
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(
-                &class_name,
-                &instance_ids,
-                property_names.as_deref(),
-                viewer.as_deref(),
-            )
+            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
         }),
     )
     .await;
@@ -2234,10 +2204,6 @@ async fn flow_valid_outputs_handler(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let perspective = match viewer_did(&ctx)? {
-        Some(did) => perspective.read_as(&did),
-        None => perspective,
-    };
     let outputs = crate::perspectives::flow_instance::produced::flow_valid_outputs(
         &perspective,
         &flow,

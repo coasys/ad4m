@@ -92,7 +92,7 @@ async fn fixture_query(
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
 ) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
-    super::query::execute_model_query(store, shape, &with_unverified(query), resolver, None).await
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
 }
 
 async fn fixture_query_from_json(
@@ -9898,11 +9898,10 @@ async fn reverse_include_follows_only_links_the_viewer_may_see() {
         let (store, resolver, shape, query) = (&store, &resolver, &block_shape, &query);
         async move {
             let result = super::query::execute_model_query(
-                store,
+                &store.read_as(viewer),
                 shape.as_ref(),
                 &with_unverified(query),
                 resolver,
-                viewer,
             )
             .await
             .unwrap();

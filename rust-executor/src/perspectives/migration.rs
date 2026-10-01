@@ -228,8 +228,12 @@ impl LocalLinkOwners {
     /// and the owners of the perspective `handle`. Fails when the executor
     /// has no main agent yet, so no link is moved to a graph nobody reads.
     pub fn of_this_executor(handle: &PerspectiveHandle) -> Result<Self, String> {
-        let main_agent = crate::perspectives::sparql_store::main_agent_did()
-            .ok_or("the executor has no main agent DID yet")?;
+        let main_agent = {
+            let service = crate::agent::AgentService::global_instance();
+            let guard = service.lock().map_err(|e| e.to_string())?;
+            guard.as_ref().and_then(|a| a.did.clone())
+        }
+        .ok_or("the executor has no main agent DID yet")?;
         let managed =
             Ad4mDb::with_global_instance(|db| db.list_users()).map_err(|e| e.to_string())?;
         Ok(Self::new(

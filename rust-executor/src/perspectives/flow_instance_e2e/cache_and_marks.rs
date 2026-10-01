@@ -480,14 +480,12 @@ async fn a_co_owners_catch_up_does_not_swallow_an_edge_for_another_user() {
         let h2 = h2.clone();
         async move {
             perspective
-                .get_links_for_viewer(
-                    &LinkQuery {
-                        source: Some(h2),
-                        predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
-                        ..Default::default()
-                    },
-                    Some(&viewer),
-                )
+                .read_as(&viewer)
+                .get_links(&LinkQuery {
+                    source: Some(h2),
+                    predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+                    ..Default::default()
+                })
                 .await
                 .expect("marks")
                 .len()

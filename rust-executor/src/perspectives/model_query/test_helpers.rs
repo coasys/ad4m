@@ -184,8 +184,13 @@ pub async fn execute_model_query_from_json_for_viewer(
     viewer_did: Option<&str>,
 ) -> Result<super::types::ModelQueryResult, Error> {
     let (resolver, shape) = StaticShapeResolver::from_json(class_name, shape_json)?;
-    super::query::execute_model_query(store, shape.as_ref(), query_input, &resolver, viewer_did)
-        .await
+    super::query::execute_model_query(
+        &store.read_as(viewer_did),
+        shape.as_ref(),
+        query_input,
+        &resolver,
+    )
+    .await
 }
 
 /// Test wrapper for `evaluate_getters_batch` that takes shape JSON.

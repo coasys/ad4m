@@ -269,19 +269,13 @@ async fn walk_levels(
 /// * `resolver` — Used to resolve target-class shapes for recursive
 ///   `include` resolution.  Typically a cache-backed resolver living on
 ///   the `PerspectiveInstance`.
-/// * `viewer_did` — Whose view the query reads: the shared links plus that
-///   user's own `Local` links (#1224). `None` keeps `store`'s reader. This is
-///   the one place a model query picks its data; every query below it,
-///   includes and projections too, runs on that view unchanged.
 pub async fn execute_model_query(
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
-    viewer_did: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
-    let store = store.read_as(viewer_did);
-    execute_model_query_inner(&store, shape, query_input, resolver, 0).await
+    execute_model_query_inner(store, shape, query_input, resolver, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.

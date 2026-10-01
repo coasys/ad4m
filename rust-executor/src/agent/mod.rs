@@ -111,6 +111,24 @@ pub fn signing_key_id_for_context(context: &AgentContext) -> Result<String, AnyE
     Ok(did_doc.verification_method[0].id.clone())
 }
 
+/// The main agent's DID, kept beside `AgentService` so a hot path can read
+/// it without taking the service's mutex. Set where the service sets its
+/// DID (`create_new_keys`, `load`); the DID does not change afterwards.
+static MAIN_AGENT_DID: std::sync::RwLock<Option<Arc<str>>> = std::sync::RwLock::new(None);
+
+/// The main agent's DID without locking `AgentService`; `None` until the
+/// agent has keys.
+pub fn cached_main_agent_did() -> Option<Arc<str>> {
+    MAIN_AGENT_DID
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn cache_main_agent_did(did: &str) {
+    *MAIN_AGENT_DID.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::from(did));
+}
+
 pub fn did_for_context(context: &AgentContext) -> Result<String, AnyError> {
     if context.is_main_agent {
         // For main agent, get from AgentService
@@ -683,6 +701,7 @@ impl AgentService {
 
         self.did_document = Some(serde_json::to_string(&did_document()).unwrap());
         self.did = Some(did.clone());
+        cache_main_agent_did(&did);
         self.agent = Some(Agent {
             did,
             perspective: Some(Perspective { links: vec![] }),
@@ -758,6 +777,7 @@ impl AgentService {
         let dump: AgentStore = serde_json::from_str(&file).unwrap();
 
         self.did = Some(dump.did.clone());
+        cache_main_agent_did(&dump.did);
         self.did_document = Some(dump.did_document);
         self.signing_key_id = Some(dump.signing_key_id);
 

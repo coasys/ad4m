@@ -306,7 +306,9 @@ Each user's data is fully isolated within the shared executor:
 
   Raw SPARQL reads the same view. `querySparql`, `subscribeSparql`, `evaluateGetters`, hand-written SPARQL `getter` properties and relations, and `getSubjectData` run over the shared links plus your own local links; the query does not change, the executor chooses the data it runs on. A query cannot reach another user's graph: `FROM <…>`, `FROM NAMED <…>` and `GRAPH ?g` see your own graph and nothing else. A local link is in the graph of the user who wrote it, even when it names another agent as its author (`addLinkExpression` with a link someone else signed).
 
-  Perspectives created before this storage existed are migrated once, when the executor loads them: each local link moves into the graph of its author when the author is a user of this host, and into the main agent's graph otherwise (a link another agent signed, which some user of the host stored as local).
+  A link is one signed expression (author, timestamp and triple), and it is either shared or local, never both. Storing a shared link as `local` is refused, since that would hide it from the other users of the host. When a local link arrives shared (a link language delivers the same signed expression), it moves to the shared store unchanged.
+
+  Perspectives created before this storage existed are migrated once, when the executor loads them: each local link moves into the graph of its author when the author is a user of this host. A local link another agent signed, which some user of the host stored as local, is copied into the graph of each owner of the perspective, since every owner saw it before; only in a perspective without owners does it go to the main agent. A perspective whose links cannot be moved is not loaded until the executor restarts, so its local links are never shown to the wrong user.
 
 ## For App Developers: No Changes Required
 

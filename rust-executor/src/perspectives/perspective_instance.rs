@@ -31,6 +31,7 @@ use crate::types::{
 };
 use crate::{db::Ad4mDb, types::*};
 use ad4m_client::literal::Literal;
+use chrono::DateTime;
 use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use futures::future;
@@ -496,10 +497,13 @@ pub struct PerspectiveInstance {
     last_successful_fallback_sync: Arc<Mutex<Option<tokio::time::Instant>>>,
     fallback_sync_interval: Arc<Mutex<Duration>>,
     pub(crate) sparql_store: Arc<crate::perspectives::sparql_store::SparqlStore>,
-    /// In-memory cache of parsed `ModelShape` instances keyed by class name.
-    /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
-    /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
-    shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
+    /// In-memory cache of parsed `ModelShape` instances keyed by reader and
+    /// class name: a shape is parsed from the SHACL its reader sees, and a
+    /// class in one user's Local links must not shape another user's reads
+    /// (#1224). Populated lazily from SHACL triples in `sparql_store`;
+    /// invalidated by `add_sdna_inner` when SHACL is re-written for a class.
+    /// No persistence.
+    shape_cache: Arc<std::sync::RwLock<ShapeCache>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -519,25 +523,27 @@ pub struct PerspectiveInstance {
     fail_add_link_after: Arc<AtomicI64>,
 }
 
+/// Parsed shapes by (reader DID, class name); see `PerspectiveInstance::shape_cache`.
+type ShapeCache = HashMap<(Option<Arc<str>>, String), Arc<ModelShape>>;
+
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
 /// lifetime of a single query.  On miss it parses SHACL from the perspective's
-/// store and memoizes the result.
+/// store, as the store's reader sees it, and memoizes the result for that
+/// reader.
 pub(super) struct PerspectiveShapeResolver<'a> {
-    cache: &'a std::sync::RwLock<HashMap<String, Arc<ModelShape>>>,
+    cache: &'a std::sync::RwLock<ShapeCache>,
     store: &'a crate::perspectives::sparql_store::SparqlStore,
 }
 
 impl<'a> ShapeResolver for PerspectiveShapeResolver<'a> {
     fn get_shape(&self, class_name: &str) -> Result<Arc<ModelShape>, AnyError> {
-        if let Some(shape) = self.cache.read().unwrap().get(class_name).cloned() {
+        let key = (self.store.reader(), class_name.to_string());
+        if let Some(shape) = self.cache.read().unwrap().get(&key).cloned() {
             return Ok(shape);
         }
         let shape = load_shape_from_store(self.store, class_name)?;
         let arc = Arc::new(shape);
-        self.cache
-            .write()
-            .unwrap()
-            .insert(class_name.to_string(), arc.clone());
+        self.cache.write().unwrap().insert(key, arc.clone());
         Ok(arc)
     }
 }
@@ -608,7 +614,10 @@ impl PerspectiveInstance {
     /// Drop any cached `ModelShape` for `class_name`.  Called when SHACL is
     /// (re-)written for the class so the next query re-parses fresh state.
     pub fn invalidate_shape(&self, class_name: &str) {
-        self.shape_cache.write().unwrap().remove(class_name);
+        self.shape_cache
+            .write()
+            .unwrap()
+            .retain(|(_, class), _| class != class_name);
     }
 
     /// Like [`get_shape`], but for perspectives joined to a
@@ -2422,7 +2431,23 @@ impl PerspectiveInstance {
         &self,
         query: &LinkQuery,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        self.get_links_local_decorated_for_viewer(query, None)
+        let from_date = query.from_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+        let until_date = query.until_date.as_ref().map(|d| {
+            let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+            dt.to_rfc3339()
+        });
+
+        Ok(self.sparql_store.query_links(
+            query.source.as_deref(),
+            query.predicate.as_deref(),
+            query.target.as_deref(),
+            from_date.as_deref(),
+            until_date.as_deref(),
+            None, // limit is applied after sorting in get_links()
+        )?)
     }
 
     fn get_links_local(
@@ -2454,12 +2479,77 @@ impl PerspectiveInstance {
 
     /// Read links as this instance reads: the shared links plus the `Local`
     /// links of its reader, the main agent unless the instance was scoped
-    /// with [`Self::read_as`].
-    ///
-    /// Anything serving a request on behalf of an agent — WS RPC, MCP — calls
-    /// [`Self::get_links_for_viewer`] with that agent's DID instead.
+    /// with [`Self::read_as`]. Request surfaces (WS RPC, MCP) scope the
+    /// instance to the requesting agent before any read.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        self.get_links_for_viewer(q, None).await
+        let mut reverse = false;
+        let mut query = q.clone();
+
+        if let Some(until_date) = query.until_date.as_ref() {
+            if let Some(from_date) = query.from_date.as_ref() {
+                let chrono_from_date: chrono::DateTime<chrono::Utc> = from_date.clone().into();
+                let chrono_until_date: chrono::DateTime<chrono::Utc> = until_date.clone().into();
+                if chrono_from_date > chrono_until_date {
+                    reverse = true;
+                    query.from_date.clone_from(&q.until_date);
+                    query.until_date.clone_from(&q.from_date);
+                }
+            }
+        }
+
+        // When the caller supplies a `limit`, push it down into the store via
+        // a bounded top-N heap. This keeps memory at O(limit) regardless of
+        // how many links match — the previous materialise-sort-truncate path
+        // allocated the full Vec even for a 10-item page, which on large
+        // perspectives was a substantial regression in the same hot path this
+        // PR is trying to shrink.
+        //
+        // Otherwise (no limit) fall back to the in-memory sort path. We still
+        // pull the decorated form directly from the store so we don't pay the
+        // triple-materialisation tax described below.
+        if let Some(limit) = query.limit {
+            let from_date = query.from_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            let until_date = query.until_date.as_ref().map(|d| {
+                let dt: chrono::DateTime<chrono::Utc> = d.clone().into();
+                dt.to_rfc3339()
+            });
+            return Ok(self.sparql_store.query_links_top_n_by_timestamp(
+                query.source.as_deref(),
+                query.predicate.as_deref(),
+                query.target.as_deref(),
+                from_date.as_deref(),
+                until_date.as_deref(),
+                limit as usize,
+                reverse,
+            )?);
+        }
+
+        // No limit: pull the already-decorated form from the SPARQL store and
+        // sort in-place. Previously this path materialised Vec<...> three
+        // times: once as DecoratedLinkExpression in get_links_local_decorated,
+        // again as Vec<(LinkExpression, LinkStatus)> in get_links_local
+        // (unwrap), and a third time after sort by re-wrapping each pair via
+        // `DecoratedLinkExpression::from((link, status))` — which re-runs
+        // Ed25519 signature verification per link. For a 10K-link result
+        // that's ~30K extra small allocations + 10K crypto ops every call.
+        // The wind-tunnel S9 query path was the dominant remaining source of
+        // RSS growth; this collapses it to a single Vec.
+        let mut links = self.get_links_local_decorated(&query)?;
+
+        links.sort_by(|a, b| {
+            let a_time = DateTime::parse_from_rfc3339(&a.timestamp).unwrap_or_default();
+            let b_time = DateTime::parse_from_rfc3339(&b.timestamp).unwrap_or_default();
+            if reverse {
+                b_time.cmp(&a_time)
+            } else {
+                a_time.cmp(&b_time)
+            }
+        });
+
+        Ok(links)
     }
 
     /// Adds the given Social DNA code to the perspective's SDNA code
@@ -3044,7 +3134,8 @@ impl PerspectiveInstance {
                 // Get all links for Simple mode. Use the decorated form
                 // directly — re-running signature verification per link was
                 // hot in the wind tunnel.
-                self.get_links_local_decorated_for_viewer(&LinkQuery::default(), Some(&user_did))?
+                self.read_as(&user_did)
+                    .get_links_local_decorated(&LinkQuery::default())?
             }
             PrologMode::SdnaOnly => {
                 // Get only SDNA links for SdnaOnly mode (efficient query)
@@ -3465,16 +3556,11 @@ impl PerspectiveInstance {
     /// `query` (no wire-format re-encoding of coincidentally-named
     /// `?target`/`?t` bindings; see `SparqlStore::query_arbitrary`).
     ///
-    /// The query runs over `viewer_did`'s view (shared links plus their own
-    /// `Local` links); the text is not rewritten.
-    pub fn sparql_query(
-        &self,
-        query: String,
-        viewer_did: Option<&str>,
-    ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store
-            .read_as(viewer_did)
-            .query_arbitrary(&query)
+    /// The query runs over this instance's reader's view (shared links plus
+    /// their own `Local` links, see [`Self::read_as`]); the text is not
+    /// rewritten.
+    pub fn sparql_query(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.query_arbitrary(&query)
     }
 
     /// Resolve each URI to every subject class it is an instance of, most
@@ -3509,12 +3595,8 @@ impl PerspectiveInstance {
         &self,
         query: String,
         cancel: tokio_util::sync::CancellationToken,
-        viewer_did: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.sparql_store
-            .read_as(viewer_did)
-            .query_cancellable(&query, cancel)
-            .await
+        self.sparql_store.query_cancellable(&query, cancel).await
     }
 
     /// The ordering strategy declared for `(source, predicate)`, if any.
@@ -3795,8 +3877,79 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
-        self.model_query_for_viewer(class_name, query_json, None)
-            .await
+        let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
+            .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
+
+        // `where.producedByFlow` is resolved here, not in the pipeline: it
+        // needs the perspective (receipts, flow catalogue) and signature
+        // verification, neither of which SPARQL or the post-hydration filter
+        // has. Extracted BEFORE the query runs and turned into an id
+        // constraint the store applies ahead of `limit`/`offset` — so a page
+        // of N is N *valid* outputs, never N rows later thinned. Malformed or
+        // mis-placed filters error rather than silently admit everything.
+        let produced_by_flow = super::model_query::take_produced_by_flow(&mut query_input)
+            .map_err(deno_core::anyhow::Error::msg)?;
+
+        // Cross-peer safety: on a shared perspective we may be asked about
+        // a class whose SHACL hasn't synced yet. Poll briefly rather than
+        // fail immediately. The subsequent recursive resolves inside
+        // `execute_model_query` use the plain (non-waiting) resolver
+        // because at that point the top-level shape has been resolved so
+        // referenced target-classes are extremely likely to also be
+        // present already — a nested wait per relation would multiply
+        // latency for a case we haven't seen bite in practice.
+        let _ = self
+            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
+            .await?;
+        let resolver = self.shape_resolver();
+        let shape = resolver.get_shape(class_name)?;
+
+        if let Some(filter) = produced_by_flow {
+            let valid = super::flow_instance::produced::flow_valid_outputs(
+                self,
+                &filter.flow,
+                filter.state.as_deref(),
+            )
+            .await?;
+            // Only outputs committed as the queried class pass; see
+            // `output_matches_class` for why conformance alone is not enough.
+            let allowed: std::collections::BTreeSet<String> = valid
+                .into_iter()
+                .filter(|v| {
+                    super::flow_instance::produced::output_matches_class(
+                        &v.output,
+                        class_name,
+                        &shape.target_class,
+                    )
+                })
+                .map(|v| v.output.id)
+                .collect();
+            if !super::model_query::constrain_ids(&mut query_input, allowed)
+                .map_err(deno_core::anyhow::Error::msg)?
+            {
+                // No valid output survives; answer directly rather than
+                // handing the store an empty VALUES block.
+                return serde_json::to_string(&super::model_query::ModelQueryResult {
+                    instances: vec![],
+                    total_count: 0,
+                })
+                .map_err(|e| {
+                    deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+                });
+            }
+        }
+
+        let result = super::model_query::execute_model_query(
+            &self.sparql_store,
+            shape.as_ref(),
+            &query_input,
+            &resolver,
+        )
+        .await?;
+
+        serde_json::to_string(&result).map_err(|e| {
+            deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
+        })
     }
 
     /// Evaluate property getters for a batch of instances in-process.
@@ -3808,11 +3961,10 @@ impl PerspectiveInstance {
         class_name: &str,
         instance_ids: &[String],
         property_names: Option<&[String]>,
-        viewer_did: Option<&str>,
     ) -> Result<String, deno_core::anyhow::Error> {
         let shape = self.get_shape(class_name)?;
         let result = super::model_query::evaluate_getters_batch(
-            &self.sparql_store.read_as(viewer_did),
+            &self.sparql_store,
             shape.as_ref(),
             instance_ids,
             property_names,
@@ -5670,8 +5822,8 @@ impl PerspectiveInstance {
             crate::agent::AgentContext::main_agent()
         };
         let result_string = if is_sparql_query(&query) {
-            let viewer_did = did_for_context(&agent_context)?;
-            self.sparql_query(query.clone(), Some(&viewer_did))?
+            self.read_as_context(&agent_context)?
+                .sparql_query(query.clone())?
         } else {
             let initial_result = self
                 .prolog_query_subscription_with_context(query.clone(), &agent_context)
@@ -5719,9 +5871,9 @@ impl PerspectiveInstance {
             Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
             None => crate::agent::AgentContext::main_agent(),
         };
-        let viewer_did = super::viewer_reads::viewer_did_for_context(&agent_context)?;
         let initial_result = self
-            .model_query_for_viewer(&class_name, &query_json, viewer_did.as_deref())
+            .read_as_context(&agent_context)?
+            .model_query(&class_name, &query_json)
             .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
@@ -5966,9 +6118,8 @@ impl PerspectiveInstance {
                 // so every re-run has to stay in that agent's visibility
                 // scope — otherwise the first update after a co-owner writes
                 // a Local link would deliver what the initial query withheld.
-                let viewer_did = match super::viewer_reads::viewer_did_for_context(&_agent_context)
-                {
-                    Ok(did) => did,
+                let subscriber = match self_clone.read_as_context(&_agent_context) {
+                    Ok(subscriber) => subscriber,
                     Err(e) => {
                         log::error!("❌ 🔗 subscription viewer DID unresolved: {}", e);
                         return None;
@@ -5977,12 +6128,8 @@ impl PerspectiveInstance {
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
-                    match self_clone
-                        .model_query_for_viewer(
-                            &params.class_name,
-                            &params.query_json,
-                            viewer_did.as_deref(),
-                        )
+                    match subscriber
+                        .model_query(&params.class_name, &params.query_json)
                         .await
                     {
                         Ok(r) => r,
@@ -5992,7 +6139,7 @@ impl PerspectiveInstance {
                         }
                     }
                 } else if is_sparql_query(&query_string) {
-                    match self_clone.sparql_query(query_string, viewer_did.as_deref()) {
+                    match subscriber.sparql_query(query_string) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
@@ -7834,7 +7981,7 @@ mod tests {
             .into_iter()
             .flatten()
         {
-            for link in p.get_links_for_viewer(&query, Some(&viewer)).await.unwrap() {
+            for link in p.read_as(&viewer).get_links(&query).await.unwrap() {
                 if !all.contains(&link) {
                     all.push(link);
                 }
@@ -8238,14 +8385,12 @@ mod tests {
         viewer: &str,
     ) -> Vec<String> {
         let mut targets: Vec<String> = p
-            .get_links_for_viewer(
-                &LinkQuery {
-                    source: Some(WRITE_SOURCE.to_string()),
-                    predicate: Some(predicate.to_string()),
-                    ..Default::default()
-                },
-                Some(viewer),
-            )
+            .read_as(viewer)
+            .get_links(&LinkQuery {
+                source: Some(WRITE_SOURCE.to_string()),
+                predicate: Some(predicate.to_string()),
+                ..Default::default()
+            })
             .await
             .unwrap()
             .into_iter()
@@ -8426,9 +8571,10 @@ mod tests {
             async move {
                 let query = format!(r#"{{"where":{{"id":"{WRITE_SOURCE}"}},"limit":1}}"#);
                 let result = p
-                    .model_query_for_viewer("Note", &query, Some(&viewer))
+                    .read_as(&viewer)
+                    .model_query("Note", &query)
                     .await
-                    .expect("model_query_for_viewer");
+                    .expect("model_query");
                 let result: serde_json::Value = serde_json::from_str(&result).unwrap();
                 result["instances"][0][name].as_str().map(str::to_string)
             }
@@ -9223,6 +9369,54 @@ mod tests {
         );
     }
 
+    /// A class the main agent defines in its own Local links does not shape
+    /// another user's model queries (#1224), not even after the main agent
+    /// has queried it and its shape is cached. Bob has a Shared instance of
+    /// the class (its required property); he cannot query it as that class.
+    #[tokio::test]
+    async fn the_main_agents_local_class_does_not_shape_another_users_model_query() {
+        let mut perspective = setup().await;
+        let bob_email = "local-class-bob@test.local";
+        AgentService::ensure_user_key_exists(bob_email).unwrap();
+        let bob = AgentContext::for_user_email(bob_email.to_string());
+        let bob_did = crate::agent::did_for_context(&bob).unwrap();
+
+        let shacl = cache_test_shacl("Privateclass", "ns://");
+        for link in
+            crate::perspectives::shacl_parser::parse_shacl_to_links(&shacl, "Privateclass").unwrap()
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &AgentContext::main_agent())
+                .await
+                .unwrap();
+        }
+        // Bob's item has the class's required property, so it is an
+        // instance wherever the class is defined.
+        perspective
+            .add_link(
+                Link {
+                    source: "ns://bobs-item".to_string(),
+                    predicate: Some("ns://name".to_string()),
+                    target: "literal:string:bob".to_string(),
+                },
+                LinkStatus::Shared,
+                None,
+                &bob,
+            )
+            .await
+            .unwrap();
+
+        let mine = perspective.model_query("Privateclass", "{}").await.unwrap();
+        let mine: serde_json::Value = serde_json::from_str(&mine).unwrap();
+        assert_eq!(mine["instances"].as_array().unwrap().len(), 1, "{mine}");
+
+        let bobs = perspective
+            .read_as(&bob_did)
+            .model_query("Privateclass", "{}")
+            .await;
+        assert!(bobs.is_err(), "no such class in Bob's view: {bobs:?}");
+    }
+
     #[tokio::test]
     async fn test_shape_cache_returns_same_arc_on_second_call() {
         let mut perspective = setup().await;
@@ -9734,11 +9928,7 @@ mod tests {
         // Uncancelled — should return JSON with at least the inserted triple.
         let cancel = tokio_util::sync::CancellationToken::new();
         let result = perspective
-            .sparql_query_cancellable(
-                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
-                cancel,
-                None,
-            )
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
             .expect("non-cancelled query should succeed");
         let rows: Vec<serde_json::Value> = serde_json::from_str(&result).unwrap();
@@ -9751,11 +9941,7 @@ mod tests {
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
         let err = perspective
-            .sparql_query_cancellable(
-                "SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(),
-                cancel,
-                None,
-            )
+            .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
             .expect_err("pre-cancelled query should error");
         assert!(

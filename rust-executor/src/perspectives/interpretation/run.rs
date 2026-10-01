@@ -663,14 +663,10 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             Vec::new()
         };
-        let viewer_did = crate::perspectives::viewer_reads::viewer_did_for_context(context)
-            .ok()
-            .flatten();
         let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
             perspective,
             &flow_subjects,
             flow_filter,
-            viewer_did.as_deref(),
         )
         .await;
         let speaker_names = build_speaker_name_map(transcript);
@@ -1070,14 +1066,10 @@ pub async fn run_interpretation_with_harness_and_model(
     } else {
         Vec::new()
     };
-    let viewer_did = crate::perspectives::viewer_reads::viewer_did_for_context(context)
-        .ok()
-        .flatten();
     let active_flows = crate::perspectives::flow_context::gather_active_flow_contexts(
         perspective,
         &flow_subjects,
         flow_filter,
-        viewer_did.as_deref(),
     )
     .await;
     let speaker_names = build_speaker_name_map(transcript);

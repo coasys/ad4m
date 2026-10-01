@@ -2265,7 +2265,8 @@ async fn in_every_view(
 ) -> Vec<crate::types::DecoratedLinkExpression> {
     let mut all = perspective.get_links(query).await.unwrap();
     for link in perspective
-        .get_links_for_viewer(query, Some("did:key:z6MkOtherManagedUser"))
+        .read_as("did:key:z6MkOtherManagedUser")
+        .get_links(query)
         .await
         .unwrap()
     {
@@ -2683,7 +2684,8 @@ async fn assert_only_other_users_copy_left(uuid: &str, channel: &str, item: &str
         let query = query.clone();
         async move {
             perspective
-                .get_links_for_viewer(&query, Some(&viewer))
+                .read_as(&viewer)
+                .get_links(&query)
                 .await
                 .unwrap()
                 .len()
@@ -2738,4 +2740,49 @@ async fn instance_remove_from_collection_leaves_other_users_local_member() {
 
     assert_eq!(parse(&out)["success"], true, "{out}");
     assert_only_other_users_copy_left(&uuid, &channel, "ad4m://obj/private", &out).await;
+}
+
+/// The per-class tool list is built from the classes the session's agent
+/// sees (#1224): a class defined in the main agent's Local links is not
+/// offered to a managed user, and the user's own Local class is.
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_tool_list_offers_the_classes_the_caller_sees() {
+    let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+    let bob = super::super::test_session::UserSession::new("mcp-tools-bob@test.local", true);
+    perspective.persisted.lock().await.owners = Some(vec![crate::agent::did(), bob.did.clone()]);
+    let uuid = perspective.uuid.clone();
+    register_perspective(uuid.clone(), perspective.clone());
+    let _guard = PerspectiveGuard(uuid.clone());
+
+    let mut p = perspective.clone();
+    let class = |name: &str| {
+        format!(
+            r#"{{"target_class":"ns://{name}","constructor_actions":[{{"action":"addLink","source":"this","predicate":"rdf://type","target":"ns://{name}"}}],"properties":[]}}"#
+        )
+    };
+    for (name, ctx) in [
+        ("Secretclass", crate::agent::AgentContext::main_agent()),
+        ("Bobsclass", bob.context.clone()),
+    ] {
+        for link in
+            crate::perspectives::shacl_parser::parse_shacl_to_links(&class(name), name).unwrap()
+        {
+            p.add_link(link, crate::types::LinkStatus::Local, None, &ctx)
+                .await
+                .unwrap();
+        }
+    }
+
+    let names: Vec<String> = bob
+        .handler
+        .exposed_tools()
+        .await
+        .iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    assert!(names.iter().any(|n| n == "bobsclass_create"), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("secretclass_")),
+        "{names:?}"
+    );
 }

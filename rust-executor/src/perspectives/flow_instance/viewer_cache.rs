@@ -278,9 +278,10 @@ mod tests {
         let (_, other_did) = other_user();
         let mut all = perspective.get_links(&query).await.expect("get_links");
         for link in perspective
-            .get_links_for_viewer(&query, Some(&other_did))
+            .read_as(&other_did)
+            .get_links(&query)
             .await
-            .expect("get_links_for_viewer")
+            .expect("get_links")
         {
             if !all.contains(&link) {
                 all.push(link);
@@ -303,13 +304,13 @@ mod tests {
     /// The `currentState` the viewer's own model query hydrates for `uri`.
     async fn state_seen_by(perspective: &PerspectiveInstance, uri: &str, did: &str) -> String {
         let json = perspective
-            .model_query_for_viewer(
+            .read_as(did)
+            .model_query(
                 FLOW_INSTANCE_CLASS,
                 &serde_json::json!({ "where": { "id": uri } }).to_string(),
-                Some(did),
             )
             .await
-            .expect("model_query_for_viewer");
+            .expect("model_query");
         let rows: serde_json::Value = serde_json::from_str(&json).expect("JSON");
         rows["instances"][0]["currentState"]
             .as_str()
@@ -400,9 +401,10 @@ mod tests {
         };
         for (viewer, expected_author) in [(&main_did, &main_did), (&other_did, &other_did)] {
             let seen = perspective
-                .get_links_for_viewer(&query, Some(viewer))
+                .read_as(viewer)
+                .get_links(&query)
                 .await
-                .expect("get_links_for_viewer");
+                .expect("get_links");
             assert_eq!(seen.len(), 1, "{viewer} sees one cache link: {seen:?}");
             assert_eq!(&seen[0].author, expected_author, "and it is their own");
         }
