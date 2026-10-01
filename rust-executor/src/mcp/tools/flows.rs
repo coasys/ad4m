@@ -907,6 +907,10 @@ mod tests {
             serde_json::json!(["literal:string:BobFlow"]),
             "{flows}"
         );
+        assert!(
+            !rejected.starts_with("Error"),
+            "Bob's reject failed: {rejected}"
+        );
         let rejected: serde_json::Value = serde_json::from_str(&rejected).expect(&rejected);
         assert_eq!(rejected["retracted_links"], 1, "{rejected}");
     }

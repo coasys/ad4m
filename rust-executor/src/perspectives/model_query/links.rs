@@ -164,11 +164,6 @@ pub(super) fn resolve_link_keys(
 /// `wireTarget` annotation when a literal was written in another encoding
 /// than the store's canonical one), and the verdict was computed over those
 /// same bytes, so the verdict and a consumer's own re-verification agree.
-///
-/// Not viewer-scoped: like the rest of `model_query` on `dev`, this read does
-/// not take a `viewer_did`. When #1058 threads `viewer_author_filter` through
-/// `model_query`, this query needs it too, after `{local_status}`. It accepts
-/// arbitrary predicate IRIs, so it is the widest read to leave unscoped.
 pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,

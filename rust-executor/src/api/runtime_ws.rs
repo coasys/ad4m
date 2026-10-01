@@ -110,7 +110,10 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(true))
 }
 
-async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+pub(crate) async fn export_data(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
