@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient"
+import { ApiClient, CallOptions, longCall } from "../apiClient"
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
@@ -19,15 +19,16 @@ export class NeighbourhoodClient {
     async publishFromPerspective(
         perspectiveUUID: string,
         linkLanguage: Address,
-        meta: Perspective
+        meta: Perspective,
+        options?: CallOptions,
     ): Promise<string> {
         return this.#apiClient.call<string>('neighbourhood.publish', {
             perspectiveUUID, linkLanguage, meta
-        })
+        }, longCall(options))
     }
 
-    async joinFromUrl(url: string): Promise<PerspectiveHandle> {
-        return this.#apiClient.call<PerspectiveHandle>('neighbourhood.join', { url })
+    async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
+        return this.#apiClient.call<PerspectiveHandle>('neighbourhood.join', { url }, longCall(options))
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
@@ -90,7 +91,7 @@ export class NeighbourhoodClient {
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
         const unsub = this.#apiClient.subscribe(
             (data) => {
-                if (data.type === 'signal') {
+                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
                     this.dispatchSignal(perspectiveUUID, data.signal)
                 }
             }

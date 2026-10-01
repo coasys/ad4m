@@ -515,7 +515,7 @@ describe("perspective.runInterpretationWithHarness — tool-call events", functi
     // test's observationId is unique to it.
     const observationId = `tool-events-test-${Date.now()}`;
     const collected: AutoProcessorEvent[] = [];
-    await p.addAutoProcessorEventListener((event) => {
+    p.addAutoProcessorEventListener((event) => {
       if (event.processorId === observationId) {
         collected.push(event);
       }
@@ -616,7 +616,7 @@ describe("perspective.runInterpretationWithHarness — tool-call events", functi
     const observationId = `tool-events-fastpath-${Date.now()}`;
     const collected: AutoProcessorEvent[] = [];
     let anyGlobalToolEvent = false;
-    await p.addAutoProcessorEventListener((event) => {
+    p.addAutoProcessorEventListener((event) => {
       if (event.processorId === observationId) {
         collected.push(event);
       }

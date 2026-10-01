@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient"
+import { ApiClient, CallOptions, longCall } from "../apiClient"
 import { LanguageHandle } from "./LanguageHandle"
 import { LanguageMeta, LanguageMetaInput } from "./LanguageMeta"
 import { LanguageRef } from "./LanguageRef"
@@ -27,12 +27,12 @@ export class LanguageClient {
         return this.#apiClient.call<Boolean>('language.writeSettings', { address: languageAddress, settings })
     }
 
-    async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string): Promise<LanguageRef> {
-        return this.#apiClient.call<LanguageRef>('language.applyTemplate', { sourceLanguageHash, templateData })
+    async applyTemplateAndPublish(sourceLanguageHash: string, templateData: string, options?: CallOptions): Promise<LanguageRef> {
+        return this.#apiClient.call<LanguageRef>('language.applyTemplate', { sourceLanguageHash, templateData }, longCall(options))
     }
 
-    async publish(languagePath: string, languageMeta: LanguageMetaInput): Promise<LanguageMeta> {
-        return this.#apiClient.call<LanguageMeta>('language.publish', { languagePath, languageMeta })
+    async publish(languagePath: string, languageMeta: LanguageMetaInput, options?: CallOptions): Promise<LanguageMeta> {
+        return this.#apiClient.call<LanguageMeta>('language.publish', { languagePath, languageMeta }, longCall(options))
     }
 
     async meta(address: string): Promise<LanguageMeta> {
