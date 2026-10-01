@@ -24,6 +24,9 @@
 //!     async calls wait their turn; a sync call that finds the language
 //!     busy, or any call before `init()`, returns a `LanguageError`
 //!     instead of panicking (a panic aborts the whole WASM module).
+//!     A panic hook records a panic in the language's own code; every
+//!     later call then returns a "panicked" `LanguageError` instead of
+//!     waiting for the lock that the aborted call still holds.
 //!   * lifecycle exports: `name`, `version`, `isPublic`, `init`, `teardown`, `interactions`
 //!   * capability exports — **only** for the listed capabilities. The WASM
 //!     export table therefore carries exactly the functions the runtime
@@ -65,6 +68,10 @@ macro_rules! ad4m_language {
             __AD4M_LANG_STATE.with(|slot| slot.get(op))
         }
 
+        fn __ad4m_mark_panicked(message: &str) {
+            let _ = __AD4M_LANG_STATE.try_with(|slot| slot.mark_panicked(message));
+        }
+
         // -------- Lifecycle --------
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "name")]
@@ -91,17 +98,22 @@ macro_rules! ad4m_language {
             // `await mod.init()` transparently waits for completion.
             let instance = <$lang as $crate::traits::Language>::init().await?;
             __AD4M_LANG_STATE.with(|slot| slot.set(instance));
+            // After `Language::init()`, so the hook wraps one the language
+            // installed there.
+            static __AD4M_PANIC_HOOK: ::std::sync::Once = ::std::sync::Once::new();
+            __AD4M_PANIC_HOOK.call_once(|| $crate::state::install_panic_marker(__ad4m_mark_panicked));
             Ok(())
         }
 
         /// Async so it can wait for an in-flight async call to finish
         /// before the teardown hook runs. The runtime always awaits
         /// `language.teardown()`. The slot empties first, so calls that
-        /// arrive during teardown get "not initialized".
+        /// arrive during teardown get "not initialized". After a panic it
+        /// skips the hook: the aborted call never releases the lock.
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "teardown")]
         pub async fn __ad4m_teardown() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
-            let taken = __AD4M_LANG_STATE.with(|slot| slot.take());
-            if let Some(m) = taken {
+            let (taken, panicked) = __AD4M_LANG_STATE.with(|slot| (slot.take(), slot.has_panicked()));
+            if let (Some(m), false) = (taken, panicked) {
                 let mut guard = m.lock().await;
                 <$lang as $crate::traits::Language>::teardown(&mut *guard)?;
             }
