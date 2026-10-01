@@ -418,6 +418,18 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
     await expect(proxy.subjectClasses()).rejects.toThrow('network error');
   });
+
+  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
+    const mockClient: any = {
+      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
+    };
+    const proxy = createProxy(mockClient);
+    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
+
+    // A className sends it to the subjectClasses() lookup first, which now rejects.
+    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
+    expect(byProperties).toHaveBeenCalled();
+  });
 });
 
 describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
