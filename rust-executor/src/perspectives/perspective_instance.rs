@@ -6491,7 +6491,7 @@ impl PerspectiveInstance {
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
                     .with_items(&item_ids)
                     .with_batch_key(&batch_id);
-            if let Ok(me) = crate::agent::did_for_context(context) {
+            if let Ok(me) = did_for_context(context) {
                 ready = ready.with_agent_did(&me);
             }
             emit(ready).await;
