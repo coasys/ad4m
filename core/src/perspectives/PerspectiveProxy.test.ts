@@ -409,13 +409,14 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
   });
 
-  it('returns an empty array on error', async () => {
+  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
     const mockClient: any = {
       queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
     };
     const proxy = createProxy(mockClient);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
+    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
   });
 });
 
