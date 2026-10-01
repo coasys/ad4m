@@ -452,6 +452,11 @@ jobs:
   # These hit Marvin's local Ollama; too slow + occasionally flaky for
   # per-push CI, so they run once nightly against `dev` via a scheduled
   # pipeline (`run-nightly-llm: true`).
+  #
+  # The exception is `anthropic_e2e`, which calls api.anthropic.com and
+  # costs real money on every run. It reads `ANTHROPIC_API_KEY`
+  # from the `nightly-llm-e2e` context and skips each test when the key is
+  # unset, so it is inert until the key is added there.
   llm-e2e:
     machine: true
     resource_class: coasys/marvin
@@ -482,11 +487,12 @@ jobs:
       - run:
           name: Rust LLM-E2E (interpretation + harness + flow-context suites)
           command: |
-            cargo test --release --lib \
+            cd rust-executor && cargo test --release --lib -- \
               perspectives::interpretation_e2e \
               perspectives::interpretation_harness_e2e \
               perspectives::flow_context::real_llm_e2e \
-              -- --ignored --test-threads=1 --nocapture
+              ai_service::providers::anthropic_e2e \
+              --ignored --test-threads=1 --nocapture
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (auto-processor + interpretation suites)
