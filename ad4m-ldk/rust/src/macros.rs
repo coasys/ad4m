@@ -18,7 +18,12 @@
 //! ```
 //!
 //! The macro emits:
-//!   * a thread_local state slot for an `Option<MyLang>`
+//!   * a thread_local `LanguageSlot<MyLang>` (see `state.rs`). The runtime
+//!     does NOT guarantee serial calls: a second call can arrive while an
+//!     async call waits on a host import. The slot's async lock makes
+//!     async calls wait their turn; a sync call that finds the language
+//!     busy, or any call before `init()`, returns a `LanguageError`
+//!     instead of panicking (a panic aborts the whole WASM module).
 //!   * lifecycle exports: `name`, `version`, `isPublic`, `init`, `teardown`, `interactions`
 //!   * capability exports — **only** for the listed capabilities. The WASM
 //!     export table therefore carries exactly the functions the runtime
@@ -36,16 +41,28 @@ macro_rules! ad4m_language {
         $(,)?
     ) => {
         thread_local! {
-            static __AD4M_LANG_STATE: ::std::cell::RefCell<Option<$lang>> =
-                ::std::cell::RefCell::new(None);
+            static __AD4M_LANG_STATE: $crate::state::LanguageSlot<$lang> =
+                const { $crate::state::LanguageSlot::new() };
         }
 
-        fn __ad4m_with<R>(f: impl FnOnce(&mut $lang) -> R) -> R {
-            __AD4M_LANG_STATE.with(|cell| {
-                let mut b = cell.borrow_mut();
-                let v = b.as_mut().expect("Language not initialized; init() must be called first");
-                f(v)
-            })
+        /// Run a sync trait method. Errors (never panics) when the
+        /// language is not initialized or an async call holds it.
+        fn __ad4m_with<R>(
+            op: &str,
+            f: impl FnOnce(&mut $lang) -> R,
+        ) -> $crate::errors::LanguageResult<R> {
+            __AD4M_LANG_STATE.with(|slot| slot.try_with(op, f))
+        }
+
+        /// The shared instance for an async shim. The shim awaits
+        /// `.lock()` on it, so overlapping async calls run one after
+        /// the other.
+        fn __ad4m_instance(
+            op: &str,
+        ) -> $crate::errors::LanguageResult<
+            ::std::rc::Rc<$crate::__futures::lock::Mutex<$lang>>,
+        > {
+            __AD4M_LANG_STATE.with(|slot| slot.get(op))
         }
 
         // -------- Lifecycle --------
@@ -73,25 +90,32 @@ macro_rules! ad4m_language {
             // emits a JS `async function init()` so the bootstrap shim's
             // `await mod.init()` transparently waits for completion.
             let instance = <$lang as $crate::traits::Language>::init().await?;
-            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(instance));
+            __AD4M_LANG_STATE.with(|slot| slot.set(instance));
             Ok(())
         }
 
+        /// Async so it can wait for an in-flight async call to finish
+        /// before the teardown hook runs. The runtime always awaits
+        /// `language.teardown()`. The slot empties first, so calls that
+        /// arrive during teardown get "not initialized".
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "teardown")]
-        pub fn __ad4m_teardown() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
-            __AD4M_LANG_STATE.with(|c| {
-                if let Some(mut inst) = c.borrow_mut().take() {
-                    <$lang as $crate::traits::Language>::teardown(&mut inst)?;
-                }
-                Ok::<(), $crate::errors::LanguageError>(())
-            })?;
+        pub async fn __ad4m_teardown() -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
+            let taken = __AD4M_LANG_STATE.with(|slot| slot.take());
+            if let Some(m) = taken {
+                let mut guard = m.lock().await;
+                <$lang as $crate::traits::Language>::teardown(&mut *guard)?;
+            }
             Ok(())
         }
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "interactions")]
         pub fn __ad4m_interactions(address: String) -> ::wasm_bindgen::JsValue {
-            let v = __ad4m_with(|l| <$lang as $crate::traits::Language>::interactions(l, address));
-            $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
+            // NULL on any error, as for serde errors: the runtime maps a
+            // non-array result to "no interactions".
+            match __ad4m_with("interactions", |l| <$lang as $crate::traits::Language>::interactions(l, address)) {
+                Ok(v) => $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL),
+                Err(_) => ::wasm_bindgen::JsValue::NULL,
+            }
         }
 
         /// Execute a named interaction. Spec §5.7 — the runtime calls
@@ -107,9 +131,9 @@ macro_rules! ad4m_language {
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let params: ::serde_json::Value = ::serde_wasm_bindgen::from_value(parameters)
                 .map_err($crate::errors::LanguageError::from)?;
-            let result = __ad4m_with(|l| {
+            let result = __ad4m_with("expressionInteract", |l| {
                 <$lang as $crate::traits::Language>::expression_interact(l, address, name, params)
-            })?;
+            })??;
             Ok(match result {
                 Some(v) => $crate::__serde::to_js(&v)
                     .map_err($crate::errors::LanguageError::from)?,
@@ -131,13 +155,10 @@ macro_rules! __ad4m_cap {
     (expression, $lang:ty) => {
         // Async shims: the trait methods return `impl Future` so they
         // can call async host imports (`holochain_call`, etc.). The
-        // macro can't hold a `RefCell::borrow_mut()` across an `await`,
-        // so it temporarily takes the language out of the thread_local
-        // slot, runs the async method against the owned value, and puts
-        // it back when the future resolves. This is safe because the
-        // runtime serializes all calls into a given Language via the
-        // JS event loop + language controller mutex — no re-entrant
-        // call can observe the empty slot.
+        // runtime can start a second call while the first one waits on
+        // such an import. Each shim holds the slot's async lock across
+        // the await, so a concurrent call waits for its turn. The guard
+        // releases when the method completes or its future drops.
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionCreate")]
         pub async fn __ad4m_expression_create(
@@ -145,22 +166,20 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<String, ::wasm_bindgen::JsValue> {
             let v: ::serde_json::Value = ::serde_wasm_bindgen::from_value(content)
                 .map_err($crate::errors::LanguageError::from)?;
-            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
-                .expect("Language not initialized (expressionCreate called before init)");
-            let result = <$lang as $crate::traits::ExpressionCapability>::expression_create(&mut lang, v).await;
-            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
-            Ok(result?)
+            let m = __ad4m_instance("expressionCreate")?;
+            let mut guard = m.lock().await;
+            Ok(<$lang as $crate::traits::ExpressionCapability>::expression_create(&mut *guard, v).await?)
         }
 
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "expressionGet")]
         pub async fn __ad4m_expression_get(
             address: String,
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
-            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
-                .expect("Language not initialized (expressionGet called before init)");
-            let result = <$lang as $crate::traits::ExpressionCapability>::expression_get(&mut lang, address).await;
-            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
-            let exp = result?;
+            let m = __ad4m_instance("expressionGet")?;
+            let exp = {
+                let mut guard = m.lock().await;
+                <$lang as $crate::traits::ExpressionCapability>::expression_get(&mut *guard, address).await?
+            };
             Ok($crate::__serde::to_js(&exp).map_err($crate::errors::LanguageError::from)?)
         }
     };
@@ -172,7 +191,7 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let d: $crate::types::PerspectiveDiff = ::serde_wasm_bindgen::from_value(diff)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with(|l| <$lang as $crate::traits::PerspectiveCommitCapability>::perspective_commit(l, d))?;
+            __ad4m_with("perspectiveCommit", |l| <$lang as $crate::traits::PerspectiveCommitCapability>::perspective_commit(l, d))??;
             Ok(())
         }
     };
@@ -182,21 +201,21 @@ macro_rules! __ad4m_cap {
         pub fn __ad4m_perspective_sync_sync()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
-            let d = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_sync(l))?;
+            let d = __ad4m_with("perspectiveSyncSync", |l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_sync(l))??;
             Ok($crate::__serde::to_js(&d).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveSyncRender")]
         pub fn __ad4m_perspective_sync_render()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
-            let p = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_render(l))?;
+            let p = __ad4m_with("perspectiveSyncRender", |l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_render(l))??;
             Ok($crate::__serde::to_js(&p).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveSyncCurrentRevision")]
         pub fn __ad4m_perspective_sync_current_revision()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
-            let r = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_current_revision(l))?;
+            let r = __ad4m_with("perspectiveSyncCurrentRevision", |l| <$lang as $crate::traits::PerspectiveSyncCapability>::perspective_sync_current_revision(l))??;
             Ok(match r {
                 Some(s) => ::wasm_bindgen::JsValue::from_str(&s),
                 None => ::wasm_bindgen::JsValue::NULL,
@@ -207,8 +226,10 @@ macro_rules! __ad4m_cap {
     (perspective_query, $lang:ty) => {
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveQuerySupportedKinds")]
         pub fn __ad4m_perspective_query_supported_kinds() -> ::wasm_bindgen::JsValue {
-            let v = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_supported_kinds(l));
-            $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL)
+            match __ad4m_with("perspectiveQuerySupportedKinds", |l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_supported_kinds(l)) {
+                Ok(v) => $crate::__serde::to_js(&v).unwrap_or(::wasm_bindgen::JsValue::NULL),
+                Err(_) => ::wasm_bindgen::JsValue::NULL,
+            }
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "perspectiveQueryRun")]
         pub fn __ad4m_perspective_query_run(
@@ -216,7 +237,7 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let r: $crate::types::QueryRequest = ::serde_wasm_bindgen::from_value(request)
                 .map_err($crate::errors::LanguageError::from)?;
-            let resp = __ad4m_with(|l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_run(l, r))?;
+            let resp = __ad4m_with("perspectiveQueryRun", |l| <$lang as $crate::traits::PerspectiveQueryCapability>::perspective_query_run(l, r))??;
             Ok($crate::__serde::to_js(&resp).map_err($crate::errors::LanguageError::from)?)
         }
     };
@@ -228,29 +249,27 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let v: Vec<String> = ::serde_wasm_bindgen::from_value(agents)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with(|l| <$lang as $crate::traits::PeersCapability>::peers_set_local(l, v))?;
+            __ad4m_with("peersSetLocal", |l| <$lang as $crate::traits::PeersCapability>::peers_set_local(l, v))??;
             Ok(())
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "peersRemote")]
         pub fn __ad4m_peers_remote()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
-            let v = __ad4m_with(|l| <$lang as $crate::traits::PeersCapability>::peers_remote(l))?;
+            let v = __ad4m_with("peersRemote", |l| <$lang as $crate::traits::PeersCapability>::peers_remote(l))??;
             Ok($crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?)
         }
     };
 
     (language_source, $lang:ty) => {
-        // Async shim — same take-run-restore pattern as expression.
+        // Async shim — same lock-across-await pattern as expression.
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "languageGetSource")]
         pub async fn __ad4m_language_get_source(
             address: String,
         ) -> ::std::result::Result<String, ::wasm_bindgen::JsValue> {
-            let mut lang = __AD4M_LANG_STATE.with(|c| c.borrow_mut().take())
-                .expect("Language not initialized (languageGetSource called before init)");
-            let result = <$lang as $crate::traits::LanguageSourceCapability>::language_get_source(&mut lang, address).await;
-            __AD4M_LANG_STATE.with(|c| *c.borrow_mut() = Some(lang));
-            Ok(result?)
+            let m = __ad4m_instance("languageGetSource")?;
+            let mut guard = m.lock().await;
+            Ok(<$lang as $crate::traits::LanguageSourceCapability>::language_get_source(&mut *guard, address).await?)
         }
     };
 
@@ -261,14 +280,14 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let s: ::serde_json::Value = ::serde_wasm_bindgen::from_value(status)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_set_online_status(l, s))?;
+            __ad4m_with("telepresenceSetOnlineStatus", |l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_set_online_status(l, s))??;
             Ok(())
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceGetOnlineAgents")]
         pub fn __ad4m_telepresence_get_online_agents()
             -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue>
         {
-            let v = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_get_online_agents(l))?;
+            let v = __ad4m_with("telepresenceGetOnlineAgents", |l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_get_online_agents(l))??;
             Ok($crate::__serde::to_js(&v).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSendSignal")]
@@ -278,7 +297,7 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let p: ::serde_json::Value = ::serde_wasm_bindgen::from_value(payload)
                 .map_err($crate::errors::LanguageError::from)?;
-            let r = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_signal(l, remote_did, p))?;
+            let r = __ad4m_with("telepresenceSendSignal", |l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_signal(l, remote_did, p))??;
             Ok($crate::__serde::to_js(&r).map_err($crate::errors::LanguageError::from)?)
         }
         #[::wasm_bindgen::prelude::wasm_bindgen(js_name = "telepresenceSendBroadcast")]
@@ -287,7 +306,7 @@ macro_rules! __ad4m_cap {
         ) -> ::std::result::Result<::wasm_bindgen::JsValue, ::wasm_bindgen::JsValue> {
             let p: ::serde_json::Value = ::serde_wasm_bindgen::from_value(payload)
                 .map_err($crate::errors::LanguageError::from)?;
-            let r = __ad4m_with(|l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_broadcast(l, p))?;
+            let r = __ad4m_with("telepresenceSendBroadcast", |l| <$lang as $crate::traits::TelepresenceCapability>::telepresence_send_broadcast(l, p))??;
             Ok($crate::__serde::to_js(&r).map_err($crate::errors::LanguageError::from)?)
         }
     };
@@ -304,7 +323,7 @@ macro_rules! __ad4m_maybe_hc_signal {
         ) -> ::std::result::Result<(), ::wasm_bindgen::JsValue> {
             let s: ::serde_json::Value = ::serde_wasm_bindgen::from_value(signal)
                 .map_err($crate::errors::LanguageError::from)?;
-            __ad4m_with(|l| <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s))?;
+            __ad4m_with("handleHolochainSignal", |l| <$lang as $crate::traits::HolochainSignalHandler>::handle_holochain_signal(l, s))??;
             Ok(())
         }
     };
