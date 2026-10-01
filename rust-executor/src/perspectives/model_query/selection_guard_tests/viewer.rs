@@ -3,8 +3,9 @@
 //! as the verdict and the status.
 //!
 //! Alice and Bob co-own one perspective. Every test reads as Bob, as Alice,
-//! and in executor scope, so none of them can pass because the Local link
-//! never mattered.
+//! and as neither (the read that names no user, which has no executor scope
+//! since #1224), so none of them can pass because the Local link never
+//! mattered.
 
 use super::super::test_helpers::execute_model_query_from_json_for_viewer;
 use super::super::types::{ModelQueryInput, ModelQueryResult};
@@ -22,7 +23,9 @@ async fn run_as(store: &SparqlStore, query: Value, viewer: &str) -> ModelQueryRe
         .unwrap()
 }
 
-async fn run_in_executor_scope(store: &SparqlStore, query: Value) -> ModelQueryResult {
+/// A read that names no user: it reads as the main agent, who is neither
+/// Alice nor Bob here (#1224).
+async fn run_as_neither(store: &SparqlStore, query: Value) -> ModelQueryResult {
     let query: ModelQueryInput = serde_json::from_value(query).unwrap();
     execute_model_query_from_json_for_viewer(store, "Grant", &query, SG_SHAPE_JSON, None)
         .await
@@ -94,14 +97,15 @@ async fn another_users_local_value_does_not_select_for_a_viewer() {
         "with includeUnverified the forged Shared link selects"
     );
 
-    // Alice's own Local value selects for her, and executor scope reads all.
+    // Alice's own Local value selects for her; a read as neither user does
+    // not see it.
     let as_alice = run_as(&store, secret.clone(), &alice.did).await;
     assert_eq!(ids(&as_alice), vec!["sg://g/g"], "Alice");
     assert_eq!(as_alice.instances[0]["agent"], "secret");
     let as_alice = run_as(&store, both, &alice.did).await;
     assert_eq!(ids(&as_alice), vec!["sg://g/h"], "Alice, same triple");
-    let executor = run_in_executor_scope(&store, secret).await;
-    assert_eq!(ids(&executor), vec!["sg://g/g"], "executor scope");
+    let neither = run_as_neither(&store, secret).await;
+    assert_eq!(ids(&neither), Vec::<String>::new(), "no executor scope");
 }
 
 /// `linkStatus: 'local'` for a viewer means the viewer's own Local links: Bob
@@ -110,8 +114,8 @@ async fn another_users_local_value_does_not_select_for_a_viewer() {
 ///
 /// `a` is typed by Alice's Local flag only, `b` by Bob's. `b`'s `agent` is
 /// Alice's Local link. So under `local` Bob gets `b` alone and `where { agent }`
-/// selects nothing for him; Alice gets `a` and cannot see `b`; executor scope
-/// gets both, and `b` by `agent`.
+/// selects nothing for him; Alice gets `a` and cannot see `b`; a read as
+/// neither gets no instance under `local` and nothing by `agent`.
 #[tokio::test]
 async fn link_status_local_is_the_viewers_own_local_links() {
     let store = SparqlStore::new(None).unwrap();
@@ -177,12 +181,12 @@ async fn link_status_local_is_the_viewers_own_local_links() {
         "b is typed by Bob's Local flag, which Alice cannot see"
     );
 
-    let executor = run_in_executor_scope(&store, all).await;
+    let neither = run_as_neither(&store, all).await;
+    assert_eq!(ids(&neither), Vec::<String>::new(), "no executor scope");
+    let neither = run_as_neither(&store, by_agent).await;
     assert_eq!(
-        ids(&executor),
-        vec!["sg://g/a", "sg://g/b"],
-        "executor scope"
+        ids(&neither),
+        Vec::<String>::new(),
+        "no executor scope, by agent"
     );
-    let executor = run_in_executor_scope(&store, by_agent).await;
-    assert_eq!(ids(&executor), vec!["sg://g/b"], "executor scope, by agent");
 }

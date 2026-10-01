@@ -164,12 +164,6 @@ pub(super) fn resolve_link_keys(
 /// `wireTarget` annotation when a literal was written in another encoding
 /// than the store's canonical one), and the verdict was computed over those
 /// same bytes, so the verdict and a consumer's own re-verification agree.
-///
-/// Viewer-scoped like hydration (#1024): `viewer_did` sees another agent's
-/// `Local` link only on an engine-derived predicate (see
-/// [`link_visibility`](crate::perspectives::link_visibility)). This read
-/// accepts arbitrary predicate IRIs, so without the filter it would be the
-/// widest way round it. `None` is executor scope and reads every row.
 pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
@@ -177,7 +171,6 @@ pub(super) async fn attach_links(
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
     instances: &mut [Value],
-    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     if keys.is_empty() || instances.is_empty() {
         return Ok(());
@@ -203,9 +196,6 @@ pub(super) async fn attach_links(
         let local_status = local_status_filter(shape);
         let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
-        let viewer = crate::perspectives::link_visibility::viewer_author_filter(
-            viewer_did, "_reifier", "author",
-        );
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
     {source_constraint}
@@ -218,7 +208,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
-{link_status}{proof_valid}{local_status}{viewer}}}"#
+{link_status}{proof_valid}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();

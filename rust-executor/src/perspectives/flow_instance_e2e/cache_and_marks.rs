@@ -127,7 +127,12 @@ async fn a_peer_written_shared_cache_is_overridden_not_deleted() {
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(peer_cache), LinkStatus::Shared, None)
+        .add_link_expression(
+            LinkExpression::from(peer_cache),
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
         .await
         .expect("sync a peer's currentState");
     // The peer's link really is on the graph, and really does say something
@@ -206,7 +211,7 @@ async fn an_instance_without_a_cache_still_loads_and_the_pass_fills_it() {
         .collect();
     assert!(!cache.is_empty());
     f.perspective
-        .remove_links(cache, None)
+        .remove_links(cache, None, &f.ctx)
         .await
         .expect("drop the creator's local cache");
 
@@ -325,7 +330,7 @@ async fn drop_local_cache(f: &mut Fixture) {
         .map(LinkExpression::from)
         .collect();
     f.perspective
-        .remove_links(cache, None)
+        .remove_links(cache, None, &f.ctx)
         .await
         .expect("drop the local cache");
 }
@@ -337,7 +342,12 @@ async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[
     for uri in proposal_uris {
         for link in links_of(from, uri).await {
             to.perspective
-                .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+                .add_link_expression(
+                    LinkExpression::from(link),
+                    LinkStatus::Shared,
+                    None,
+                    &to.ctx,
+                )
                 .await
                 .expect("replicate a proposal link");
         }
@@ -442,6 +452,87 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
         marked.contains(&h1) && marked.contains(&h2),
         "and the history is marked: {marked:?}"
     );
+}
+
+/// Marks are per user (#1224). An edge settles after the main agent's last
+/// pass; Mallory, a second user of this replica, then runs her first pass,
+/// a silent catch-up that marks the edge. Her mark is in her own graph, so
+/// the main agent's next pass still finds the edge unmarked and reports it.
+///
+/// On #1058 the pass read every user's Local marks (executor scope), so
+/// Mallory's catch-up marked the edge for the whole replica and nobody
+/// reported it (finding A of Data's review, #1161).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_catch_up_does_not_swallow_an_edge_for_another_user() {
+    let mut f = seed_review_flow().await;
+    settle(&mut f, "h1", "review", "changes_requested").await;
+    let h2 = propose(&mut f, "h2", "changes_requested", "review").await;
+
+    let mallory = second_agent("mallory-marks@e2e.test");
+    let mallory_did = crate::agent::did_for_context(&mallory).expect("Mallory's DID");
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert!(
+        hers.is_empty(),
+        "Mallory's first pass is a silent catch-up: {hers:?}"
+    );
+    let marks_on_h2 = |viewer: String| {
+        let perspective = f.perspective.clone();
+        let h2 = h2.clone();
+        async move {
+            perspective
+                .read_as(&viewer)
+                .get_links(&LinkQuery {
+                    source: Some(h2),
+                    predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+                    ..Default::default()
+                })
+                .await
+                .expect("marks")
+                .len()
+        }
+    };
+    assert_eq!(marks_on_h2(mallory_did).await, 1, "her catch-up marked h2");
+    assert_eq!(
+        marks_on_h2(acting_did(&f)).await,
+        0,
+        "in her graph, not the main agent's"
+    );
+
+    let mine = consensus_pass(&mut f).await;
+    assert_eq!(mine.len(), 1, "the main agent still reports h2: {mine:?}");
+    assert!(mine[0].contributing_proposal_uris.contains(&h2));
+}
+
+/// The mirror image: the main agent's marks do not swallow an edge for a
+/// co-owner either. Mallory has passed once (her cache exists), `h2`
+/// settles, the main agent's pass reports and marks it; Mallory's next pass
+/// reads her own view, finds `h2` unmarked there and reports it too.
+///
+/// This pins the pass's own scoping (`run_flow_consensus_pass` reading as
+/// the user it acts for): unscoped, the pass reads as the main agent and
+/// its mark.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_main_agents_marks_do_not_swallow_an_edge_for_a_co_owner() {
+    let mut f = seed_review_flow().await;
+    settle(&mut f, "h1", "review", "changes_requested").await;
+    let mallory = second_agent("mallory-mirror@e2e.test");
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert!(
+        hers.is_empty(),
+        "Mallory's first pass is a silent catch-up: {hers:?}"
+    );
+
+    let h2 = propose(&mut f, "h2", "changes_requested", "review").await;
+    let mine = consensus_pass(&mut f).await;
+    assert_eq!(
+        mine.len(),
+        1,
+        "the main agent reports and marks h2: {mine:?}"
+    );
+
+    let hers = run_flow_consensus_pass(&mut f.perspective, None, &mallory, None, None).await;
+    assert_eq!(hers.len(), 1, "Mallory still reports h2: {hers:?}");
+    assert!(hers[0].contributing_proposal_uris.contains(&h2));
 }
 
 /// A newcomer with nothing to catch up on: the first pass writes the cache

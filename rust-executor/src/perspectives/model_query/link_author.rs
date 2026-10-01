@@ -425,8 +425,7 @@ pub(super) fn refuse_unanswerable_link_author(
     let Some(ref wc) = query.where_clause else {
         return Ok(());
     };
-    // Whether a clause is answerable does not depend on who reads it.
-    let compiled = compile_where_clause(wc, shape, Some(resolver), LinkGuard::of(query, None));
+    let compiled = compile_where_clause(wc, shape, Some(resolver), LinkGuard::of(query));
     if let Some(error) = compiled.link_author_error {
         return Err(anyhow!("where: {error}"));
     }

@@ -236,14 +236,13 @@ pub fn retain_selected_flows(
 /// tests) can query [`load_flow_instances`] directly with the full
 /// subject set.
 ///
-/// `viewer_did` is the user the run acts for. Their own cached state is
-/// used where they hold one; every other instance, and every instance when
-/// there is no viewer, is derived.
+/// `perspective` reads as the user the run acts for (#1224). Their own
+/// cached state is used where they hold one; every other instance is
+/// derived.
 pub async fn gather_active_flow_contexts(
     perspective: &PerspectiveInstance,
     subjects: &[String],
     flow_filter: Option<&[String]>,
-    viewer_did: Option<&str>,
 ) -> Vec<FlowContext> {
     let mut flows_by_uri = match load_shacl_flows(perspective).await {
         Ok(m) => m,
@@ -265,12 +264,10 @@ pub async fn gather_active_flow_contexts(
             return Vec::new();
         }
     };
-    // The viewer's own cache first (#987, #1024): the `Local`
-    // `currentState` link the run's user wrote, signature verified. Another
-    // user's cache is never read, since any user may write one with any
-    // value (`flow_instance::local_cached_state`). Instances without an own
-    // cache, and all of them when there is no viewer, fall through to
-    // `derive_states`.
+    // The run's user's own cache first (#987, #1024): the `Local`
+    // `currentState` link in their view. Another user's cache is not in it
+    // (`flow_instance::local_cached_state`). Instances without an own
+    // cache fall through to `derive_states`.
     //
     // The cache stores only the state name — the fold's contention verdict
     // was NOT computed on this path, so cache-sourced flows carry
@@ -283,14 +280,9 @@ pub async fn gather_active_flow_contexts(
     let mut resolved: Vec<ResolvedFlow> = Vec::with_capacity(records.len());
     let mut uncached: Vec<FlowInstanceRecord> = Vec::new();
     for record in records {
-        let Some(viewer_did) = viewer_did else {
-            uncached.push(record);
-            continue;
-        };
         match crate::perspectives::flow_instance::local_cached_state(
             perspective,
             &record.instance_uri,
-            viewer_did,
         )
         .await
         {

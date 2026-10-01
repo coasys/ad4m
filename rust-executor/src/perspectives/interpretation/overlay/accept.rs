@@ -177,6 +177,9 @@ pub(crate) async fn accept_interpretation(
     property: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
+    // The overlay is read as the user acting on it (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let all = links_from(perspective, base).await?;
     if first_target(&all, OVERLAY_KIND_PRED).is_none() {
         anyhow::bail!("accept_interpretation: no overlay on `{base}`");
@@ -196,13 +199,13 @@ pub(crate) async fn accept_interpretation(
         // batch to thread — `None` matches every other one-shot call site.
         replace_link(perspective, base, real_pred, &l.data.target, None, context).await?;
         perspective
-            .remove_links(vec![LinkExpression::from(l.clone())], None)
+            .remove_links(vec![LinkExpression::from(l.clone())], None, context)
             .await?;
     }
 
     // If no staged suggestion remains, the overlay has done its job — remove its
     // `kind`/`run` so the base reads as plain human-owned data (delete = lock).
-    prune_overlay_shell_if_empty(perspective, base).await
+    prune_overlay_shell_if_empty(perspective, base, context).await
 }
 
 /// Reject the overlay's suggestion(s) on `base`. `property = Some(p)` drops just
@@ -217,7 +220,9 @@ pub(crate) async fn reject_interpretation(
     property: Option<&str>,
     context: &AgentContext,
 ) -> anyhow::Result<()> {
-    let _ = context;
+    // The overlay is read as the user acting on it (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let all = links_from(perspective, base).await?;
     let raw_kind = match first_target(&all, OVERLAY_KIND_PRED) {
         Some(k) => k,
@@ -237,8 +242,8 @@ pub(crate) async fn reject_interpretation(
 
     if let Some(_prop) = property {
         // Drop just this suggestion; the real value stays as it is.
-        remove(perspective, inferred_links(&all, property)).await?;
-        return prune_overlay_shell_if_empty(perspective, base).await;
+        remove(perspective, inferred_links(&all, property), context).await?;
+        return prune_overlay_shell_if_empty(perspective, base, context).await;
     }
 
     // Whole-base reject.
@@ -249,7 +254,7 @@ pub(crate) async fn reject_interpretation(
         // parent-scope UI querying "children of X" would keep seeing a link
         // to a base whose scalars have all been deleted (CodeRabbit #881
         // review).
-        remove(perspective, all.iter().collect()).await?;
+        remove(perspective, all.iter().collect(), context).await?;
         let inbound = perspective
             .get_links(&LinkQuery {
                 target: Some(base.to_string()),
@@ -257,7 +262,7 @@ pub(crate) async fn reject_interpretation(
             })
             .await?;
         if !inbound.is_empty() {
-            remove(perspective, inbound.iter().collect()).await?;
+            remove(perspective, inbound.iter().collect(), context).await?;
         }
         Ok(())
     } else {
@@ -267,7 +272,7 @@ pub(crate) async fn reject_interpretation(
             .iter()
             .filter(|l| is_overlay_link(l))
             .collect::<Vec<_>>();
-        remove(perspective, shell).await
+        remove(perspective, shell, context).await
     }
 }
 
@@ -326,12 +331,13 @@ fn is_overlay_link(l: &DecoratedLinkExpression) -> bool {
 async fn remove(
     perspective: &mut PerspectiveInstance,
     links: Vec<&DecoratedLinkExpression>,
+    context: &AgentContext,
 ) -> anyhow::Result<()> {
     if links.is_empty() {
         return Ok(());
     }
     let exprs: Vec<LinkExpression> = links.into_iter().cloned().map(Into::into).collect();
-    perspective.remove_links(exprs, None).await?;
+    perspective.remove_links(exprs, None, context).await?;
     Ok(())
 }
 
@@ -341,6 +347,7 @@ async fn remove(
 async fn prune_overlay_shell_if_empty(
     perspective: &mut PerspectiveInstance,
     base: &str,
+    context: &AgentContext,
 ) -> anyhow::Result<()> {
     let all = links_from(perspective, base).await?;
     let any_inferred = all.iter().any(|l| {
@@ -361,7 +368,7 @@ async fn prune_overlay_shell_if_empty(
             )
         })
         .collect::<Vec<_>>();
-    remove(perspective, shell).await
+    remove(perspective, shell, context).await
 }
 
 #[cfg(test)]

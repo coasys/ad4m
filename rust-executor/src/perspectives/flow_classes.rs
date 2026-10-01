@@ -403,7 +403,7 @@ pub(crate) async fn write_local_current_state(
         .filter(|l| l.status == Some(LinkStatus::Local))
     {
         perspective
-            .remove_link(link.into(), batch_id.clone())
+            .remove_link(link.into(), batch_id.clone(), context)
             .await
             .map_err(|e| anyhow::anyhow!("dropping the old currentState cache failed: {e:#}"))?;
     }
@@ -420,7 +420,7 @@ pub(crate) async fn write_local_current_state(
     let signed: LinkExpression =
         crate::agent::create_signed_expression(link.normalize(), context)?.into();
     perspective
-        .add_link_expression(signed, LinkStatus::Local, batch_id)
+        .add_link_expression(signed, LinkStatus::Local, batch_id, context)
         .await
         .map_err(|e| anyhow::anyhow!("writing the currentState cache failed: {e:#}"))?;
     Ok(())

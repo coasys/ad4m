@@ -28,7 +28,7 @@ async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
         .collect();
     assert_eq!(votes.len(), 1, "exactly Bob's vote is on the graph");
     f.perspective
-        .remove_links(votes, None)
+        .remove_links(votes, None, &f.ctx)
         .await
         .expect("delete the settling vote");
 
@@ -81,7 +81,7 @@ async fn two_replicas_with_the_same_links_derive_the_same_state() {
     proposal_links.reverse();
     for link in proposal_links {
         b.perspective
-            .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
+            .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None, &b.ctx)
             .await
             .expect("sync link into replica B");
     }
@@ -172,6 +172,7 @@ async fn reject_leaves_a_forged_link_claiming_our_did_alone() {
             },
             LinkStatus::Shared,
             None,
+            &f.ctx,
         )
         .await
         .expect("sync a forged vote claiming our authorship");

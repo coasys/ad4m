@@ -926,6 +926,103 @@ describe("Multi-User Simple integration tests", () => {
             expect((await (PrivTag as any).findOne(pb, { where: { id: tag.id } })).colour).to.equal("same-colour");
             expect((await (PrivTag as any).findOne(pa, { where: { id: tag.id } })).colour).to.equal("alice-colour");
         });
+
+        // #1224: each user's Local links live in their own named graph, and a
+        // query runs over the shared links plus the caller's graph. Raw SPARQL
+        // and SPARQL subscriptions, which no filter could be put into, follow
+        // the rule too, and the query text cannot name another user's graph.
+        it("keeps a co-owner's Local links out of raw SPARQL and SPARQL subscriptions (#1224)", async function () {
+            this.timeout(300000);
+
+            const { Literal } = await import("@coasys/ad4m");
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privsparql1@example.com", "password1");
+            await createTestUser("privsparql2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privsparql1@example.com", "password1"), false);
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privsparql2@example.com", "password2"), false);
+            const aliceDid = (await alice.agent.me()).did;
+
+            const aliceHandle = await alice.perspective.add("Local Link Privacy: SPARQL");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Local Link Privacy: SPARQL" }),
+            );
+            const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(
+                aliceHandle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+            const bobHandle = (await bob.perspective.all()).find((p) => p.sharedUrl === neighbourhoodUrl);
+            expect(bobHandle, "Bob joined the neighbourhood").to.not.be.undefined;
+            const pb = (await bob.perspective.byUUID(bobHandle!.uuid))!;
+
+            const source = `priv://sparql/${uuidv4()}`;
+            const alicesSecret = Literal.from("alice-secret").toUrl();
+            const shared = Literal.from("shared-value").toUrl();
+            const bySource = `SELECT ?t WHERE { <${source}> <priv://value> ?t }`;
+
+            // Bob subscribes before anything is written, so every later result
+            // is a re-run of his subscription.
+            const subscription = await pb.subscribeInfer(bySource);
+            let bobsLatest = JSON.stringify(subscription.result ?? []);
+            subscription.onResult((r: any) => { bobsLatest = JSON.stringify(r); });
+
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source, predicate: "priv://value", target: alicesSecret }), "local");
+
+            // `PerspectiveClient.querySparql` has no client-side cache, so each
+            // call is answered by the executor for that client's user.
+            const values = async (client: Ad4mClient, uuid: string, query: string) =>
+                JSON.stringify(await client.perspective.querySparql(uuid, query));
+            expect(await values(alice, aliceHandle.uuid, bySource), "Alice reads her Local link").to.contain("alice-secret");
+            expect(await values(bob, bobHandle!.uuid, bySource), "querySparql does not show it to Bob").to.not.contain("alice-secret");
+            const alicesGraph = `ad4m://local/${aliceDid}`;
+            for (const query of [
+                `SELECT ?t FROM <${alicesGraph}> WHERE { <${source}> <priv://value> ?t }`,
+                `SELECT ?t WHERE { GRAPH ?g { <${source}> <priv://value> ?t } }`,
+                `SELECT ?t WHERE { ?r <ad4m://ontology/author> ?t }`,
+            ]) {
+                const rows = await values(bob, bobHandle!.uuid, query);
+                expect(rows, `Bob cannot name Alice's graph: ${query}`).to.not.contain("alice-secret");
+                expect(rows, `nor read her authorship: ${query}`).to.not.contain(aliceDid);
+            }
+
+            // A shared link reaches Bob's subscription; Alice's Local link
+            // never does.
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source, predicate: "priv://value", target: shared }), "shared");
+            for (let i = 0; i < 40 && !bobsLatest.includes("shared-value"); i++) await sleep(250);
+            expect(bobsLatest, "Bob's subscription saw the shared link").to.contain("shared-value");
+            expect(bobsLatest, "and not Alice's Local link").to.not.contain("alice-secret");
+            subscription.dispose();
+        });
+
+        // #1224: storing a shared link Local would hide it from every other
+        // user here, so the executor refuses it and the client gets the error.
+        it("refuses to store a shared link as local and tells the caller (#1224)", async function () {
+            this.timeout(120000);
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privrefuse1@example.com", "password1");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privrefuse1@example.com", "password1"), false);
+            const handle = await alice.perspective.add("Local Link Privacy: refusal");
+            const source = `priv://refuse/${uuidv4()}`;
+            const added = await alice.perspective.addLink(handle.uuid, new Link({ source, predicate: "priv://value", target: "priv://shared" }), "shared");
+            const expression = {
+                author: added.author,
+                timestamp: added.timestamp,
+                data: added.data,
+                proof: { key: added.proof.key, signature: added.proof.signature },
+            } as LinkExpression;
+
+            await expect(alice.perspective.addLinkExpression(handle.uuid, expression, "local"))
+                .to.be.rejectedWith(/Refusing to store a shared link Local/);
+
+            const links = await alice.perspective.queryLinks(handle.uuid, new LinkQuery({ source }));
+            expect(links.map((l) => [l.data.target, String(l.status).toLowerCase()])).to.deep.equal([["priv://shared", "shared"]]);
+        });
     });
 
     describe("Agent Profiles and Status", () => {

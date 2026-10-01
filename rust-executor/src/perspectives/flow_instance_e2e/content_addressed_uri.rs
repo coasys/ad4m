@@ -53,7 +53,7 @@ async fn a_live_graph_outputs_swap_after_the_co_sign_uncounts_the_votes() {
         .collect();
     assert!(!stale.is_empty(), "the commitment links exist to remove");
     f.perspective
-        .remove_links(stale, None)
+        .remove_links(stale, None, &f.ctx)
         .await
         .expect("retract the committed outputs");
     f.link(

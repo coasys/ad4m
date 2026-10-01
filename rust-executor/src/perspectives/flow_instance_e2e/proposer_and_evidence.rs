@@ -25,6 +25,7 @@ async fn a_foreign_field_override_neither_redirects_nor_destroys_a_proposal() {
             LinkExpression::from(override_link),
             LinkStatus::Shared,
             None,
+            &f.ctx,
         )
         .await
         .expect("foreign to_state link");
@@ -83,6 +84,7 @@ async fn a_forged_vote_claiming_our_authorship_does_not_suppress_our_own() {
             },
             LinkStatus::Shared,
             None,
+            &f.ctx,
         )
         .await
         .expect("sync a forged vote claiming our authorship");

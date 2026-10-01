@@ -395,10 +395,9 @@ pub(super) async fn run_model_query(
     perspective: &PerspectiveInstance,
     class_name: &str,
     query: &Value,
-    viewer_did: Option<&str>,
 ) -> Result<(Vec<Value>, usize), String> {
     let raw = perspective
-        .model_query_for_viewer(class_name, &query.to_string(), viewer_did)
+        .model_query(class_name, &query.to_string())
         .await
         .map_err(|e| format!("{e:#}"))?;
     let parsed: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
@@ -432,11 +431,10 @@ pub(crate) async fn fetch_instance(
     perspective: &PerspectiveInstance,
     class_name: &str,
     base_uri: &str,
-    viewer_did: Option<&str>,
 ) -> Result<Option<Value>, String> {
     let lookup = |uri: String| async move {
         let query = json!({ "where": { "id": uri }, "limit": 1 });
-        let (instances, _) = run_model_query(perspective, class_name, &query, viewer_did).await?;
+        let (instances, _) = run_model_query(perspective, class_name, &query).await?;
         Ok::<Option<Value>, String>(instances.into_iter().next())
     };
 
@@ -579,7 +577,7 @@ pub(crate) struct CascadeFailure {
     pub error: String,
 }
 
-/// Remove every link touching `uri` (as source or target) that `viewer_did`
+/// Remove every link touching `uri` (as source or target) that `context`
 /// may see. Same cascade as `delete_subject` / `{class}_delete`.
 ///
 /// Another user's Local links on `uri` are not visible to the caller, so
@@ -591,7 +589,7 @@ pub(crate) struct CascadeFailure {
 pub(crate) async fn remove_all_links_of(
     perspective: &mut PerspectiveInstance,
     uri: &str,
-    viewer_did: Option<&str>,
+    context: &crate::agent::AgentContext,
 ) -> Result<usize, CascadeFailure> {
     let mut removed = 0;
     for query in [
@@ -604,7 +602,7 @@ pub(crate) async fn remove_all_links_of(
             ..Default::default()
         },
     ] {
-        let links = match perspective.get_links_for_viewer(&query, viewer_did).await {
+        let links = match perspective.get_links_for_context(&query, context).await {
             Ok(links) => links,
             Err(e) => {
                 return Err(CascadeFailure {
@@ -620,7 +618,7 @@ pub(crate) async fn remove_all_links_of(
                 link.data.predicate.as_deref().unwrap_or(""),
                 link.data.target
             );
-            if let Err(e) = perspective.remove_link(link.into(), None).await {
+            if let Err(e) = perspective.remove_link(link.into(), None, context).await {
                 return Err(CascadeFailure {
                     removed,
                     error: format!("removing link {described} failed: {e:#}"),

@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 async fn selection_link_status_restricts_selection_and_order() {
     let store = SparqlStore::new(None).unwrap();
     let admin = TestSigner::generate();
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&admin.did));
     let local =
         |s: &str, p: &str, t: &str, sec: u32| sg_link(&admin, s, p, t, sec, LinkStatus::Local);
     add(
@@ -99,6 +101,8 @@ async fn selection_link_status_restricts_selection_and_order() {
 async fn selection_link_status_applies_to_a_relation_where() {
     let store = SparqlStore::new(None).unwrap();
     let admin = TestSigner::generate();
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&admin.did));
     add(
         &store,
         [
@@ -175,6 +179,8 @@ async fn selection_link_status_applies_to_a_relation_where() {
 async fn selection_link_status_local_needs_a_local_flag() {
     let store = SparqlStore::new(None).unwrap();
     let admin = TestSigner::generate();
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&admin.did));
     let local =
         |s: &str, p: &str, t: &str, sec: u32| sg_link(&admin, s, p, t, sec, LinkStatus::Local);
     add(

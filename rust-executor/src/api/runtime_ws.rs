@@ -110,7 +110,10 @@ async fn open_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     Ok(Value::Bool(true))
 }
 
-async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+pub(crate) async fn export_data(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
@@ -130,8 +133,13 @@ async fn export_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             let uuid = body.perspective_uuid.as_deref().ok_or_else(|| {
                 WsRpcError::bad_request("perspective_uuid required for perspective export")
             })?;
+            // The perspective as the requesting agent sees it (#1224).
             let perspective = crate::perspectives::get_perspective(uuid)
-                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?;
+                .ok_or_else(|| WsRpcError::not_found(format!("Perspective {} not found", uuid)))?
+                .read_as_context(&crate::agent::AgentContext::from_auth_token(
+                    ctx.auth_token.clone(),
+                ))
+                .map_err(|e| WsRpcError::internal(e.to_string()))?;
             let links = perspective
                 .get_links(&crate::types::LinkQuery {
                     source: None,

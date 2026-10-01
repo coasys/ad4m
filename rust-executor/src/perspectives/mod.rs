@@ -16,8 +16,7 @@ pub mod interpretation;
 mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
-pub mod link_visibility;
-mod viewer_reads;
+pub mod viewer_reads;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
@@ -118,102 +117,95 @@ pub fn initialize_from_db() {
         // Spawn async task to initialize perspective
         tokio::spawn(async move {
             let p = PerspectiveInstance::new(handle_clone.clone(), None);
-
-            // Run literal:// → literal: URI migration (idempotent)
-            match migration::migrate_links_from_rusqlite_to_sparql(
-                &handle_clone.uuid,
-                &p.sparql_store,
-            ) {
-                Ok(result) if result.migrated > 0 => {
-                    log::info!(
-                        "🔄 Migration for {}: {} migrated, {} literal conversions",
-                        handle_clone.uuid,
-                        result.migrated,
-                        result.literal_conversions
-                    );
-                }
-                Ok(_) => {} // Already migrated or nothing to migrate
-                Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
-            }
-
-            // No named-graph → reifier migration. The named-graph storage model
-            // never shipped: `git tag --contains` on the commit that replaced it
-            // (`7aeeb8982`) is empty, and the last release tag carrying
-            // `perspectives/` has no `sparql_store.rs` at all. Carrying a
-            // migration for a format nobody holds meant carrying a third
-            // `proofValid` read path, and with it the "never evaluated" verdict
-            // it decoded (#1046).
-
-            // No literal-encoding migration on boot. A scalar rides the API as a
-            // `literal:*` wire target and is stored as a native typed RDF literal
-            // by the write path (`target_to_storage_term`, applied uniformly to
-            // every link — model properties, raw `addLink`, and SHACLFlow
-            // bookkeeping alike); reads render it back to the same wire form
-            // (`storage_term_to_target_string`). Fresh writes therefore land in
-            // the indexed shape by construction, so there is nothing to migrate.
-            // A store-sweep migration would sit below this wire-format boundary
-            // and could not tell a model property value from a SHACLFlow
-            // bookkeeping link — see the git history of this file for the removed
-            // v3/v4 sweeps. If real pre-typed-literal stores ever need upgrading,
-            // reintroduce a migration keyed on SHACL property shapes, never a
-            // blanket rewrite.
-
-            // Rebuild SPARQL index from existing links
-            // Skip SPARQL rebuild if persistent store already has data
-            if p.sparql_store.has_data() {
-                log::info!(
-                    "✅ SPARQL store for perspective {} already has data, skipping rebuild",
-                    handle_clone.uuid
-                );
-            } else {
-                match p.get_links(&LinkQuery::default()).await {
-                    Ok(links) => {
-                        if !links.is_empty() {
-                            log::info!(
-                                "🔄 SPARQL REBUILD: Syncing {} links for perspective {}",
-                                links.len(),
-                                handle_clone.uuid
-                            );
-                            if let Err(e) = p.sync_existing_links_to_sparql(&links) {
-                                log::error!(
-                                    "Failed to sync links to SPARQL for perspective {}: {}",
-                                    handle_clone.uuid,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::error!(
-                            "Failed to get links for SPARQL sync in perspective {}: {}",
-                            handle_clone.uuid,
-                            e
-                        );
-                    }
-                }
-            }
-
-            // Atomically check-and-insert to prevent race condition
-            // (In case multiple initializations were spawned before any completed)
-            let should_start_tasks = {
-                let mut perspectives = PERSPECTIVES.write().unwrap();
-                if perspectives.contains_key(&handle_clone.uuid) {
-                    log::warn!(
-                        "Perspective {} was initialized by another task, discarding duplicate",
-                        handle_clone.uuid
-                    );
-                    false
-                } else {
-                    perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
-                    true
-                }
-            };
-
-            if should_start_tasks {
-                // Start background tasks
-                tokio::spawn(p.start_background_tasks());
-            }
+            load_perspective(p, handle_clone).await;
         });
+    }
+}
+
+/// Bring a perspective's store up to date and register it.
+///
+/// Fails closed: when moving its Local links into per-user graphs fails, the
+/// perspective is not registered, so no read sees a Local link still in the
+/// shared graph. It is retried when the executor next starts.
+async fn load_perspective(p: PerspectiveInstance, handle_clone: PerspectiveHandle) {
+    // Run literal:// → literal: URI migration (idempotent)
+    match migration::migrate_links_from_rusqlite_to_sparql(&handle_clone, &p.sparql_store) {
+        Ok(result) if result.migrated > 0 => {
+            log::info!(
+                "🔄 Migration for {}: {} migrated, {} literal conversions",
+                handle_clone.uuid,
+                result.migrated,
+                result.literal_conversions
+            );
+        }
+        Ok(_) => {} // Already migrated or nothing to migrate
+        Err(e) => log::warn!("Migration check for {}: {}", handle_clone.uuid, e),
+    }
+
+    // Local links move out of the shared default graph into the graph
+    // of the user they belong to (#1224). Before the instance is
+    // registered, so no read sees them in the shared graph.
+    match migration::LocalLinkOwners::of_this_executor(&handle_clone)
+        .and_then(|owners| migration::migrate_local_links_to_user_graphs(&p.sparql_store, &owners))
+    {
+        Ok(0) => {}
+        Ok(moved) => log::info!(
+            "🔄 Moved {} Local links of perspective {} into per-user graphs",
+            moved,
+            handle_clone.uuid
+        ),
+        Err(e) => {
+            log::error!(
+                "Moving Local links of perspective {} into per-user graphs failed, \
+                     so it is not loaded until the executor restarts: {}",
+                handle_clone.uuid,
+                e
+            );
+            return;
+        }
+    }
+
+    // No named-graph → reifier migration. The named-graph storage model
+    // never shipped: `git tag --contains` on the commit that replaced it
+    // (`7aeeb8982`) is empty, and the last release tag carrying
+    // `perspectives/` has no `sparql_store.rs` at all. Carrying a
+    // migration for a format nobody holds meant carrying a third
+    // `proofValid` read path, and with it the "never evaluated" verdict
+    // it decoded (#1046).
+
+    // No literal-encoding migration on boot. A scalar rides the API as a
+    // `literal:*` wire target and is stored as a native typed RDF literal
+    // by the write path (`target_to_storage_term`, applied uniformly to
+    // every link — model properties, raw `addLink`, and SHACLFlow
+    // bookkeeping alike); reads render it back to the same wire form
+    // (`storage_term_to_target_string`). Fresh writes therefore land in
+    // the indexed shape by construction, so there is nothing to migrate.
+    // A store-sweep migration would sit below this wire-format boundary
+    // and could not tell a model property value from a SHACLFlow
+    // bookkeeping link — see the git history of this file for the removed
+    // v3/v4 sweeps. If real pre-typed-literal stores ever need upgrading,
+    // reintroduce a migration keyed on SHACL property shapes, never a
+    // blanket rewrite.
+
+    // Atomically check-and-insert to prevent race condition
+    // (In case multiple initializations were spawned before any completed)
+    let should_start_tasks = {
+        let mut perspectives = PERSPECTIVES.write().unwrap();
+        if perspectives.contains_key(&handle_clone.uuid) {
+            log::warn!(
+                "Perspective {} was initialized by another task, discarding duplicate",
+                handle_clone.uuid
+            );
+            false
+        } else {
+            perspectives.insert(handle_clone.uuid.clone(), RwLock::new(p.clone()));
+            true
+        }
+    };
+
+    if should_start_tasks {
+        // Start background tasks
+        tokio::spawn(p.start_background_tasks());
     }
 }
 
@@ -735,27 +727,20 @@ pub async fn import_perspective(
     let perspective = get_perspective(&instance.handle.uuid)
         .ok_or_else(|| "Perspective not found after creation".to_string())?;
 
-    // `instance.links` is already `LinkExpression`. Decorating just to persist
-    // would convert back at the store boundary. Missing status defaults to
-    // Local, matching the previous decorate path (not Shared).
-    let additions: Vec<crate::types::LinkExpression> = instance
-        .links
-        .into_iter()
-        .map(|mut link| {
-            if link.status.is_none() {
-                link.status = Some(LinkStatus::Local);
-            }
-            link
-        })
-        .collect();
-
-    perspective
-        .persist_link_diff(&crate::types::PerspectiveDiff {
-            additions,
-            removals: vec![],
-        })
-        .await
-        .map_err(|e| format!("Failed to persist link diff to SPARQL store: {}", e))?;
+    // `instance.links` is already `LinkExpression`, written to the store as
+    // it is. Missing status defaults to Local, matching the previous decorate
+    // path (not Shared). An export records no user a Local link belongs to,
+    // so it goes to the graph of the user who authored it here, or else to
+    // each owner of the perspective (#1224, `LocalLinkOwners`).
+    let owners = migration::LocalLinkOwners::of_this_executor(&instance.handle)?;
+    for mut link in instance.links {
+        if link.status.is_none() {
+            link.status = Some(LinkStatus::Local);
+        }
+        owners
+            .add_link(&perspective.sparql_store, &link)
+            .map_err(|e| format!("Failed to persist link to SPARQL store: {}", e))?;
+    }
 
     Ok(instance.handle)
 }
@@ -783,6 +768,51 @@ mod tests {
         }
 
         None
+    }
+
+    /// A perspective whose Local links cannot be moved out of the shared
+    /// graph is not loaded: registered, every co-owner would read them there
+    /// (#1224). Here the move fails because the executor has no main agent
+    /// yet; with one, the same store loads.
+    #[tokio::test]
+    async fn a_perspective_whose_local_links_cannot_move_is_not_loaded() {
+        setup();
+        let alice = crate::agent::signatures::TestSigner::generate();
+        let signed = alice.sign(
+            Link {
+                source: "ad4m://s".to_string(),
+                predicate: Some("ad4m://p".to_string()),
+                target: "ad4m://t".to_string(),
+            }
+            .normalize(),
+        );
+        let local = LinkExpression {
+            author: signed.author,
+            timestamp: signed.timestamp,
+            data: signed.data,
+            proof: signed.proof,
+            status: Some(LinkStatus::Local),
+        };
+        let load = |name: &str| {
+            let handle = PerspectiveHandle::new_from_name(name.to_string());
+            let p = PerspectiveInstance::new(handle.clone(), None);
+            p.sparql_store.add_link_as_before_1224(&local);
+            (p, handle)
+        };
+
+        let (p, handle) = load("no main agent");
+        let saved = crate::agent::AgentService::with_mutable_global_instance(|a| a.did.take());
+        load_perspective(p, handle.clone()).await;
+        crate::agent::AgentService::with_mutable_global_instance(|a| a.did = saved);
+        assert!(
+            get_perspective(&handle.uuid).is_none(),
+            "registered with its Local links in the shared graph"
+        );
+
+        let (p, handle) = load("with a main agent");
+        load_perspective(p, handle.clone()).await;
+        assert!(get_perspective(&handle.uuid).is_some());
+        remove_perspective(&handle.uuid).await;
     }
 
     #[tokio::test]
@@ -880,7 +910,12 @@ mod tests {
         println!("test_link: {:?}", test_link);
 
         perspective
-            .add_link_expression(test_link.clone(), LinkStatus::Local, None)
+            .add_link_expression(
+                test_link.clone(),
+                LinkStatus::Local,
+                None,
+                &crate::agent::AgentContext::main_agent(),
+            )
             .await
             .expect("Failed to add link");
 

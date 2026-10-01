@@ -24,7 +24,6 @@ use super::types::{
     ScopeDirection, ShapeResolver, SortKey, SparqlPagination,
 };
 use super::utils::{validate_iri, values_or_str_filter, MAX_INCLUDE_DEPTH};
-use crate::perspectives::link_visibility::viewer_author_filter;
 use crate::perspectives::sparql_store::SparqlStore;
 use deno_core::anyhow::Error;
 use serde_json::Value;
@@ -51,9 +50,8 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
 /// duplicates.
 ///
 /// A property path (`<p>+`) is a reachability test over triples and has no
-/// link per hop whose status, verdict or author it could read, so a transitive
-/// walk that must honour `linkStatus` / `includeUnverified`, or a viewer who
-/// may not follow another user's Local link (#1024), is done here (#1120):
+/// link per hop whose status or verdict it could read, so a transitive walk
+/// that must honour `linkStatus` / `includeUnverified` is done here (#1120):
 /// one guarded single-step query per depth for the whole frontier, until no
 /// new node turns up. `Out` follows `start -> node`, `In` follows
 /// `node -> start`. As with `+`, a start on a cycle reaches itself.
@@ -170,7 +168,6 @@ async fn walk_levels(
     predicate: &str,
     direction: ScopeDirection,
     levels: &[usize],
-    viewer_did: Option<&str>,
 ) -> Result<Vec<String>, Error> {
     let mut ordered: Vec<String> = Vec::new();
     // Seeded with the roots so that a cycle back to an anchor neither returns
@@ -197,13 +194,7 @@ async fn walk_levels(
         level_input.limit = None;
         level_input.offset = None;
 
-        let plan = build_instance_sparql(
-            shape,
-            &level_input,
-            Some(pagination),
-            Some(resolver),
-            viewer_did,
-        );
+        let plan = build_instance_sparql(shape, &level_input, Some(pagination), Some(resolver));
         let InstanceQueryPlan::TwoPhase {
             pagination_subquery,
             ..
@@ -278,19 +269,13 @@ async fn walk_levels(
 /// * `resolver` — Used to resolve target-class shapes for recursive
 ///   `include` resolution.  Typically a cache-backed resolver living on
 ///   the `PerspectiveInstance`.
-/// * `viewer_did` — Visibility scope of the read. `None` is executor scope
-///   (every link); `Some(did)` hides `Local` links authored by anyone else.
-///   See [`link_visibility`](crate::perspectives::link_visibility). The scope
-///   is carried through include recursion and projections, so a relation
-///   cannot be used to walk into another user's private links.
 pub async fn execute_model_query(
     store: &SparqlStore,
     shape: &ModelShape,
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
-    viewer_did: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
-    execute_model_query_inner(store, shape, query_input, resolver, 0, viewer_did).await
+    execute_model_query_inner(store, shape, query_input, resolver, 0).await
 }
 
 /// Inner implementation with recursion depth tracking.
@@ -304,7 +289,6 @@ pub(super) async fn execute_model_query_inner(
     query_input: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
-    viewer_did: Option<&str>,
 ) -> Result<ModelQueryResult, Error> {
     if depth > MAX_INCLUDE_DEPTH {
         log::warn!(
@@ -355,7 +339,7 @@ pub(super) async fn execute_model_query_inner(
             transitive: true,
             direction,
             ..
-        }) if query_input.walked.is_none() && !LinkGuard::of(query_input, viewer_did).is_open() => {
+        }) if query_input.walked.is_none() && !LinkGuard::of(query_input).is_open() => {
             match validate_iri(predicate) {
                 Ok(safe_pred) => {
                     let anchors: Vec<String> = ids
@@ -368,7 +352,7 @@ pub(super) async fn execute_model_query_inner(
                         &anchors,
                         safe_pred,
                         *direction,
-                        LinkGuard::of(query_input, viewer_did),
+                        LinkGuard::of(query_input),
                     )?;
                     walked_input = ModelQueryInput {
                         walked: Some(pairs),
@@ -415,7 +399,7 @@ pub(super) async fn execute_model_query_inner(
         && count_only_can_skip_the_walk
         && all_where_pushable(query_input, shape, Some(resolver))
     {
-        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver), viewer_did) {
+        if let Some(sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             let count = results
@@ -646,7 +630,6 @@ pub(super) async fn execute_model_query_inner(
         query_input,
         sparql_pagination.as_ref(),
         Some(resolver),
-        viewer_did,
     );
 
     // Captures the source IRI order returned by the phase-1 pagination subquery
@@ -679,7 +662,6 @@ pub(super) async fn execute_model_query_inner(
                         &predicate,
                         direction,
                         levels,
-                        viewer_did,
                     )
                     .await?
                 }
@@ -713,10 +695,6 @@ pub(super) async fn execute_model_query_inner(
                     let local_status = local_status_filter(shape);
                     let link_status = link_status_filter(query_input.link_status.as_ref());
                     let proof_valid = proof_valid_filter(query_input.include_unverified);
-                    // Phase 1 pages over conformance, which the guard already
-                    // scopes to the viewer; the rows themselves are filtered
-                    // here the same way the single plan filters them.
-                    let viewer = viewer_author_filter(viewer_did, "_reifier", "author");
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
     {source_constraint}
@@ -725,7 +703,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{link_status}{proof_valid}{local_status}{viewer}}}"#
+{link_status}{proof_valid}{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -774,7 +752,6 @@ pub(super) async fn execute_model_query_inner(
             &reverse_rels,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
-            viewer_did,
         )?;
     }
 
@@ -805,9 +782,7 @@ pub(super) async fn execute_model_query_inner(
     let total_count = if walk.is_some() {
         instances.len()
     } else if sparql_pagination.is_some() {
-        if let Some(count_sparql) =
-            build_count_sparql(shape, query_input, Some(resolver), viewer_did)
-        {
+        if let Some(count_sparql) = build_count_sparql(shape, query_input, Some(resolver)) {
             let result_json = store.query(&count_sparql)?;
             let results: Vec<Value> = serde_json::from_str(&result_json)?;
             results
@@ -876,7 +851,8 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
-            LinkGuard::of(query_input, viewer_did),
+            query_input.link_status.as_ref(),
+            query_input.include_unverified,
         )?;
     }
 
@@ -892,7 +868,6 @@ pub(super) async fn execute_model_query_inner(
                 depth,
                 query_input.link_status.as_ref(),
                 query_input.include_unverified,
-                viewer_did,
             )
             .await?;
         }
@@ -924,7 +899,6 @@ pub(super) async fn execute_model_query_inner(
         query_input.link_status.as_ref(),
         query_input.include_unverified,
         &mut final_instances,
-        viewer_did,
     )
     .await?;
 
@@ -939,7 +913,6 @@ pub(super) async fn execute_model_query_inner(
             depth,
             query_input.link_status.as_ref(),
             query_input.include_unverified,
-            viewer_did,
         )
         .await?;
     }

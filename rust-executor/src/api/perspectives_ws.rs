@@ -120,7 +120,11 @@ async fn get_perspective_with_access(
         }
     }
 
-    Ok(perspective)
+    // Every read a handler makes through this handle runs in the requesting
+    // agent's view: the shared links plus their own Local links (#1224).
+    perspective
+        .read_as_context(&AgentContext::from_auth_token(ctx.auth_token.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
@@ -286,18 +290,6 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
-/// Visibility scope for a request on this surface.
-///
-/// Every handler below serves a request on behalf of an agent, so reads go
-/// through the `*_for_viewer` entry points with this DID rather than the
-/// executor-scoped ones. See
-/// [`link_visibility`](crate::perspectives::link_visibility).
-fn viewer_did(ctx: &RequestContext) -> Result<Option<String>, WsRpcError> {
-    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-    crate::perspectives::link_visibility::viewer_did_for_context(&agent_context)
-        .map_err(|e| WsRpcError::internal(e.to_string()))
-}
-
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -312,19 +304,15 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
         Err(e) => return Err(e),
     };
-    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links_for_viewer(
-            &LinkQuery {
-                source: None,
-                target: None,
-                predicate: None,
-                from_date: None,
-                until_date: None,
-                limit: None,
-            },
-            viewer.as_deref(),
-        )
+        .get_links(&LinkQuery {
+            source: None,
+            target: None,
+            predicate: None,
+            from_date: None,
+            until_date: None,
+            limit: None,
+        })
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
@@ -372,9 +360,8 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .map(|v| v as i32),
     };
 
-    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links_for_viewer(&query, viewer.as_deref())
+        .get_links(&query)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(links)?)
@@ -537,6 +524,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
                 .remove_link(
                     LinkExpression::from_input_without_proof(link),
                     Some(batch_id.clone()),
+                    &agent_context,
                 )
                 .await
                 .map_err(|e| WsRpcError::internal(e.to_string()))?;
@@ -612,9 +600,10 @@ async fn add_link_expression(params: Value, ctx: Arc<RequestContext>) -> Result<
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
     let status = parse_link_status(body.status.as_deref());
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let result = perspective
-        .add_link_expression(body.link, status, body.batch_id)
+        .add_link_expression(body.link, status, body.batch_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -666,10 +655,11 @@ async fn remove_link(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
 
     let link_expr = LinkExpression::from_input_without_proof(body.link);
     perspective
-        .remove_link(link_expr, body.batch_id)
+        .remove_link(link_expr, body.batch_id, &agent_context)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -1166,7 +1156,6 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let query_json = params.require_str("query_json")?;
 
     let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
-    let viewer = viewer_did(&ctx)?;
 
     // A `FlowInstance` read is where a user learns a flow's state, and the
     // `currentState` cache is a Local link private to whoever's request wrote
@@ -1190,7 +1179,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query_for_viewer(&class_name, &query_json, viewer.as_deref()),
+        perspective.model_query(&class_name, &query_json),
     )
     .await;
 
@@ -2379,7 +2368,10 @@ pub(crate) async fn resolve_shacl_target_class(
 /// Equivalent to the SDK's `PerspectiveProxy.getShaclNames()` but resolved
 /// in-process — one handler call replaces one `queryLinks` round trip, plus
 /// deduplication happens server-side.
-async fn get_shacl_names(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+pub(crate) async fn get_shacl_names(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
         &ctx.capabilities,

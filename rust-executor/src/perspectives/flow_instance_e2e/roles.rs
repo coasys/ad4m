@@ -214,7 +214,12 @@ async fn late_syncing_revocation_stops_counting_votes_that_arrive_after_it() {
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(bob_vote), LinkStatus::Shared, None)
+        .add_link_expression(
+            LinkExpression::from(bob_vote),
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
         .await
         .expect("sync Bob's vote");
 
@@ -255,7 +260,12 @@ async fn sync_revocation_from(
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(tombstone), LinkStatus::Shared, None)
+        .add_link_expression(
+            LinkExpression::from(tombstone),
+            LinkStatus::Shared,
+            None,
+            &f.ctx,
+        )
         .await
         .expect("sync a peer's revocation");
 }

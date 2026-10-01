@@ -164,16 +164,7 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow state: {:#}", e),
         };
 
-        // No viewer DID means no own cache to read: derive.
-        let viewer = self.viewer_did().await.ok().flatten();
-        match Self::flow_instance_for(
-            &perspective,
-            &p.expression_address,
-            &flow_uri,
-            viewer.as_deref(),
-        )
-        .await
-        {
+        match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
             Err(e) => format!("Error querying flow state: {:#}", e),
             Ok(None) => format!(
                 "Expression {} is not in any state of flow {}",
@@ -264,12 +255,12 @@ impl Ad4mMcpHandler {
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
     ///
-    /// **The caller's own cache first (#987, #1024)**: when `viewer_did`
-    /// holds a verified `Local` `currentState` link of their own, its value is
-    /// returned directly, with no fold and no flow catalogue load. Another
-    /// user's cache is never read: any user may write one with any value
-    /// (`flow_instance::local_cached_state`). Without a viewer, or without a
-    /// cache of the viewer's own, the state is derived.
+    /// **The caller's own cache first (#987, #1024)**: `perspective` reads
+    /// as the caller (`get_readable_perspective`), and when it holds a
+    /// `Local` `currentState` link, its value is returned directly, with no
+    /// fold and no flow catalogue load. Another user's cache is not in the
+    /// caller's view (`flow_instance::local_cached_state`). Without a cache,
+    /// the state is derived.
     ///
     /// Freshness note: the sync-triggered pass (`trigger.rs`) re-derives on
     /// every incoming flow link, so residual staleness is bounded by the
@@ -278,7 +269,6 @@ impl Ad4mMcpHandler {
         perspective: &PerspectiveInstance,
         expression: &str,
         flow_uri: &str,
-        viewer_did: Option<&str>,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
         let Some(record) = instances
@@ -287,19 +277,16 @@ impl Ad4mMcpHandler {
         else {
             return Ok(None);
         };
-        if let Some(viewer_did) = viewer_did {
-            if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
-                perspective,
-                &record.instance_uri,
-                viewer_did,
-            )
-            .await?
-            {
-                return Ok(Some(FlowInstanceRecord {
-                    current_state: cached,
-                    ..record
-                }));
-            }
+        if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
+            perspective,
+            &record.instance_uri,
+        )
+        .await?
+        {
+            return Ok(Some(FlowInstanceRecord {
+                current_state: cached,
+                ..record
+            }));
         }
         let flows = load_shacl_flows(perspective).await?;
         let derived = crate::perspectives::flow_instance::derive_states(
@@ -346,24 +333,17 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow actions: {:#}", e),
         };
 
-        let viewer = self.viewer_did().await.ok().flatten();
-        let instance = match Self::flow_instance_for(
-            &perspective,
-            &p.expression_address,
-            &flow_uri,
-            viewer.as_deref(),
-        )
-        .await
-        {
-            Err(e) => return format!("Error querying flow actions: {:#}", e),
-            Ok(None) => {
-                return format!(
-                    "Expression {} is not in any state of flow {}",
-                    p.expression_address, p.flow_name
-                )
-            }
-            Ok(Some(instance)) => instance,
-        };
+        let instance =
+            match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+                Err(e) => return format!("Error querying flow actions: {:#}", e),
+                Ok(None) => {
+                    return format!(
+                        "Expression {} is not in any state of flow {}",
+                        p.expression_address, p.flow_name
+                    )
+                }
+                Ok(Some(instance)) => instance,
+            };
 
         // An instance can outlive its definition (flow removed from the
         // perspective's SDNA while instances remain). Report that as "no
@@ -646,21 +626,17 @@ mod tests {
         assert!(flow.is_none());
 
         // Instance lookup is keyed on (expression, flow URI).
-        let found = Ad4mMcpHandler::flow_instance_for(
-            &perspective,
-            base_uri,
-            "delivery://DeliveryFlow",
-            None,
-        )
-        .await
-        .expect("flow_instance_for");
+        let found =
+            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
+                .await
+                .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
         assert_eq!(found.current_state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow", None)
+            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow")
                 .await
                 .expect("flow_instance_for(other flow)")
                 .is_none(),
@@ -671,7 +647,6 @@ mod tests {
                 &perspective,
                 "ad4m://task/unrelated",
                 "delivery://DeliveryFlow",
-                None,
             )
             .await
             .expect("flow_instance_for(other subject)")
@@ -720,10 +695,9 @@ mod tests {
 
         let own_did = crate::agent::did_for_context(&ctx).expect("DID");
         let record = Ad4mMcpHandler::flow_instance_for(
-            &perspective,
+            &perspective.read_as(&own_did),
             base_uri,
             "delivery://DeliveryFlow",
-            Some(&own_did),
         )
         .await
         .expect("flow_instance_for")
@@ -792,7 +766,7 @@ mod tests {
             .await
             .expect("get_links");
         perspective
-            .remove_links(own.into_iter().map(Into::into).collect(), None)
+            .remove_links(own.into_iter().map(Into::into).collect(), None, &ctx)
             .await
             .expect("drop the minter's cache");
         plant(&mut perspective, inst_uri).await;
@@ -873,47 +847,71 @@ mod tests {
         assert_eq!(actions[0]["action"], "Scope");
     }
 
-    /// A Local link that names the caller as its author counts as the
-    /// caller's cache only when the caller's signature on it verifies.
+    /// The MCP flow tools read in the caller's view (#1224): the handles
+    /// from `get_readable_perspective` (`get_flows`) and
+    /// `get_perspective_with_auth` (`flow_proposal_reject`). Bob, a managed
+    /// user, does not see the main agent's Local links and does see his own.
     #[tokio::test(flavor = "multi_thread")]
-    async fn flow_state_ignores_a_cache_the_caller_did_not_sign() {
-        fn unsigned_in_callers_name(
-            perspective: &mut PerspectiveInstance,
-            inst_uri: String,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
-            Box::pin(async move {
-                let main_did =
-                    crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
-                        .expect("main DID");
-                perspective
-                    .add_link_expression(
-                        crate::types::LinkExpression {
-                            author: main_did,
-                            timestamp: chrono::Utc::now().to_rfc3339(),
-                            data: crate::types::Link {
-                                source: inst_uri,
-                                predicate: Some(
-                                    crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE
-                                        .to_string(),
-                                ),
-                                target: "literal:string:scoped".to_string(),
-                            },
-                            proof: crate::types::ExpressionProof {
-                                key: "not-the-callers-key".to_string(),
-                                signature: "not-the-callers-signature".to_string(),
-                            },
-                            status: None,
-                        },
-                        LinkStatus::Local,
-                        None,
-                    )
-                    .await
-                    .expect("add_link_expression");
-            })
+    async fn flow_tools_read_the_callers_view() {
+        use crate::agent::AgentContext;
+        use crate::types::Link;
+
+        let (perspective, _shapes, _ctx) = setup_perspective_no_llm(&[]).await;
+        let bob = super::super::test_session::UserSession::new("mcp-flows-bob@test.local", false);
+        perspective.persisted.lock().await.owners =
+            Some(vec![crate::agent::did(), bob.did.clone()]);
+        let uuid = perspective.uuid.clone();
+        crate::perspectives::register_perspective(uuid.clone(), perspective.clone());
+
+        let mut p = perspective.clone();
+        let link = |source: &str, predicate: &str, target: &str| Link {
+            source: source.to_string(),
+            predicate: Some(predicate.to_string()),
+            target: target.to_string(),
+        };
+        for (l, ctx) in [
+            (
+                link("ad4m://self", "ad4m://has_flow", "literal:string:MainFlow"),
+                AgentContext::main_agent(),
+            ),
+            (
+                link("ad4m://self", "ad4m://has_flow", "literal:string:BobFlow"),
+                bob.context.clone(),
+            ),
+            (
+                link("test://bobs-proposal", "test://vote", "test://yes"),
+                bob.context.clone(),
+            ),
+        ] {
+            p.add_link(l, LinkStatus::Local, None, &ctx).await.unwrap();
         }
-        let (handler, uuid, _guard) = instance_with_a_foreign_cache(unsigned_in_callers_name).await;
-        let out: serde_json::Value =
-            serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
-        assert_eq!(out["state"], "identified", "{out}");
+
+        let flows = bob
+            .handler
+            .get_flows(Parameters(GetFlowsParams {
+                perspective_id: uuid.clone(),
+            }))
+            .await;
+        let rejected = bob
+            .handler
+            .flow_proposal_reject(Parameters(FlowProposalParams {
+                perspective_id: uuid.clone(),
+                proposal_uri: "test://bobs-proposal".to_string(),
+            }))
+            .await;
+        crate::perspectives::unregister_perspective(&uuid);
+
+        let flows: serde_json::Value = serde_json::from_str(&flows).expect(&flows);
+        assert_eq!(
+            flows["flows"],
+            serde_json::json!(["literal:string:BobFlow"]),
+            "{flows}"
+        );
+        assert!(
+            !rejected.starts_with("Error"),
+            "Bob's reject failed: {rejected}"
+        );
+        let rejected: serde_json::Value = serde_json::from_str(&rejected).expect(&rejected);
+        assert_eq!(rejected["retracted_links"], 1, "{rejected}");
     }
 }

@@ -304,13 +304,6 @@ impl Ad4mMcpHandler {
         // which covers a caller using one spelling.
         let filters = link_filter_variants(&p.source, &p.predicate, &p.target);
 
-        // Serving an agent's read: another user's Local links are not ours
-        // to hand over (issue #1024).
-        let viewer = match self.viewer_did().await {
-            Ok(v) => v,
-            Err(e) => return format!("Error resolving requesting agent: {}", e),
-        };
-
         match self.get_readable_perspective(&p.perspective_id).await {
             Ok(perspective) => {
                 let mut result: Vec<serde_json::Value> = Vec::new();
@@ -325,10 +318,7 @@ impl Ad4mMcpHandler {
                         ..Default::default()
                     };
 
-                    let links = match perspective
-                        .get_links_for_viewer(&query, viewer.as_deref())
-                        .await
-                    {
+                    let links = match perspective.get_links(&query).await {
                         Ok(links) => links,
                         Err(e) => return format!("Error querying links: {}", e),
                     };

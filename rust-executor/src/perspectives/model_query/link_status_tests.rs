@@ -132,7 +132,9 @@ pub(super) fn unset(instance: &Value, key: &str) -> bool {
 #[tokio::test]
 async fn link_status_shared_reads_only_the_shared_property() {
     let store = SparqlStore::new(None).unwrap();
-    ls_seed(&store);
+    let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
 
     // `limit` switches to the two-phase plan, whose property query is built
     // separately in `query.rs`.
@@ -190,6 +192,8 @@ async fn link_status_shared_reads_only_the_shared_property() {
 async fn link_status_applies_to_includes_and_reverse_relations() {
     let store = SparqlStore::new(None).unwrap();
     let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     let r = "ls://r/1";
     for l in [
         ls_link(
@@ -266,7 +270,7 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
+            super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
                 .await
                 .unwrap()
                 .instances[0]
@@ -308,7 +312,9 @@ async fn link_status_applies_to_includes_and_reverse_relations() {
 #[tokio::test]
 async fn link_status_restricts_links_rows() {
     let store = SparqlStore::new(None).unwrap();
-    ls_seed(&store);
+    let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     let targets = |inst: &Value, key: &str| -> Vec<String> {
         inst["__links"][key]
             .as_array()
@@ -466,6 +472,8 @@ async fn link_status_shared_does_not_combine_a_local_link_with_a_forged_shared_o
 async fn link_status_and_include_unverified_both_apply_to_a_local_unverified_link() {
     let store = SparqlStore::new(None).unwrap();
     let signer = TestSigner::generate();
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     let c = "ls://c/1";
     store
         .add_link(&ls_link(

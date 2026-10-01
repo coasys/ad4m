@@ -174,15 +174,11 @@ impl Ad4mMcpHandler {
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });
-        let viewer = match self.viewer_did().await {
+        let (mut instances, total) = match run_model_query(&perspective, &class_name, &query).await
+        {
             Ok(v) => v,
-            Err(e) => return error_json(e),
+            Err(e) => return error_json(format!("Error reading {class_name} instances: {e}")),
         };
-        let (mut instances, total) =
-            match run_model_query(&perspective, &class_name, &query, viewer.as_deref()).await {
-                Ok(v) => v,
-                Err(e) => return error_json(format!("Error reading {class_name} instances: {e}")),
-            };
         if instances.is_empty() {
             return format!("(no {class_name} instances under {parent})");
         }

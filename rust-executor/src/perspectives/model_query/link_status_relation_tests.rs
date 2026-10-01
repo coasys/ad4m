@@ -81,6 +81,8 @@ fn ids(v: &Value) -> Vec<String> {
 async fn link_status_applies_to_getter_backed_relations() {
     let store = SparqlStore::new(None).unwrap();
     let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     ls_seed_remark(&store, &signer);
     store
         .add_link(&ls_link(
@@ -131,15 +133,10 @@ async fn link_status_applies_to_getter_backed_relations() {
                     }),
                     ..Default::default()
                 };
-                let result = super::query::execute_model_query(
-                    store,
-                    shape.as_ref(),
-                    &query,
-                    &resolver,
-                    None,
-                )
-                .await
-                .unwrap();
+                let result =
+                    super::query::execute_model_query(store, shape.as_ref(), &query, &resolver)
+                        .await
+                        .unwrap();
                 assert_eq!(result.instances.len(), 1, "limit {limit:?}");
                 out.push(ids(&result.instances[0]["comments"]));
             }
@@ -187,6 +184,8 @@ async fn link_status_applies_to_getter_backed_relations() {
 async fn link_status_applies_to_a_reverse_include() {
     let store = SparqlStore::new(None).unwrap();
     let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     for (second, mark, status) in [
         (6, "ls://m/shared", LinkStatus::Shared),
         (7, "ls://m/local", LinkStatus::Local),
@@ -246,12 +245,11 @@ async fn link_status_applies_to_a_reverse_include() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            let inst =
-                super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
-                    .await
-                    .unwrap()
-                    .instances[0]
-                    .clone();
+            let inst = super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
+                .await
+                .unwrap()
+                .instances[0]
+                .clone();
             let marks = &inst["markedBy"];
             assert!(
                 marks
@@ -280,6 +278,8 @@ async fn link_status_applies_to_a_reverse_include() {
 async fn link_status_applies_to_a_projection_target() {
     let store = SparqlStore::new(None).unwrap();
     let signer = ls_seed(&store);
+    // The Local links are the signer's own; read as the signer (#1224).
+    let store = store.read_as(Some(&signer.did));
     ls_seed_remark(&store, &signer);
     store
         .add_link(&ls_link(
@@ -317,12 +317,11 @@ async fn link_status_applies_to_a_projection_target() {
         let shape = shape.clone();
         let resolver = &resolver;
         async move {
-            let inst =
-                super::query::execute_model_query(store, shape.as_ref(), &query, resolver, None)
-                    .await
-                    .unwrap()
-                    .instances[0]
-                    .clone();
+            let inst = super::query::execute_model_query(store, shape.as_ref(), &query, resolver)
+                .await
+                .unwrap()
+                .instances[0]
+                .clone();
             let remark = inst["$remark"].clone();
             assert_eq!(remark["id"], json!("ls://r/1"), "hydrated: {inst}");
             remark
@@ -444,11 +443,10 @@ async fn another_users_local_links_do_not_fill_a_typed_relation_for_a_viewer() {
                         ..Default::default()
                     };
                     let result = super::query::execute_model_query(
-                        store,
+                        &store.read_as(viewer.as_deref()),
                         shape.as_ref(),
                         &query,
                         &resolver,
-                        viewer.as_deref(),
                     )
                     .await
                     .unwrap();
@@ -479,7 +477,8 @@ async fn another_users_local_links_do_not_fill_a_typed_relation_for_a_viewer() {
         each(&[]),
         "Bob: r/3's only aside is Alice's Local link"
     );
-    for viewer in [alice_did, None] {
+    // There is no executor scope any more (#1224): only Alice reads her links.
+    for viewer in [alice_did] {
         assert_eq!(
             comments(false, viewer.clone()).await,
             each(&["ls://r/1", "ls://r/2", "ls://r/3"]),

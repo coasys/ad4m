@@ -482,6 +482,7 @@ pub async fn remove_processor(
         .remove_links(
             links.into_iter().map(LinkExpression::from).collect(),
             Some(batch_id.clone()),
+            context,
         )
         .await;
 

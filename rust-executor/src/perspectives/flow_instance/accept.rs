@@ -62,6 +62,9 @@ pub async fn accept_flow_proposal(
     proposal_uri: &str,
     context: &AgentContext,
 ) -> anyhow::Result<Vec<FireOutcome>> {
+    // Everything below reads as the accepting user (#1224).
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let links = proposal_links(perspective, proposal_uri).await?;
     let Some(instance_uri) = links.iter().find_map(|l| {
         (l.data.predicate.as_deref() == Some(FLOW_INSTANCE_PREDICATE))
@@ -223,7 +226,7 @@ pub async fn reject_flow_proposal(
     // the only thing that distinguishes them at the wire.
     let retracted = to_remove.len();
     perspective
-        .remove_links(to_remove, None)
+        .remove_links(to_remove, None, context)
         .await
         .map_err(|e| anyhow::anyhow!("reject_flow_proposal: remove_links failed: {e:#}"))?;
     Ok(retracted)

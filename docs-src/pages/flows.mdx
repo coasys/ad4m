@@ -65,7 +65,7 @@ Three consequences, all intended:
   The engine does write a `currentState` value onto each flow instance, but it
   is a **cache for readers, never authority**. It is a `Local` link — it never
   syncs — and nothing in the derivation reads it. On a multi-user host it is
-  also per user: a `Local` link is private to its author, so a read of
+  also per user: a `Local` link is private to the user who wrote it, so a read of
   `FlowInstance` rows derives the state for the reading user and writes that
   user's own cache first. Read it for display. Never decide anything on it.
 </Callout>

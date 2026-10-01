@@ -92,7 +92,7 @@ async fn fixture_query(
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
 ) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
-    super::query::execute_model_query(store, shape, &with_unverified(query), resolver, None).await
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
 }
 
 async fn fixture_query_from_json(
@@ -216,8 +216,9 @@ async fn local_property_hydrates_only_from_local_links() {
         ))
         .unwrap();
 
+    // `make_link`'s author reads their own Local link (#1224).
     let result2 = fixture_query_from_json(
-        &store2,
+        &store2.read_as(Some("did:key:test123")),
         "Cache",
         &ModelQueryInput::default(),
         LOCAL_CACHE_SHAPE_JSON,
@@ -359,11 +360,11 @@ async fn local_links_are_private_per_user_on_one_executor() {
         "Bob must NOT read Alice's Local link"
     );
 
-    // ── Executor scope still sees everything ────────────────────────────────
-    // The flow engine's `currentState` cache and the auto-processor read in
-    // this scope. If filtering leaked into it, those would silently stop
-    // seeing their own derivations.
-    let as_executor = fixture_query_from_json_for_viewer(
+    // ── No read sees everyone's Local links (#1224) ────────────────────────
+    // There is no executor scope any more. A read that names no user reads
+    // as the main agent, who is neither Alice nor Bob here: both instances
+    // (their flags are Shared), neither user's Local state.
+    let unnamed = fixture_query_from_json_for_viewer(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -373,17 +374,9 @@ async fn local_links_are_private_per_user_on_one_executor() {
     .await
     .unwrap();
 
-    assert_eq!(as_executor.instances.len(), 2);
-    assert_eq!(
-        state_of(&as_executor, alice_base),
-        json!("alice_secret"),
-        "executor scope reads every Local link"
-    );
-    assert_eq!(
-        state_of(&as_executor, bob_base),
-        json!("bob_secret"),
-        "executor scope reads every Local link"
-    );
+    assert_eq!(unnamed.instances.len(), 2);
+    assert!(state_of(&unnamed, alice_base).is_null());
+    assert!(state_of(&unnamed, bob_base).is_null());
 }
 
 /// A shape with one engine-derived Local property (`ad4m://flow/current_state`,
@@ -547,8 +540,8 @@ async fn total_count_matches_what_the_viewer_can_hydrate() {
         "a paged total must not include an instance Bob cannot hydrate"
     );
 
-    // Alice reads both, and executor scope is unchanged.
-    for viewer in [Some(ALICE), None] {
+    // Alice reads both. There is no executor scope any more (#1224).
+    for viewer in [Some(ALICE)] {
         let count = run(
             ModelQueryInput {
                 limit: Some(0),
@@ -564,18 +557,21 @@ async fn total_count_matches_what_the_viewer_can_hydrate() {
     }
 }
 
-/// `total_count` for a viewer counts only the instances hydration returns,
-/// when what selects an instance is not one of its own rows.
+/// A read as Bob is the same read on a store that never held Alice's Local
+/// link (#1224): his view is the shared links plus his own, and nothing in it
+/// says Alice's link exists.
 ///
 /// A class with no flag and no required property is selected by its scope
 /// alone: `<folder> <note://in> ?source`, a Shared link on the *parent*,
-/// which Bob may see. `hidden`'s only row is Alice's Local `body`, so
-/// hydration returns nothing for it to Bob, and without
-/// `count_visibility_guard` the count would still include it. `listed` has a
-/// Shared `body` and is counted for everyone. Alice and executor scope get
-/// both.
+/// which Bob may see. `hidden`'s only row is Alice's Local `body`. For Bob,
+/// `hidden` is a note under the folder with no body, and he gets exactly
+/// what a store holding only the shared links gives. #1058 filtered this
+/// case with `count_visibility_guard`, which kept `hidden` out of Bob's
+/// count; the split store has no such guard, so his count follows the shared
+/// scope link he can read, as it does for any note without a body. `listed`
+/// has a Shared `body` and is counted for everyone. Alice gets both.
 #[tokio::test]
-async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate() {
+async fn a_viewer_reads_a_scoped_class_as_if_the_other_users_local_link_did_not_exist() {
     use crate::types::LinkStatus;
 
     const ALICE: &str = "did:key:z6MkAlice";
@@ -588,8 +584,7 @@ async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate(
         "relations": {}
     }"#;
 
-    let store = SparqlStore::new(None).unwrap();
-    for (source, pred, target, ts, status) in [
+    let links = [
         (
             "note://folder",
             "note://in",
@@ -618,14 +613,19 @@ async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate(
             "1700000000003",
             LinkStatus::Shared,
         ),
-    ] {
-        store
-            .add_link(&make_link_by(ALICE, source, pred, target, ts, status))
-            .unwrap();
+    ];
+    let store = SparqlStore::new(None).unwrap();
+    let without_alices_local_link = SparqlStore::new(None).unwrap();
+    for (source, pred, target, ts, status) in links {
+        let link = make_link_by(ALICE, source, pred, target, ts, status.clone());
+        store.add_link(&link).unwrap();
+        if status == LinkStatus::Shared {
+            without_alices_local_link.add_link(&link).unwrap();
+        }
     }
 
-    let run = |limit: usize, viewer: Option<&'static str>| {
-        let store = &store;
+    let run = |store: &SparqlStore, limit: usize, viewer: Option<&'static str>| {
+        let store = store.clone();
         async move {
             let input = ModelQueryInput {
                 parent: Some(Scope::Raw {
@@ -635,27 +635,36 @@ async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate(
                 limit: Some(limit),
                 ..Default::default()
             };
-            fixture_query_from_json_for_viewer(store, "Note", &input, NOTE_SHAPE_JSON, viewer)
+            fixture_query_from_json_for_viewer(&store, "Note", &input, NOTE_SHAPE_JSON, viewer)
                 .await
                 .unwrap()
         }
     };
 
-    let paged = run(10, Some(BOB)).await;
-    let ids: Vec<&str> = paged
-        .instances
-        .iter()
-        .filter_map(|i| i["id"].as_str())
-        .collect();
-    assert_eq!(ids, vec!["note://listed"], "Bob's rows");
-    assert_eq!(paged.total_count, 1, "Bob's paged total");
-    assert_eq!(run(0, Some(BOB)).await.total_count, 1, "Bob's count()");
-
-    for viewer in [Some(ALICE), None] {
-        assert_eq!(run(10, viewer).await.instances.len(), 2, "{viewer:?}");
-        assert_eq!(run(10, viewer).await.total_count, 2, "{viewer:?}");
-        assert_eq!(run(0, viewer).await.total_count, 2, "{viewer:?} count()");
+    for limit in [10, 0] {
+        let as_bob = run(&store, limit, Some(BOB)).await;
+        let shared_only = run(&without_alices_local_link, limit, Some(BOB)).await;
+        assert_eq!(
+            serde_json::to_value(&as_bob.instances).unwrap(),
+            serde_json::to_value(&shared_only.instances).unwrap(),
+            "limit {limit}: Bob's rows"
+        );
+        assert_eq!(
+            as_bob.total_count, shared_only.total_count,
+            "limit {limit}: Bob's total"
+        );
+        assert!(
+            !serde_json::to_string(&as_bob.instances)
+                .unwrap()
+                .contains("secret"),
+            "limit {limit}: {:?}",
+            as_bob.instances
+        );
     }
+
+    assert_eq!(run(&store, 10, Some(ALICE)).await.instances.len(), 2);
+    assert_eq!(run(&store, 10, Some(ALICE)).await.total_count, 2);
+    assert_eq!(run(&store, 0, Some(ALICE)).await.total_count, 2);
 }
 
 #[tokio::test]
@@ -1358,7 +1367,6 @@ async fn test_resolve_projections_count() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1415,7 +1423,6 @@ async fn test_resolve_projections_list() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1471,7 +1478,6 @@ async fn test_resolve_projections_scalar() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1519,7 +1525,6 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1597,7 +1602,6 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1672,7 +1676,6 @@ async fn test_resolve_projections_where_filter_by_author() {
             0,
             None,
             Some(true),
-            None,
         )
         .await
         .unwrap();
@@ -1953,7 +1956,8 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY);
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2524,7 +2528,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2603,7 +2607,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2730,7 +2734,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2802,7 +2806,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2872,7 +2876,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2965,7 +2969,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -3400,7 +3404,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3434,7 +3438,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3468,7 +3472,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3499,7 +3503,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3515,7 +3519,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3535,7 +3539,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -4948,7 +4952,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
-        None,
     )
     .await
     .unwrap();
@@ -4984,7 +4987,6 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
-        None,
     )
     .await
     .unwrap();
@@ -9697,11 +9699,6 @@ async fn parent_scope_edges_follow_the_viewer() {
             alice_sees,
             "{name}: Alice reaches it through her own link"
         );
-        assert_eq!(
-            comment_ids(&store, query, None).await,
-            alice_sees,
-            "{name}: executor scope is unchanged"
-        );
     }
 }
 
@@ -9767,7 +9764,6 @@ async fn transitive_traversal_follows_only_links_the_viewer_may_see() {
         comment_ids(&store, query.clone(), Some(EDGE_ALICE)).await,
         everything
     );
-    assert_eq!(comment_ids(&store, query, None).await, everything);
 
     // Inward: from `hid2`, Bob reaches `hid1` by an unannotated link and
     // stops there, because the only way on to `r2` is Alice's Local link.
@@ -9844,7 +9840,6 @@ async fn a_level_walk_follows_only_links_the_viewer_may_see() {
         comment_ids(&store, query.clone(), Some(EDGE_ALICE)).await,
         with_hidden
     );
-    assert_eq!(comment_ids(&store, query, None).await, with_hidden);
 }
 
 /// A reverse include (`belongsTo`) reads the edges that point at each record.
@@ -9903,11 +9898,10 @@ async fn reverse_include_follows_only_links_the_viewer_may_see() {
         let (store, resolver, shape, query) = (&store, &resolver, &block_shape, &query);
         async move {
             let result = super::query::execute_model_query(
-                store,
+                &store.read_as(viewer),
                 shape.as_ref(),
                 &with_unverified(query),
                 resolver,
-                viewer,
             )
             .await
             .unwrap();
@@ -9928,7 +9922,6 @@ async fn reverse_include_follows_only_links_the_viewer_may_see() {
     );
     let both = vec!["we://c/1".to_string(), "we://c/2".to_string()];
     assert_eq!(containers(Some(EDGE_ALICE)).await, both);
-    assert_eq!(containers(None).await, both);
 }
 
 /// A transitive projection read by a viewer counts (and lists) what the
@@ -10031,11 +10024,6 @@ async fn a_transitive_projection_follows_only_links_the_viewer_may_see() {
     let (direct, all, subtree) = root_as(Some(EDGE_ALICE)).await;
     assert_eq!(direct, json!(3));
     assert_eq!(all, json!(8), "Alice also reaches past her own Local link");
-    assert_eq!(subtree, everything);
-
-    let (direct, all, subtree) = root_as(None).await;
-    assert_eq!(direct, json!(3));
-    assert_eq!(all, json!(8), "executor scope is unchanged");
     assert_eq!(subtree, everything);
 }
 
@@ -10680,10 +10668,5 @@ async fn links_rows_are_viewer_scoped() {
         targets(Some(BOB), "currentState").await,
         vec!["literal:string:InReview"],
         "Bob reads his own cache"
-    );
-    assert_eq!(
-        targets(None, "app://undeclared").await,
-        vec!["literal:string:alice_own", "literal:string:bob_private"],
-        "executor scope reads every row"
     );
 }

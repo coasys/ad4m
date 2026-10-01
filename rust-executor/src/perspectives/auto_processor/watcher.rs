@@ -572,6 +572,9 @@ pub async fn run_one_pass(
     let uuid = perspective.uuid.clone();
     let me = did_for_context(context)
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
+    // The pass reads as the user it runs for (#1224).
+    let mut scoped = perspective.read_as(&me);
+    let perspective = &mut scoped;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
     let pass_started = std::time::Instant::now();

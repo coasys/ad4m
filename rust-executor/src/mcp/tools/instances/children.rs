@@ -43,22 +43,18 @@ pub struct GetChildrenParams {
     pub limit: Option<usize>,
 }
 
-/// All `ad4m://has_child` links from `parent` that `viewer_did` may see,
+/// All `ad4m://has_child` links from `parent` in `perspective`'s view,
 /// oldest first. Another user's Local child link is not listed (#1024).
 pub(super) async fn child_links(
     perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
     parent: &str,
-    viewer_did: Option<&str>,
 ) -> Result<Vec<DecoratedLinkExpression>, String> {
     let mut links = perspective
-        .get_links_for_viewer(
-            &LinkQuery {
-                source: Some(link_target(parent)),
-                predicate: Some(HAS_CHILD.to_string()),
-                ..Default::default()
-            },
-            viewer_did,
-        )
+        .get_links(&LinkQuery {
+            source: Some(link_target(parent)),
+            predicate: Some(HAS_CHILD.to_string()),
+            ..Default::default()
+        })
         .await
         .map_err(|e| format!("{e:#}"))?;
     links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
@@ -118,11 +114,7 @@ impl Ad4mMcpHandler {
         if parent.is_empty() {
             return error_json("parent must be a non-empty URI");
         }
-        let viewer = match self.viewer_did().await {
-            Ok(v) => v,
-            Err(e) => return error_json(e),
-        };
-        let mut links = match child_links(&perspective, parent, viewer.as_deref()).await {
+        let mut links = match child_links(&perspective, parent).await {
             Ok(links) => links,
             Err(e) => return error_json(format!("Error getting children: {e}")),
         };

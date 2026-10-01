@@ -1,8 +1,8 @@
 //! Per-user derivation of a `FlowInstance`'s `currentState` on read.
 //!
 //! The `currentState` cache is a `Local` link, and on a multi-user host a
-//! Local link is private to its author (#1024, `link_visibility`). The engine
-//! writes the cache under whichever user's request ran the pass, so after Bob
+//! Local link lives in the graph of the user who wrote it (#1024, #1224). The
+//! engine writes the cache for whichever user's request ran the pass, so after Bob
 //! moved a flow, Alice — a co-owner of the same perspective — does not see
 //! Bob's cache. She must not: the cache is his. What she gets instead is her
 //! own derivation. When a user reads `FlowInstance` rows
@@ -20,6 +20,13 @@
 //! the rows outside the page stale, and a `where` on `currentState` itself
 //! must not be answered from a stale cache.
 //!
+//! The derivation reads as the user too ([`PerspectiveInstance::read_as_context`]):
+//! their proposals, votes and marks, never another user's Local links. Marks
+//! are per user as well, so the refresh also marks, as the reader's own, the
+//! settled edges the reader has not recorded: the read has shown them the
+//! state those edges produced, and their next consensus pass must not report
+//! them as new.
+//!
 //! The refresh is best effort ([`refresh_for_read`]). It is not billed and
 //! needs no credits (the writer skips `add_link`'s billing), a failure is
 //! logged and the query still answers from whatever cache the user holds,
@@ -32,12 +39,14 @@
 //! writer, which replaces only the acting user's own Local link.
 
 use crate::agent::capabilities::{check_capability, perspective_update_capability, Capability};
+use crate::agent::create_signed_expression;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{write_local_current_state, FLOW_INSTANCE_CLASS};
 use crate::perspectives::flow_context::{load_shacl_flows, parse_flow_instance_from_hydrated};
-use crate::perspectives::flow_instance::derive_states;
-use crate::perspectives::link_visibility::viewer_did_for_context;
+use crate::perspectives::flow_instance::atom::{FIRED_MARK, RESOLVED_AS_PREDICATE};
+use crate::perspectives::flow_instance::{fold_read_set, FlowInstance};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::types::{Link, LinkExpression, LinkStatus};
 
 /// What a `FlowInstance` read did to the reader's own cache.
 #[derive(Debug, PartialEq, Eq)]
@@ -92,13 +101,11 @@ pub(crate) async fn sync_for_context(
     query_json: &str,
     context: &AgentContext,
 ) -> anyhow::Result<usize> {
-    let viewer = viewer_did_for_context(context)?;
+    // The rows, the flows and the derivation are all read as the viewer.
+    let mut scoped = perspective.read_as_context(context)?;
+    let perspective = &mut scoped;
     let json = match perspective
-        .model_query_for_viewer(
-            FLOW_INSTANCE_CLASS,
-            &narrowed_query(query_json),
-            viewer.as_deref(),
-        )
+        .model_query(FLOW_INSTANCE_CLASS, &narrowed_query(query_json))
         .await
     {
         Ok(j) => j,
@@ -128,18 +135,51 @@ pub(crate) async fn sync_for_context(
     }
     let flows = load_shacl_flows(perspective).await?;
     let mut written = 0;
-    for derived in derive_states(perspective, &records, &flows).await {
-        let cached = records
+    for record in &records {
+        let Some(flow) = flows.get(&record.flow_uri) else {
+            continue;
+        };
+        let instance = FlowInstance::from_record(record, flow);
+        let read_set = match instance.read_set(perspective).await {
+            Ok(rs) => rs,
+            Err(e) => {
+                log::warn!(
+                    "sync_for_context: skipping {}, its state could not be derived: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
+        let derived = match fold_read_set(flow, &read_set) {
+            Ok(d) => d,
+            Err(e) => {
+                log::warn!(
+                    "sync_for_context: skipping {}, its state could not be derived: {e:#}",
+                    record.instance_uri
+                );
+                continue;
+            }
+        };
+        // The reader has now seen every edge that settled. Record the ones
+        // they have not, as their own marks (#1224: marks are per user), so
+        // their next consensus pass does not report another user's old
+        // transitions as new. Silent, like a pass's catch-up.
+        let marked = read_set.marked_proposals();
+        for uri in derived
+            .settled
             .iter()
-            .find(|r| r.instance_uri == derived.record.instance_uri)
-            .map(|r| r.current_state.as_str());
-        if cached == Some(derived.record.current_state.as_str()) {
+            .flat_map(|edge| edge.atom_uris.iter())
+            .filter(|uri| !marked.contains(*uri))
+        {
+            write_local_fired_mark(perspective, uri, context).await?;
+        }
+        if record.current_state == derived.state {
             continue;
         }
         write_local_current_state(
             perspective,
-            &derived.record.instance_uri,
-            &derived.record.current_state,
+            &record.instance_uri,
+            &derived.state,
             None,
             context,
         )
@@ -147,6 +187,28 @@ pub(crate) async fn sync_for_context(
         written += 1;
     }
     Ok(written)
+}
+
+/// Mark proposal `uri` fired as the reader's own `Local` link: the mark a
+/// consensus pass writes, but signed and stored like the cache
+/// (`write_local_current_state`), with no credit check and no billing, since
+/// a read writes it.
+async fn write_local_fired_mark(
+    perspective: &mut PerspectiveInstance,
+    uri: &str,
+    context: &AgentContext,
+) -> anyhow::Result<()> {
+    let link = Link {
+        source: uri.to_string(),
+        predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+        target: format!("literal:string:{}", urlencoding::encode(FIRED_MARK)),
+    };
+    let signed: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
+    perspective
+        .add_link_expression(signed, LinkStatus::Local, None, context)
+        .await
+        .map_err(|e| anyhow::anyhow!("marking {uri} fired failed: {e:#}"))?;
+    Ok(())
 }
 
 /// The part of the user's query that decides *which* instances to derive:
@@ -201,19 +263,31 @@ mod tests {
         (ctx, did)
     }
 
-    /// Every `currentState` link on `uri`, in executor scope.
+    /// Every `currentState` link on `uri` the main agent and the other user
+    /// hold, each read in its own view: there is no executor scope any more
+    /// (#1224), so this is what the store holds for them.
     async fn cache_links(
         perspective: &PerspectiveInstance,
         uri: &str,
     ) -> Vec<DecoratedLinkExpression> {
-        perspective
-            .get_links(&LinkQuery {
-                source: Some(uri.to_string()),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                ..Default::default()
-            })
+        let query = LinkQuery {
+            source: Some(uri.to_string()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        };
+        let (_, other_did) = other_user();
+        let mut all = perspective.get_links(&query).await.expect("get_links");
+        for link in perspective
+            .read_as(&other_did)
+            .get_links(&query)
             .await
             .expect("get_links")
+        {
+            if !all.contains(&link) {
+                all.push(link);
+            }
+        }
+        all
     }
 
     fn state_of(link: &DecoratedLinkExpression) -> String {
@@ -230,13 +304,13 @@ mod tests {
     /// The `currentState` the viewer's own model query hydrates for `uri`.
     async fn state_seen_by(perspective: &PerspectiveInstance, uri: &str, did: &str) -> String {
         let json = perspective
-            .model_query_for_viewer(
+            .read_as(did)
+            .model_query(
                 FLOW_INSTANCE_CLASS,
                 &serde_json::json!({ "where": { "id": uri } }).to_string(),
-                Some(did),
             )
             .await
-            .expect("model_query_for_viewer");
+            .expect("model_query");
         let rows: serde_json::Value = serde_json::from_str(&json).expect("JSON");
         rows["instances"][0]["currentState"]
             .as_str()
@@ -327,9 +401,10 @@ mod tests {
         };
         for (viewer, expected_author) in [(&main_did, &main_did), (&other_did, &other_did)] {
             let seen = perspective
-                .get_links_for_viewer(&query, Some(viewer))
+                .read_as(viewer)
+                .get_links(&query)
                 .await
-                .expect("get_links_for_viewer");
+                .expect("get_links");
             assert_eq!(seen.len(), 1, "{viewer} sees one cache link: {seen:?}");
             assert_eq!(&seen[0].author, expected_author, "and it is their own");
         }

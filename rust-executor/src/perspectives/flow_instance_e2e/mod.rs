@@ -105,13 +105,14 @@ async fn forge_fired_mark(f: &mut Fixture, proposal_uri: &str) {
     .await;
 }
 
-/// Give a state its own `consensusRule`, as the flow author would.
+/// Give a state its own `consensusRule`, as the flow author would: Shared,
+/// part of the flow definition every user of the perspective reads (#1224).
 async fn set_consensus_rule(f: &mut Fixture, state_uri: &str, rule: &str) {
     f.link(
         state_uri,
         "ad4m://consensusRule",
         &literal(rule),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
 }
@@ -136,7 +137,7 @@ async fn sync_vote_from(f: &mut Fixture, signer: &TestSigner, proposal_uri: &str
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(vote), LinkStatus::Shared, None)
+        .add_link_expression(LinkExpression::from(vote), LinkStatus::Shared, None, &f.ctx)
         .await
         .expect("sync a second agent's vote");
 }
@@ -209,7 +210,12 @@ async fn sync_committed_proposal_from(
             .normalize(),
         );
         f.perspective
-            .add_link_expression(LinkExpression::from(signed), LinkStatus::Shared, None)
+            .add_link_expression(
+                LinkExpression::from(signed),
+                LinkStatus::Shared,
+                None,
+                &f.ctx,
+            )
             .await
             .expect("sync a foreign proposal link");
     }
@@ -228,7 +234,7 @@ async fn sync_fired_mark_from(f: &mut Fixture, signer: &TestSigner, proposal_uri
         .normalize(),
     );
     f.perspective
-        .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None)
+        .add_link_expression(LinkExpression::from(mark), LinkStatus::Shared, None, &f.ctx)
         .await
         .expect("sync a peer's fired mark");
 }
