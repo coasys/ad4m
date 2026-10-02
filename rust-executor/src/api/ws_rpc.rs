@@ -101,12 +101,14 @@ async fn handle_ws(
     let token_for_events = token.clone();
     let user_email_for_events = ctx.user_email.clone();
     let is_admin_for_events = ctx.is_admin_credential;
+    let can_approve_apps = check_capability(&ctx.capabilities, &AGENT_PERMIT_CAPABILITY).is_ok();
     let tx_events = tx.clone();
     tokio::spawn(async move {
         let event_stream = super::events_ws::build_event_stream(
             token_for_events,
             user_email_for_events,
             is_admin_for_events,
+            can_approve_apps,
         )
         .await;
         tokio::pin!(event_stream);
