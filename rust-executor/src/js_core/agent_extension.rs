@@ -6,7 +6,7 @@ use crate::{
         create_signed_expression, did, did_document, did_for_context, sign_for_context,
         sign_string_hex_for_context, signing_key_id_for_context, AgentContext, AgentService,
     },
-    types::{Agent, AgentStatus},
+    types::Agent,
 };
 use deno_core::anyhow;
 use deno_core::op2;
@@ -172,46 +172,12 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
     })
 }
 
-#[op2]
-#[serde]
-fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        // Only load if the agent is initialized (agent file exists)
-        if agent_service.is_initialized() {
-            agent_service.load();
-        }
-        Ok(agent_service.dump())
-    })
-}
-
-#[op2(async(lazy), fast)]
-#[serde]
-async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| agent_service.unlock(passphrase))
-        .map_err(AnyhowWrapperError::from)
-}
-
-#[op2(async(lazy), fast)]
-#[serde]
-async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service.lock(passphrase);
-        Ok(())
-    })
-}
-
-#[op2]
-fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service.save_agent_profile(agent);
-
-        Ok(())
-    })
-}
-
+// Languages sign and read through these ops. Unlocking, locking, reloading the keystore
+// and overwriting the node's profile stay out: any language could otherwise probe the
+// passphrase, lock the node under a passphrase of its own, or rewrite the node's profile.
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent, agent_load, agent_unlock, agent_lock, save_agent_profile],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );
