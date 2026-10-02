@@ -33,6 +33,20 @@ commands:
               echo "Corrupted .git directory detected, removing for fresh clone..."
               rm -rf .git
             fi
+      - run:
+          # tests/js/utils/utils.ts starts each executor in /tmp/ad4m-<hash>
+          # and never deletes it. On marvin /tmp is a 30GB tmpfs shared by
+          # every runner, and a busy hour leaves ~10GB. When it fills, Rust
+          # tests fail with "No space left on device" and then en masse
+          # with PoisonError (#1123, 2026-09-25). Skip dirs that a live
+          # executor still uses; a concurrent job's dir is younger than 60 min.
+          name: Clean up stale test executor dirs in /tmp (older than 60 min)
+          command: |
+            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/ad4m-[0-9a-f]+' | sort -u || true)
+            find /tmp -maxdepth 1 -name 'ad4m-*' -user "$(id -u)" -mmin +60 -print 2>/dev/null \
+              | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
+              | xargs -r -d '\n' rm -rf || true
+            df -h /tmp | tail -1
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
