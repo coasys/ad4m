@@ -2,9 +2,7 @@ use deno_core::error::AnyError;
 use deno_core::{anyhow::anyhow, op2};
 use holochain::{
     conductor::api::AppInfo,
-    prelude::{
-        hash_type::Agent, ExternIO, HoloHash, InstallAppPayload, Signature, ZomeCallResponse,
-    },
+    prelude::{hash_type::Agent, ExternIO, HoloHash, InstallAppPayload, ZomeCallResponse},
 };
 use log::error;
 use serde::{Deserialize, Serialize};
@@ -355,18 +353,6 @@ async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> 
 }
 
 #[op2(async(lazy), fast)]
-#[serde]
-async fn sign_string(#[string] data: String) -> Result<Signature, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.sign(data))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
-}
-
-#[op2(async(lazy), fast)]
 async fn shutdown() -> Result<(), AnyhowWrapperError> {
     let interface = holochain_service_once_started()
         .await
@@ -440,7 +426,7 @@ async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperErro
 //Implement signal callbacks from dna/holochain to js
 deno_core::extension!(
     holochain_service,
-    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, sign_string, shutdown, get_agent_key, pack_dna, unpack_dna, pack_happ, unpack_happ],
+    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, shutdown, get_agent_key, pack_dna, unpack_dna, pack_happ, unpack_happ],
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );
