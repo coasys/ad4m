@@ -8,7 +8,6 @@ use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
 use super::string_module_loader::StringModuleLoader;
 use super::utils_extension::utils_service;
-use crate::entanglement_service::entanglement_service_extension::entanglement_service;
 use crate::holochain_service::holochain_service_extension::holochain_service;
 use crate::runtime_service::runtime_service_extension::runtime_service;
 
@@ -54,7 +53,6 @@ pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
         holochain_service::init(),
         signature_service::init(),
         agent_service::init(),
-        entanglement_service::init(),
         runtime_service::init(),
         language_service::init(),
     ]
