@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 pub mod api;
 pub mod config;
+pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
 mod globals;
@@ -214,6 +215,42 @@ async fn holochain_signal_receiver() {
     }
 }
 
+/// Unlocks the main agent with the passphrase an operator supplied at
+/// startup (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, so
+/// a restarted headless executor serves requests without a person or a
+/// script unlocking it. Call after [`run`] has returned. Without an agent
+/// (not generated yet) it only logs. Neither path logs the passphrase.
+pub async fn unlock_agent_at_startup(passphrase: String) {
+    let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
+    if !initialized {
+        warn!(
+            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: generate one \
+             (agent.generate); later starts unlock it from the file"
+        );
+        return;
+    }
+    const FAILED: &str = "Unlocking the agent at startup with the passphrase from \
+                          AD4M_UNLOCK_PASSPHRASE_FILE failed";
+    const STAYS_LOCKED: &str = "The executor stays up with the agent locked; check the file, \
+                                then unlock with agent.unlock or restart";
+    match api::agent_ws::unlock_main_agent(passphrase).await {
+        Ok(status) if status.is_unlocked => match status.error {
+            None => info!(
+                "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
+            ),
+            Some(error) => error!(
+                "Agent unlocked at startup with the passphrase from \
+                 AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
+            ),
+        },
+        Ok(status) => error!(
+            "{FAILED}: {}. {STAYS_LOCKED}",
+            status.error.unwrap_or_default()
+        ),
+        Err(e) => error!("{FAILED}: {}. {STAYS_LOCKED}", e.message),
+    }
+}
+
 /// Runs the REST server and the deno core runtime
 pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     #[cfg(unix)]
@@ -288,7 +325,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
-    crate::logging::init_cli_logging(None);
+    crate::logging::init_cli_logging(config.log_config.as_ref());
     config.prepare();
 
     // Write PID file if requested via config.
