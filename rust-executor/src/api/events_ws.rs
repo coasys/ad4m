@@ -846,18 +846,16 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
 }
 
 /// Multi-user: only events about a perspective the session owns. An event
-/// without `perspectiveUuid` passes.
+/// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
+/// publisher of these topics sets the field.
 pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return true;
     };
-    match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(v) => match v.get("perspectiveUuid").and_then(serde_json::Value::as_str) {
-            Some(uuid) => perspective_is_owned_by(uuid, did),
-            None => true,
-        },
-        Err(_) => true,
-    }
+    serde_json::from_str::<serde_json::Value>(msg)
+        .ok()
+        .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string))
+        .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -1421,9 +1419,13 @@ mod perspective_owner_filter_tests {
             "an unverifiable owner fails closed"
         );
         assert!(matches_perspective_owner(unknown, None), "single-user");
-        assert!(matches_perspective_owner(
-            r#"{"notification":{}}"#,
-            Some("did:x")
-        ));
+        assert!(
+            !matches_perspective_owner(r#"{"notification":{}}"#, Some("did:x")),
+            "an event without perspectiveUuid fails closed"
+        );
+        assert!(
+            !matches_perspective_owner("not json", Some("did:x")),
+            "an event that does not parse fails closed"
+        );
     }
 }
