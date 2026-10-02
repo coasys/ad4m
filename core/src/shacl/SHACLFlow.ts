@@ -338,6 +338,25 @@ export interface FlowTransition {
  * ```
  */
 export class SHACLFlow {
+  /**
+   * Every predicate {@link toLinks} writes from the flow's own URI. A state's
+   * or a transition's links all belong to the definition; the flow's URI
+   * also carries links that do not (a receipt index, for one), so replacing a
+   * definition removes only these from it. Keep in step with `toLinks`.
+   */
+  static readonly FLOW_LEVEL_PREDICATES: readonly string[] = [
+    "rdf://type",
+    "ad4m://flowName",
+    "ad4m://interpretationHint",
+    "ad4m://inputTypes",
+    "ad4m://outputTypes",
+    "ad4m://creationHint",
+    "ad4m://context",
+    "ad4m://consensusRule",
+    "ad4m://hasState",
+    "ad4m://hasTransition",
+  ];
+
   /** Flow name (e.g., "TODO") */
   public name: string;
 

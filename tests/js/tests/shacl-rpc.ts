@@ -3,6 +3,8 @@ import {
     SHACLShape,
     SHACLFlow,
     LinkQuery,
+    Link,
+    Literal,
     Ad4mModel,
     Flag,
     HasMany,
@@ -247,6 +249,41 @@ export default function shaclRpcTests(testContext: TestContext) {
 
                         await perspective.addFlow("Todo", todoFlow());
                         expect(await transitions()).to.deep.equal(["ready->done:Complete"]);
+                    } finally {
+                        await testContext.ad4mClient.perspective.remove(perspective.uuid);
+                    }
+                });
+
+                it("addFlow() replaces a changed rule and leaves links it does not own", async () => {
+                    const perspective = await testContext.ad4mClient.perspective.add("shacl-rpc-flow-rule");
+                    try {
+                        const todoFlow = (n: number) => {
+                            const flow = new SHACLFlow("Todo", "todo://");
+                            flow.addState({ name: "ready", value: 0 });
+                            flow.addState({ name: "done", value: 1, consensusRule: { n } });
+                            flow.addTransition({ actionName: "Complete", fromState: "ready", toState: "done", actions: [] });
+                            return flow;
+                        };
+                        const stateUri = todoFlow(1).stateUri("done");
+                        const rules = async () =>
+                            (await perspective.get(new LinkQuery({ source: stateUri, predicate: "ad4m://consensusRule" })))
+                                .map((l) => JSON.parse(Literal.fromUrl(l.data.target).get()).n);
+
+                        await perspective.addFlow("Todo", todoFlow(2));
+                        // A link on the flow's URI that is not part of its definition.
+                        const flowUri = todoFlow(1).flowUri;
+                        await perspective.add(new Link({ source: flowUri, predicate: "todo://receipt", target: "todo://r1" }));
+
+                        await perspective.addFlow("Todo", todoFlow(3));
+                        expect(await rules()).to.deep.equal([3]);
+                        expect(await perspective.get(new LinkQuery({ source: flowUri, predicate: "todo://receipt" })))
+                            .to.have.length(1);
+
+                        // An unchanged definition writes nothing.
+                        const before = (await perspective.get(new LinkQuery({}))).length;
+                        await perspective.addFlow("Todo", todoFlow(3));
+                        expect((await perspective.get(new LinkQuery({}))).length).to.equal(before);
+                        expect(await rules()).to.deep.equal([3]);
                     } finally {
                         await testContext.ad4mClient.perspective.remove(perspective.uuid);
                     }
