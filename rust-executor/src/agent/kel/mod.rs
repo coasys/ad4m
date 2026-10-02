@@ -13,6 +13,7 @@
 //! - **Recovery authority** committed as a descriptor hash (threshold + keys),
 //!   not plaintext — guardian membership stays private until recovery runs.
 
+pub mod adapter;
 pub mod recovery;
 
 use did_key::{CoreSign, PatchedKeyPair};
@@ -846,7 +847,7 @@ mod tests {
         let key0 = full_key(&key_id0, &did0);
         let (ev0, _) = incept_human(vec![key0], dummy_commitment(), &key_id0, &kp0);
 
-        let (kp1, did1) = keypair();
+        let (_kp1, did1) = keypair();
         let key_id1 = format!("{}#key-1", did1);
         let body1 = KeyEventBody::Delegate {
             key: full_key(&key_id1, &did1),
@@ -1120,7 +1121,7 @@ mod tests {
     #[test]
     fn controller_op_authorized() {
         let (kp_owner, did_owner) = keypair();
-        let owner_key_id = format!("{}#key-0", did_owner);
+        let _owner_key_id = format!("{}#key-0", did_owner);
 
         let (kp_asst, did_asst) = keypair();
         let asst_key_id = format!("{}#key-0", did_asst);
