@@ -254,6 +254,24 @@ describe("FlowTransitionProposal — @Model", function () {
       .to.equal(rust!.min_count);
     expect(outputsHash.setter, "setter must match the Rust SDNA's setSingleTarget")
       .to.deep.equal(rust!.setter);
+
+    // Votes and marks are read, never written, through the model; and the vote
+    // getter restates the engine's rule, so both sides must carry the same one.
+    const rustProps = (JSON.parse(raw) as {
+      properties: Array<{ path: string; writable?: boolean; getter?: string }>;
+    }).properties;
+    for (const path of ["ad4m://acceptedBy", "ad4m://flow/resolved_as"]) {
+      const ts = shape.properties.find((prop: any) => prop.path === path);
+      const rs = rustProps.find((prop) => prop.path === path);
+      expect(ts, `TS shape must declare ${path}`).to.exist;
+      expect(ts.writable, `${path} is read-only on both sides`).to.equal(false);
+      expect(rs!.writable).to.equal(false);
+      expect(ts.adder ?? ts.setter, `${path} has no writer`).to.be.undefined;
+    }
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://acceptedBy").getter,
+      "the vote getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://acceptedBy")!.getter);
   });
 });
 

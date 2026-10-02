@@ -36,6 +36,8 @@ export interface RelationMetadataEntry {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
+    /** No writer for this relation; see `RelationOptions.readOnly`. */
+    readOnly?: boolean;
     /**
      * Whether to auto-generate a conformance filter when `target` is set.
      * Defaults to `true` — set to `false` to opt out of DB-level type filtering
@@ -820,7 +822,7 @@ export interface RelationOptions {
     /**
      * The predicate URI used to link the two models.
      * Defaults to `'ad4m://has_child'` when omitted.
-     * Cannot be combined with `getter`.
+     * Cannot be combined with `getter`, except on a `readOnly` relation.
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
@@ -833,7 +835,9 @@ export interface RelationOptions {
      *
      * Mutually exclusive with `through` — a getter replaces link-based resolution,
      * so there is no predicate to add to or remove from. When `getter` is provided
-     * the relation is read-only (no adder/remover actions are generated).
+     * the relation is read-only (no adder/remover actions are generated). The
+     * exception is `readOnly: true`, where `through` names the predicate the
+     * getter reads and becomes the shape's path.
      *
      * **Combines with `target`**, which names the class the traversal's values
      * hydrate into — without it `include` has no shape to resolve and the relation
@@ -854,6 +858,14 @@ export interface RelationOptions {
      * ```
      */
     getter?: string;
+    /**
+     * A relation read through `through` that this model must not write: no
+     * `add*`/`remove*`/`set*` methods and no adder or remover actions. Pair
+     * it with `getter` when the stored links need filtering on the way out
+     * (only those signed by their target, say) but the predicate should
+     * still be the shape's path, so a subscription re-runs when one lands.
+     */
+    readOnly?: boolean;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
     /**
@@ -1046,13 +1058,18 @@ function resolveRelationArgs(
         );
     }
 
-    // getter is mutually exclusive with through
+    // getter is mutually exclusive with a WRITABLE through: the relation would
+    // write raw links and read back whatever the getter lets through. With
+    // `readOnly` there is nothing to write, and `through` only names the
+    // predicate the getter reads — the shape's path, which is what makes a
+    // subscription re-run when one of those links lands.
     if (opts.getter) {
-        if (opts.through) {
+        if (opts.through && !opts.readOnly) {
             throw new Error(
                 'Relation decorator: `getter` and `through` are mutually exclusive. ' +
-                'Use `getter` alone for custom read-only relations, or `through` ' +
-                '(with optional `target`) for standard link-based relations.'
+                'Use `getter` alone for custom read-only relations, `through` ' +
+                '(with optional `target`) for standard link-based relations, or ' +
+                'both with `readOnly: true` to read that predicate through the getter.'
             );
         }
         // `target` and `where` are NOT mutually exclusive with `getter`.
@@ -1152,12 +1169,13 @@ export function HasMany(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
         // Only add mutation methods when a predicate is available
-        // (getter-only relations are read-only)
-        if (opts.through) {
+        // (getter-only relations are read-only) and writing is allowed
+        if (opts.through && !opts.readOnly) {
             (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
                 return (this as any).addRelationValue(relKey, arg, batchId);
             };
@@ -1220,10 +1238,17 @@ export function HasOne(
             ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
             ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
-        if (opts.through) {
+        if (opts.through && opts.readOnly) {
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: true,
+                local: opts.local,
+            })(target, key);
+        } else if (opts.through) {
             // Register as a writable property
             applyPropertyMetadata({
                 through: opts.through,

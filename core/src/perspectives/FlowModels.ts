@@ -23,6 +23,16 @@ import { Ad4mModel } from "../model/Ad4mModel";
 import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 
+/**
+ * The engine's vote rule (`signed_by`: the link's author is the DID it names,
+ * and its signature verified) as a getter over the link's reifier. Must match
+ * the `acceptedBy` getter in `hardwired_sdna/flow_transition_proposal.json`
+ * byte for byte: whichever side registers the class first decides the stored
+ * shape.
+ */
+export const ACCEPTED_BY_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") }';
+
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
 // on the engine side; see file header). One node per proposed transition; the
@@ -123,6 +133,24 @@ export class FlowTransitionProposal extends Ad4mModel {
    */
   @Optional({ through: "ad4m://flow/rationale" })
   rationale?: string;
+
+  /**
+   * DIDs that co-signed this proposal, as the consensus engine counts them:
+   * an `ad4m://acceptedBy` link counts only when it is signed by the DID it
+   * names, since anyone can write one naming someone else. The proposer's
+   * own vote is implicit, so the voters are `proposer` plus these. Read-only:
+   * vote with `acceptProposal`, withdraw with `rejectProposal`.
+   */
+  @HasMany({ through: "ad4m://acceptedBy", getter: ACCEPTED_BY_GETTER, readOnly: true })
+  acceptedBy: string[] = [];
+
+  /**
+   * `"fired"` once this replica's consensus pass has recorded the transition
+   * this proposal settled. Per-replica bookkeeping, never an input to the
+   * engine's own derivation. Read-only.
+   */
+  @Optional({ through: "ad4m://flow/resolved_as", readOnly: true })
+  resolvedAs?: string;
 
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in
   // `createdAt`, synthesized on hydration from the earliest link timestamp

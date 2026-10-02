@@ -1,6 +1,6 @@
 {
   "target_class": "ad4m://FlowTransitionProposal",
-  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits. A proposal into a terminal state also names the run's outputs as (class, id) pairs and signs a hash over their content. The proposal's URI is the content address of its signed fields, salted by the proposer's nonce, so a co-signature on the URI covers them all.",
+  "interpretation_hint": "A proposed transition of a running flow instance from one state to another, awaiting consensus. Carries the DID of the proposer, the URIs of instances offered as evidence for the target state's `requires`, and a hash snapshot of each cited instance's content so downstream verifiers can detect post-proposal edits. A proposal into a terminal state also names the run's outputs as (class, id) pairs and signs a hash over their content. The proposal's URI is the content address of its signed fields, salted by the proposer's nonce, so a co-signature on the URI covers them all. The proposer's vote is implicit; `acceptedBy` lists the co-signers whose acceptance link is signed by the DID it names, the only ones that count. `resolvedAs` is this replica's record that the engine fired the proposal.",
   "constructor_actions": [
     {"action": "addLink", "source": "this", "predicate": "ad4m://flow/instance", "target": "placeholder"}
   ],
@@ -15,6 +15,8 @@
     {"path": "ad4m://flow/outputs_hash",     "name": "outputsHash",                        "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/outputs_hash", "target": "value"}]},
     {"path": "ad4m://flow/nonce",            "name": "nonce",                              "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/nonce", "target": "value"}]},
     {"path": "ad4m://flow/run_uri",          "name": "runUri",                             "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/run_uri", "target": "value"}]},
-    {"path": "ad4m://flow/rationale",        "name": "rationale",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/rationale", "target": "value"}]}
+    {"path": "ad4m://flow/rationale",        "name": "rationale",                          "min_count": 0, "max_count": 1, "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "ad4m://flow/rationale", "target": "value"}]},
+    {"path": "ad4m://acceptedBy",            "name": "acceptedBy",       "collection": true, "min_count": 0, "writable": false, "getter": "SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = \"true\") }"},
+    {"path": "ad4m://flow/resolved_as",      "name": "resolvedAs",       "datatype": "xsd://string", "min_count": 0, "max_count": 1, "writable": false}
   ]
 }

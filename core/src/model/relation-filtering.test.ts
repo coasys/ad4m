@@ -865,3 +865,50 @@ describe("compileWhereClause()", () => {
     expect(conditions[0]).toContain("value");
   });
 });
+
+// ============================================================================
+// readOnly relations
+// ============================================================================
+
+@Model({ name: "ReadOnlyRelations" })
+class ReadOnlyRelations extends Ad4mModel {
+  @HasMany({
+    through: "test://voted_by",
+    getter: "SELECT ?target WHERE { ?source <test://voted_by> ?target . }",
+    readOnly: true,
+  })
+  votedBy: string[] = [];
+
+  @HasMany({ through: "test://tags" })
+  tags: string[] = [];
+}
+
+describe("readOnly relations", () => {
+  const shape = () => (ReadOnlyRelations as any).generateSHACL().shape as SHACLShape;
+  const prop = (name: string) =>
+    shape().properties.find((p: SHACLPropertyShape) => p.name === name)!;
+
+  it("keep their predicate as the shape's path, so a subscription re-runs on it", () => {
+    expect(prop("votedBy").path).toBe("test://voted_by");
+    expect(prop("votedBy").getter).toContain("test://voted_by");
+  });
+
+  it("generate no adder or remover and are marked not writable", () => {
+    expect(prop("votedBy").adder).toBeUndefined();
+    expect(prop("votedBy").remover).toBeUndefined();
+    expect(prop("votedBy").writable).toBe(false);
+  });
+
+  it("get no add/remove/set methods", () => {
+    const instance = ReadOnlyRelations.prototype as any;
+    expect(instance.addVotedBy).toBeUndefined();
+    expect(instance.removeVotedBy).toBeUndefined();
+    expect(instance.setVotedBy).toBeUndefined();
+    expect(typeof instance.addTags).toBe("function");
+  });
+
+  it("leave an ordinary relation writable", () => {
+    expect(prop("tags").adder).toBeDefined();
+    expect(prop("tags").writable).not.toBe(false);
+  });
+});

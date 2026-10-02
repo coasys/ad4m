@@ -160,3 +160,106 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
         "the record rebuilt from carried fields must equal the live one"
     );
 }
+
+/// The proposal model's `acceptedBy` lists exactly the co-signers the fold
+/// counts. A vote is an authorship claim: an `acceptedBy` naming Carol that Bob
+/// signed is on the graph, but the fold ignores it, so the model must too.
+/// `resolvedAs` reads the pass's own mark once the edge fires.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":3}"#).await;
+    let minted = f.mint_one().await;
+
+    let bob = TestSigner::generate();
+    let carol = TestSigner::generate();
+    sync_vote_from(&mut f, &bob, &minted).await;
+    let forged = bob.sign(
+        Link {
+            source: minted.clone(),
+            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+            target: carol.did.clone(),
+        }
+        .normalize(),
+    );
+    f.perspective
+        .add_link_expression(LinkExpression::from(forged), LinkStatus::Shared, None)
+        .await
+        .expect("sync a vote signed by someone other than the DID it names");
+
+    let proposal = |raw: String| -> serde_json::Value {
+        let result: serde_json::Value = serde_json::from_str(&raw).expect("model_query JSON");
+        result["instances"]
+            .as_array()
+            .expect("instances")
+            .iter()
+            .find(|i| i["id"].as_str() == Some(minted.as_str()))
+            .cloned()
+            .expect("the minted proposal is listed")
+    };
+    let read = |p: &serde_json::Value| -> Vec<String> {
+        let mut dids: Vec<String> = p["acceptedBy"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        dids.sort();
+        dids
+    };
+
+    let p = proposal(
+        f.perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await
+            .expect("query proposals"),
+    );
+    assert_eq!(
+        read(&p),
+        vec![bob.did.clone()],
+        "Bob's own vote, not the one he wrote for Carol"
+    );
+
+    // Held to the fold, not to a list written here: the fold's voters are the
+    // proposer (implicit) plus `acceptedBy`.
+    let atom = f
+        .read_set()
+        .await
+        .atoms()
+        .into_iter()
+        .find(|a| a.uri == minted)
+        .expect("the proposal is an atom");
+    let mut counted: Vec<String> = atom
+        .votes
+        .iter()
+        .map(|v| v.did.clone())
+        .filter(|did| *did != atom.proposer)
+        .collect();
+    counted.sort();
+    assert_eq!(
+        read(&p),
+        counted,
+        "the model and the fold agree on who voted"
+    );
+    assert!(
+        p["resolvedAs"].is_null(),
+        "short of quorum, nothing is marked"
+    );
+
+    let dave = TestSigner::generate();
+    sync_vote_from(&mut f, &dave, &minted).await;
+    consensus_pass(&mut f).await;
+    let p = proposal(
+        f.perspective
+            .model_query("FlowTransitionProposal", "{}")
+            .await
+            .expect("query proposals"),
+    );
+    assert_eq!(
+        p["resolvedAs"].as_str(),
+        Some("fired"),
+        "the pass marked the edge it fired"
+    );
+}
