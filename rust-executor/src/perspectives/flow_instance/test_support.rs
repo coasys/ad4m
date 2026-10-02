@@ -45,6 +45,7 @@ pub fn link(
             signature: "sig".to_string(),
             valid: Some(valid),
             invalid: Some(!valid),
+            ..Default::default()
         },
         status: None,
     }

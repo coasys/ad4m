@@ -30,6 +30,7 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpre
         proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
+            ..Default::default()
         },
         // The store refuses status-less inserts; Shared is the plain case,
         // `make_link_with_status` overrides for the local-property tests.

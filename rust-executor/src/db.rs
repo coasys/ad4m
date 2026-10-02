@@ -376,6 +376,12 @@ impl Ad4mDb {
         )?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
 
+        // Add proof identity fields to link table for did:scid verification
+        // anchoring. Old rows read back as NULL (maps to None), which falls
+        // through to the legacy did:key verification path.
+        alter_add_column("ALTER TABLE link ADD COLUMN proof_key_id TEXT")?;
+        alter_add_column("ALTER TABLE link ADD COLUMN proof_kel_seq INTEGER")?;
+
         // Optional per-model context-window ceiling for API models (see
         // ModelApi::max_num_ctx). Appended last so its SELECT * position is
         // the same on a fresh table and on one migrated via ALTER.
@@ -1313,8 +1319,8 @@ impl Ad4mDb {
         status: &LinkStatus,
     ) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 perspective_uuid,
                 link.data.source,
@@ -1325,6 +1331,8 @@ impl Ad4mDb {
                 link.proof.signature,
                 link.proof.key,
                 serde_json::to_string(status)?,
+                link.proof.key_id,
+                link.proof.kel_seq.map(|v| v as i64),
             ],
         )?;
         Ok(())
@@ -1338,8 +1346,8 @@ impl Ad4mDb {
     ) -> Ad4mDbResult<()> {
         for link in links.iter() {
             self.conn.execute(
-                "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT OR IGNORE INTO link (perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     perspective_uuid,
                     link.data.source,
@@ -1350,6 +1358,8 @@ impl Ad4mDb {
                     link.proof.signature,
                     link.proof.key,
                     serde_json::to_string(&status)?,
+                    link.proof.key_id,
+                    link.proof.kel_seq.map(|v| v as i64),
                 ],
             )?;
         }
@@ -1363,8 +1373,8 @@ impl Ad4mDb {
         new_link: &LinkExpression,
     ) -> Ad4mDbResult<()> {
         self.conn.execute(
-            "UPDATE link SET source = ?1, predicate = ?2, target = ?3, author = ?4, timestamp = ?5, signature = ?6, key = ?7
-             WHERE perspective = ?8 AND source = ?9 AND predicate = ?10 AND target = ?11 AND author = ?12 AND timestamp = ?13",
+            "UPDATE link SET source = ?1, predicate = ?2, target = ?3, author = ?4, timestamp = ?5, signature = ?6, key = ?7, proof_key_id = ?8, proof_kel_seq = ?9
+             WHERE perspective = ?10 AND source = ?11 AND predicate = ?12 AND target = ?13 AND author = ?14 AND timestamp = ?15",
             params![
                 new_link.data.source,
                 new_link.data.predicate.as_ref().unwrap_or(&"".to_string()),
@@ -1373,6 +1383,8 @@ impl Ad4mDb {
                 new_link.timestamp,
                 new_link.proof.signature,
                 new_link.proof.key,
+                new_link.proof.key_id,
+                new_link.proof.kel_seq.map(|v| v as i64),
                 perspective_uuid,
                 old_link.data.source,
                 old_link.data.predicate.as_ref().unwrap_or(&"".to_string()),
@@ -1405,7 +1417,7 @@ impl Ad4mDb {
         link: &LinkExpression,
     ) -> Ad4mDbResult<Option<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 AND predicate = ?3 AND target = ?4 AND author = ?5 AND timestamp = ?6",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link WHERE perspective = ?1 AND source = ?2 AND predicate = ?3 AND target = ?4 AND author = ?5 AND timestamp = ?6",
         )?;
         let link_expression: Option<(LinkExpression, LinkStatus)> = stmt
             .query_row(
@@ -1436,6 +1448,8 @@ impl Ad4mDb {
                         proof: ExpressionProof {
                             signature: row.get(6)?,
                             key: row.get(7)?,
+                            key_id: row.get(9)?,
+                            kel_seq: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
                         },
                         author: row.get(4)?,
                         timestamp: row.get(5)?,
@@ -1454,7 +1468,7 @@ impl Ad4mDb {
         perspective_uuid: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 ORDER BY timestamp, source, predicate, target, author",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link WHERE perspective = ?1 ORDER BY timestamp, source, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid], |row| {
             let status: LinkStatus =
@@ -1474,6 +1488,8 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    key_id: row.get(9)?,
+                    kel_seq: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1491,7 +1507,7 @@ impl Ad4mDb {
         source: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND source = ?2 ORDER BY timestamp, predicate, target, author",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link WHERE perspective = ?1 AND source = ?2 ORDER BY timestamp, predicate, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, source], |row| {
             let status: LinkStatus =
@@ -1511,6 +1527,8 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    key_id: row.get(9)?,
+                    kel_seq: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1528,7 +1546,7 @@ impl Ad4mDb {
         target: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND target = ?2 ORDER BY timestamp, source, predicate, author",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link WHERE perspective = ?1 AND target = ?2 ORDER BY timestamp, source, predicate, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, target], |row| {
             let status: LinkStatus =
@@ -1548,6 +1566,8 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    key_id: row.get(9)?,
+                    kel_seq: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -1566,7 +1586,7 @@ impl Ad4mDb {
         predicate: &str,
     ) -> Ad4mDbResult<Vec<(LinkExpression, LinkStatus)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link WHERE perspective = ?1 AND predicate = ?2 ORDER BY timestamp, source, target, author",
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link WHERE perspective = ?1 AND predicate = ?2 ORDER BY timestamp, source, target, author",
         )?;
         let link_iter = stmt.query_map(params![perspective_uuid, predicate], |row| {
             let status: LinkStatus =
@@ -1586,6 +1606,8 @@ impl Ad4mDb {
                 proof: ExpressionProof {
                     signature: row.get(6)?,
                     key: row.get(7)?,
+                    key_id: row.get(9)?,
+                    kel_seq: row.get::<_, Option<i64>>(10)?.map(|v| v as u64),
                 },
                 author: row.get(4)?,
                 timestamp: row.get(5)?,
@@ -2049,7 +2071,7 @@ impl Ad4mDb {
 
         // Export links
         let links: Vec<(LinkSchema, String, String)> = self.conn.prepare(
-            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status FROM link"
+            "SELECT perspective, source, predicate, target, author, timestamp, signature, key, status, proof_key_id, proof_kel_seq FROM link"
         )?.query_map([], |row| {
             Ok((
                 LinkSchema {
@@ -4002,6 +4024,7 @@ mod tests {
             proof: ExpressionProof {
                 signature: "signature".to_string(),
                 key: "key".to_string(),
+                ..Default::default()
             },
             author: "did:test:key".to_string(),
             timestamp: Utc::now().to_rfc3339(),
@@ -4047,6 +4070,8 @@ mod tests {
                 key: "test-key".to_string(),
                 valid: None,
                 invalid: None,
+
+                ..Default::default()
             },
         };
 
@@ -5564,5 +5589,45 @@ mod tests {
             .all(|r| r.proposal_action_hash.as_deref() != Some("hash2")));
 
         println!("✅ Multiple payment requests tests passed");
+    }
+
+    // ── PR1 proof-persistence integration tests ─────────────────────────
+
+    // DecoratedExpressionProof MUST round-trip key_id/kel_seq through the DB.
+    #[test]
+    fn proof_key_fields_round_trip() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let mut link = construct_dummy_link_expression(LinkStatus::Shared);
+        link.proof.key_id = Some("did:scid:ke:1:EAgent#key-0".to_string());
+        link.proof.kel_seq = Some(42);
+
+        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
+        let result = db.get_link(&p_uuid, &link).unwrap();
+        assert!(result.is_some());
+        let (read_back, _status) = result.unwrap();
+        assert_eq!(
+            read_back.proof.key_id,
+            Some("did:scid:ke:1:EAgent#key-0".to_string())
+        );
+        assert_eq!(read_back.proof.kel_seq, Some(42));
+    }
+
+    // A link stored without key_id/kel_seq (pre-migration equivalent) reads
+    // back as None. This mirrors a row from before the schema migration.
+    #[test]
+    fn absent_proof_fields_read_as_none() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        let p_uuid = Uuid::new_v4().to_string();
+        let link = construct_dummy_link_expression(LinkStatus::Shared);
+        // Default proof has key_id: None, kel_seq: None.
+        assert!(link.proof.key_id.is_none());
+        assert!(link.proof.kel_seq.is_none());
+
+        db.add_link(&p_uuid, &link, &LinkStatus::Shared).unwrap();
+        let result = db.get_link(&p_uuid, &link).unwrap();
+        let (read_back, _status) = result.unwrap();
+        assert!(read_back.proof.key_id.is_none());
+        assert!(read_back.proof.kel_seq.is_none());
     }
 }

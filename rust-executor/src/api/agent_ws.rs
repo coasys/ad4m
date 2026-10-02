@@ -51,6 +51,7 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
         proof: ExpressionProof {
             key: lei.proof.key.clone().unwrap_or_default(),
             signature: lei.proof.signature.clone().unwrap_or_default(),
+            ..Default::default()
         },
         status: lei.status.clone(),
     };
