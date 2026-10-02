@@ -44,6 +44,19 @@ struct ExpressionSchema {
 
 pub type Ad4mDbResult<T> = Result<T, AnyError>;
 
+/// `set_default_model` was asked for a model that does not exist or has another type: the
+/// caller's mistake, not a database failure, so the API can answer it as a bad request.
+#[derive(Debug)]
+pub struct InvalidDefaultModel(pub String);
+
+impl std::fmt::Display for InvalidDefaultModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidDefaultModel {}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PaymentRequest {
     pub id: i64,
@@ -1994,19 +2007,17 @@ impl Ad4mDb {
     /// that type, so an LLM cannot become the default embedding model.
     pub fn set_default_model(&self, model_type: ModelType, model_id: &str) -> Ad4mDbResult<()> {
         let model = self.get_model(model_id.to_string())?.ok_or_else(|| {
-            anyhow!(
+            InvalidDefaultModel(format!(
                 "Cannot set default {:?} model: no model with id {}",
-                model_type,
-                model_id
-            )
+                model_type, model_id
+            ))
         })?;
         if model.model_type != model_type {
-            return Err(anyhow!(
+            return Err(InvalidDefaultModel(format!(
                 "Cannot set default {:?} model: model {} is a {:?} model",
-                model_type,
-                model_id,
-                model.model_type
-            ));
+                model_type, model_id, model.model_type
+            ))
+            .into());
         }
         self.conn.execute(
             "INSERT INTO default_models (model_type, model_id) 
@@ -5102,13 +5113,18 @@ mod tests {
         };
         let llm_id = db.add_model(&llm).unwrap();
 
+        // Both refusals are the caller's mistake, which the API answers as a bad request.
+        let refused = |r: Ad4mDbResult<()>| {
+            r.expect_err("refused")
+                .downcast_ref::<InvalidDefaultModel>()
+                .is_some()
+        };
         assert!(
-            db.set_default_model(ModelType::Embedding, &llm_id).is_err(),
+            refused(db.set_default_model(ModelType::Embedding, &llm_id)),
             "an LLM is not an embedding model"
         );
         assert!(
-            db.set_default_model(ModelType::Llm, "no-such-model")
-                .is_err(),
+            refused(db.set_default_model(ModelType::Llm, "no-such-model")),
             "a default must name a model that exists"
         );
         assert_eq!(db.get_default_model(ModelType::Embedding).unwrap(), None);
