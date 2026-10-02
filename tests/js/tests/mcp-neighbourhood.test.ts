@@ -14,7 +14,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
 import { ChildProcess } from 'node:child_process';
 import { mcpHttpRequest, callMcpTool, initializeMcp } from './mcp-utils';
 
@@ -69,20 +69,25 @@ describe("MCP Neighbourhood Integration Tests", function () {
             MCP_PORT,
         );
 
-        await sleep(3000);
-
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL, false);
+        // Poll until the server answers, then generate once: generate() is
+        // not idempotent, so retrying it could only fail with "already exists".
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${API_PORT}`, ADMIN_CREDENTIAL);
+        await pollUntil(async () => {
+            await adminClient.agent.status();
+            return true;
+        }, { timeoutMs: 15000, label: "executor API ready" });
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated");
     });
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await sleep(1000);
-            if (!executorProcess.killed) executorProcess.kill('SIGKILL');
+            await stopChildProcess(executorProcess);
         }
-        killByPorts([API_PORT, HC_ADMIN_PORT, HC_APP_PORT, MCP_PORT]);
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
     });
 
     // ========================================================================

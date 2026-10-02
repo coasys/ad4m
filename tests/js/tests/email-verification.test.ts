@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, runHcLocalServices, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 
@@ -46,25 +46,31 @@ describe("Email Verification with Mock Service", () => {
             fs.mkdirSync(appDataPath, { recursive: true });
         }
 
-        // Prefer local Holochain bootstrap/proxy services when available, but
-        // fall back to the shared dev bootstrap so this suite still runs in
-        // environments where `kitsune2-bootstrap-srv` is not installed.
-        try {
-            const localServices = await runHcLocalServices();
-            proxyUrl = localServices.proxyUrl;
-            bootstrapUrl = localServices.bootstrapUrl;
-            localServicesProcess = localServices.process;
-        } catch (e: any) {
-            console.warn(`Falling back to default bootstrap/proxy URLs: ${e?.message || e}`);
+        const runHolochain = process.env.LOCAL_MODE !== 'true';
+
+        if (runHolochain) {
+            // Prefer local Holochain bootstrap/proxy services when available, but
+            // fall back to the shared dev bootstrap so this suite still runs in
+            // environments where `kitsune2-bootstrap-srv` is not installed.
+            try {
+                const localServices = await runHcLocalServices();
+                proxyUrl = localServices.proxyUrl;
+                bootstrapUrl = localServices.bootstrapUrl;
+                localServicesProcess = localServices.process;
+            } catch (e: any) {
+                console.warn(`Falling back to default bootstrap/proxy URLs: ${e?.message || e}`);
+            }
         }
 
         executorProcess = proxyUrl && bootstrapUrl
             ? await startExecutor(appDataPath, bootstrapSeedPath,
-                apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl)
+                apiPort, hcAdminPort, hcAppPort, false, undefined, proxyUrl, bootstrapUrl,
+                undefined, false, undefined, undefined, runHolochain)
             : await startExecutor(appDataPath, bootstrapSeedPath,
-                apiPort, hcAdminPort, hcAppPort, false);
+                apiPort, hcAdminPort, hcAppPort, false,
+                undefined, undefined, undefined, undefined, false, undefined, undefined, runHolochain);
 
-        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, undefined, false)
+        adminAd4mClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`)
 
         // Generate initial admin agent (needed for JWT signing)
         await adminAd4mClient.agent.generate("passphrase")
@@ -321,9 +327,13 @@ describe("Email Verification with Mock Service", () => {
 
             // Request new code
             await adminAd4mClient!.agent.requestLoginVerification(email);
-            await sleep(100); // Small delay to ensure new code generation
 
-            const code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+            // Poll until a new code appears (different from the consumed one)
+            let code2: string | undefined;
+            await pollUntil(async () => {
+                code2 = await adminAd4mClient!.runtime.emailTestGetCode(email);
+                return code2 !== undefined && code2 !== code1;
+            }, { timeoutMs: 5000, label: "new verification code generated" });
 
             // Codes should be different
             expect(code1).to.not.equal(code2);
