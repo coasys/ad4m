@@ -1092,12 +1092,12 @@ pub async fn run_interpretation_with_harness_and_model(
         .collect();
 
     // The AD4M MCP handler is the read-tool surface. Constructed here with a
-    // pass-scoped McpContext — admin-credential from env (matches the /v1
-    // openai-compat path) + a fresh per-pass auth-token slot. Every existing
-    // MCP tool (`query_*`, `get_*`, subject/perspective tools) becomes
-    // visible to the LLM through `Ad4mToolProvider`.
+    // pass-scoped McpContext — the admin credential of `harness_admin_credential`
+    // + a fresh per-pass auth-token slot. Every existing MCP tool (`query_*`,
+    // `get_*`, subject/perspective tools) becomes visible to the LLM through
+    // `Ad4mToolProvider`.
     let mcp_context = crate::mcp::server::McpContext {
-        admin_credential: std::env::var("AD4M_ADMIN_CREDENTIAL").ok(),
+        admin_credential: harness_admin_credential(&auth_token),
         auth_token: Arc::new(tokio::sync::RwLock::new(auth_token.clone())),
         // The harness reaches tools through `list_tool_schemas` /
         // `call_tool_by_name`, which always include the dynamic per-class
@@ -1264,6 +1264,46 @@ pub async fn run_interpretation_with_harness_and_model(
         debug: None,
         flow_proposals,
     })
+}
+
+/// The admin credential the harness's MCP handler compares a pass's token with. A pass
+/// with a caller token uses the executor's configured credential, so an admin caller acts
+/// as the main agent, as on the RPC socket. An executor-owned pass (the auto-processor's,
+/// with no caller token) keeps the unauthenticated local path it always had: with a
+/// credential set, the handler would ask it to authenticate and hide its read tools.
+fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
+    auth_token.as_ref()?;
+    crate::config::configured_admin_credential()
+        .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+}
+
+#[cfg(test)]
+mod harness_credential_tests {
+    use super::harness_admin_credential;
+    use crate::config::{set_global_config, Ad4mConfig};
+
+    #[test]
+    fn an_executor_owned_pass_keeps_the_unauthenticated_path() {
+        let config = Ad4mConfig {
+            admin_credential: Some("configured-admin".to_string()),
+            ..Ad4mConfig::default()
+        };
+        set_global_config(config);
+        assert_eq!(harness_admin_credential(&None), None);
+        set_global_config(Ad4mConfig::default());
+    }
+
+    #[test]
+    fn a_pass_with_a_caller_token_checks_it_against_the_configured_credential() {
+        let config = Ad4mConfig {
+            admin_credential: Some("configured-admin".to_string()),
+            ..Ad4mConfig::default()
+        };
+        set_global_config(config);
+        let credential = harness_admin_credential(&Some("configured-admin".to_string()));
+        assert_eq!(credential.as_deref(), Some("configured-admin"));
+        set_global_config(Ad4mConfig::default());
+    }
 }
 
 #[cfg(test)]

@@ -497,9 +497,19 @@ impl Ad4mMcpHandler {
     /// Get agent context, requiring authentication
     pub(crate) async fn get_agent_context(&self) -> Result<AgentContext, String> {
         match self.get_auth_token().await {
-            Some(token) if !token.is_empty() => Ok(AgentContext::from_auth_token(token)),
+            Some(token) if !token.is_empty() => self.agent_context_for(&token),
             _ => Err("Authentication required. Use request_capability + generate_jwt, login_email, or signup + verify_email_code first.".to_string()),
         }
+    }
+
+    /// The agent a token acts as in this session. See [`AgentContext::from_auth_token`].
+    pub(crate) fn agent_context_for(&self, token: &str) -> Result<AgentContext, String> {
+        let is_admin = crate::agent::capabilities::is_admin_credential_token(
+            token,
+            &self.context.admin_credential,
+        );
+        AgentContext::from_auth_token(token.to_string(), is_admin)
+            .map_err(|e| format!("Unauthorized: {}", e))
     }
 
     /// Get capabilities from the stored auth token (reuses same logic as REST RequestContext)
@@ -530,18 +540,16 @@ impl Ad4mMcpHandler {
         resp.to_string()
     }
 
-    /// Get the user's email from the JWT token (for multi-user perspective isolation)
-    pub(crate) async fn get_user_email(&self) -> Option<String> {
-        let token = self.get_auth_token().await.unwrap_or_default();
-        crate::agent::capabilities::user_email_from_token(token)
-    }
-
     /// Check if the current user can access a perspective.
     /// In multi-user mode, only perspectives owned by the user (or unowned) are accessible.
     /// In single-user mode, all perspectives are accessible.
     pub(crate) async fn can_access_perspective(&self, perspective: &PerspectiveHandle) -> bool {
-        let user_email = self.get_user_email().await;
-        crate::helpers::can_access_perspective(&user_email, perspective)
+        // A token that no longer works reaches nothing, not the main agent's perspectives.
+        let token = self.get_auth_token().await.unwrap_or_default();
+        match self.agent_context_for(&token) {
+            Ok(context) => crate::helpers::can_access_perspective(&context.user_email, perspective),
+            Err(_) => false,
+        }
     }
 
     /// Get a perspective by ID, verifying the agent is authenticated, has the required capability,
@@ -557,15 +565,15 @@ impl Ad4mMcpHandler {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
         })?;
 
+        let agent_context = self.get_agent_context().await?;
+
         // Check perspective ownership/access (multi-user isolation)
         let handle = perspective.persisted.lock().await.clone();
-        if !self.can_access_perspective(&handle).await {
+        if !crate::helpers::can_access_perspective(&agent_context.user_email, &handle) {
             return Err(
                 json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string(),
             );
         }
-
-        let agent_context = self.get_agent_context().await?;
 
         let capabilities = self.get_capabilities().await;
         if let Err(e) = check_capability(&capabilities, required_capability) {
@@ -792,5 +800,68 @@ impl Ad4mMcpHandler {
                 Self::encode_literal(value)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_context_tests {
+    use super::*;
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    fn handler(session_token: &str) -> Ad4mMcpHandler {
+        Ad4mMcpHandler::new(McpContext {
+            admin_credential: Some("test-admin".to_string()),
+            auth_token: std::sync::Arc::new(tokio::sync::RwLock::new(Some(
+                session_token.to_string(),
+            ))),
+            dynamic_class_tools: false,
+        })
+    }
+
+    // MCP tools used to act as the node's main agent once a session token stopped decoding.
+    #[tokio::test]
+    async fn an_expired_session_token_acts_as_nobody() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = expired_user_token("expired@example.org");
+        let err = handler(&token).get_agent_context().await.unwrap_err();
+        assert!(err.contains("Unauthorized"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_session_admin_credential_acts_as_the_main_agent() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let context = handler("test-admin").get_agent_context().await.unwrap();
+        assert!(context.is_main_agent);
+    }
+
+    // Profile tools answered with the node's DID once a session token stopped decoding.
+    #[tokio::test]
+    async fn a_profile_tool_with_an_expired_token_does_not_answer_as_the_node() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = expired_user_token("expired.profile@example.org");
+        let answer = handler(&token)
+            .get_my_did(rmcp::handler::server::wrapper::Parameters(
+                super::profiles::GetAgentProfileParams {},
+            ))
+            .await;
+        assert_ne!(answer, crate::agent::did());
+        assert!(answer.contains("Unauthorized"), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn a_user_session_token_acts_as_its_user() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token =
+            crate::user_management::generate_user_jwt("mcp.user@example.org", "test").unwrap();
+        let context = handler(&token).get_agent_context().await.unwrap();
+        assert_eq!(context.user_email.as_deref(), Some("mcp.user@example.org"));
     }
 }

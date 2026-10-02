@@ -39,7 +39,7 @@
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
         State,
     },
     response::IntoResponse,
@@ -68,14 +68,14 @@ use crate::agent::{did_for_context, AgentContext};
 /// don't know who this is" and filters must drop the event, not accept it.
 pub(crate) struct LazyDid {
     cached: Mutex<Option<String>>,
-    auth_token: String,
+    context: AgentContext,
 }
 
 impl LazyDid {
-    pub(crate) fn new(auth_token: String, initial: Option<String>) -> Self {
+    pub(crate) fn new(context: AgentContext, initial: Option<String>) -> Self {
         Self {
             cached: Mutex::new(initial),
-            auth_token,
+            context,
         }
     }
 
@@ -84,8 +84,7 @@ impl LazyDid {
     pub(crate) fn get(&self) -> Option<String> {
         let mut guard = self.cached.lock().unwrap();
         if guard.is_none() {
-            let ctx = AgentContext::from_auth_token(self.auth_token.clone());
-            *guard = did_for_context(&ctx).ok();
+            *guard = did_for_context(&self.context).ok();
         }
         guard.clone()
     }
@@ -117,38 +116,37 @@ pub async fn events_ws(
     check_capability(&context.capabilities, &AGENT_READ_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
 
-    let auth_token = context.auth_token.clone();
-    let user_email = user_email_from_token(auth_token.clone());
+    let user_email = context.user_email.clone();
     // Captured before the upgrade so the stream builder knows whether the
     // caller is an admin credential. Admin is the ONLY escape hatch for
     // per-DID filters — an ordinary session whose DID hasn't resolved yet
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
+    let token_check = TokenCheck::new(&context.auth_token, is_admin);
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, token_check, user_email, is_admin)))
 }
 
 /// Build the merged event stream for a given user.
 ///
 /// Returns a boxed stream of JSON-stringified event messages, already filtered
-/// per-user.
+/// per-user. The stream ends at the first event after `token_check` fails.
 pub(crate) async fn build_event_stream(
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
 
-    // Resolve the DID once at subscription time — avoids repeated JWT decode +
-    // DB / AgentService lookups on every single event. If the client connected
-    // before `agent.generate()` completed this returns `None`; the per-DID
-    // filters below fail closed on `None` until re-resolution succeeds.
-    let resolved_did: Option<String> = {
-        let ctx = AgentContext::from_auth_token(auth_token.clone());
-        did_for_context(&ctx).ok()
-    };
+    // The session's own agent, taken from the session: a token that stops decoding cannot
+    // turn it into the main agent. Resolve the DID once at subscription time — avoids
+    // repeated DB / AgentService lookups on every single event. If the client connected
+    // before `agent.generate()` completed this returns `None`; the per-DID filters below
+    // fail closed on `None` until re-resolution succeeds.
+    let session_context = AgentContext::for_session(user_email.clone());
+    let resolved_did: Option<String> = did_for_context(&session_context).ok();
 
     // Clone the pre-resolved DID for each filter closure
     let d_persp_added = resolved_did.clone();
@@ -170,7 +168,7 @@ pub(crate) async fn build_event_stream(
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
     // streams share the same lazy cell — one resolution serves both.
-    let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
+    let d_auto_processor = Arc::new(LazyDid::new(session_context.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
@@ -336,22 +334,19 @@ pub(crate) async fn build_event_stream(
 
     // ── Neighbourhood signals ──
     // Lazy DID resolution: the WebSocket may connect before agent.generate()
-    // completes, leaving resolved_did as None. Resolve on each signal event
-    // so that by the time signals actually flow, the DID is available.
+    // completes, leaving resolved_did as None. The shared lazy cell resolves
+    // again until a DID exists, so by the time signals flow, it is available.
     let s_signal = {
         let rx = pubsub.subscribe(&NEIGHBOURHOOD_SIGNAL_TOPIC).await;
-        let token = auth_token.clone();
+        let d_signal = d_auto_processor.clone();
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let d_signal = d_signal.clone();
                 async move {
                     match result {
                         Ok(ref msg) => {
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
+                            let did = d_signal.get();
                             if matches_signal_recipient(msg, did.as_deref()) {
                                 Some(wrap_event("signal", msg))
                             } else {
@@ -510,18 +505,19 @@ pub(crate) async fn build_event_stream(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    Box::pin(top)
+    // Events end with the token: expiry and revokeToken() stop them as they stop requests.
+    Box::pin(top.take_while(move |_| futures::future::ready(token_check.check().is_ok())))
 }
 
 async fn handle_events_ws(
     mut socket: WebSocket,
-    auth_token: String,
+    token_check: TokenCheck,
     user_email: Option<String>,
     is_admin: bool,
 ) {
     log::info!("Events WebSocket connected");
 
-    let mut event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let mut event_stream = build_event_stream(token_check, user_email, is_admin).await;
 
     loop {
         tokio::select! {
@@ -533,7 +529,15 @@ async fn handle_events_ws(
                             break;
                         }
                     }
-                    None => break, // All streams ended (shouldn't happen with broadcast)
+                    // The stream ends when the token stops working.
+                    None => {
+                        let close = CloseFrame {
+                            code: 1008,
+                            reason: "token expired or revoked".into(),
+                        };
+                        let _ = socket.send(Message::Close(Some(close))).await;
+                        break;
+                    }
                 }
             }
             // Handle incoming WebSocket messages
@@ -1111,7 +1115,10 @@ mod lazy_did_tests {
     fn resolved_at_construction_stays_resolved() {
         // Happy path: the caller already had a DID at socket-open time.
         // `get()` returns it verbatim, no re-resolution attempt needed.
-        let lazy = LazyDid::new("token".into(), Some("did:key:alice".into()));
+        let lazy = LazyDid::new(
+            crate::agent::AgentContext::main_agent(),
+            Some("did:key:alice".into()),
+        );
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
         // Idempotent — repeated calls keep returning the same DID.
         assert_eq!(lazy.get().as_deref(), Some("did:key:alice"));
@@ -1131,4 +1138,53 @@ mod lazy_did_tests {
     // agent — reproducing it as a pure Rust unit test would require standing
     // up an in-process `AgentContext` + `agent::generate()` + DB, which is
     // what the integration suite already does.
+}
+
+#[cfg(test)]
+mod token_expiry_tests {
+    use super::*;
+    use crate::test_utils::{setup_agent, setup_wallet, MultiUserMode};
+    use std::time::Duration;
+
+    /// Builds a user's event stream, publishes one event and returns what the stream yields.
+    async fn next_event(token_check: TokenCheck) -> Option<String> {
+        let mut stream = build_event_stream(
+            token_check,
+            Some("events.user@example.org".to_string()),
+            false,
+        )
+        .await;
+        get_global_pubsub()
+            .await
+            .publish(
+                &AI_MODEL_LOADING_STATUS,
+                &r#"{"model":"m","status":"loading"}"#.to_string(),
+            )
+            .await;
+        tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("the stream must answer, not hang")
+    }
+
+    // A connection kept its event stream after its token expired.
+    #[tokio::test]
+    async fn a_token_that_expired_after_connect_ends_the_event_stream() {
+        let an_hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 3600;
+        let expired = TokenCheck::with_expiry("user-jwt", an_hour_ago);
+        assert!(next_event(expired).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_valid_token_keeps_its_event_stream() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token =
+            crate::user_management::generate_user_jwt("events.user@example.org", "test").unwrap();
+        assert!(next_event(TokenCheck::new(&token, false)).await.is_some());
+    }
 }
