@@ -16,7 +16,6 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
-use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
     run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
@@ -25,6 +24,7 @@ use crate::perspectives::interpretation::{
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
+use crate::presence::is_online;
 use crate::types::{Link, LinkStatus};
 
 use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
@@ -432,35 +432,23 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
     AuthorElection::NoneOnline
 }
 
-/// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. `last_seen` is written at most
-/// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
-/// by a margin for the gap between requests; otherwise an active user ages out
-/// right before their `last_seen` is refreshed and their loop flaps (#1070).
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
-
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
-/// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
+/// the emails of users online at `now_s` under the shared presence window.
 ///
 /// Split from the live supervisor loop so the freshness policy is trivially
 /// testable — no DB, no wall clock, no spawning. `last_seen == None` means
 /// "never seen since server boot" and is treated as offline (a fresh managed
 /// user who has not yet authenticated should not gate an LLM loop against
 /// their DID). `last_seen > now_s` is capped to "just now" — a client with
-/// a slightly-fast clock is still online, not future-perfect.
-pub fn select_online_managed_users<I>(users: I, now_s: i64, threshold_s: i64) -> Vec<String>
+/// a slightly-fast clock is still online, not future-perfect. The predicate is
+/// [`crate::presence::is_online`], shared with `online_agents`.
+pub fn select_online_managed_users<I>(users: I, now_s: i64) -> Vec<String>
 where
     I: IntoIterator<Item = (String, Option<i64>)>,
 {
-    let cutoff = now_s.saturating_sub(threshold_s);
     users
         .into_iter()
-        .filter_map(|(email, last_seen)| {
-            let ls = last_seen?;
-            // Clamp future timestamps forward-into-online; still filter by cutoff.
-            let effective = ls.min(now_s);
-            (effective >= cutoff).then_some(email)
-        })
+        .filter_map(|(email, last_seen)| is_online(last_seen, now_s).then_some(email))
         .collect()
 }
 
@@ -1161,6 +1149,7 @@ mod tests {
     use super::*;
     use crate::perspectives::auto_processor::claim::{batch_key, write_claim};
     use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::presence::MANAGED_USER_ONLINE_WINDOW_S;
 
     fn cfg(id: &str, debounce_ms: i64, batch_max: usize) -> AutoProcessorConfig {
         AutoProcessorConfig {
@@ -1292,17 +1281,16 @@ mod tests {
     #[test]
     fn selects_users_within_freshness_window() {
         let now = 1_000_000_i64;
-        let window = 300_i64;
+        let window = MANAGED_USER_ONLINE_WINDOW_S;
         let online = select_online_managed_users(
             vec![
-                ("alice@x".into(), Some(now - 10)),   // seen 10s ago
-                ("bob@x".into(), Some(now - 299)),    // right on the edge, still in
-                ("carol@x".into(), Some(now - 301)),  // just past — out
-                ("dave@x".into(), Some(now - 5_000)), // long stale — out
-                ("eve@x".into(), None),               // never seen — out
+                ("alice@x".into(), Some(now - 10)),         // seen 10s ago
+                ("bob@x".into(), Some(now - window)),       // exactly on the edge, still in
+                ("carol@x".into(), Some(now - window - 1)), // just past — out
+                ("dave@x".into(), Some(now - 5_000)),       // long stale — out
+                ("eve@x".into(), None),                     // never seen — out
             ],
             now,
-            window,
         );
         assert_eq!(online, vec!["alice@x", "bob@x"]);
     }
@@ -1313,14 +1301,15 @@ mod tests {
     #[test]
     fn future_last_seen_is_treated_as_online() {
         let now = 1_000_000_i64;
-        let window = 300_i64;
         let online = select_online_managed_users(
             vec![
                 ("skewed@x".into(), Some(now + 60)), // 1 min in the future
-                ("stale@x".into(), Some(now - 400)), // 400s ago — out
+                (
+                    "stale@x".into(),
+                    Some(now - MANAGED_USER_ONLINE_WINDOW_S - 100),
+                ), // past the window — out
             ],
             now,
-            window,
         );
         assert_eq!(online, vec!["skewed@x"]);
     }
@@ -1329,30 +1318,8 @@ mod tests {
     /// as "no managed users online right now" and spawns no loops.
     #[test]
     fn empty_input_selects_no_users() {
-        let selected =
-            select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000, 300);
+        let selected = select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000);
         assert!(selected.is_empty());
-    }
-
-    /// The online window must leave room for the `last_seen` write-throttle
-    /// plus the gap between requests (#1070).
-    #[test]
-    fn online_window_exceeds_last_seen_write_throttle() {
-        assert!(
-            MANAGED_USER_ONLINE_WINDOW_S >= 2 * LAST_SEEN_WRITE_THROTTLE_S,
-            "`last_seen` is only rewritten once it is {LAST_SEEN_WRITE_THROTTLE_S}s old, so a \
-             {MANAGED_USER_ONLINE_WINDOW_S}s window without margin reaps every active user just \
-             before their `last_seen` is refreshed and respawns their loop (#1070)"
-        );
-        let now = 1_000_000_i64;
-        let stale_but_active = (
-            "u@x".to_string(),
-            Some(now - LAST_SEEN_WRITE_THROTTLE_S - 1),
-        );
-        assert_eq!(
-            select_online_managed_users(vec![stale_but_active], now, MANAGED_USER_ONLINE_WINDOW_S),
-            vec!["u@x"]
-        );
     }
 
     // ---- WatcherState -------------------------------------------------------
@@ -1817,7 +1784,6 @@ mod tests {
     #[test]
     fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
         let now = 2_000_000_i64;
-        let window = MANAGED_USER_ONLINE_WINDOW_S;
         // `active` had last_seen refreshed 10s ago (simulates lease heartbeat).
         // `idle` had last_seen 700s ago (no heartbeat — idle loop).
         let online = select_online_managed_users(
@@ -1826,7 +1792,6 @@ mod tests {
                 ("idle@x".into(), Some(now - 700)),  // no activity — should be reaped
             ],
             now,
-            window,
         );
         assert_eq!(
             online,

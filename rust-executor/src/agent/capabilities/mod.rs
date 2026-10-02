@@ -10,6 +10,7 @@ pub use token::*;
 #[allow(ambiguous_glob_reexports)]
 pub use types::*;
 
+use crate::presence::{last_seen_write_due, LAST_SEEN_CLOCK_SKEW_S, LAST_SEEN_WRITE_THROTTLE_S};
 use crate::pubsub::{get_global_pubsub, APPS_CHANGED, EXCEPTION_OCCURRED_TOPIC};
 use crate::types::*;
 use crate::utils::constant_time_eq;
@@ -34,12 +35,6 @@ lazy_static! {
 }
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
-
-/// Minimum interval (seconds) between two `users.last_seen` writes for the same
-/// user, so an active user's `last_seen` can be this stale. The auto-processor
-/// supervisor's online window depends on it
-/// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
-pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
@@ -129,136 +124,136 @@ pub fn user_email_from_token(token: String) -> Option<String> {
     }
 }
 
-/// Update last_seen timestamp for the user from the auth token
-/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
-/// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
+/// Update last_seen timestamp for the user from the auth token.
+/// See [`track_last_seen`].
 pub async fn track_last_seen_from_token(token: String) {
+    if let Some(user_email) = user_email_from_token(token) {
+        track_last_seen(user_email, chrono::Utc::now().timestamp()).await;
+    }
+}
+
+/// Record activity by `user_email` at `now` in `users.last_seen`, at most once
+/// per [`LAST_SEEN_WRITE_THROTTLE_S`]. Both the in-memory cache path and the
+/// DB path decide through [`last_seen_write_due`], the same rule the presence
+/// readers are tested against (#1070). The cache only avoids DB lookups: a
+/// cached value is never fresher than the DB, so it cannot suppress a write
+/// the DB path would make.
+pub(crate) async fn track_last_seen(user_email: String, now: i64) {
     use crate::db::Ad4mDb;
 
-    if let Some(user_email) = user_email_from_token(token) {
-        let now = chrono::Utc::now().timestamp();
-
-        // Check cache first (non-blocking read)
-        {
-            let cache = LAST_SEEN_CACHE.read().await;
-            if let Some(entry) = cache.get(&user_email) {
-                let cache_age = now - entry.last_checked;
-                if cache_age < CACHE_TTL_SECONDS {
-                    // Cache is fresh, check if update is needed based on cached value
-                    let time_since_last_seen = now - entry.last_seen_value;
-                    if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
-                        // Still inside the throttle period, no need to update
-                        log::trace!(
-                            "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
-                            user_email, entry.last_seen_value, time_since_last_seen
-                        );
-                        return;
-                    }
+    // Check cache first (non-blocking read)
+    {
+        let cache = LAST_SEEN_CACHE.read().await;
+        if let Some(entry) = cache.get(&user_email) {
+            let cache_age = now - entry.last_checked;
+            if cache_age < CACHE_TTL_SECONDS {
+                // Cache is fresh, check if update is needed based on cached value
+                if !last_seen_write_due(Some(entry.last_seen_value), now) {
+                    // Still inside the throttle period, no need to update
+                    log::trace!(
+                        "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
+                        user_email, entry.last_seen_value, now - entry.last_seen_value
+                    );
+                    return;
                 }
             }
         }
+    }
 
-        // Cache miss or stale - need to check database
-        // Use spawn_blocking to avoid blocking the async runtime
-        let user_email_clone = user_email.clone();
-        let should_update = tokio::task::spawn_blocking(move || {
-            Ad4mDb::with_global_instance(|db| {
-                if let Ok(user) = db.get_user(&user_email_clone) {
-                    if let Some(last_seen) = user.last_seen {
-                        let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
-
-                        // Handle unrealistic future timestamps by treating them as stale
-                        // (allow some clock skew tolerance of 1 minute)
-                        let should_update = if last_seen > now + 60 {
-                            log::warn!(
-                                "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
-                                user_email_clone, last_seen
-                            );
-                            true
-                        } else {
-                            last_seen < throttle_cutoff
-                        };
-
-                        log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
-                            user_email_clone, last_seen, throttle_cutoff, should_update);
-                        (should_update, Some(last_seen))
-                    } else {
-                        log::debug!(
-                            "last_seen tracking for {}: never seen before, updating now",
-                            user_email_clone
+    // Cache miss or stale - need to check database
+    // Use spawn_blocking to avoid blocking the async runtime
+    let user_email_clone = user_email.clone();
+    let should_update = tokio::task::spawn_blocking(move || {
+        Ad4mDb::with_global_instance(|db| {
+            if let Ok(user) = db.get_user(&user_email_clone) {
+                if let Some(last_seen) = user.last_seen {
+                    if last_seen > now + LAST_SEEN_CLOCK_SKEW_S {
+                        log::warn!(
+                            "last_seen tracking for {}: unrealistic future timestamp {}, treating as stale",
+                            user_email_clone, last_seen
                         );
-                        (true, None) // Never updated, do it now
                     }
+                    let should_update = last_seen_write_due(Some(last_seen), now);
+
+                    log::trace!("last_seen tracking for {}: last_seen={}, should_update={}",
+                        user_email_clone, last_seen, should_update);
+                    (should_update, Some(last_seen))
                 } else {
-                    log::warn!(
-                        "last_seen tracking: user {} not found in database",
+                    log::debug!(
+                        "last_seen tracking for {}: never seen before, updating now",
                         user_email_clone
                     );
-                    (false, None) // User not found
+                    (true, None) // Never updated, do it now
                 }
-            })
+            } else {
+                log::warn!(
+                    "last_seen tracking: user {} not found in database",
+                    user_email_clone
+                );
+                (false, None) // User not found
+            }
+        })
+    })
+    .await;
+
+    let (should_update, last_seen_value) = match should_update {
+        Ok((update, value)) => (update, value),
+        Err(e) => {
+            log::error!(
+                "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                e
+            );
+            return;
+        }
+    };
+
+    // Update cache with the value we got from DB
+    if let Some(last_seen_val) = last_seen_value {
+        let mut cache = LAST_SEEN_CACHE.write().await;
+        cache.insert(
+            user_email.clone(),
+            LastSeenCacheEntry {
+                last_checked: now,
+                last_seen_value: last_seen_val,
+            },
+        );
+    }
+
+    if should_update {
+        log::debug!("Updating last_seen for user: {}", user_email);
+
+        // Perform the update in spawn_blocking
+        let user_email_for_update = user_email.clone();
+        let update_result = tokio::task::spawn_blocking(move || {
+            Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
         })
         .await;
 
-        let (should_update, last_seen_value) = match should_update {
-            Ok((update, value)) => (update, value),
-            Err(e) => {
+        match update_result {
+            Ok(Ok(())) => {
+                // Update succeeded, refresh cache with new timestamp
+                let mut cache = LAST_SEEN_CACHE.write().await;
+                cache.insert(
+                    user_email,
+                    LastSeenCacheEntry {
+                        last_checked: now,
+                        last_seen_value: now,
+                    },
+                );
+            }
+            Ok(Err(e)) => {
                 log::error!(
-                    "Failed to check last_seen status (spawn_blocking join error): {:?}",
+                    "Failed to update last_seen for user {}: {:?}",
+                    user_email,
                     e
                 );
-                return;
             }
-        };
-
-        // Update cache with the value we got from DB
-        if let Some(last_seen_val) = last_seen_value {
-            let mut cache = LAST_SEEN_CACHE.write().await;
-            cache.insert(
-                user_email.clone(),
-                LastSeenCacheEntry {
-                    last_checked: now,
-                    last_seen_value: last_seen_val,
-                },
-            );
-        }
-
-        if should_update {
-            log::debug!("Updating last_seen for user: {}", user_email);
-
-            // Perform the update in spawn_blocking
-            let user_email_for_update = user_email.clone();
-            let update_result = tokio::task::spawn_blocking(move || {
-                Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&user_email_for_update))
-            })
-            .await;
-
-            match update_result {
-                Ok(Ok(())) => {
-                    // Update succeeded, refresh cache with new timestamp
-                    let mut cache = LAST_SEEN_CACHE.write().await;
-                    cache.insert(
-                        user_email,
-                        LastSeenCacheEntry {
-                            last_checked: now,
-                            last_seen_value: now,
-                        },
-                    );
-                }
-                Ok(Err(e)) => {
-                    log::error!(
-                        "Failed to update last_seen for user {}: {:?}",
-                        user_email,
-                        e
-                    );
-                }
-                Err(e) => {
-                    log::error!(
-                        "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
-                        user_email,
-                        e
-                    );
-                }
+            Err(e) => {
+                log::error!(
+                    "Failed to update last_seen for user {} (spawn_blocking join error): {:?}",
+                    user_email,
+                    e
+                );
             }
         }
     }
@@ -409,6 +404,52 @@ pub fn gen_request_key(request_id: &str, rand: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The writer itself, through the real DB and cache, writes exactly when
+    /// [`last_seen_write_due`] says so (#1070). The first call (no cache entry)
+    /// takes the DB path at the last not-due second; the second call, one
+    /// second later, first passes the cache entry the first call left behind
+    /// and then the DB path. An inline comparison on either path that
+    /// disagrees with the shared rule fails one of the two asserts.
+    #[tokio::test]
+    async fn track_last_seen_writes_exactly_when_the_throttle_has_elapsed() {
+        use crate::db::Ad4mDb;
+        crate::perspectives::interpretation_test_support::ensure_db_init();
+
+        let email = "track-last-seen-throttle@test";
+        let t0 = chrono::Utc::now().timestamp() - 10_000;
+        Ad4mDb::with_global_instance(|db| {
+            db.import_from_json(serde_json::json!({
+                "users": [{
+                    "username": email,
+                    "did": "did:key:track-last-seen-throttle",
+                    "password_hash": "x",
+                    "last_seen": t0,
+                }]
+            }))
+        })
+        .expect("seed user");
+        let stored = || {
+            Ad4mDb::with_global_instance(|db| db.get_user(email))
+                .expect("user")
+                .last_seen
+        };
+        assert_eq!(stored(), Some(t0));
+
+        track_last_seen(email.to_string(), t0 + LAST_SEEN_WRITE_THROTTLE_S).await;
+        assert_eq!(
+            stored(),
+            Some(t0),
+            "exactly one throttle after the last write is not due yet"
+        );
+
+        track_last_seen(email.to_string(), t0 + LAST_SEEN_WRITE_THROTTLE_S + 1).await;
+        assert_ne!(
+            stored(),
+            Some(t0),
+            "one second past the throttle the writer must record the activity"
+        );
+    }
 
     #[test]
     fn all_capability_is_expected() {

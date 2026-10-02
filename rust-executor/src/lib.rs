@@ -12,6 +12,7 @@ pub mod js_core;
 pub mod mcp;
 pub mod perspective_snapshot;
 pub mod perspectives;
+pub mod presence;
 mod prolog_service;
 pub mod runtime_service;
 pub mod unyt_service;
