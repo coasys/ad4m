@@ -5,7 +5,7 @@
 //! handlers via `register_ws_handlers(&mut HandlerMap)` — no central route map.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -175,6 +175,9 @@ pub trait ParamExt {
     fn opt_str(&self, key: &str) -> Option<String>;
     /// Get a required nested object/value parameter.
     fn require(&self, key: &str) -> Result<Value, WsRpcError>;
+    /// Get an optional array of strings as a set: `None` when absent or
+    /// `null`, 400 when present but not an array of strings.
+    fn opt_str_set(&self, key: &str) -> Result<Option<HashSet<String>>, WsRpcError>;
 }
 
 impl ParamExt for Value {
@@ -197,5 +200,18 @@ impl ParamExt for Value {
         self.get(key).cloned().ok_or_else(|| {
             WsRpcError::bad_request(format!("Missing required parameter: '{}'", key))
         })
+    }
+
+    fn opt_str_set(&self, key: &str) -> Result<Option<HashSet<String>>, WsRpcError> {
+        let invalid = || WsRpcError::bad_request(format!("`{}` must be an array of strings", key));
+        match self.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Array(items)) => items
+                .iter()
+                .map(|v| v.as_str().map(str::to_string).ok_or_else(invalid))
+                .collect::<Result<_, _>>()
+                .map(Some),
+            Some(_) => Err(invalid()),
+        }
     }
 }

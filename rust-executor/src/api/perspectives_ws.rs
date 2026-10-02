@@ -916,6 +916,23 @@ async fn commit_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     })?)
 }
 
+/// `perspective.discardBatch` → `true` if the batch was open and is now
+/// dropped, `false` if it was already committed, discarded or timed out.
+async fn discard_batch(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    let uuid = params.require_str("uuid")?;
+    check_capability(
+        &ctx.capabilities,
+        &perspective_update_capability(vec![uuid.clone()]),
+    )
+    .map_err(WsRpcError::forbidden)?;
+
+    let body: DiscardBatchRequest = serde_json::from_value(params.clone())
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+
+    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    Ok(Value::Bool(perspective.discard_batch(&body.batch_id).await))
+}
+
 async fn subscribe_query(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -2495,6 +2512,9 @@ async fn get_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 /// with `SHACLShape.fromLinks(entry.links, entry.shapeUri)`.  Equivalent to
 /// the SDK's `PerspectiveProxy.getAllShacl()` — one handler call replaces
 /// 1 + N×(3+M) `queryLinks` round trips (N shapes, M properties each).
+///
+/// Optional `names: string[]` restricts the reply to those shapes, in the
+/// perspective's order; unknown names are left out.
 async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -2502,6 +2522,8 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         &perspective_query_capability(vec![uuid.clone()]),
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let wanted = params.opt_str_set("names")?;
 
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
 
@@ -2517,6 +2539,7 @@ async fn get_all_shacl(params: Value, ctx: Arc<RequestContext>) -> Result<Value,
         .iter()
         .filter_map(|link| shape_name_from_has_shacl_target(&link.data.target))
         .filter(|name| seen_names.insert(name.clone()))
+        .filter(|name| wanted.as_ref().is_none_or(|w| w.contains(name)))
         .collect();
 
     // Step 2: resolve each shape's full link set. Concurrent per-shape
@@ -2598,6 +2621,7 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.getSubjectData", get_subject_data);
     map.register("perspective.createBatch", create_batch);
     map.register("perspective.commitBatch", commit_batch);
+    map.register("perspective.discardBatch", discard_batch);
     map.register("perspective.subscribeQuery", subscribe_query);
     map.register("perspective.keepAliveQuery", keep_alive_query);
     map.register("perspective.disposeQuery", dispose_query);
