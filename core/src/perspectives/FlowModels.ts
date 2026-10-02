@@ -24,6 +24,15 @@ import { HasMany, Optional, Property } from "../model/decorators";
 import { Model } from "../model/decorators";
 
 /**
+ * The engine's proposer rule (`self_authored_proposer`: a `proposer` link
+ * signed by the DID it names) as a getter. Must match the `proposer` getter in
+ * `hardwired_sdna/flow_transition_proposal.json` byte for byte, as
+ * `ACCEPTED_BY_GETTER` must.
+ */
+export const PROPOSER_GETTER =
+  'SELECT ?target WHERE { ?source <ad4m://flow/proposer> ?target . FILTER EXISTS { ?_claim <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://flow/proposer> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
+
+/**
  * The engine's vote rule (`signed_by`: the link's author is the DID it names,
  * and its signature verified) as a getter over the link's reifier. Must match
  * the `acceptedBy` getter in `hardwired_sdna/flow_transition_proposal.json`
@@ -63,8 +72,13 @@ export class FlowTransitionProposal extends Ad4mModel {
   @Property({ through: "ad4m://flow/to_state", required: true })
   toState: string = "";
 
-  /** DID of the agent that issued the proposal. */
-  @Property({ through: "ad4m://flow/proposer", required: true })
+  /**
+   * DID of the agent that issued the proposal, read the way the engine reads
+   * it: only from a `proposer` link signed by the DID it names. Any member
+   * can write a `proposer` link naming someone else, and an unchecked read
+   * would show that DID instead (and drop the real proposer from the voters).
+   */
+  @Property({ through: "ad4m://flow/proposer", required: true, getter: PROPOSER_GETTER, datatype: "xsd:string" })
   proposer: string = "";
 
   /**

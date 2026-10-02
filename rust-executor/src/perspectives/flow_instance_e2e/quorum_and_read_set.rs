@@ -1,4 +1,5 @@
 use super::*;
+use crate::perspectives::flow_instance::atom::PROPOSER_PREDICATE;
 // ---------------------------------------------------------------------------
 // Quorum, accept, and the read-set
 // ---------------------------------------------------------------------------
@@ -166,7 +167,8 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
 /// A vote is an authorship claim with a valid signature, counted once per DID,
 /// so each of these is on the graph and must not show up twice or at all:
 /// a vote for Carol that Bob signed, a vote whose signature fails, Bob voting
-/// twice, and the proposer accepting their own proposal. `resolvedAs` reads
+/// twice, the proposer accepting their own proposal, and a `proposer` link
+/// naming Bob that Mallory signed. `resolvedAs` reads
 /// only this replica's own mark, never a peer's Shared one.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
@@ -192,6 +194,7 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     let bob = TestSigner::generate();
     let carol = TestSigner::generate();
     let eve = TestSigner::generate();
+    let mallory = TestSigner::generate();
     sync_vote_from(&mut f, &bob, &minted).await;
     let later = chrono::Utc::now() + chrono::Duration::seconds(1);
     let mut synced = vec![
@@ -199,6 +202,16 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
         sync_signed(vote(&bob.did), &bob, Some(later)),
         // Bob names Carol: a valid signature, but not Carol's.
         sync_signed(vote(&carol.did), &bob, None),
+        // Mallory names Bob as the proposer: a valid signature, but not Bob's.
+        sync_signed(
+            Link {
+                source: minted.clone(),
+                predicate: Some(PROPOSER_PREDICATE.to_string()),
+                target: bob.did.clone(),
+            },
+            &mallory,
+            None,
+        ),
         // A peer's Shared `resolved_as`: says nothing about what happened here.
         sync_signed(
             Link {
@@ -272,7 +285,16 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
         .expect("the proposal is an atom");
     let counted: std::collections::BTreeSet<String> =
         atom.votes.iter().map(|v| v.did.clone()).collect();
-    let documented: std::collections::BTreeSet<String> = std::iter::once(proposer.clone())
+    // The formula as a reader applies it: the model's own `proposer`.
+    assert_eq!(
+        p["proposer"].as_str(),
+        Some(proposer.as_str()),
+        "the model shows the real proposer, not the one Mallory named"
+    );
+    let documented: std::collections::BTreeSet<String> = p["proposer"]
+        .as_str()
+        .map(str::to_string)
+        .into_iter()
         .chain(accepted(&p))
         .collect();
     assert_eq!(

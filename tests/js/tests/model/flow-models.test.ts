@@ -101,10 +101,14 @@ describe("FlowTransitionProposal — @Model", function () {
       predicate: "ad4m://flow/to_state",
       target: "literal:string:tensionIdentified",
     }));
+    // The engine writes the proposer as the acting agent's own DID, signed by
+    // that agent; a `proposer` link naming anyone else is a claim the model
+    // (like the engine) does not read.
+    const me = (await ad4m.agent.me()).did;
     await p.add(new Link({
       source: proposal,
       predicate: "ad4m://flow/proposer",
-      target: "literal:string:did:example:alice",
+      target: `literal:string:${me}`,
     }));
     await p.add(new Link({
       source: proposal,
@@ -117,7 +121,7 @@ describe("FlowTransitionProposal — @Model", function () {
     expect(proposals[0].flowInstance).to.equal(flowInstance);
     expect(proposals[0].fromState).to.equal("collectingPerspectives");
     expect(proposals[0].toState).to.equal("tensionIdentified");
-    expect(proposals[0].proposer).to.equal("did:example:alice");
+    expect(proposals[0].proposer).to.equal(me);
     expect(proposals[0].evidenceHashes).to.equal("{}");
     // "When was this proposed?" is answered by Ad4mModel's built-in
     // `createdAt`, synthesised on hydration from the earliest link
@@ -272,6 +276,12 @@ describe("FlowTransitionProposal — @Model", function () {
       shape.properties.find((prop: any) => prop.path === "ad4m://acceptedBy").getter,
       "the vote getter must be the Rust SDNA's, byte for byte",
     ).to.equal(rustProps.find((prop) => prop.path === "ad4m://acceptedBy")!.getter);
+    // `proposer` is read with the engine's rule too, so a forged proposer link
+    // neither replaces the real proposer nor drops their vote from the set.
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://flow/proposer").getter,
+      "the proposer getter must be the Rust SDNA's, byte for byte",
+    ).to.equal(rustProps.find((prop) => prop.path === "ad4m://flow/proposer")!.getter);
     // The mark is this replica's own: a peer's Shared one must not read as fired.
     expect(
       shape.properties.find((prop: any) => prop.path === "ad4m://flow/resolved_as").local,
