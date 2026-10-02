@@ -24,6 +24,7 @@ pub mod error;
 mod futures;
 pub mod languages_extension;
 mod options;
+pub use options::ad4m_language_extensions;
 pub mod pubsub_extension;
 #[allow(dead_code)]
 pub mod residual_lazy;
@@ -31,7 +32,6 @@ pub mod signature_extension;
 mod string_module_loader;
 pub mod utils;
 pub mod utils_extension;
-pub mod wallet_extension;
 
 use self::futures::{EventLoopFuture, SmartGlobalVariableFuture};
 
