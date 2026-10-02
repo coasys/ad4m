@@ -3320,7 +3320,7 @@ describe("WakerSubscriptionManager", () => {
   };
 
   const mockPerspectiveClientSimple = {
-    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
+    querySparql: vi.fn(() => Promise.resolve([])),
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
@@ -3631,18 +3631,13 @@ describe("WakerSubscriptionManager", () => {
       querySparql: vi.fn((_perspectiveId: string, query: string) => {
         // msg-1 has two parents (channel + conversation thread)
         if (query.includes("msg-1")) {
-          return Promise.resolve({ results: { bindings: [
-            { source: { value: "channel-abc" } },
-            { source: { value: "conversation-xyz" } },
-          ]}});
+          return Promise.resolve([{ source: "channel-abc" }, { source: "conversation-xyz" }]);
         }
         // msg-2 is only in channel-abc
         if (query.includes("msg-2")) {
-          return Promise.resolve({ results: { bindings: [
-            { source: { value: "channel-abc" } },
-          ]}});
+          return Promise.resolve([{ source: "channel-abc" }]);
         }
-        return Promise.resolve({ results: { bindings: [] }});
+        return Promise.resolve([]);
       }),
     };
 
@@ -3689,7 +3684,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] }})),
+      querySparql: vi.fn(() => Promise.resolve([])),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3766,7 +3761,7 @@ describe("WakerSubscriptionManager disposal races", () => {
     info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(),
   });
   const perspectiveClient = {
-    querySparql: vi.fn(() => Promise.resolve({ results: { bindings: [] } })),
+    querySparql: vi.fn(() => Promise.resolve([])),
   };
 
   /** A proxy whose subscribe() only settles when the test says so. */

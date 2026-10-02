@@ -294,7 +294,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     await admin.agent.createUser("alice@handover.local", "pass");
     await admin.runtime.setUserFreeAccess("alice@handover.local", true);
     const aliceToken = await admin.agent.loginUser("alice@handover.local", "pass");
-    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken, false);
+    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken);
     aliceDid = (await alice.agent.me()).did;
 
     // Admin is the second signer: ALL_CAPABILITY lets it read Alice's

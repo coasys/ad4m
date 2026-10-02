@@ -1,4 +1,5 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, CallOptions, WsEvent, longCall } from "../apiClient";
+import { addListener, notifyListeners } from "../notifyListeners";
 import { PerspectiveInput } from "../perspectives/Perspective";
 import {
   Agent,
@@ -11,8 +12,7 @@ import {
 } from "./Agent";
 import { HostingUserInfo, PaymentRequestResult, ComputeLogEntry } from "../runtime/RuntimeTypes";
 import { AgentStatus } from "./AgentStatus";
-import { LinkMutations, LinkExpression } from "../links/Links";
-import { PerspectiveClient } from "../perspectives/PerspectiveClient";
+import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Links";
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type {
@@ -36,18 +36,13 @@ export type AgentUpdatedCallback = (agent: Agent) => void;
 export type AgentStatusChangedCallback = (agent: Agent) => void;
 export type AgentAppsUpdatedCallback = () => void;
 export type HostingUserInfoChangedCallback = (info: HostingUserInfo) => void;
-export type ComputeLogUpdatedCallback = (entry: ComputeLogEntry) => void;
 
 export class AgentClient {
   #apiClient: ApiClient;
-  #baseUrl: string;
-  #token?: string;
   #appsChangedCallback: AgentAppsUpdatedCallback[];
   #updatedCallbacks: AgentUpdatedCallback[];
   #agentStatusChangedCallbacks: AgentStatusChangedCallback[];
   #hostingUserInfoChangedCallbacks: HostingUserInfoChangedCallback[];
-  #computeLogUpdatedCallbacks: ComputeLogUpdatedCallback[];
-  #unsubscribers: (() => void)[];
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -63,23 +58,13 @@ export class AgentClient {
    *  After this window any restart triggers a fresh network fetch. */
   static REMOTE_AGENT_TTL_L2_MS = 5 * 60_000; // 5 minutes
 
-  constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
-    this.#baseUrl = baseUrl;
-    this.#token = token;
+  constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     this.#updatedCallbacks = [];
     this.#agentStatusChangedCallbacks = [];
     this.#appsChangedCallback = [];
     this.#hostingUserInfoChangedCallbacks = [];
-    this.#computeLogUpdatedCallbacks = [];
-    this.#unsubscribers = [];
     this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
-
-    if (subscribe) {
-      this.subscribeAgentUpdated();
-      this.subscribeAgentStatusChanged();
-      this.subscribeAppsChanged();
-    }
   }
 
   async me(): Promise<Agent> {
@@ -101,8 +86,8 @@ export class AgentClient {
     return new AgentStatus(agentStatus);
   }
 
-  async generate(passphrase: string): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase });
+  async generate(passphrase: string, options?: CallOptions): Promise<AgentStatus> {
+    const result = await this.#apiClient.call<AgentStatus>('agent.generate', { passphrase }, longCall(options));
     return new AgentStatus(result);
   }
 
@@ -116,12 +101,14 @@ export class AgentClient {
     return new AgentStatus(result);
   }
 
-  async unlock(passphrase: string, holochain = true): Promise<AgentStatus> {
-    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain });
+  async unlock(passphrase: string, holochain = true, options?: CallOptions): Promise<AgentStatus> {
+    const result = await this.#apiClient.call<AgentStatus>('agent.unlock', { passphrase, holochain }, longCall(options));
     return new AgentStatus(result);
   }
 
   async byDID(did: string): Promise<Agent> {
+    // agent-updated events keep cached entries fresh (the self-DID entry has no TTL).
+    this.#listen();
     const now = Date.now();
     const cached = this.#memCache.get(did);
 
@@ -159,6 +146,13 @@ export class AgentClient {
     });
 
     return promise;
+  }
+
+  #cacheAgent(agent: Agent): void {
+    if (!agent.did) return;
+    this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
+    this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
+    this.#listen();
   }
 
   /**
@@ -200,36 +194,27 @@ export class AgentClient {
     agent.directMessageLanguage = a.directMessageLanguage;
 
     // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the subscription event
-    if (agent.did) {
-      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-    }
+    // return fresh data without waiting for the agent-updated event
+    this.#cacheAgent(agent);
 
     return agent;
   }
 
-  async mutatePublicPerspective(mutations: LinkMutations): Promise<Agent> {
-    const perspectiveClient = new PerspectiveClient(this.#baseUrl, this.#token);
+  async mutatePublicPerspective({ additions, removals }: LinkMutations): Promise<Agent> {
+    const added = additions.length > 0 ? await this.#signLinks(additions) : [];
+    const { perspective } = await this.me();
+    const kept = (perspective?.links ?? []).filter(link => !removals.some(r => linkEqual(link, r as LinkExpression)));
+    return this.updatePublicPerspective({ links: [...kept, ...added] } as PerspectiveInput);
+  }
 
-    const proxyPerspective = await perspectiveClient.add("Agent Perspective Proxy");
-    const agentMe = await this.me();
-
-    if (agentMe.perspective) {
-      await proxyPerspective.loadSnapshot(agentMe.perspective);
+  /** Has the executor sign `links` as this agent, in a throwaway perspective. */
+  async #signLinks(links: LinkInput[]): Promise<LinkExpression[]> {
+    const { uuid } = await this.#apiClient.call<{ uuid: string }>('perspective.create', { name: 'Agent Perspective Proxy' });
+    try {
+      return await this.#apiClient.call<LinkExpression[]>('perspective.addLinks', { uuid, links, status: 'shared' });
+    } finally {
+      await this.#apiClient.call('perspective.remove', { uuid });
     }
-
-    for (const addition of mutations.additions) {
-      await proxyPerspective.add(addition);
-    }
-    for (const removal of mutations.removals) {
-      await proxyPerspective.remove(removal);
-    }
-
-    const snapshot = await proxyPerspective.snapshot();
-    const agent = await this.updatePublicPerspective(snapshot);
-    await perspectiveClient.remove(proxyPerspective.uuid);
-    return agent;
   }
 
   async updateDirectMessageLanguage(directMessageLanguage: string): Promise<Agent> {
@@ -238,11 +223,8 @@ export class AgentClient {
     agent.directMessageLanguage = a.directMessageLanguage;
 
     // Immediately update byDID cache so subsequent byDID() calls
-    // return fresh data without waiting for the subscription event
-    if (agent.did) {
-      this.#memCache.set(agent.did, { promise: Promise.resolve(agent), ts: Date.now() });
-      this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-    }
+    // return fresh data without waiting for the agent-updated event
+    this.#cacheAgent(agent);
 
     return agent;
   }
@@ -263,81 +245,53 @@ export class AgentClient {
     return this.#apiClient.call<EntanglementProof>('agent.entanglementProofPreflight', { deviceKey, deviceKeyType });
   }
 
-  addUpdatedListener(listener: AgentUpdatedCallback) {
-    this.#updatedCallbacks.push(listener);
+  /** Each addXListener returns a function that removes the listener. */
+  addUpdatedListener(listener: AgentUpdatedCallback): () => void {
+    this.#listen();
+    return addListener(this.#updatedCallbacks, listener);
   }
 
-  addAppChangedListener(listener: AgentAppsUpdatedCallback) {
-    this.#appsChangedCallback.push(listener);
+  addAppChangedListener(listener: AgentAppsUpdatedCallback): () => void {
+    this.#listen();
+    return addListener(this.#appsChangedCallback, listener);
   }
 
-  subscribeAgentUpdated() {
-    const unsub = this.#apiClient.subscribe((data) => {
-      if (data.type === 'agent-updated') {
-        const agent = (data.agent || data) as Agent;
+  addAgentStatusChangedListener(listener: AgentStatusChangedCallback): () => void {
+    this.#listen();
+    return addListener(this.#agentStatusChangedCallbacks, listener);
+  }
 
-        // Update L1 and L2 cache from the event payload
-        if (agent.did) {
-          this.#memCache.set(agent.did, {
-            promise: Promise.resolve(agent),
-            ts: Date.now(),
-          });
-          this.#persistent.put(agent.did, { agent, ts: Date.now() }); // fire-and-forget
-        }
+  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback): () => void {
+    this.#listen();
+    return addListener(this.#hostingUserInfoChangedCallbacks, listener);
+  }
 
-        this.#updatedCallbacks.forEach((cb) => cb(agent));
+  /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
+  #listen(): void {
+    this.#apiClient.subscribe(this.#onEvent);
+  }
+
+  // Payload shapes follow the event table in rust-executor/src/api/events_ws.rs:
+  // the agent events nest under `agent`, hosting-user-info-changed is inline.
+  #onEvent = (data: WsEvent): void => {
+    switch (data.type) {
+      case 'agent-updated': {
+        const agent = data.agent as Agent;
+        this.#cacheAgent(agent);
+        notifyListeners(this.#updatedCallbacks, agent);
+        break;
       }
-    });
-    this.#unsubscribers.push(unsub);
-  }
-
-  subscribeAppsChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
-      if (data.type === 'apps-changed') {
-        this.#appsChangedCallback.forEach((cb) => cb());
-      }
-    });
-    this.#unsubscribers.push(unsub);
-  }
-
-  addAgentStatusChangedListener(listener: AgentStatusChangedCallback) {
-    this.#agentStatusChangedCallbacks.push(listener);
-  }
-
-  subscribeAgentStatusChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
-      if (data.type === 'agent-status-changed') {
-        this.#agentStatusChangedCallbacks.forEach((cb) => cb((data.agent || data) as Agent));
-      }
-    });
-    this.#unsubscribers.push(unsub);
-  }
-
-  addHostingUserInfoChangedListener(listener: HostingUserInfoChangedCallback) {
-    this.#hostingUserInfoChangedCallbacks.push(listener);
-  }
-
-  subscribeHostingUserInfoChanged() {
-    const unsub = this.#apiClient.subscribe((data) => {
-      if (data.type === 'hosting-user-info-changed') {
-        this.#hostingUserInfoChangedCallbacks.forEach((cb) => cb((data.info || data) as HostingUserInfo));
-      }
-    });
-    this.#unsubscribers.push(unsub);
-  }
-
-  addComputeLogUpdatedListener(listener: ComputeLogUpdatedCallback) {
-    this.#computeLogUpdatedCallbacks.push(listener);
-  }
-
-  subscribeComputeLogUpdated() {
-    const unsub = this.#apiClient.subscribe((data) => {
-      if (data.type === 'compute-log-updated') {
-        this.#computeLogUpdatedCallbacks.forEach((cb) => cb((data.entry || data) as ComputeLogEntry));
-      }
-    });
-    this.#unsubscribers.push(unsub);
-  }
+      case 'agent-status-changed':
+        notifyListeners(this.#agentStatusChangedCallbacks, data.agent as Agent);
+        break;
+      case 'apps-changed':
+        notifyListeners(this.#appsChangedCallback);
+        break;
+      case 'hosting-user-info-changed':
+        notifyListeners(this.#hostingUserInfoChangedCallbacks, data as unknown as HostingUserInfo);
+        break;
+    }
+  };
 
   async requestCapability(authInfo: AuthInfoInput): Promise<string> {
     return this.#apiClient.call<string>('agent.requestCapability', { authInfo });
