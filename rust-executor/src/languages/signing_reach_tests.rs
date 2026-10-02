@@ -75,7 +75,7 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
         r#"(() => {
   const ops = (globalThis.Deno && Deno.core && Deno.core.ops) || {};
   const nodeSigningOps = ["sign_string", "sign_device_key", "generate_entanglement_proof",
-    "add_entanglement_proofs", "delete_entanglement_proofs"];
+    "add_entanglement_proofs", "delete_entanglement_proofs", "wallet_sign"];
   return JSON.stringify({
     entanglementService: typeof globalThis.ENTANGLEMENT_SERVICE,
     holochainSignString: typeof HOLOCHAIN_SERVICE.signString,
