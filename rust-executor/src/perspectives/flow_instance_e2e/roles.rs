@@ -381,3 +381,48 @@ async fn a_revocation_from_outside_the_grants_authority_is_ignored() {
     );
     assert_eq!(f.derived().await.state, "review");
 }
+
+/// #1144. A role gate carrying a key the reader does not know is refused, not
+/// read as the gate without that key.
+///
+/// `grantedByFlow` is the key #1076 renamed to `producedByFlow`. Dropped, it
+/// leaves the plain `owner` gate, which the voter below passes, so the edge
+/// settled on a vote the author meant to require a flow receipt for. The first
+/// run is the positive control: the same fixture, grant and vote under the
+/// rule without the stale key settle the edge, so the refusal is the key's.
+///
+/// Killing mutation: drop the `role_gate_key_errors` check from
+/// `decode_consensus_rule`. The rule then decodes as the plain `owner` gate and
+/// the second run settles to `scoped`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_role_gate_with_an_unknown_key_refuses_the_edge() {
+    const PLAIN_GATE: &str =
+        r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
+    const RENAMED_KEY_GATE: &str = r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner","grantedByFlow":{"flow":"ns://GrantFlow","state":"Granted"}}}"#;
+
+    for (rule, expected, why) in [
+        (
+            PLAIN_GATE,
+            "scoped",
+            "control: the voter holds the plain role, so the edge settles",
+        ),
+        (
+            RENAMED_KEY_GATE,
+            "identified",
+            "an unknown key must refuse the edge, not fall back to the plain role",
+        ),
+    ] {
+        let mut f = seed_satisfied_fixture(None).await;
+        set_consensus_rule(&mut f, "delivery://Delivery.scoped", rule).await;
+        f.link(
+            TASK,
+            "ns://owner",
+            &literal(&acting_did(&f)),
+            LinkStatus::Local,
+        )
+        .await;
+        f.mint_one().await;
+        consensus_pass(&mut f).await;
+        assert_eq!(f.derived().await.state, expected, "{why}");
+    }
+}
