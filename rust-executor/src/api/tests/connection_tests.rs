@@ -27,9 +27,13 @@ struct Socket {
 
 impl Socket {
     async fn open() -> Self {
+        Self::open_as(DID).await
+    }
+
+    async fn open_as(did: &str) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        let events = build_event_stream_for(String::new(), Some(DID.into()), None, false).await;
+        let events = build_event_stream_for(String::new(), Some(did.into()), None, false).await;
         let conn = Connection::new(
             Arc::new(build_handler_map()),
             admin_ctx(),
@@ -184,5 +188,70 @@ async fn query_updates_reach_a_socket_without_a_watch() {
     assert_eq!(
         got,
         json!({ "type": "query-subscription-update", "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" })
+    );
+}
+
+#[tokio::test]
+async fn a_watch_cannot_reach_another_users_link_events() {
+    // A watch only narrows what the owner filter lets through: naming
+    // another user's perspective, or watching every link, gets Bob nothing.
+    let run = uuid::Uuid::new_v4().to_string();
+    let a = format!("A-{run}");
+    let mut bob = Socket::open_as("did:key:bob").await;
+    bob.send(
+        json!({ "id": "w1", "type": "events.watch", "params": { "link-added": [a.clone()] } }),
+    );
+    bob.reply("w1").await;
+    publish_link(&a, &run).await;
+    assert!(
+        bob.link_events(&run).await.is_empty(),
+        "Bob named Alice's perspective"
+    );
+
+    bob.send(json!({ "id": "w2", "type": "events.watch", "params": { "link-added": null } }));
+    bob.reply("w2").await;
+    publish_link(&a, &run).await;
+    assert!(
+        bob.link_events(&run).await.is_empty(),
+        "Bob watched every link-added"
+    );
+
+    let mut alice = Socket::open().await;
+    alice.send(json!({ "id": "w3", "type": "events.watch", "params": { "link-added": null } }));
+    alice.reply("w3").await;
+    publish_link(&a, &run).await;
+    assert_eq!(alice.link_events(&run).await, vec![a], "the owner gets it");
+}
+
+#[tokio::test]
+async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
+    // `query_updates_reach_a_socket_without_a_watch` uses an unowned
+    // perspective, so it never reaches the owner check. This one does.
+    let p = registered_perspective(&[]).await;
+    {
+        let inst = crate::perspectives::get_perspective(&p.0).unwrap();
+        inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    }
+    let mut bob = Socket::open_as("did:key:bob").await;
+    let mut alice = Socket::open().await;
+
+    let sub = uuid::Uuid::new_v4().to_string();
+    let update =
+        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    get_global_pubsub()
+        .await
+        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+        .await;
+
+    let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(got["perspectiveUuid"], p.0, "the owner gets it");
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(500),
+        bob.next_of(|m| m["subscriptionId"] == sub),
+    )
+    .await;
+    assert!(
+        leaked.is_err(),
+        "Bob got Alice's live-query update: {leaked:?}"
     );
 }
