@@ -1,7 +1,7 @@
 mod byte_array;
-pub mod feature;
 mod conductor_languages;
 pub mod error;
+pub mod feature;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;

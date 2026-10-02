@@ -229,15 +229,30 @@ pub fn compat_key(v: &semver::Version) -> String {
 }
 
 pub(crate) fn standalone_schema(schema: &Value, types: &BTreeMap<String, Value>) -> Value {
+    // Only the types `schema` reaches, directly or through other types.
+    let mut reached: Vec<String> = Vec::new();
+    let mut queue = vec![schema];
+    while let Some(s) = queue.pop() {
+        let mut found = Vec::new();
+        refs(s, &mut found);
+        for name in found.iter().filter_map(|r| r.strip_prefix("#/types/")) {
+            if let Some(t) = types.get(name) {
+                if !reached.iter().any(|n| n == name) {
+                    reached.push(name.to_string());
+                    queue.push(t);
+                }
+            }
+        }
+    }
     let mut out = rewrite_refs(schema);
-    if !types.is_empty() {
+    if !reached.is_empty() {
         if let Value::Object(map) = &mut out {
             let defs = map
                 .entry("$defs")
                 .or_insert_with(|| Value::Object(Default::default()));
             if let Value::Object(defs) = defs {
-                for (name, t) in types {
-                    defs.insert(name.clone(), rewrite_refs(t));
+                for name in reached {
+                    defs.insert(name.clone(), rewrite_refs(&types[&name]));
                 }
             }
         }
@@ -292,8 +307,8 @@ fn is_kebab(name: &str) -> bool {
 }
 
 /// Codes the protocol itself answers with (SPEC §9.4). A method error must
-/// use another 4xx code so callers can tell them apart.
-const RESERVED_CODES: &[u16] = &[400, 401, 402, 403, 404, 408];
+/// use another code so callers can tell them apart.
+const RESERVED_CODES: &[u16] = &[400, 401, 402, 403, 404, 408, 500, 502, 503, 504];
 
 fn object_properties(schema: &Value) -> Option<&serde_json::Map<String, Value>> {
     schema.get("properties").and_then(Value::as_object)
@@ -314,7 +329,9 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         (None, None) => {}
         (Some(m), Some(p)) if is_hash(m) && is_hash(p) => {}
         (Some(_), Some(_)) => return Err("`module` and `previous` must be hashes".into()),
-        _ => return Err("`module` and `previous` must both be set, or both absent (genesis)".into()),
+        _ => {
+            return Err("`module` and `previous` must both be set, or both absent (genesis)".into())
+        }
     }
     if let Some(f) = &doc.fork_of {
         if !f.starts_with("did:") || !f.contains('/') {
@@ -327,7 +344,11 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         }
     }
     for (name, a) in &doc.actions {
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit()) {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+        {
             return Err(format!("action `{}` must be UPPER_SNAKE_CASE", name));
         }
         if a.label.trim().is_empty() {
@@ -355,13 +376,22 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         // Closed params let a MINOR add optional params safely (§6.3), and
         // make unknown params a 400 instead of silently ignored.
         if m.params.get("additionalProperties") != Some(&Value::Bool(false)) {
-            return Err(format!("{}: params must set `additionalProperties: false`", owner));
+            return Err(format!(
+                "{}: params must set `additionalProperties: false`",
+                owner
+            ));
         }
         for (err_name, e) in &m.errors {
-            if !err_name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            if !err_name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_uppercase())
                 || !err_name.chars().all(|c| c.is_ascii_alphanumeric())
             {
-                return Err(format!("{}: error `{}` must be PascalCase", owner, err_name));
+                return Err(format!(
+                    "{}: error `{}` must be PascalCase",
+                    owner, err_name
+                ));
             }
             if !(400..600).contains(&e.code) || RESERVED_CODES.contains(&e.code) {
                 return Err(format!(
@@ -376,10 +406,19 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
                 .get(&s.event)
                 .ok_or_else(|| format!("{}: stream event `{}` is not declared", owner, s.event))?;
             if ev.scope.as_deref() != Some("streamId") {
-                return Err(format!("{}: stream event `{}` must have scope `streamId`", owner, s.event));
+                return Err(format!(
+                    "{}: stream event `{}` must have scope `streamId`",
+                    owner, s.event
+                ));
             }
-            if !object_properties(&m.params).is_some_and(|p| p.contains_key("streamId")) {
-                return Err(format!("{}: a streaming method takes a `streamId` param", owner));
+            let required = m.params.get("required").and_then(Value::as_array);
+            if !object_properties(&m.params).is_some_and(|p| p.contains_key("streamId"))
+                || !required.is_some_and(|r| r.iter().any(|v| v == "streamId"))
+            {
+                return Err(format!(
+                    "{}: a streaming method takes a required `streamId` param",
+                    owner
+                ));
             }
         }
         schemas.push((format!("{} params", owner), &m.params));
@@ -405,12 +444,18 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
             if !props.is_some_and(|p| p.contains_key(scope))
                 || !required.is_some_and(|r| r.iter().any(|v| v == scope))
             {
-                return Err(format!("{}: scope `{}` must be a required payload property", owner, scope));
+                return Err(format!(
+                    "{}: scope `{}` must be a required payload property",
+                    owner, scope
+                ));
             }
         }
         schemas.push((format!("{} payload", owner), &e.payload));
     }
-    for (label, def) in [("provision", &doc.provision), ("deprovision", &doc.deprovision)] {
+    for (label, def) in [
+        ("provision", &doc.provision),
+        ("deprovision", &doc.deprovision),
+    ] {
         if let Some(p) = def {
             schemas.push((format!("{} params", label), &p.params));
             schemas.push((format!("{} result", label), &p.result));
@@ -430,7 +475,10 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
                 || r.starts_with("#/$defs/")
                 || r == "#";
             if !ok {
-                return Err(format!("{}: `$ref` `{}` must point into `#/types/`", owner, r));
+                return Err(format!(
+                    "{}: `$ref` `{}` must point into `#/types/`",
+                    owner, r
+                ));
             }
         }
         jsonschema::draft202012::new(&standalone_schema(schema, &doc.types))
@@ -523,7 +571,12 @@ pub(crate) mod tests {
         let mut raw = genesis("did:key:z6Mkx");
         mutate(&mut raw);
         let err = InterfaceDocument::parse(raw).unwrap_err();
-        assert!(err.contains(needle), "`{}` does not mention `{}`", err, needle);
+        assert!(
+            err.contains(needle),
+            "`{}` does not mention `{}`",
+            err,
+            needle
+        );
     }
 
     #[test]
@@ -532,17 +585,50 @@ pub(crate) mod tests {
         rejects(|r| r["version"] = json!("1.0"), "not semver");
         rejects(|r| r["author"] = json!("bob"), "must be a DID");
         rejects(|r| r["module"] = json!("QmAAAAAAAAAAAA"), "both be set");
-        rejects(|r| r["methods"]["say"]["action"] = json!("NOPE"), "unknown action");
-        rejects(|r| r["methods"]["Say"] = r["methods"]["say"].clone(), "camelCase");
-        rejects(|r| r["events"]["Said"] = r["events"]["said"].clone(), "kebab-case");
-        rejects(|r| r["methods"]["say"]["params"] = json!({ "type": "string" }), "object schema");
-        rejects(|r| r["methods"]["say"]["params"]["additionalProperties"] = json!(true), "additionalProperties");
-        rejects(|r| r["methods"]["say"]["errors"]["Muted"]["code"] = json!(403), "reserved");
-        rejects(|r| r["methods"]["say"]["params"]["properties"]["text"] = json!({ "$ref": "#/types/Missing" }), "$ref");
+        rejects(
+            |r| r["methods"]["say"]["action"] = json!("NOPE"),
+            "unknown action",
+        );
+        rejects(
+            |r| r["methods"]["Say"] = r["methods"]["say"].clone(),
+            "camelCase",
+        );
+        rejects(
+            |r| r["events"]["Said"] = r["events"]["said"].clone(),
+            "kebab-case",
+        );
+        rejects(
+            |r| r["methods"]["say"]["params"] = json!({ "type": "string" }),
+            "object schema",
+        );
+        rejects(
+            |r| r["methods"]["say"]["params"]["additionalProperties"] = json!(true),
+            "additionalProperties",
+        );
+        rejects(
+            |r| r["methods"]["say"]["errors"]["Muted"]["code"] = json!(403),
+            "reserved",
+        );
+        rejects(
+            |r| {
+                r["methods"]["say"]["params"]["properties"]["text"] =
+                    json!({ "$ref": "#/types/Missing" })
+            },
+            "$ref",
+        );
         rejects(|r| r["events"]["said"]["scope"] = json!("nope"), "scope");
-        rejects(|r| r["methods"]["count"]["stream"] = json!({ "event": "said" }), "scope `streamId`");
-        rejects(|r| r["methods"]["say"]["result"] = json!({ "type": 5 }), "invalid JSON Schema");
-        rejects(|r| r["actions"]["say"] = json!({ "label": "x", "risk": "safe" }), "UPPER_SNAKE_CASE");
+        rejects(
+            |r| r["methods"]["count"]["stream"] = json!({ "event": "said" }),
+            "scope `streamId`",
+        );
+        rejects(
+            |r| r["methods"]["say"]["result"] = json!({ "type": 5 }),
+            "invalid JSON Schema",
+        );
+        rejects(
+            |r| r["actions"]["say"] = json!({ "label": "x", "risk": "safe" }),
+            "UPPER_SNAKE_CASE",
+        );
     }
 
     #[test]

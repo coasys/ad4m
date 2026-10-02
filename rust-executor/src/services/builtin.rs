@@ -50,7 +50,11 @@ pub struct CallContext {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServiceError {
     /// A method error the interface declares (`errors`), by name.
-    Method { name: String, data: Option<Value>, message: String },
+    Method {
+        name: String,
+        data: Option<Value>,
+        message: String,
+    },
     /// The service cannot serve right now (→ 503).
     Unavailable(String),
     /// Anything else (→ 500).
@@ -59,7 +63,11 @@ pub enum ServiceError {
 
 impl ServiceError {
     pub fn method(name: impl Into<String>, message: impl Into<String>) -> Self {
-        ServiceError::Method { name: name.into(), data: None, message: message.into() }
+        ServiceError::Method {
+            name: name.into(),
+            data: None,
+            message: message.into(),
+        }
     }
 }
 
@@ -85,7 +93,9 @@ impl EventEmitter {
     /// host checks the payload against the interface and delivers it only to
     /// that agent's sockets that hold the event's action.
     pub async fn emit(&self, event: &str, owner: &str, payload: Value) -> Result<(), String> {
-        self.host.emit_event(&self.implementation, event, owner, payload).await
+        self.host
+            .emit_event(&self.implementation, event, owner, payload)
+            .await
     }
 }
 
@@ -102,10 +112,17 @@ impl ServiceCaller {
     /// Call `<hash>.<method>` while handling `outer`. The nested call keeps
     /// the user, records this service in `origin`, and adds this service's
     /// own grants as a layer.
-    pub async fn call(&self, outer: &CallContext, method: &str, params: Value) -> Result<Value, crate::api::ws_handler::WsRpcError> {
+    pub async fn call(
+        &self,
+        outer: &CallContext,
+        method: &str,
+        params: Value,
+    ) -> Result<Value, crate::api::ws_handler::WsRpcError> {
         let mut ctx = outer.clone();
         ctx.origin.push(ctx.caller.clone());
-        ctx.caller = Caller::Service { implementation: self.implementation.clone() };
+        ctx.caller = Caller::Service {
+            implementation: self.implementation.clone(),
+        };
         ctx.grants.push(self.grants.as_ref().clone());
         self.host.dispatch(method, params, ctx).await
     }
@@ -129,5 +146,10 @@ pub trait ServiceImplementation: Send + Sync {
     }
     /// Handle one method of any implemented interface. The host has already
     /// resolved, authorised and validated the call.
-    async fn call(&self, method: &str, params: Value, ctx: CallContext) -> Result<Value, ServiceError>;
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        ctx: CallContext,
+    ) -> Result<Value, ServiceError>;
 }

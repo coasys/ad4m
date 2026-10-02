@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
-use super::builtin::{CallContext, EventEmitter, ServiceError, ServiceHealth, ServiceImplementation, StartContext};
+use super::builtin::{
+    CallContext, EventEmitter, ServiceError, ServiceHealth, ServiceImplementation, StartContext,
+};
 use super::host::{host, ServiceHost};
 use super::interface::{Risk, Selection};
 use super::registry::{BuiltinManifest, Instancing, Requirement};
@@ -72,16 +74,29 @@ fn echo_interface(author: &str) -> Value {
             "say",
             "SAY",
             "Say `text` in `room`; everyone watching the room sees it.",
-            MethodOptions { read: true, errors: vec![("Muted", 409)], ..Default::default() },
+            MethodOptions {
+                read: true,
+                errors: vec![("Muted", 409)],
+                ..Default::default()
+            },
         )
         .method::<CountParams, CountResult>(
             "count",
             "SAY",
             "Count from 1 to `to`, one `count-tick` per number.",
-            MethodOptions { long: true, stream: Some("count-tick"), ..Default::default() },
+            MethodOptions {
+                long: true,
+                stream: Some("count-tick"),
+                ..Default::default()
+            },
         )
         .event::<Said>("said", "SAY", "Text said in a room.", Some("room"))
-        .event::<CountTick>("count-tick", "SAY", "One number of a count.", Some("streamId"))
+        .event::<CountTick>(
+            "count-tick",
+            "SAY",
+            "One number of a count.",
+            Some("streamId"),
+        )
         .build()
 }
 
@@ -93,7 +108,9 @@ struct Echo {
 #[async_trait]
 impl ServiceImplementation for Echo {
     async fn start(&self, ctx: StartContext) -> Result<(), String> {
-        self.events.set(ctx.events).map_err(|_| "started twice".to_string())
+        self.events
+            .set(ctx.events)
+            .map_err(|_| "started twice".to_string())
     }
     async fn stop(&self) -> Result<(), String> {
         Ok(())
@@ -101,16 +118,33 @@ impl ServiceImplementation for Echo {
     async fn health(&self) -> ServiceHealth {
         ServiceHealth::Running
     }
-    async fn call(&self, method: &str, params: Value, ctx: CallContext) -> Result<Value, ServiceError> {
-        let events = self.events.get().ok_or_else(|| ServiceError::Unavailable("not started".into()))?;
-        let owner = ctx.agent_did.clone().ok_or_else(|| ServiceError::Internal("no agent".into()))?;
+    async fn call(
+        &self,
+        method: &str,
+        params: Value,
+        ctx: CallContext,
+    ) -> Result<Value, ServiceError> {
+        let events = self
+            .events
+            .get()
+            .ok_or_else(|| ServiceError::Unavailable("not started".into()))?;
+        let owner = ctx
+            .agent_did
+            .clone()
+            .ok_or_else(|| ServiceError::Internal("no agent".into()))?;
         let emit = |e: &'static str, p: Value| {
             let (events, owner) = (events.clone(), owner.clone());
-            async move { events.emit(e, &owner, p).await.map_err(ServiceError::Internal) }
+            async move {
+                events
+                    .emit(e, &owner, p)
+                    .await
+                    .map_err(ServiceError::Internal)
+            }
         };
         match method {
             "say" => {
-                let p: SayParams = serde_json::from_value(params).map_err(|e| ServiceError::Internal(e.to_string()))?;
+                let p: SayParams = serde_json::from_value(params)
+                    .map_err(|e| ServiceError::Internal(e.to_string()))?;
                 if p.text == "mute" {
                     return Err(ServiceError::Method {
                         name: "Muted".into(),
@@ -124,13 +158,30 @@ impl ServiceImplementation for Echo {
                 if p.text == "undeclared" {
                     return Err(ServiceError::method("Gone", "not declared"));
                 }
-                emit("said", serde_json::to_value(Said { room: p.room, text: p.text.clone() }).unwrap()).await?;
+                emit(
+                    "said",
+                    serde_json::to_value(Said {
+                        room: p.room,
+                        text: p.text.clone(),
+                    })
+                    .unwrap(),
+                )
+                .await?;
                 Ok(serde_json::to_value(SayResult { text: p.text }).unwrap())
             }
             "count" => {
-                let p: CountParams = serde_json::from_value(params).map_err(|e| ServiceError::Internal(e.to_string()))?;
+                let p: CountParams = serde_json::from_value(params)
+                    .map_err(|e| ServiceError::Internal(e.to_string()))?;
                 for n in 1..=p.to {
-                    emit("count-tick", serde_json::to_value(CountTick { stream_id: p.stream_id.clone(), n }).unwrap()).await?;
+                    emit(
+                        "count-tick",
+                        serde_json::to_value(CountTick {
+                            stream_id: p.stream_id.clone(),
+                            n,
+                        })
+                        .unwrap(),
+                    )
+                    .await?;
                 }
                 Ok(serde_json::to_value(CountResult { total: p.to }).unwrap())
             }
@@ -157,9 +208,14 @@ fn manifest(name: &str, implements: Vec<String>, requires: Vec<Requirement>) -> 
 /// Register the echo interface (under a unique author, so tests sharing the
 /// global host do not collide) and start an implementation of it.
 async fn echo_on(host: &Arc<ServiceHost>, author: &str) -> (String, String) {
-    let doc = host.register_interface(echo_interface(author), None, true).unwrap();
+    let doc = host
+        .register_interface(echo_interface(author), None, true)
+        .unwrap();
     let implementation = host
-        .register_builtin(manifest(&format!("echo-{}", author), vec![doc.hash.clone()], vec![]), Arc::new(Echo::default()))
+        .register_builtin(
+            manifest(&format!("echo-{}", author), vec![doc.hash.clone()], vec![]),
+            Arc::new(Echo::default()),
+        )
         .unwrap();
     host.start(&implementation, json!({})).await.unwrap();
     (doc.hash.clone(), implementation)
@@ -167,7 +223,10 @@ async fn echo_on(host: &Arc<ServiceHost>, author: &str) -> (String, String) {
 
 fn grant(domain: String, can: &[&str]) -> Capability {
     Capability {
-        with: Resource { domain, pointers: vec!["*".into()] },
+        with: Resource {
+            domain,
+            pointers: vec!["*".into()],
+        },
         can: can.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -190,13 +249,18 @@ fn ctx(did: &str, grants: Vec<Capability>) -> CallContext {
 /// `UPDATE_SERVICE_FIXTURES=1 cargo test --lib services::tests::echo_interface_is_current`.
 #[test]
 fn echo_interface_is_current() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/fixtures/echo.interface.json");
-    let built = serde_json::to_string_pretty(&echo_interface("did:key:z6MkFixture")).unwrap() + "\n";
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/services/fixtures/echo.interface.json");
+    let built =
+        serde_json::to_string_pretty(&echo_interface("did:key:z6MkFixture")).unwrap() + "\n";
     if std::env::var("UPDATE_SERVICE_FIXTURES").is_ok() {
         std::fs::write(&path, &built).unwrap();
     }
     let committed = std::fs::read_to_string(&path).expect("fixture exists");
-    assert_eq!(committed, built, "echo.interface.json is stale; see the test's doc comment");
+    assert_eq!(
+        committed, built,
+        "echo.interface.json is stale; see the test's doc comment"
+    );
     // And the built document is a valid interface.
     super::interface::InterfaceDocument::parse(serde_json::from_str(&committed).unwrap()).unwrap();
 }
@@ -207,44 +271,135 @@ fn echo_interface_is_current() {
 async fn dispatch_answers_with_protocol_codes() {
     let host = ServiceHost::new();
     let (iface, implementation) = echo_on(&host, "did:key:z6MkDispatch").await;
+    // A started implementation does not start twice.
+    assert!(host
+        .start(&implementation, json!({}))
+        .await
+        .unwrap_err()
+        .contains("already started"));
     let module = host.registry().interface(&iface).unwrap().module_id();
     let all = vec![ALL_CAPABILITY.clone()];
     let say = format!("{}.say", iface);
 
-    let ok = host.dispatch(&say, json!({ "room": "r", "text": "hi" }), ctx("did:key:a", all.clone())).await.unwrap();
+    let ok = host
+        .dispatch(
+            &say,
+            json!({ "room": "r", "text": "hi" }),
+            ctx("did:key:a", all.clone()),
+        )
+        .await
+        .unwrap();
     assert_eq!(ok, json!({ "text": "hi" }));
 
     // A grant on the module line works; a grant on another line or action does not.
     let line = grant(format!("service:{}@1", module), &["SAY"]);
-    assert!(host.dispatch(&say, json!({ "room": "r", "text": "hi" }), ctx("did:key:a", vec![line])).await.is_ok());
+    assert!(host
+        .dispatch(
+            &say,
+            json!({ "room": "r", "text": "hi" }),
+            ctx("did:key:a", vec![line])
+        )
+        .await
+        .is_ok());
     let other = grant(format!("service:{}@2", module), &["SAY"]);
-    let e = host.dispatch(&say, json!({ "room": "r", "text": "hi" }), ctx("did:key:a", vec![other])).await.unwrap_err();
+    let e = host
+        .dispatch(
+            &say,
+            json!({ "room": "r", "text": "hi" }),
+            ctx("did:key:a", vec![other]),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(e.code, 403);
     assert!(e.message.contains("#SAY"));
 
     // 400: missing param, unknown param, wrong type.
-    for bad in [json!({ "room": "r" }), json!({ "room": "r", "text": "x", "extra": 1 }), json!({ "room": 1, "text": "x" })] {
-        assert_eq!(host.dispatch(&say, bad, ctx("did:key:a", all.clone())).await.unwrap_err().code, 400);
+    for bad in [
+        json!({ "room": "r" }),
+        json!({ "room": "r", "text": "x", "extra": 1 }),
+        json!({ "room": 1, "text": "x" }),
+    ] {
+        assert_eq!(
+            host.dispatch(&say, bad, ctx("did:key:a", all.clone()))
+                .await
+                .unwrap_err()
+                .code,
+            400
+        );
     }
 
     // A declared method error: its code, and `data` with the name.
-    let e = host.dispatch(&say, json!({ "room": "r", "text": "mute" }), ctx("did:key:a", all.clone())).await.unwrap_err();
-    assert_eq!((e.code, e.data.clone()), (409, Some(json!({ "name": "Muted", "room": "r" }))));
+    let e = host
+        .dispatch(
+            &say,
+            json!({ "room": "r", "text": "mute" }),
+            ctx("did:key:a", all.clone()),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.data.clone()),
+        (409, Some(json!({ "name": "Muted", "room": "r" })))
+    );
     // An undeclared one is a 500.
-    let e = host.dispatch(&say, json!({ "room": "r", "text": "undeclared" }), ctx("did:key:a", all.clone())).await.unwrap_err();
+    let e = host
+        .dispatch(
+            &say,
+            json!({ "room": "r", "text": "undeclared" }),
+            ctx("did:key:a", all.clone()),
+        )
+        .await
+        .unwrap_err();
     assert_eq!(e.code, 500);
 
     // 404: unknown hash or method.
-    assert_eq!(host.dispatch("QmNopeNopeNopeNope.say", json!({}), ctx("did:key:a", all.clone())).await.unwrap_err().code, 404);
-    assert_eq!(host.dispatch(&format!("{}.nope", iface), json!({}), ctx("did:key:a", all.clone())).await.unwrap_err().code, 404);
+    assert_eq!(
+        host.dispatch(
+            "QmNopeNopeNopeNope.say",
+            json!({}),
+            ctx("did:key:a", all.clone())
+        )
+        .await
+        .unwrap_err()
+        .code,
+        404
+    );
+    assert_eq!(
+        host.dispatch(
+            &format!("{}.nope", iface),
+            json!({}),
+            ctx("did:key:a", all.clone())
+        )
+        .await
+        .unwrap_err()
+        .code,
+        404
+    );
 
     // Pinning the implementation works too.
     let pinned = format!("{}.say", implementation);
-    assert!(host.dispatch(&pinned, json!({ "room": "r", "text": "hi" }), ctx("did:key:a", all.clone())).await.is_ok());
+    assert!(host
+        .dispatch(
+            &pinned,
+            json!({ "room": "r", "text": "hi" }),
+            ctx("did:key:a", all.clone())
+        )
+        .await
+        .is_ok());
 
     // 503 once stopped.
     host.stop(&implementation).await.unwrap();
-    assert_eq!(host.dispatch(&say, json!({ "room": "r", "text": "hi" }), ctx("did:key:a", all.clone())).await.unwrap_err().code, 503);
+    assert_eq!(
+        host.dispatch(
+            &say,
+            json!({ "room": "r", "text": "hi" }),
+            ctx("did:key:a", all.clone())
+        )
+        .await
+        .unwrap_err()
+        .code,
+        503
+    );
 }
 
 #[tokio::test]
@@ -255,24 +410,65 @@ async fn nested_calls_need_every_layer() {
     // A caller service that requires SAY on echo, and one that requires nothing.
     let with = host
         .register_builtin(
-            manifest("with", vec![iface.clone()], vec![Requirement { interface: iface.clone(), actions: vec!["SAY".into()], optional: false }]),
+            manifest(
+                "with",
+                vec![iface.clone()],
+                vec![Requirement {
+                    interface: iface.clone(),
+                    actions: vec!["SAY".into()],
+                    optional: false,
+                }],
+            ),
             Arc::new(Echo::default()),
         )
         .unwrap();
-    let without = host.register_builtin(manifest("without", vec![iface.clone()], vec![]), Arc::new(Echo::default())).unwrap();
+    let without = host
+        .register_builtin(
+            manifest("without", vec![iface.clone()], vec![]),
+            Arc::new(Echo::default()),
+        )
+        .unwrap();
     let caller = |implementation: &str| {
-        let i = host.registry().implementation(implementation).map(|i| i.grants.clone()).unwrap();
-        super::builtin::ServiceCaller { host: host.clone(), implementation: implementation.into(), grants: i }
+        let i = host
+            .registry()
+            .implementation(implementation)
+            .map(|i| i.grants.clone())
+            .unwrap();
+        super::builtin::ServiceCaller {
+            host: host.clone(),
+            implementation: implementation.into(),
+            grants: i,
+        }
     };
     let say = format!("{}.say", iface);
     let params = json!({ "room": "r", "text": "hi" });
     let app_all = ctx("did:key:a", vec![ALL_CAPABILITY.clone()]);
-    assert!(caller(&with).call(&app_all, &say, params.clone()).await.is_ok());
+    assert!(caller(&with)
+        .call(&app_all, &say, params.clone())
+        .await
+        .is_ok());
     // The service lacks the grant, even though the app has everything.
-    assert_eq!(caller(&without).call(&app_all, &say, params.clone()).await.unwrap_err().code, 403);
+    assert_eq!(
+        caller(&without)
+            .call(&app_all, &say, params.clone())
+            .await
+            .unwrap_err()
+            .code,
+        403
+    );
     // The app lacks it, even though the service has it: no confused deputy.
-    let app_none = ctx("did:key:a", vec![grant(format!("service:{}@1", module), &["OTHER"])]);
-    assert_eq!(caller(&with).call(&app_none, &say, params).await.unwrap_err().code, 403);
+    let app_none = ctx(
+        "did:key:a",
+        vec![grant(format!("service:{}@1", module), &["OTHER"])],
+    );
+    assert_eq!(
+        caller(&with)
+            .call(&app_none, &say, params)
+            .await
+            .unwrap_err()
+            .code,
+        403
+    );
 }
 
 #[tokio::test]
@@ -281,7 +477,11 @@ async fn result_outside_contract_is_logged_for_builtins() {
     let (iface, _) = echo_on(&host, "did:key:z6MkResult").await;
     // Builtins are trusted: debug builds log the violation and pass the result.
     let r = host
-        .dispatch(&format!("{}.say", iface), json!({ "room": "r", "text": "bad result" }), ctx("did:key:a", vec![ALL_CAPABILITY.clone()]))
+        .dispatch(
+            &format!("{}.say", iface),
+            json!({ "room": "r", "text": "bad result" }),
+            ctx("did:key:a", vec![ALL_CAPABILITY.clone()]),
+        )
         .await
         .unwrap();
     assert_eq!(r, json!({ "nope": 1 }));
@@ -293,19 +493,35 @@ async fn events_reach_only_their_owner_with_the_grant() {
     let (iface, implementation) = echo_on(&host, "did:key:z6MkEvents").await;
     let module = host.registry().interface(&iface).unwrap().module_id();
     let mut rx = host.subscribe_events();
-    host.emit_event(&implementation, "said", "did:key:a", json!({ "room": "r", "text": "hi" })).await.unwrap();
+    host.emit_event(
+        &implementation,
+        "said",
+        "did:key:a",
+        json!({ "room": "r", "text": "hi" }),
+    )
+    .await
+    .unwrap();
     let e = rx.recv().await.unwrap();
     assert_eq!(e.event_type, format!("{}.said", iface));
     let wire: Value = serde_json::from_str(&e.wire).unwrap();
-    assert_eq!(wire, json!({ "type": format!("{}.said", iface), "room": "r", "text": "hi" }));
+    assert_eq!(
+        wire,
+        json!({ "type": format!("{}.said", iface), "room": "r", "text": "hi" })
+    );
     let yes = vec![grant(format!("service:{}@1", module), &["SAY"])];
     assert!(ServiceHost::delivers(&e, Some("did:key:a"), false, &yes));
     assert!(!ServiceHost::delivers(&e, Some("did:key:b"), false, &yes));
     assert!(ServiceHost::delivers(&e, None, true, &yes));
     assert!(!ServiceHost::delivers(&e, Some("did:key:a"), false, &[]));
     // A payload outside the contract never goes out.
-    assert!(host.emit_event(&implementation, "said", "did:key:a", json!({ "room": 1 })).await.is_err());
-    assert!(host.emit_event(&implementation, "nope", "did:key:a", json!({})).await.is_err());
+    assert!(host
+        .emit_event(&implementation, "said", "did:key:a", json!({ "room": 1 }))
+        .await
+        .is_err());
+    assert!(host
+        .emit_event(&implementation, "nope", "did:key:a", json!({}))
+        .await
+        .is_err());
 }
 
 // ── Over the RPC socket ─────────────────────────────────────────────────────
@@ -321,7 +537,14 @@ impl Socket {
     async fn open(capabilities: Vec<Capability>) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        let events = build_event_stream_for(String::new(), Some(ALICE.into()), None, false, capabilities.clone()).await;
+        let events = build_event_stream_for(
+            String::new(),
+            Some(ALICE.into()),
+            None,
+            false,
+            capabilities.clone(),
+        )
+        .await;
         let ctx = Arc::new(RequestContext {
             capabilities: Ok(capabilities),
             auto_permit_cap_requests: false,
@@ -340,12 +563,19 @@ impl Socket {
         self.input.send(msg.to_string()).unwrap();
     }
 
+    /// Next message, skipping live-query updates: they bypass `events.watch`
+    /// by design, and other tests on the global pubsub produce them.
     async fn next(&mut self) -> Value {
-        let msg = tokio::time::timeout(Duration::from_secs(10), self.out.recv())
-            .await
-            .expect("a message within 10 s")
-            .expect("the connection is open");
-        serde_json::from_str(&msg).unwrap()
+        loop {
+            let msg = tokio::time::timeout(Duration::from_secs(10), self.out.recv())
+                .await
+                .expect("a message within 10 s")
+                .expect("the connection is open");
+            let v: Value = serde_json::from_str(&msg).unwrap();
+            if v["type"] != json!("query-subscription-update") {
+                return v;
+            }
+        }
     }
 
     /// The reply to `id`; events that arrive first are returned too.
@@ -361,10 +591,9 @@ impl Socket {
     }
 
     async fn nothing_more(&mut self) {
-        assert!(
-            tokio::time::timeout(Duration::from_millis(300), self.out.recv()).await.is_err(),
-            "no further message"
-        );
+        if let Ok(m) = tokio::time::timeout(Duration::from_millis(300), self.next()).await {
+            panic!("unexpected message: {}", m);
+        }
     }
 }
 
@@ -372,7 +601,11 @@ impl Socket {
 async fn round_trip_over_the_rpc_socket() {
     let (iface, implementation) = echo_on(&host(), "did:key:z6MkSocket").await;
     let module = host().registry().interface(&iface).unwrap().module_id();
-    let mut s = Socket::open(vec![grant(format!("service:{}@1", module), &["SAY"]), crate::agent::capabilities::AGENT_READ_CAPABILITY.clone()]).await;
+    let mut s = Socket::open(vec![
+        grant(format!("service:{}@1", module), &["SAY"]),
+        crate::agent::capabilities::AGENT_READ_CAPABILITY.clone(),
+    ])
+    .await;
 
     // Call before any watch: a result, and no events.
     s.send(json!({ "id": "1", "type": format!("{}.say", iface), "params": { "room": "r1", "text": "hi" } }));
@@ -384,6 +617,7 @@ async fn round_trip_over_the_rpc_socket() {
     s.send(json!({ "id": "w", "type": "events.watch", "params": {
         format!("{}.said", iface): ["r1"],
         format!("{}.count-tick", iface): ["s-1"],
+        "service-stream-end": ["s-1"],
     } }));
     assert_eq!(s.reply("w").await.0["result"], json!(true));
     s.send(json!({ "id": "2", "type": format!("{}.say", iface), "params": { "room": "r2", "text": "elsewhere" } }));
@@ -395,22 +629,33 @@ async fn round_trip_over_the_rpc_socket() {
         got.push(s.next().await);
     }
     let event = got.iter().find(|m| m.get("type").is_some()).unwrap();
-    assert_eq!(event, &json!({ "type": format!("{}.said", iface), "room": "r1", "text": "here" }));
+    assert_eq!(
+        event,
+        &json!({ "type": format!("{}.said", iface), "room": "r1", "text": "here" })
+    );
 
-    // A stream: the client chose the id and watched it first.
+    // A stream: the client chose the id and watched it first. The reply can
+    // overtake the chunks; `service-stream-end` cannot, it travels behind them.
     s.send(json!({ "id": "4", "type": format!("{}.count", iface), "params": { "to": 3, "streamId": "s-1" } }));
-    let mut ticks = Vec::new();
-    let reply = loop {
+    let (mut reply, mut ticks) = (None, Vec::new());
+    loop {
         let m = s.next().await;
         if m.get("id") == Some(&json!("4")) {
-            break m;
+            reply = Some(m);
+        } else if m["type"] == json!("service-stream-end") {
+            assert_eq!(
+                m,
+                json!({ "type": "service-stream-end", "streamId": "s-1", "method": format!("{}.count", iface), "ok": true })
+            );
+            break;
+        } else {
+            ticks.push(m["n"].clone());
         }
-        ticks.push(m["n"].clone());
-    };
-    // The reply can overtake the last ticks; collect the rest.
-    while ticks.len() < 3 {
-        ticks.push(s.next().await["n"].clone());
     }
+    let reply = match reply {
+        Some(r) => r,
+        None => s.reply("4").await.0,
+    };
     assert_eq!(reply["result"], json!({ "total": 3 }));
     assert_eq!(ticks, vec![json!(1), json!(2), json!(3)]);
 
@@ -419,7 +664,10 @@ async fn round_trip_over_the_rpc_socket() {
     assert_eq!(s.reply("5").await.0["error"]["code"], json!(400));
     s.send(json!({ "id": "6", "type": format!("{}.say", iface), "params": { "room": "r1", "text": "mute" } }));
     let err = s.reply("6").await.0["error"].clone();
-    assert_eq!(err, json!({ "code": 409, "message": "the room is muted", "data": { "name": "Muted", "room": "r1" } }));
+    assert_eq!(
+        err,
+        json!({ "code": 409, "message": "the room is muted", "data": { "name": "Muted", "room": "r1" } })
+    );
 
     // services.describe shows the interface with the caller's actions.
     s.send(json!({ "id": "7", "type": "services.describe", "params": { "target": iface } }));
@@ -438,12 +686,25 @@ async fn round_trip_over_the_rpc_socket() {
 #[tokio::test]
 async fn missing_grant_over_the_socket_is_403_and_hides_events() {
     let (iface, implementation) = echo_on(&host(), "did:key:z6MkNoGrant").await;
-    let mut s = Socket::open(vec![crate::agent::capabilities::AGENT_READ_CAPABILITY.clone()]).await;
-    s.send(json!({ "id": "w", "type": "events.watch", "params": { format!("{}.said", iface): null } }));
+    let mut s = Socket::open(vec![
+        crate::agent::capabilities::AGENT_READ_CAPABILITY.clone()
+    ])
+    .await;
+    s.send(
+        json!({ "id": "w", "type": "events.watch", "params": { format!("{}.said", iface): null } }),
+    );
     s.reply("w").await;
     s.send(json!({ "id": "1", "type": format!("{}.say", iface), "params": { "room": "r", "text": "hi" } }));
     assert_eq!(s.reply("1").await.0["error"]["code"], json!(403));
     // An event for this agent emitted by another path still needs the grant.
-    host().emit_event(&implementation, "said", ALICE, json!({ "room": "r", "text": "x" })).await.unwrap();
+    host()
+        .emit_event(
+            &implementation,
+            "said",
+            ALICE,
+            json!({ "room": "r", "text": "x" }),
+        )
+        .await
+        .unwrap();
     s.nothing_more().await;
 }

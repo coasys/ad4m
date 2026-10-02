@@ -19,6 +19,9 @@ REST/WS shim. Split plan: spec item 6.
 handlers), `runtime`, `users`. Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
+Service methods (`<hash>.<method>`) are not in the map: `HandlerMap::dispatch` falls
+back to `crate::services::host()` for them. See `services/AGENTS.md`.
+
 Handler shape today (`perspectives_ws.rs::add_link` is representative):
 
 ```rust

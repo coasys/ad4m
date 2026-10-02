@@ -34,7 +34,10 @@ mod tests {
 
     fn grant(domain: &str, can: &[&str]) -> Capability {
         Capability {
-            with: Resource { domain: domain.into(), pointers: vec!["*".into()] },
+            with: Resource {
+                domain: domain.into(),
+                pointers: vec!["*".into()],
+            },
             can: can.iter().map(|s| s.to_string()).collect(),
         }
     }
@@ -42,9 +45,18 @@ mod tests {
     #[test]
     fn grants_match_module_line_and_action() {
         let need = service_capability("did:key:a/QmX", "1", "SAY");
-        assert!(allowed(&[vec![grant("service:did:key:a/QmX@1", &["SAY"])]], &need));
-        assert!(!allowed(&[vec![grant("service:did:key:a/QmX@2", &["SAY"])]], &need));
-        assert!(!allowed(&[vec![grant("service:did:key:a/QmX@1", &["OTHER"])]], &need));
+        assert!(allowed(
+            &[vec![grant("service:did:key:a/QmX@1", &["SAY"])]],
+            &need
+        ));
+        assert!(!allowed(
+            &[vec![grant("service:did:key:a/QmX@2", &["SAY"])]],
+            &need
+        ));
+        assert!(!allowed(
+            &[vec![grant("service:did:key:a/QmX@1", &["OTHER"])]],
+            &need
+        ));
         assert!(allowed(&[vec![ALL_CAPABILITY.clone()]], &need));
         assert!(!allowed(&[], &need));
     }

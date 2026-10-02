@@ -8,6 +8,8 @@ import { AIClient } from './ai/AIClient'
 import { ApiClient, EventFilter } from './apiClient'
 import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
+import { ServicesClient } from './services/ServicesClient'
+import type { ServiceClient, ServiceClientOptions, ServiceDefinition, ServiceEventTable, ServiceMethodTable } from './services/ServiceClient'
 
 /**
  * Client for the Ad4m interface wrapping WebSocket RPC calls
@@ -31,6 +33,7 @@ export class Ad4mClient {
     #perspectiveClient: PerspectiveClient
     #runtimeClient: RuntimeClient
     #aiClient: AIClient
+    #servicesClient: ServicesClient
 
     constructor(
         baseUrl: string,
@@ -45,6 +48,7 @@ export class Ad4mClient {
         this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)
         this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#apiClient)
         this.#aiClient = new AIClient(baseUrl, token, this.#apiClient)
+        this.#servicesClient = new ServicesClient(this.#apiClient)
         this.#perspectiveClient = new PerspectiveClient(baseUrl, token, this.#apiClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
@@ -87,6 +91,19 @@ export class Ad4mClient {
 
     get ai(): AIClient {
         return this.#aiClient
+    }
+
+    /** The executor's service registry. */
+    get services(): ServicesClient {
+        return this.#servicesClient
+    }
+
+    /**
+     * A typed client for one service interface version, e.g.
+     * `ad4m.service(AiInference_1_0_0).call('prompt', { messages })`.
+     */
+    service<M extends ServiceMethodTable, E extends ServiceEventTable>(def: ServiceDefinition<M, E>, options?: ServiceClientOptions): ServiceClient<M, E> {
+        return this.#servicesClient.use(def, options)
     }
 
     /**

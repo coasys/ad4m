@@ -26,13 +26,22 @@ pub struct InterfaceBuilder {
 }
 
 impl InterfaceBuilder {
-    pub fn new(name: &str, author: &str, version: &str, selection: Selection, description: &str) -> Self {
+    pub fn new(
+        name: &str,
+        author: &str,
+        version: &str,
+        selection: Selection,
+        description: &str,
+    ) -> Self {
         let mut doc = Map::new();
         doc.insert("name".into(), json!(name));
         doc.insert("author".into(), json!(author));
         doc.insert("version".into(), json!(version));
         doc.insert("description".into(), json!(description));
-        doc.insert("selection".into(), serde_json::to_value(selection).expect("selection serialises"));
+        doc.insert(
+            "selection".into(),
+            serde_json::to_value(selection).expect("selection serialises"),
+        );
         for k in ["methods", "events", "actions"] {
             doc.insert(k.into(), Value::Object(Map::new()));
         }
@@ -81,14 +90,24 @@ impl InterfaceBuilder {
         }
         if !options.errors.is_empty() {
             m["errors"] = Value::Object(
-                options.errors.iter().map(|(n, c)| (n.to_string(), json!({ "code": c }))).collect(),
+                options
+                    .errors
+                    .iter()
+                    .map(|(n, c)| (n.to_string(), json!({ "code": c })))
+                    .collect(),
             );
         }
         self.section("methods").insert(name.into(), m);
         self
     }
 
-    pub fn event<T: JsonSchema>(mut self, name: &str, action: &str, description: &str, scope: Option<&str>) -> Self {
+    pub fn event<T: JsonSchema>(
+        mut self,
+        name: &str,
+        action: &str,
+        description: &str,
+        scope: Option<&str>,
+    ) -> Self {
         let payload = self.object_schema::<T>();
         let mut e = json!({ "description": description, "payload": payload, "action": action });
         if let Some(s) = scope {
@@ -111,14 +130,21 @@ impl InterfaceBuilder {
     }
 
     fn section(&mut self, key: &str) -> &mut Map<String, Value> {
-        self.doc.get_mut(key).and_then(Value::as_object_mut).expect("section exists")
+        self.doc
+            .get_mut(key)
+            .and_then(Value::as_object_mut)
+            .expect("section exists")
     }
 
     /// The schema of `T` inlined (params and payloads must be object schemas,
     /// not refs).
     fn object_schema<T: JsonSchema>(&mut self) -> Value {
         let s = self.generator.subschema_for::<T>().to_value();
-        let Some(name) = s.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix("#/$defs/")) else {
+        let Some(name) = s
+            .get("$ref")
+            .and_then(Value::as_str)
+            .and_then(|r| r.strip_prefix("#/$defs/"))
+        else {
             return s;
         };
         // A params / payload struct is not a shared type: move it inline.

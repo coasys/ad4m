@@ -10,7 +10,10 @@ use ts_rs::TS;
 use super::builtin::ServiceHealth;
 use super::capability::{allowed, service_capability};
 use super::host::{host, ServiceHost};
-use crate::agent::capabilities::{check_capability, AGENT_READ_CAPABILITY};
+use super::interface::Selection;
+use crate::agent::capabilities::{
+    check_capability, AGENT_READ_CAPABILITY, AGENT_UPDATE_CAPABILITY,
+};
 use crate::api::ws_handler::{HandlerMap, WsRpcError};
 use crate::types::RequestContext;
 
@@ -85,13 +88,20 @@ fn read_check(ctx: &RequestContext) -> Result<(), WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY).map_err(WsRpcError::forbidden)
 }
 
-pub(crate) fn describe(host: &ServiceHost, target: Option<&str>, grants: &[Vec<crate::agent::capabilities::Capability>]) -> ServicesDescription {
+pub(crate) fn describe(
+    host: &ServiceHost,
+    target: Option<&str>,
+    grants: &[Vec<crate::agent::capabilities::Capability>],
+) -> ServicesDescription {
     let reg = host.registry();
     let mut interfaces: Vec<ServiceInterfaceSummary> = reg
         .interfaces()
         .filter(|d| {
             target.is_none_or(|t| {
-                d.hash == t || reg.implementation(t).is_some_and(|i| i.manifest.implements.contains(&d.hash))
+                d.hash == t
+                    || reg
+                        .implementation(t)
+                        .is_some_and(|i| i.manifest.implements.contains(&d.hash))
             })
         })
         .map(|d| ServiceInterfaceSummary {
@@ -114,7 +124,9 @@ pub(crate) fn describe(host: &ServiceHost, target: Option<&str>, grants: &[Vec<c
     interfaces.sort_by(|a, b| (&a.module_id, &a.version).cmp(&(&b.module_id, &b.version)));
     let mut implementations: Vec<ServiceImplementationSummary> = reg
         .implementations()
-        .filter(|i| target.is_none_or(|t| i.hash == t || i.manifest.implements.iter().any(|h| h == t)))
+        .filter(|i| {
+            target.is_none_or(|t| i.hash == t || i.manifest.implements.iter().any(|h| h == t))
+        })
         .map(|i| ServiceImplementationSummary {
             hash: i.hash.clone(),
             module_id: i.module_id.clone(),
@@ -125,7 +137,10 @@ pub(crate) fn describe(host: &ServiceHost, target: Option<&str>, grants: &[Vec<c
         })
         .collect();
     implementations.sort_by(|a, b| a.hash.cmp(&b.hash));
-    ServicesDescription { interfaces, implementations }
+    ServicesDescription {
+        interfaces,
+        implementations,
+    }
 }
 
 async fn services_describe(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -134,7 +149,11 @@ async fn services_describe(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     let host = host();
     host.refresh_health().await;
     let grants = ServiceHost::context_for_request(&ctx).grants;
-    Ok(serde_json::to_value(describe(&host, p.target.as_deref(), &grants))?)
+    Ok(serde_json::to_value(describe(
+        &host,
+        p.target.as_deref(),
+        &grants,
+    ))?)
 }
 
 async fn services_interface(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -147,18 +166,30 @@ async fn services_interface(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .ok_or_else(|| WsRpcError::not_found(format!("unknown interface {}", p.hash)))
 }
 
-async fn services_set_preference(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    read_check(&ctx)?;
+async fn services_set_preference(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY).map_err(WsRpcError::forbidden)?;
     let p: ServicesSetPreferenceParams = serde_json::from_value(params)?;
-    let user = if p.for_all_users.unwrap_or(false) {
-        if !ctx.is_admin_credential {
-            return Err(WsRpcError::forbidden("only the admin sets the executor default"));
-        }
-        None
-    } else {
-        // Single-user executors have no user: the preference is the default.
-        ctx.user_email.clone()
-    };
+    let for_all_users = p.for_all_users.unwrap_or(false);
+    if for_all_users && !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "only the admin sets the executor default",
+        ));
+    }
+    // Single-user executors have no user: the preference is the default.
+    let user = (!for_all_users).then(|| ctx.user_email.clone()).flatten();
+    // An `executor` interface (one ledger per executor) takes only the admin's choice.
+    let executor_only = host()
+        .registry()
+        .interface(&p.interface)
+        .is_some_and(|d| d.doc.selection == Selection::Executor);
+    if user.is_none() && executor_only && !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "only the admin sets the default of an `executor` interface",
+        ));
+    }
     host()
         .set_preference(user, &p.interface, &p.module)
         .map_err(WsRpcError::bad_request)?;
@@ -166,9 +197,15 @@ async fn services_set_preference(params: Value, ctx: Arc<RequestContext>) -> Res
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.method::<ServicesDescribeParams, ServicesDescription>("services.describe", services_describe)
-        .read();
+    map.method::<ServicesDescribeParams, ServicesDescription>(
+        "services.describe",
+        services_describe,
+    )
+    .read();
     map.method::<ServicesInterfaceParams, Value>("services.interface", services_interface)
         .read();
-    map.method::<ServicesSetPreferenceParams, bool>("services.setPreference", services_set_preference);
+    map.method::<ServicesSetPreferenceParams, bool>(
+        "services.setPreference",
+        services_set_preference,
+    );
 }

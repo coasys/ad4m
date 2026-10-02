@@ -91,9 +91,7 @@ pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
     {
         None => false,
         Some(None) => true,
-        Some(Some(wanted)) => {
-            event_scope(event_type, &event).is_some_and(|p| wanted.contains(p))
-        }
+        Some(Some(wanted)) => event_scope(event_type, &event).is_some_and(|p| wanted.contains(p)),
     }
 }
 

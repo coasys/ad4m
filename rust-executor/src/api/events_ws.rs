@@ -138,11 +138,14 @@ pub mod events {
     pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
     pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
+    /// A service stream finished (SPEC_SERVICE_LANGUAGES §9.2). It travels
+    /// the same path as the stream's chunks, so it arrives after all of them.
+    pub const SERVICE_STREAM_END: &str = "service-stream-end";
     pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
     pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
 
     /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 20] = [
+    pub const ALL: [&str; 21] = [
         AGENT_STATUS_CHANGED,
         AGENT_UPDATED,
         APPS_CHANGED_EVENT,
@@ -163,6 +166,7 @@ pub mod events {
         QUERY_SUBSCRIPTION_UPDATE,
         AUTO_PROCESSOR_EVENT,
         AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
+        SERVICE_STREAM_END,
     ];
 }
 
@@ -207,6 +211,17 @@ pub struct MessageReceivedEvent {
     pub message: PerspectiveExpression,
 }
 
+/// `service-stream-end`: `{ streamId, method, ok }`. Scoped by `streamId`.
+#[derive(Debug, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceStreamEnd {
+    pub stream_id: String,
+    /// `<hash>.<method>` as called.
+    pub method: String,
+    /// `false` when the call failed; the reply carries the error.
+    pub ok: bool,
+}
+
 /// `exception-occurred`: `{ exception }`.
 #[derive(Debug, Serialize, Deserialize, TS)]
 pub struct ExceptionOccurredEvent {
@@ -240,6 +255,11 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<PerspectiveQuerySubscriptionFilter>(QUERY_SUBSCRIPTION_UPDATE, true),
         EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
+        EventSpec {
+            name: SERVICE_STREAM_END,
+            payload: super::ws_handler::TsType::of::<ServiceStreamEnd>(),
+            scope: Some("streamId"),
+        },
     ]
 }
 

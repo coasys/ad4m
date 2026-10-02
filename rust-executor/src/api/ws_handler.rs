@@ -370,7 +370,9 @@ impl HandlerMap {
             // `<hash>.<method>` addresses a service (SPEC_SERVICE_LANGUAGES §9.1).
             if crate::services::is_service_method(msg_type) {
                 let call = crate::services::ServiceHost::context_for_request(&ctx);
-                return crate::services::host().dispatch(msg_type, params, call).await;
+                return crate::services::host()
+                    .dispatch(msg_type, params, call)
+                    .await;
             }
             return Err(WsRpcError::not_found(format!("Unknown type: {}", msg_type)));
         };

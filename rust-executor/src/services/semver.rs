@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use super::interface::{compat_key, InterfaceDocument};
+use super::interface::{compat_key, ErrorDef, InterfaceDocument};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Bump {
@@ -33,13 +33,12 @@ pub fn check_successor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Re
     if compat_key(&next.version) != compat_key(&prev.version) {
         return Ok(Bump::Major);
     }
-    let bump = if next.version.major == prev.version.major
-        && next.version.minor == prev.version.minor
-    {
-        Bump::Patch
-    } else {
-        Bump::Minor
-    };
+    let bump =
+        if next.version.major == prev.version.major && next.version.minor == prev.version.minor {
+            Bump::Patch
+        } else {
+            Bump::Minor
+        };
     match bump {
         Bump::Patch => check_patch(prev, next)?,
         _ => check_minor(prev, next)?,
@@ -49,16 +48,46 @@ pub fn check_successor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Re
 
 /// Keys that carry no validation meaning.
 const ANNOTATIONS: &[&str] = &["description", "title", "examples", "$comment", "label"];
+/// Keys whose value maps names to definitions: the names are data, so a
+/// property called `title` survives.
+const NAME_MAPS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "dependentSchemas",
+    "$defs",
+    "definitions",
+    "types",
+    "methods",
+    "events",
+    "actions",
+    "errors",
+];
+/// Keys whose value is data, never schema.
+const LITERALS: &[&str] = &["enum", "const", "default"];
 
 fn strip_annotations(v: &Value) -> Value {
+    strip(v, false)
+}
+
+/// `names`: the keys of `v` are names, not keywords.
+fn strip(v: &Value, names: bool) -> Value {
     match v {
         Value::Object(map) => Value::Object(
             map.iter()
-                .filter(|(k, _)| !ANNOTATIONS.contains(&k.as_str()))
-                .map(|(k, v)| (k.clone(), strip_annotations(v)))
+                .filter(|(k, _)| names || !ANNOTATIONS.contains(&k.as_str()))
+                .map(|(k, v)| {
+                    let child = if names {
+                        strip(v, false)
+                    } else if LITERALS.contains(&k.as_str()) {
+                        v.clone()
+                    } else {
+                        strip(v, NAME_MAPS.contains(&k.as_str()))
+                    };
+                    (k.clone(), child)
+                })
                 .collect(),
         ),
-        Value::Array(items) => Value::Array(items.iter().map(strip_annotations).collect()),
+        Value::Array(items) => Value::Array(items.iter().map(|i| strip(i, false)).collect()),
         _ => v.clone(),
     }
 }
@@ -85,7 +114,12 @@ fn check_patch(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(),
 
 fn check_minor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(), String> {
     let (p, n) = (&prev.doc, &next.doc);
-    let fail = |what: String| Err(format!("{} is a MINOR of {}: {}", next.version, prev.version, what));
+    let fail = |what: String| {
+        Err(format!(
+            "{} is a MINOR of {}: {}",
+            next.version, prev.version, what
+        ))
+    };
     if p.selection != n.selection {
         return fail("`selection` changed".into());
     }
@@ -96,7 +130,10 @@ fn check_minor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(),
             None => return fail(format!("action `{}` removed", name)),
         }
     }
-    let types = Types { old: &p.types, new: &n.types };
+    let types = Types {
+        old: &p.types,
+        new: &n.types,
+    };
     for (name, m) in &p.methods {
         let Some(nm) = n.methods.get(name) else {
             return fail(format!("method `{}` removed", name));
@@ -111,12 +148,25 @@ fn check_minor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(),
             return fail(format!("method `{}` params accept less than before", name));
         }
         if !types.narrows(&m.result, &nm.result, 0) {
-            return fail(format!("method `{}` result can hold values the old result schema refuses", name));
+            return fail(format!(
+                "method `{}` result can hold values the old result schema refuses",
+                name
+            ));
         }
         for (err, e) in &m.errors {
+            let data_narrows = |ne: &ErrorDef| match (&e.data, &ne.data) {
+                (None, _) => true,
+                (Some(o), Some(n)) => types.narrows(o, n, 0),
+                (Some(_), None) => false,
+            };
             match nm.errors.get(err) {
-                Some(ne) if ne.code == e.code => {}
-                _ => return fail(format!("method `{}` error `{}` removed or recoded", name, err)),
+                Some(ne) if ne.code == e.code && data_narrows(ne) => {}
+                _ => {
+                    return fail(format!(
+                        "method `{}` error `{}` removed, recoded or widened",
+                        name, err
+                    ))
+                }
             }
         }
     }
@@ -128,7 +178,10 @@ fn check_minor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(),
             return fail(format!("event `{}` changed its action or scope", name));
         }
         if !types.narrows(&e.payload, &ne.payload, 0) {
-            return fail(format!("event `{}` payload can hold values old consumers refuse", name));
+            return fail(format!(
+                "event `{}` payload can hold values old consumers refuse",
+                name
+            ));
         }
     }
     for (label, old, new) in [
@@ -139,7 +192,9 @@ fn check_minor(prev: &InterfaceDocument, next: &InterfaceDocument) -> Result<(),
             (None, _) => {}
             (Some(_), None) => return fail(format!("`{}` removed", label)),
             (Some(o), Some(nw)) => {
-                if !types.widens(&o.params, &nw.params, 0) || !types.narrows(&o.result, &nw.result, 0) {
+                if !types.widens(&o.params, &nw.params, 0)
+                    || !types.narrows(&o.result, &nw.result, 0)
+                {
                     return fail(format!("`{}` changed incompatibly", label));
                 }
             }
@@ -161,8 +216,15 @@ impl Types<'_> {
         let types = if old { self.old } else { self.new };
         let mut cur = v;
         for _ in 0..MAX_DEPTH {
-            match cur
-                .get("$ref")
+            // A `$ref` with sibling keywords stays as is: following it would
+            // drop the siblings' constraints.
+            let bare = cur.as_object().is_some_and(|m| {
+                m.keys()
+                    .all(|k| k == "$ref" || ANNOTATIONS.contains(&k.as_str()))
+            });
+            match Some(cur)
+                .filter(|_| bare)
+                .and_then(|c| c.get("$ref"))
                 .and_then(Value::as_str)
                 .and_then(|r| r.strip_prefix("#/types/"))
                 .and_then(|name| types.get(name))
@@ -194,7 +256,10 @@ impl Types<'_> {
         if depth > MAX_DEPTH {
             return false;
         }
-        let (o, n) = (strip_annotations(self.resolve(old, true)), strip_annotations(self.resolve(new, false)));
+        let (o, n) = (
+            strip_annotations(self.resolve(old, true)),
+            strip_annotations(self.resolve(new, false)),
+        );
         if o == n && !contains_ref(&o) {
             return true;
         }
@@ -217,7 +282,10 @@ impl Types<'_> {
                 _ => false,
             };
         }
-        if let (Some(oe), Some(ne)) = (om.get("enum").and_then(Value::as_array), nm.get("enum").and_then(Value::as_array)) {
+        if let (Some(oe), Some(ne)) = (
+            om.get("enum").and_then(Value::as_array),
+            nm.get("enum").and_then(Value::as_array),
+        ) {
             if !same_except(om, nm, &["enum"]) {
                 return false;
             }
@@ -227,25 +295,50 @@ impl Types<'_> {
         false
     }
 
-    fn compare_objects(&self, om: &Map<String, Value>, nm: &Map<String, Value>, depth: usize, widening: bool) -> bool {
+    fn compare_objects(
+        &self,
+        om: &Map<String, Value>,
+        nm: &Map<String, Value>,
+        depth: usize,
+        widening: bool,
+    ) -> bool {
         if !same_except(om, nm, &["properties", "required", "additionalProperties"]) {
             return false;
         }
         let empty = Map::new();
-        let op = om.get("properties").and_then(Value::as_object).unwrap_or(&empty);
-        let np = nm.get("properties").and_then(Value::as_object).unwrap_or(&empty);
+        let op = om
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
+        let np = nm
+            .get("properties")
+            .and_then(Value::as_object)
+            .unwrap_or(&empty);
         let req = |m: &Map<String, Value>| -> Vec<Value> {
-            m.get("required").and_then(Value::as_array).cloned().unwrap_or_default()
+            m.get("required")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
         };
         let (oreq, nreq) = (req(om), req(nm));
-        let closed = |m: &Map<String, Value>| m.get("additionalProperties") == Some(&Value::Bool(false));
+        let closed =
+            |m: &Map<String, Value>| m.get("additionalProperties") == Some(&Value::Bool(false));
         let (oclosed, nclosed) = (closed(om), closed(nm));
-        if om.get("additionalProperties").is_some_and(|v| v.is_object())
-            || nm.get("additionalProperties").is_some_and(|v| v.is_object())
-        {
-            return om.get("additionalProperties") == nm.get("additionalProperties")
-                && op.keys().eq(np.keys())
-                && op.iter().all(|(k, v)| self.same(v, &np[k], depth + 1))
+        // Extras checked by a schema, a pattern or `unevaluatedProperties`
+        // depend on the property set: demand the same shape.
+        let schema_extras = |m: &Map<String, Value>| {
+            m.get("additionalProperties").is_some_and(Value::is_object)
+                || m.contains_key("patternProperties")
+                || m.contains_key("unevaluatedProperties")
+        };
+        if schema_extras(om) || schema_extras(nm) {
+            let ap = om.get("additionalProperties");
+            return ap == nm.get("additionalProperties")
+                && !ap.is_some_and(contains_ref)
+                && op.len() == np.len()
+                && op
+                    .iter()
+                    .all(|(k, v)| np.get(k).is_some_and(|nv| self.same(v, nv, depth + 1)))
                 && oreq == nreq;
         }
         if widening {
@@ -260,7 +353,10 @@ impl Types<'_> {
             if !oclosed && np.keys().any(|k| !op.contains_key(k)) {
                 return false;
             }
-            op.iter().all(|(k, v)| np.get(k).is_some_and(|nv| self.compare(v, nv, depth + 1, true)))
+            op.iter().all(|(k, v)| {
+                np.get(k)
+                    .is_some_and(|nv| self.compare(v, nv, depth + 1, true))
+            })
         } else {
             // Every value new accepts must pass old.
             if !oreq.iter().all(|r| nreq.contains(r)) {
@@ -281,14 +377,17 @@ impl Types<'_> {
     }
 }
 
+/// Equal outside `except`, with no `$ref` there: a ref's target may differ
+/// between the versions.
 fn same_except(a: &Map<String, Value>, b: &Map<String, Value>, except: &[&str]) -> bool {
-    let keys = |m: &Map<String, Value>| -> Vec<(String, Value)> {
+    let rest = |m: &Map<String, Value>| -> Map<String, Value> {
         m.iter()
             .filter(|(k, _)| !except.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     };
-    keys(a) == keys(b)
+    let ra = rest(a);
+    ra == rest(b) && !ra.values().any(contains_ref)
 }
 
 fn contains_ref(v: &Value) -> bool {
@@ -311,7 +410,11 @@ mod tests {
         InterfaceDocument::parse(raw).unwrap()
     }
 
-    fn successor(prev: &InterfaceDocument, version: &str, mutate: impl FnOnce(&mut Value)) -> InterfaceDocument {
+    fn successor(
+        prev: &InterfaceDocument,
+        version: &str,
+        mutate: impl FnOnce(&mut Value),
+    ) -> InterfaceDocument {
         let mut raw = prev.raw.clone();
         raw["version"] = json!(version);
         raw["module"] = json!(prev.module_hash());
@@ -329,7 +432,9 @@ mod tests {
             r["actions"]["SAY"]["label"] = json!("Echo");
         });
         assert_eq!(check_successor(&g, &ok), Ok(Bump::Patch));
-        let bad = successor(&g, "1.0.1", |r| r["types"]["Text"]["maxLength"] = json!(200));
+        let bad = successor(&g, "1.0.1", |r| {
+            r["types"]["Text"]["maxLength"] = json!(200)
+        });
         assert!(check_successor(&g, &bad).unwrap_err().contains("PATCH"));
     }
 
@@ -351,20 +456,58 @@ mod tests {
     fn minor_refuses_breaking_edits() {
         let g = doc(genesis(AUTHOR));
         let cases: Vec<(&str, Box<dyn FnOnce(&mut Value)>)> = vec![
-            ("removed", Box::new(|r: &mut Value| { r["methods"].as_object_mut().unwrap().remove("count"); })),
-            ("action", Box::new(|r: &mut Value| {
-                r["actions"]["OTHER"] = json!({ "label": "o", "risk": "safe" });
-                r["methods"]["say"]["action"] = json!("OTHER");
-            })),
-            ("params", Box::new(|r: &mut Value| {
-                r["methods"]["say"]["params"]["required"] = json!(["room", "text", "extra"]);
-                r["methods"]["say"]["params"]["properties"]["extra"] = json!({ "type": "string" });
-            })),
-            ("result", Box::new(|r: &mut Value| { r["methods"]["say"]["result"]["required"] = json!([]); })),
-            ("risk", Box::new(|r: &mut Value| { r["actions"]["SAY"]["risk"] = json!("write"); })),
-            ("selection", Box::new(|r: &mut Value| { r["selection"] = json!("executor"); })),
-            ("event", Box::new(|r: &mut Value| { r["events"]["said"]["payload"]["properties"]["text"] = json!({ "type": "integer" }); })),
-            ("error", Box::new(|r: &mut Value| { r["methods"]["say"]["errors"]["Muted"]["code"] = json!(410); })),
+            (
+                "removed",
+                Box::new(|r: &mut Value| {
+                    r["methods"].as_object_mut().unwrap().remove("count");
+                }),
+            ),
+            (
+                "action",
+                Box::new(|r: &mut Value| {
+                    r["actions"]["OTHER"] = json!({ "label": "o", "risk": "safe" });
+                    r["methods"]["say"]["action"] = json!("OTHER");
+                }),
+            ),
+            (
+                "params",
+                Box::new(|r: &mut Value| {
+                    r["methods"]["say"]["params"]["required"] = json!(["room", "text", "extra"]);
+                    r["methods"]["say"]["params"]["properties"]["extra"] =
+                        json!({ "type": "string" });
+                }),
+            ),
+            (
+                "result",
+                Box::new(|r: &mut Value| {
+                    r["methods"]["say"]["result"]["required"] = json!([]);
+                }),
+            ),
+            (
+                "risk",
+                Box::new(|r: &mut Value| {
+                    r["actions"]["SAY"]["risk"] = json!("write");
+                }),
+            ),
+            (
+                "selection",
+                Box::new(|r: &mut Value| {
+                    r["selection"] = json!("executor");
+                }),
+            ),
+            (
+                "event",
+                Box::new(|r: &mut Value| {
+                    r["events"]["said"]["payload"]["properties"]["text"] =
+                        json!({ "type": "integer" });
+                }),
+            ),
+            (
+                "error",
+                Box::new(|r: &mut Value| {
+                    r["methods"]["say"]["errors"]["Muted"]["code"] = json!(410);
+                }),
+            ),
         ];
         for (needle, mutate) in cases {
             let next = successor(&g, "1.1.0", mutate);
@@ -374,10 +517,71 @@ mod tests {
     }
 
     #[test]
+    fn annotation_names_used_as_data_still_count() {
+        let mut raw = genesis(AUTHOR);
+        raw["methods"]["say"]["params"]["properties"]["title"] = json!({ "type": "string" });
+        raw["methods"]["say"]["result"]["properties"]["label"] =
+            json!({ "const": { "title": "a" } });
+        let g = doc(raw);
+        let retyped = successor(&g, "1.0.1", |r| {
+            r["methods"]["say"]["params"]["properties"]["title"] = json!({ "type": "integer" })
+        });
+        assert!(check_successor(&g, &retyped).is_err());
+        let reconst = successor(&g, "1.0.1", |r| {
+            r["methods"]["say"]["result"]["properties"]["label"] =
+                json!({ "const": { "title": "b" } })
+        });
+        assert!(check_successor(&g, &reconst).is_err());
+        let renamed = successor(&g, "1.1.0", |r| {
+            r["methods"]["say"]["params"]["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("title");
+        });
+        assert!(check_successor(&g, &renamed).is_err());
+    }
+
+    #[test]
+    fn minor_sees_through_refs_only_when_sound() {
+        let mut raw = genesis(AUTHOR);
+        raw["methods"]["say"]["result"]["properties"]["text"] =
+            json!({ "$ref": "#/types/Text", "minLength": 1 });
+        raw["types"]["Tag"] = json!({ "type": "string" });
+        raw["methods"]["say"]["params"]["properties"]["tags"] = json!({
+            "type": "array", "items": { "type": "string" }, "contains": { "$ref": "#/types/Tag" }
+        });
+        let g = doc(raw);
+        // The sibling `minLength` goes away: results may now be empty.
+        let sibling = successor(&g, "1.1.0", |r| {
+            r["methods"]["say"]["result"]["properties"]["text"] = json!({ "$ref": "#/types/Text" })
+        });
+        assert!(check_successor(&g, &sibling).is_err());
+        // The type behind an unchanged `contains` ref narrows: params accept less.
+        let behind = successor(&g, "1.1.0", |r| r["types"]["Tag"]["maxLength"] = json!(2));
+        assert!(check_successor(&g, &behind).is_err());
+    }
+
+    #[test]
+    fn minor_refuses_wider_error_data() {
+        let mut raw = genesis(AUTHOR);
+        raw["methods"]["say"]["errors"]["Muted"]["data"] = json!({ "type": "object", "required": ["until"], "properties": { "until": { "type": "integer" } } });
+        let g = doc(raw);
+        let dropped = successor(&g, "1.1.0", |r| {
+            r["methods"]["say"]["errors"]["Muted"]
+                .as_object_mut()
+                .unwrap()
+                .remove("data");
+        });
+        assert!(check_successor(&g, &dropped).is_err());
+    }
+
+    #[test]
     fn enums_widen_in_params_and_narrow_in_results() {
         let mut raw = genesis(AUTHOR);
-        raw["methods"]["say"]["params"]["properties"]["room"] = json!({ "type": "string", "enum": ["a", "b"] });
-        raw["methods"]["say"]["result"]["properties"]["text"] = json!({ "type": "string", "enum": ["x", "y"] });
+        raw["methods"]["say"]["params"]["properties"]["room"] =
+            json!({ "type": "string", "enum": ["a", "b"] });
+        raw["methods"]["say"]["result"]["properties"]["text"] =
+            json!({ "type": "string", "enum": ["x", "y"] });
         let g = doc(raw);
         let ok = successor(&g, "1.1.0", |r| {
             r["methods"]["say"]["params"]["properties"]["room"]["enum"] = json!(["a", "b", "c"]);
@@ -393,10 +597,15 @@ mod tests {
     #[test]
     fn major_allows_anything_and_order_is_enforced() {
         let g = doc(genesis(AUTHOR));
-        let major = successor(&g, "2.0.0", |r| { r["methods"].as_object_mut().unwrap().remove("count"); r["events"].as_object_mut().unwrap().remove("count-tick"); });
+        let major = successor(&g, "2.0.0", |r| {
+            r["methods"].as_object_mut().unwrap().remove("count");
+            r["events"].as_object_mut().unwrap().remove("count-tick");
+        });
         assert_eq!(check_successor(&g, &major), Ok(Bump::Major));
         let back = successor(&g, "0.9.0", |_| {});
-        assert!(check_successor(&g, &back).unwrap_err().contains("does not follow"));
+        assert!(check_successor(&g, &back)
+            .unwrap_err()
+            .contains("does not follow"));
         let other = successor(&g, "1.0.1", |r| r["author"] = json!("did:key:z6Mky"));
         assert!(check_successor(&g, &other).unwrap_err().contains("author"));
     }
@@ -406,7 +615,9 @@ mod tests {
         let mut raw = genesis(AUTHOR);
         raw["version"] = json!("0.1.0");
         let g = doc(raw);
-        let next = successor(&g, "0.2.0", |r| { r["methods"].as_object_mut().unwrap().remove("say"); });
+        let next = successor(&g, "0.2.0", |r| {
+            r["methods"].as_object_mut().unwrap().remove("say");
+        });
         assert_eq!(check_successor(&g, &next), Ok(Bump::Major));
     }
 }
