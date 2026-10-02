@@ -279,10 +279,16 @@ export default function shaclRpcTests(testContext: TestContext) {
                         expect(await perspective.get(new LinkQuery({ source: flowUri, predicate: "todo://receipt" })))
                             .to.have.length(1);
 
-                        // An unchanged definition writes nothing.
-                        const before = (await perspective.get(new LinkQuery({}))).length;
+                        // An unchanged definition writes nothing. A count alone
+                        // would also pass if every link were removed and added
+                        // back, so each link's author and timestamp are compared.
+                        const snapshot = async () =>
+                            (await perspective.get(new LinkQuery({})))
+                                .map((l) => JSON.stringify([l.data.source, l.data.predicate ?? "", l.data.target, l.author, l.timestamp]))
+                                .sort();
+                        const before = await snapshot();
                         await perspective.addFlow("Todo", todoFlow(3));
-                        expect((await perspective.get(new LinkQuery({}))).length).to.equal(before);
+                        expect(await snapshot()).to.deep.equal(before);
                         expect(await rules()).to.deep.equal([3]);
                     } finally {
                         await testContext.ad4mClient.perspective.remove(perspective.uuid);

@@ -237,6 +237,9 @@ export class FlowInstance {
    * there. Calling it twice, or from two clients, does not leave two runs;
    * where two mints raced, every caller gets the earliest.
    *
+   * A flow runs on a subject once: a run that has reached its last state is
+   * returned too, not replaced by a new one.
+   *
    * Idempotently registers the hardwired `FlowInstanceRecord` +
    * `FlowTransitionProposal` @Model classes on first call — the on-graph
    * shape matches the Rust-side hardwired SDNA (parity-locked in

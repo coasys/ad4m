@@ -1790,20 +1790,28 @@ export class PerspectiveProxy {
         // a changed consensus rule beside the old one, and a state holding two
         // rules refuses every move into it. What is stored is found through
         // the flow's own links, since state and transition URIs may use an
-        // older scheme. From the flow's URI only definition predicates are
-        // taken: the same URI carries links the definition does not own.
+        // older scheme. Only definition predicates are taken, from the flow's
+        // URI and from each state and transition URI: all of them can carry
+        // links the definition does not own.
         const flowLevel = new Set(SHACLFlow.FLOW_LEVEL_PREDICATES);
+        const childLevel = new Set(SHACLFlow.STATE_AND_TRANSITION_PREDICATES);
         const ownLinks = (await this.get(new LinkQuery({ source: flow.flowUri })))
             .filter(l => flowLevel.has(l.data.predicate));
         const children = ownLinks
             .filter(l => l.data.predicate === "ad4m://hasState" || l.data.predicate === "ad4m://hasTransition")
             .map(l => l.data.target);
-        const childLinks = await Promise.all(children.map(uri => this.get(new LinkQuery({ source: uri }))));
+        const childLinks = (await Promise.all(children.map(uri => this.get(new LinkQuery({ source: uri })))))
+            .flat()
+            .filter(l => childLevel.has(l.data.predicate));
+        // A name points at one flow: getFlow reads the first flow_uri link,
+        // and FlowInstance.findAll drops records of any other flow URI. So
+        // every flow_uri link of this name is taken, and one left from an
+        // earlier namespace is removed rather than kept beside the new one.
         const registration = [
             ...await this.get(new LinkQuery({ source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral })),
-            ...await this.get(new LinkQuery({ source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri })),
+            ...await this.get(new LinkQuery({ source: flowNameLiteral, predicate: "ad4m://flow_uri" })),
         ];
-        const stored = [...ownLinks, ...childLinks.flat(), ...registration];
+        const stored = [...ownLinks, ...childLinks, ...registration];
 
         // Only the difference is written, so an unchanged definition writes
         // nothing and a changed one touches only what changed.
