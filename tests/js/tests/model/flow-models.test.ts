@@ -438,6 +438,15 @@ describe("FlowInstance.start — v5 API", function () {
     expect(bases).to.deep.equal(["ad4m://task/a", "ad4m://task/b"]);
   });
 
+  it("returns the running instance rather than minting a second on the same base", async () => {
+    await p.addFlow("Delivery", makeDeliveryFlow());
+    const first = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+    const again = await FlowInstance.start(p, "Delivery", "ad4m://task/1");
+
+    expect(again.id).to.equal(first.id);
+    expect(await FlowInstance.findAll(p, { subject: "ad4m://task/1" })).to.have.length(1);
+  });
+
   it("throws when the named flow is not registered on the perspective", async () => {
     let caught: unknown = null;
     try {
