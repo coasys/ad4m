@@ -1,0 +1,25 @@
+{
+  "name": "@coasys/identity-module",
+  "version": "0.1.0",
+  "description": "WE identity module — create, manage, and recover did:scid identities",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@coasys/ad4m": "workspace:*"
+  },
+  "peerDependencies": {
+    "@we/module-shared": "*"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "files": ["dist"],
+  "license": "CAL-1.0"
+}
