@@ -4,13 +4,14 @@ use super::*;
 // ---------------------------------------------------------------------------
 
 /// Test 16. The ruling, stated as a test: state is a function of the links
-/// that exist right now, so deleting a settled vote recomputes the state
-/// without it and the flow stands where it stood before that vote. The
+/// that exist right now, so a settled vote its author retracts recomputes the
+/// state without it and the flow stands where it stood before that vote. The
 /// engine does not defend against this — the cache is even healed backwards
 /// to match. Hardening history is the job of the snapshot taken when a token
-/// is minted, not of this engine.
+/// is minted, not of this engine. The vote ends by Bob's signed retraction
+/// arriving through sync: a removal never ends it (#1176).
 #[tokio::test(flavor = "multi_thread")]
-async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
+async fn a_retracted_settled_vote_recomputes_the_earlier_state() {
     let mut f = seed_satisfied_fixture(None).await;
     set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
     let minted = f.mint_one().await;
@@ -27,10 +28,20 @@ async fn deleting_a_settled_vote_recomputes_the_earlier_state() {
         .map(LinkExpression::from)
         .collect();
     assert_eq!(votes.len(), 1, "exactly Bob's vote is on the graph");
+    let retraction = bob.sign(
+        Link {
+            source: minted.clone(),
+            predicate: Some("ad4m://flow/retracted".to_string()),
+            target: format!("literal:string:{}", votes[0].proof.signature),
+        }
+        .normalize(),
+    );
     f.perspective
-        .remove_links(votes, None)
+        .diff_from_link_language(PerspectiveDiff::from_additions(vec![LinkExpression::from(
+            retraction,
+        )]))
         .await
-        .expect("delete the settling vote");
+        .expect("sync Bob's retraction of the settling vote");
 
     assert_eq!(
         f.derived().await.state,
@@ -138,6 +149,17 @@ async fn rejecting_our_own_settled_vote_regresses_the_state() {
             .is_none(),
         "our acceptedBy link is gone; Bob's proposal links are untouched"
     );
+    let retractions: Vec<_> = links_of(&f, &proposal)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some("ad4m://flow/retracted"))
+        .collect();
+    assert_eq!(
+        retractions.len(),
+        1,
+        "the vote ended by our signed retraction, not by a removal"
+    );
+    assert_eq!(retractions[0].author, acting_did(&f));
 }
 
 /// Reject deletes what this DID *signed*, not what merely names it. A peer
