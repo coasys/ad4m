@@ -69,17 +69,20 @@
 //! link, and a forged or damaged body proves nothing: everything above
 //! re-derives from the receipt's own contents.
 //!
-//! The read is **scoped to the flow before it is budgeted**, so other flows'
-//! receipts (and stray bodies nobody indexed) never spend F's budget — a busy
-//! perspective is the normal case, not an attack. And the budget
-//! ([`MAX_FLOW_RECEIPTS`]) **refuses** rather than truncates: a read that
-//! would exceed it is a [`ReceiptBudgetExceeded`] error on every surface.
-//! Truncating would let anyone who writes enough low-sorting candidates
-//! evict every genuine receipt and have every surface answer a confident
-//! "no valid outputs" (Lal's review of #1127). "I could not read every
-//! receipt" is not "there are none" — the same rule that makes an unknown
-//! flow an error. A flood under F's index can still make F's question
-//! unanswerable, but loudly, and only F's.
+//! The read is **scoped to the flow** — only F's index entries are looked
+//! at, so other flows' receipts and stray bodies nobody indexed cost F
+//! nothing; a busy perspective is the normal case, not an attack. And
+//! candidates are **content-addressed** ([`load_flow_receipts`], #1177): an
+//! index entry counts only if a body under it is the receipt its URI names
+//! and that receipt names F. Junk is skipped with a warning at parse cost,
+//! and nothing is dropped except by its own content, so no number of junk
+//! entries can hide the one genuine receipt beside them (the rule from
+//! Lal's review of #1127: a truncated read must never read as "no valid
+//! outputs"). There is no count cap: the index is keyed by the flow
+//! *definition*, so a cap on it was tripped by the 257th honest completion
+//! of any flow, for good. What remains is reader CPU — one parse per junk
+//! body, one verification per body that hashes to its own URI — and the
+//! per-perspective [`VerdictMemo`] keeps repeat reads from paying it twice.
 //!
 //! # The quorum time
 //!
@@ -103,9 +106,10 @@
 
 use super::atom::OutputRef;
 use super::receipt::{
-    is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE, FLOW_RECEIPT_CONTENT_PREDICATE,
-    FLOW_RECEIPT_PREDICATE,
+    is_canonical_receipt_uri, is_terminal_state, FlowReceipt, FLOW_GRANTED_BY_PREDICATE,
+    FLOW_RECEIPT_CONTENT_PREDICATE, FLOW_RECEIPT_PREDICATE, MAX_RECEIPT_BYTES, RECEIPT_URI_PREFIX,
 };
+use super::verify::memo::{settle, SettledRun, VerdictMemo};
 use super::verify::{verify_receipt, ReceiptVerdict};
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -151,13 +155,18 @@ pub struct ValidOutput {
 /// Deterministic: sorted by `(class, id, receipt_uri)` and deduplicated per
 /// `(output, terminal_state, content)`, so two replicas holding the same
 /// receipts enumerate the same list.
+///
+/// `memo`, when given, answers a receipt already verified under the same
+/// held definition from memory ([`VerdictMemo`]); the answer is the same
+/// without it.
 pub fn valid_outputs(
     catalogue: &HashMap<String, SHACLFlow>,
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
 ) -> Vec<ValidOutput> {
-    let mut out: Vec<ValidOutput> = verified_outputs(catalogue, flow_uri, state, receipts)
+    let mut out: Vec<ValidOutput> = verified_outputs(catalogue, flow_uri, state, receipts, memo)
         .into_iter()
         .map(|(output, _)| output)
         .collect();
@@ -185,6 +194,7 @@ fn verified_outputs(
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
 ) -> Vec<(ValidOutput, String)> {
     let mut out = Vec::new();
     for receipt in receipts {
@@ -194,17 +204,18 @@ fn verified_outputs(
         if receipt.flow_uri != flow_uri {
             continue;
         }
-        let verdict = verify_receipt(catalogue, receipt);
-        let ReceiptVerdict::Verified {
+        // Only what a `Verified` verdict says is used here, and only that is
+        // memoised; a non-verified receipt speaks for nothing, whatever the
+        // reason (logged where it is computed, in `settle`).
+        let settled = match memo {
+            Some(memo) => memo.settled(catalogue, receipt),
+            None => settle(catalogue, receipt),
+        };
+        let Some(SettledRun {
             terminal_state,
             settled_at,
-            ..
-        } = &verdict
+        }) = settled
         else {
-            log::debug!(
-                "valid_outputs: a receipt for `{flow_uri}` does not verify and speaks for \
-                 nothing here — {verdict}"
-            );
             continue;
         };
         if let Some(state) = state {
@@ -250,8 +261,9 @@ pub fn produced_by_flow(
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
 ) -> bool {
-    valid_outputs(catalogue, flow_uri, state, receipts)
+    valid_outputs(catalogue, flow_uri, state, receipts, memo)
         .iter()
         .any(|v| &v.output == output)
 }
@@ -279,9 +291,10 @@ pub(crate) fn first_produced_at(
     flow_uri: &str,
     state: Option<&str>,
     receipts: &[FlowReceipt],
+    memo: Option<&VerdictMemo>,
 ) -> BTreeMap<OutputRef, String> {
     let mut first: BTreeMap<OutputRef, String> = BTreeMap::new();
-    for (valid, settled_at) in verified_outputs(catalogue, flow_uri, state, receipts) {
+    for (valid, settled_at) in verified_outputs(catalogue, flow_uri, state, receipts, memo) {
         let earliest = match first.remove(&valid.output) {
             Some(seen) => earlier_of(seen, settled_at),
             None => settled_at,
@@ -332,76 +345,54 @@ pub fn output_matches_class(output: &OutputRef, queried_name: &str, target_class
     output.class_name == queried_name || output.class_name == target_class
 }
 
-/// How many receipt candidates one flow's read may carry — index entries,
-/// and bodies under them. The links are writable by anyone, so without a
-/// bound a member could make every `producedByFlow` query parse and verify
-/// thousands of junk bodies. Over the budget the read **errors**
-/// ([`ReceiptBudgetExceeded`]); it never drops candidates, because a dropped
-/// candidate could be the one genuine witness (see the module header).
-pub const MAX_FLOW_RECEIPTS: usize = 256;
-
 /// `flow --> receipt`: the per-flow index [`mint_flow_receipt`] writes, so a
 /// question about flow F reads only F's receipts. Discovery only, like every
 /// receipt link: anyone may write one, and what it points at still has to
 /// verify.
 pub const FLOW_RECEIPT_INDEX_PREDICATE: &str = "ad4m://flow/flow_receipt";
 
-/// The receipt read for a flow hit [`MAX_FLOW_RECEIPTS`]. Returned as an
-/// error, never as a shorter list: "I could not read every receipt" must not
-/// read as "there are no valid outputs" — the same argument that makes an
-/// unknown flow an error. Every surface refuses on it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReceiptBudgetExceeded {
-    /// The flow whose receipts were being read.
-    pub flow: String,
-    /// A lower bound on the candidates: the count when the read stopped,
-    /// always more than `cap`. For the index it is exact; for bodies the
-    /// read stops as soon as the running count passes the budget, so it is
-    /// "at least this many" — which is all a refusal needs.
-    pub found: usize,
-    /// [`MAX_FLOW_RECEIPTS`].
-    pub cap: usize,
-}
-
-impl std::fmt::Display for ReceiptBudgetExceeded {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "flow `{}` has at least {} receipt candidates, over the receipt budget of {}; its valid \
-             outputs cannot be decided without reading them all, so none are reported",
-            self.flow, self.found, self.cap
-        )
-    }
-}
-
-impl std::error::Error for ReceiptBudgetExceeded {}
-
 /// The receipts filed under `flow_uri`'s index, parsed — every candidate a
 /// question about that flow has to consider. Each is a *claim* to be about
 /// the flow; verification comes later and is the caller's job.
 ///
-/// Scoped before it is budgeted: only `flow_uri`'s index entries, and only
-/// the bodies under them, count toward [`MAX_FLOW_RECEIPTS`]. Over the
-/// budget the whole read is a [`ReceiptBudgetExceeded`] error — never a
-/// shorter list (see the module header).
+/// **Candidates are content-addressed, and there is no count cap** (#1177).
+/// An index entry is a candidate only if
 ///
-/// A body that does not parse as a receipt, or parses as another flow's, is
-/// warned about and skipped, not an error: it proves nothing for this flow,
-/// and failing on it would hand every writer a veto the budget already
-/// bounds. Deterministic: entries and bodies are read in sorted order.
+/// 1. its target is a canonical receipt URI
+///    ([`is_canonical_receipt_uri`]: the prefix plus exactly 64 lowercase
+///    hex characters — one spelling, so two index links cannot alias one
+///    receipt, and a non-hash target is dismissed before any store read);
+/// 2. a body under it parses as a [`FlowReceipt`] that serialises to at
+///    most [`MAX_RECEIPT_BYTES`] — the same measure
+///    [`mint`](FlowReceipt::mint) refuses over, so no genuine receipt is
+///    over it, and the reader owes an oversize body nothing. Not a
+///    tidiness check: a copy of an honest receipt with `outputs` swapped
+///    for a huge list keeps the real signatures, hashes to its own URI and
+///    names F, so it passes every other check, costs a full fold per read,
+///    and comes back as `OutputsNotCommitted { claimed: <the list> }`
+///    (Marvin on #1201);
+/// 3. that receipt's own [`uri()`](FlowReceipt::uri) **is** the target —
+///    the body is the material the URI names, not something hung under a
+///    name it borrowed;
+/// 4. that receipt names `flow_uri` — a receipt of another flow may
+///    verify, and must still not be a candidate for this one.
+///
+/// Everything else is skipped with a warning at parse cost, never an error:
+/// junk proves nothing for this flow, and failing on it would hand every
+/// writer a veto. And nothing genuine is ever dropped — a receipt is
+/// excluded only by its own content, so no number of junk entries can hide
+/// or refuse the one honest receipt beside them. The former budget
+/// (`MAX_FLOW_RECEIPTS`, `ReceiptBudgetExceeded`) refused on count instead,
+/// and since the index is keyed by the flow *definition*, the 257th honest
+/// completion of any flow tripped it for good.
+///
+/// Deterministic: entries and bodies are read in sorted order. Under one
+/// entry the first body that satisfies (2) to (4) is the receipt; any other
+/// body that satisfied them would be the same content.
 pub async fn load_flow_receipts(
     perspective: &PerspectiveInstance,
     flow_uri: &str,
 ) -> anyhow::Result<Vec<FlowReceipt>> {
-    let over_budget = |found: usize| -> anyhow::Error {
-        ReceiptBudgetExceeded {
-            flow: flow_uri.to_string(),
-            found,
-            cap: MAX_FLOW_RECEIPTS,
-        }
-        .into()
-    };
-
     let mut uris: Vec<String> = perspective
         .get_links(&LinkQuery {
             source: Some(flow_uri.to_string()),
@@ -414,79 +405,99 @@ pub async fn load_flow_receipts(
         .collect();
     uris.sort();
     uris.dedup();
-    if uris.len() > MAX_FLOW_RECEIPTS {
-        return Err(over_budget(uris.len()));
-    }
-
-    let bodies = read_bodies_within_budget(
-        &uris,
-        |uri| async move {
-            Ok(perspective
-                .get_links(&LinkQuery {
-                    source: Some(uri),
-                    predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
-                    ..Default::default()
-                })
-                .await?
-                .into_iter()
-                .map(|l| l.data.target)
-                .collect())
-        },
-        &over_budget,
-    )
-    .await?;
 
     let mut receipts = Vec::new();
-    for (uri, body) in bodies {
-        let parsed = Literal::from_url(body)
-            .and_then(|l| l.get())
-            .and_then(|v| match v {
-                LiteralValue::Json(json) => Ok(serde_json::from_value::<FlowReceipt>(json)?),
-                other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
-            });
-        match parsed {
-            Ok(receipt) if receipt.flow_uri == flow_uri => receipts.push(receipt),
-            Ok(receipt) => log::warn!(
-                "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is a receipt \
-                 for `{}`; skipped",
-                receipt.flow_uri
-            ),
-            Err(e) => log::warn!(
-                "load_flow_receipts: the body under `{uri}` does not read as a FlowReceipt and \
-                 proves nothing: {e:#}"
+    for uri in uris {
+        if !is_canonical_receipt_uri(&uri) {
+            log::warn!(
+                "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is not a \
+                 canonical receipt URI ({RECEIPT_URI_PREFIX} + 64 lowercase hex); skipped"
+            );
+            continue;
+        }
+        let mut bodies: Vec<String> = perspective
+            .get_links(&LinkQuery {
+                source: Some(uri.clone()),
+                predicate: Some(FLOW_RECEIPT_CONTENT_PREDICATE.to_string()),
+                ..Default::default()
+            })
+            .await?
+            .into_iter()
+            .map(|l| l.data.target)
+            .collect();
+        bodies.sort();
+        bodies.dedup();
+
+        let mut found = None;
+        for body in bodies {
+            let receipt = match parse_receipt_body(body) {
+                Ok(receipt) => receipt,
+                Err(e) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` does not read as a \
+                         FlowReceipt and proves nothing: {e:#}"
+                    );
+                    continue;
+                }
+            };
+            match receipt.body().map(|body| body.len()) {
+                Ok(size) if size <= MAX_RECEIPT_BYTES => {}
+                Ok(size) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` serialises to {size} bytes, \
+                         over the {MAX_RECEIPT_BYTES} byte cap no receipt is minted over; skipped"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` does not serialise: {e:#}"
+                    );
+                    continue;
+                }
+            }
+            match receipt.uri() {
+                Ok(hashed) if hashed == uri => {}
+                Ok(hashed) => {
+                    log::warn!(
+                        "load_flow_receipts: a body under `{uri}` hashes to `{hashed}`, so it \
+                         is not the receipt that URI names; skipped"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    log::warn!("load_flow_receipts: a body under `{uri}` does not hash: {e:#}");
+                    continue;
+                }
+            }
+            if receipt.flow_uri != flow_uri {
+                log::warn!(
+                    "load_flow_receipts: `{uri}` is filed under flow `{flow_uri}` but is a \
+                     receipt for `{}`; skipped",
+                    receipt.flow_uri
+                );
+                continue;
+            }
+            found = Some(receipt);
+            break;
+        }
+        match found {
+            Some(receipt) => receipts.push(receipt),
+            None => log::debug!(
+                "load_flow_receipts: no body under `{uri}` is the receipt it names; the \
+                 index entry under flow `{flow_uri}` is skipped"
             ),
         }
     }
     Ok(receipts)
 }
 
-/// The bodies under each of `uris`, in order, as `(uri, body)` — one
-/// `fetch` (a store read) per URI, each URI's bodies sorted and deduplicated.
-/// The moment the running count passes [`MAX_FLOW_RECEIPTS`] the read stops
-/// with `over_budget`'s error — at worst one read past the budget, so a
-/// flood cannot make the reader visit every remaining entry first.
-async fn read_bodies_within_budget<F, Fut>(
-    uris: &[String],
-    mut fetch: F,
-    over_budget: &impl Fn(usize) -> anyhow::Error,
-) -> anyhow::Result<Vec<(String, String)>>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<Vec<String>>>,
-{
-    let mut bodies: Vec<(String, String)> = Vec::new();
-    for uri in uris {
-        let mut under = fetch(uri.clone()).await?;
-        under.sort();
-        under.dedup();
-        bodies.extend(under.into_iter().map(|body| (uri.clone(), body)));
-        // Inside the loop: the budget bounds the reading, not just the
-        // answer — at worst one store read past it, never one per entry.
-        if bodies.len() > MAX_FLOW_RECEIPTS {
-            return Err(over_budget(bodies.len()));
-        }
+/// A `receipt_content` link's target, as a receipt.
+fn parse_receipt_body(body: String) -> anyhow::Result<FlowReceipt> {
+    match Literal::from_url(body)?.get()? {
+        LiteralValue::Json(json) => Ok(serde_json::from_value::<FlowReceipt>(json)?),
+        other => Err(anyhow::anyhow!("not a JSON literal: {other:?}")),
     }
-    Ok(bodies)
 }
 
 /// The instances that are, **as they stand**, valid outputs of `flow_uri`
@@ -516,7 +527,13 @@ pub async fn flow_valid_outputs(
         );
     }
     let receipts = load_flow_receipts(perspective, flow_uri).await?;
-    let candidates = valid_outputs(&catalogue, flow_uri, state, &receipts);
+    let candidates = valid_outputs(
+        &catalogue,
+        flow_uri,
+        state,
+        &receipts,
+        Some(&perspective.receipt_verdict_memo),
+    );
 
     let refs: Vec<OutputRef> = candidates.iter().map(|c| c.output.clone()).collect();
     let live = super::accept::load_outputs(perspective, &refs).await?;
@@ -797,7 +814,7 @@ mod tests {
         let receipt = honest();
         let cat = catalogue(vec![flow_named("Delivery")]);
 
-        let outputs = valid_outputs(&cat, FLOW, None, std::slice::from_ref(&receipt));
+        let outputs = valid_outputs(&cat, FLOW, None, std::slice::from_ref(&receipt), None);
         assert_eq!(
             outputs,
             vec![ValidOutput {
@@ -812,14 +829,16 @@ mod tests {
             &out_ref(OUTPUT),
             FLOW,
             None,
-            std::slice::from_ref(&receipt)
+            std::slice::from_ref(&receipt),
+            None
         ));
         assert!(produced_by_flow(
             &cat,
             &out_ref(OUTPUT),
             FLOW,
             Some("done"),
-            std::slice::from_ref(&receipt)
+            std::slice::from_ref(&receipt),
+            None
         ));
         // The same node named through another class is not what the quorum
         // committed to (#1108): membership is by `(class, id)`, never by id.
@@ -831,7 +850,8 @@ mod tests {
             },
             FLOW,
             None,
-            std::slice::from_ref(&receipt)
+            std::slice::from_ref(&receipt),
+            None
         ));
     }
 
@@ -848,7 +868,8 @@ mod tests {
                     &out_ref(not_an_output),
                     FLOW,
                     None,
-                    std::slice::from_ref(&receipt)
+                    std::slice::from_ref(&receipt),
+                    None
                 ),
                 "`{not_an_output}` must not read as an output"
             );
@@ -873,7 +894,7 @@ mod tests {
         let cat = catalogue(vec![flow_named("Delivery")]);
 
         let receipts = [forged, honest];
-        let outputs = valid_outputs(&cat, FLOW, None, &receipts);
+        let outputs = valid_outputs(&cat, FLOW, None, &receipts, None);
         assert!(
             outputs.iter().all(|v| v.output.id != ATTACKER),
             "a forged receipt's outputs must not be listed: {outputs:?}"
@@ -887,7 +908,8 @@ mod tests {
             &out_ref(ATTACKER),
             FLOW,
             None,
-            &receipts
+            &receipts,
+            None
         ));
     }
 
@@ -903,7 +925,7 @@ mod tests {
         let cat = catalogue(vec![flow_named("Delivery")]);
 
         assert!(
-            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&edited)).is_empty(),
+            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&edited), None).is_empty(),
             "content the quorum did not sign must not be listed"
         );
     }
@@ -925,7 +947,8 @@ mod tests {
                 &catalogue(Vec::new()),
                 FLOW,
                 None,
-                std::slice::from_ref(&receipt)
+                std::slice::from_ref(&receipt),
+                None
             )
             .is_empty(),
             "no catalogue, no answer — and no output"
@@ -942,7 +965,8 @@ mod tests {
                 &catalogue(vec![other_dna]),
                 FLOW,
                 None,
-                std::slice::from_ref(&receipt)
+                std::slice::from_ref(&receipt),
+                None
             )
             .is_empty(),
             "a receipt minted under other DNA answers nothing here"
@@ -965,11 +989,11 @@ mod tests {
         let cat = catalogue(vec![delivery, other]);
 
         assert!(
-            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&foreign)).is_empty(),
+            valid_outputs(&cat, FLOW, None, std::slice::from_ref(&foreign), None).is_empty(),
             "completing Onboarding must not produce Delivery outputs"
         );
         assert_eq!(
-            valid_outputs(&cat, &other_uri, None, std::slice::from_ref(&foreign)).len(),
+            valid_outputs(&cat, &other_uri, None, std::slice::from_ref(&foreign), None).len(),
             1,
             "the same receipt answers for its own flow"
         );
@@ -978,7 +1002,8 @@ mod tests {
                 &cat,
                 &other_uri,
                 Some("open"),
-                std::slice::from_ref(&foreign)
+                std::slice::from_ref(&foreign),
+                None
             )
             .is_empty(),
             "a state the run did not settle into admits nothing"
@@ -1062,59 +1087,278 @@ mod tests {
         );
     }
 
-    // ---- the body budget's cost -------------------------------------------
+    // ---- the verdict memo (#1177) ------------------------------------------
 
-    /// The body budget bounds the **reading**, not just the answer: a flood
-    /// of bodies under the index must stop the read as soon as the running
-    /// count passes the budget — at worst one store read past it — instead
-    /// of paying a read per remaining index entry and holding every body
-    /// before refusing (Lal's approval note on #1127). `found` is then "at
-    /// least this many", which is all the refusal needs.
+    /// The memo can only save work, never change an answer. The receipt
+    /// verifies under the DNA it was minted under and the memo holds that
+    /// verdict; then the reader's definition changes. The same receipt must
+    /// now read `DnaChanged` — through the memo — not the cached `Verified`,
+    /// and the enumeration must stop listing its outputs.
     ///
-    /// Red if the check sits after the loop: every one of the `MAX` entries
-    /// is fetched first.
-    #[tokio::test]
-    async fn the_body_budget_stops_reading_as_soon_as_it_is_exceeded() {
-        let uris: Vec<String> = (0..MAX_FLOW_RECEIPTS)
-            .map(|i| format!("ad4m://flow/receipt/{i:04}"))
-            .collect();
-        let mut fetched = 0usize;
-        let err = read_bodies_within_budget(
-            &uris,
-            |uri| {
-                fetched += 1;
-                // Every entry carries a full budget's worth of bodies.
-                async move {
-                    Ok((0..MAX_FLOW_RECEIPTS)
-                        .map(|j| format!("{uri}#{j:04}"))
-                        .collect())
-                }
-            },
-            &|found| {
-                ReceiptBudgetExceeded {
-                    flow: FLOW.to_string(),
-                    found,
-                    cap: MAX_FLOW_RECEIPTS,
-                }
-                .into()
-            },
-        )
-        .await
-        .expect_err("a body flood is over budget");
+    /// Red if the memo key drops the flow DNA hash: the second lookup hits
+    /// the first verdict and a receipt minted under old DNA keeps vouching.
+    #[test]
+    fn a_verdict_memo_never_changes_an_answer() {
+        let receipt = honest();
+        let memo = VerdictMemo::default();
+        let same_dna = catalogue(vec![flow_named("Delivery")]);
+        let mut edited = flow_named("Delivery");
+        edited.states.push(
+            serde_json::from_value(serde_json::json!({ "name": "extra", "value": 2.0 }))
+                .expect("state parses"),
+        );
+        let other_dna = catalogue(vec![edited]);
+
+        assert!(memo.settled(&same_dna, &receipt).is_some());
+        assert_eq!(
+            valid_outputs(
+                &same_dna,
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                Some(&memo)
+            )
+            .len(),
+            1,
+            "precondition: the receipt answers under its own DNA"
+        );
 
         assert_eq!(
-            fetched, 2,
-            "the first read fills the budget exactly, the second passes it — and the read stops there"
+            memo.settled(&other_dna, &receipt),
+            None,
+            "after the DNA changed the same receipt is not verified through the memo either"
         );
-        let over = err
-            .downcast_ref::<ReceiptBudgetExceeded>()
-            .expect("the typed budget error");
+        let verdict = verify_receipt(&other_dna, &receipt);
+        assert!(
+            matches!(verdict, ReceiptVerdict::DnaChanged { .. }),
+            "and a fresh verify names why: DnaChanged, got: {verdict}"
+        );
+        assert!(
+            valid_outputs(
+                &other_dna,
+                FLOW,
+                None,
+                std::slice::from_ref(&receipt),
+                Some(&memo)
+            )
+            .is_empty(),
+            "a receipt minted under other DNA answers nothing, memo or not"
+        );
+        // And back under the original DNA the memo is still exact — the
+        // first verdict, not the second.
+        assert!(memo.settled(&same_dna, &receipt).is_some());
+    }
+
+    /// A second read of an unchanged set re-verifies nothing: three receipts
+    /// cost three verifications on the first enumeration and zero on the
+    /// next, whichever surface asks. A forgery beside them is memoised as
+    /// what it is — excluded on the first read and on every later one.
+    ///
+    /// Red if the memo does not store, does not look up, or keys on
+    /// something a repeat read does not reproduce.
+    #[test]
+    fn a_second_read_of_an_unchanged_set_does_zero_re_verifies() {
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let mut forged = honest();
+        forged.outputs = out_items(&[ATTACKER]);
+        let receipts = [
+            mint(&flow, &[OUTPUT]),
+            mint(&flow, &["ad4m://deliverable/d2"]),
+            mint(&flow, &["ad4m://deliverable/d3"]),
+            forged,
+        ];
+        let memo = VerdictMemo::default();
+
+        let first = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        assert_eq!(first.len(), 3, "{first:?}");
         assert_eq!(
-            over.found,
-            2 * MAX_FLOW_RECEIPTS,
-            "at least this many, counted so far"
+            memo.verifications(),
+            4,
+            "the first read verifies every candidate once, the forgery included"
         );
-        assert!(over.found > over.cap);
+
+        let second = valid_outputs(&cat, FLOW, None, &receipts, Some(&memo));
+        assert_eq!(second, first, "the memo changes nothing about the answer");
+        assert!(produced_by_flow(
+            &cat,
+            &out_ref(OUTPUT),
+            FLOW,
+            Some("done"),
+            &receipts,
+            Some(&memo)
+        ));
+        assert_eq!(
+            first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)).len(),
+            3
+        );
+        assert_eq!(
+            memo.verifications(),
+            4,
+            "an unchanged set is answered from the memo: zero re-verifies across three surfaces"
+        );
+    }
+
+    /// The memo key has to cover every input `verify_receipt` reads from the
+    /// catalogue, and the DNA hash alone does not. `flow_dna_hash` sorts
+    /// `states` by name on purpose (link order is a store artefact), but
+    /// `initial_state_of` is `states.first()`, and the fold refuses a
+    /// genesis other than it. The parser keeps equal-`value` states in link
+    /// order, so one DNA can load as `[open, done]` on one read and
+    /// `[done, open]` on the next: same DNA hash, different verdict. Keyed on
+    /// the DNA hash alone, the memo serves the first read's `Verified` on
+    /// the second, where a fresh verify says `Unfoldable`. (CodeRabbit on
+    /// #1201.)
+    ///
+    /// Red with the memo keyed on `flow_dna_hash`.
+    #[test]
+    fn a_memo_hit_equals_a_fresh_verify_when_the_states_reload_in_another_order() {
+        use crate::perspectives::flow_instance::receipt::flow_dna_hash;
+
+        let equal_value_states = |order: [&str; 2]| -> SHACLFlow {
+            let mut flow = flow_named("Delivery");
+            flow.states = order
+                .iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({ "name": name, "value": 0.0 }))
+                        .expect("state parses")
+                })
+                .collect();
+            flow
+        };
+        let first_load = catalogue(vec![equal_value_states(["open", "done"])]);
+        let second_load = catalogue(vec![equal_value_states(["done", "open"])]);
+        assert_eq!(
+            flow_dna_hash(&first_load[FLOW]).expect("hash"),
+            flow_dna_hash(&second_load[FLOW]).expect("hash"),
+            "precondition: state order is not part of the DNA"
+        );
+        let receipt = mint(&first_load[FLOW], &[OUTPUT]);
+        let memo = VerdictMemo::default();
+        assert!(memo.settled(&first_load, &receipt).is_some());
+
+        let fresh = verify_receipt(&second_load, &receipt);
+        let hit = memo.settled(&second_load, &receipt);
+        assert_eq!(
+            hit,
+            SettledRun::of(&fresh),
+            "a memo hit must equal a fresh verify — fresh: {fresh}; memo: {hit:?}"
+        );
+    }
+
+    /// The memo holds a projection, never a verdict. A rejected verdict
+    /// carries data the receipt's writer sized — `OutputsNotCommitted.claimed`
+    /// is the whole outputs list — and memoising it bounded the memo by
+    /// 4096 × body size (Marvin on #1201). Every surface answers the same
+    /// with the memo as without, on the first read and on the hits, while a
+    /// forgery naming a thousand outputs leaves nothing of its list behind:
+    /// the memo weighs its keys plus one small `Verified` projection.
+    ///
+    /// Red if the projection drops `terminal_state` or `settled_at`, or if a
+    /// hit is answered with anything but the stored projection.
+    #[test]
+    fn the_memo_answers_like_a_fresh_verify_and_keeps_nothing_of_a_rejection() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        let flow = flow_named("Delivery");
+        let cat = catalogue(vec![flow_named("Delivery")]);
+        let thousand: Vec<String> = (0..1000)
+            .map(|i| format!("ad4m://attacker/node-{i:04}"))
+            .collect();
+        let mut forged = mint(&flow, &[OUTPUT]);
+        forged.outputs = out_items(&thousand.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut edited = mint(&flow, &["ad4m://deliverable/d2"]);
+        edited.outputs[0].content = serde_json::json!({ "title": "edited" }).to_string();
+        let receipts = [mint(&flow, &[OUTPUT]), forged, edited];
+        let memo = VerdictMemo::default();
+
+        let plain = valid_outputs(&cat, FLOW, None, &receipts, None);
+        let plain_at = first_produced_at(&cat, FLOW, None, &receipts, None);
+        assert_eq!(
+            plain.len(),
+            1,
+            "precondition: only the honest receipt verifies"
+        );
+        assert_eq!(
+            plain_at.get(&out_ref(OUTPUT)).map(String::as_str),
+            Some(T1),
+            "precondition: the quorum time reaches the role gate through the projection"
+        );
+        for read in ["first read", "second read"] {
+            assert_eq!(
+                valid_outputs(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain,
+                "{read}"
+            );
+            assert_eq!(
+                first_produced_at(&cat, FLOW, None, &receipts, Some(&memo)),
+                plain_at,
+                "{read}"
+            );
+        }
+        assert_eq!(
+            memo.verifications(),
+            3,
+            "each receipt is verified once, then every surface answers from the memo"
+        );
+
+        let keys: usize = receipts
+            .iter()
+            .map(|r| r.uri().expect("uri").len() + 64)
+            .sum();
+        let held = memo.bytes_held();
+        assert!(
+            held <= keys + MEMO_ENTRY_MAX_BYTES,
+            "the memo holds three keys and one small projection, not the forgery's \
+             thousand-output list: {held} bytes held, {keys} of them keys"
+        );
+    }
+
+    /// Even a `Verified` projection can be writer-sized. A link signature
+    /// covers the parsed instant, not the timestamp string
+    /// (`agent::signatures::verify` re-parses it), chrono reads the first
+    /// nine fractional digits and skips the rest, and the fold carries the
+    /// string verbatim into `settled_at`. So a self-quorate proposer
+    /// (`{ n: 1 }`) can stamp the vote that settles the run with a kilobyte
+    /// of fractional zeros and still sign it validly. Over
+    /// [`MEMO_ENTRY_MAX_BYTES`] the projection is answered but not stored,
+    /// so the next read re-verifies — the same answer, as without a memo.
+    ///
+    /// Red without the weight check before `put`.
+    #[test]
+    fn a_verified_run_with_a_padded_timestamp_is_answered_but_not_memoised() {
+        use super::super::verify::memo::MEMO_ENTRY_MAX_BYTES;
+
+        // The same instant as `T1`, spelled with `MEMO_ENTRY_MAX_BYTES`
+        // fractional zeros, so the fixture's real signatures still verify.
+        let padded = format!("2026-01-01T00:00:00.{}Z", "0".repeat(MEMO_ENTRY_MAX_BYTES));
+        let mut read_set = completed(&[OUTPUT]);
+        for link in read_set
+            .proposals
+            .iter_mut()
+            .flat_map(|p| p.links.iter_mut())
+        {
+            link.timestamp = padded.clone();
+        }
+        let flow = flow_named("Delivery");
+        let receipt = FlowReceipt::mint(&flow, read_set, out_items(&[OUTPUT]), Vec::new())
+            .expect("the re-spelled timestamps parse to the signed instant, so the run mints");
+        let cat = catalogue(vec![flow]);
+        let memo = VerdictMemo::default();
+
+        let fresh = settle(&cat, &receipt);
+        assert!(
+            fresh.as_ref().is_some_and(|s| s.settled_at == padded),
+            "precondition: the padded timestamp is the quorum time, got {fresh:?}"
+        );
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(memo.settled(&cat, &receipt), fresh);
+        assert_eq!(
+            memo.verifications(),
+            2,
+            "a projection over the entry cap is not stored, so the second read re-verifies"
+        );
+        assert_eq!(memo.bytes_held(), 0, "and nothing of it is held");
     }
 
     // ---- determinism -------------------------------------------------------
@@ -1128,7 +1372,7 @@ mod tests {
         let twin_a = mint(&flow, &[OUTPUT, "ad4m://deliverable/d2"]);
         let twin_b = twin_a.clone();
 
-        let outputs = valid_outputs(&cat, FLOW, None, &[twin_a, twin_b]);
+        let outputs = valid_outputs(&cat, FLOW, None, &[twin_a, twin_b], None);
         let ids: Vec<&str> = outputs.iter().map(|v| v.output.id.as_str()).collect();
         assert_eq!(ids, vec![OUTPUT, "ad4m://deliverable/d2"]);
     }
