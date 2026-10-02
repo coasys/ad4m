@@ -672,7 +672,7 @@ pub struct SubscribeQueryRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct KeepAliveQueryRequest {
+pub struct ResyncSubscriptionRequest {
     pub subscription_id: String,
 }
 

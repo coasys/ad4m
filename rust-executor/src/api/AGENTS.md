@@ -7,8 +7,8 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) |
-| `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same content as above; candidate for removal, spec D3) |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) and the connection's live query updates |
+| `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same events, no live query updates; candidate for removal, spec D3) |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
 
@@ -47,8 +47,18 @@ anything that signs, bills or writes.
 - Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
   inline on both sockets (per-connection state, like `request.cancel`).
-- Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
-  the perspective owner gets them, and the SDK routes them by `subscriptionId`.
+- Live queries: `subscribeQuery` / `modelSubscribe` reply `{ subscriptionId, result, revision }`
+  (revision 0, or later if a write landed while the first result was computed: the subscription is
+  registered first);
+  each `query-subscription-update` carries the change (models: `ids` + `upsert`; queries: `added` /
+  `removed` rows, or the whole `result` when the rows would lose their order; see
+  `perspectives/perspective_instance/subscriptions.rs`) and `revision` (+1 per update). On a gap,
+  `perspective.resyncSubscription { uuid, subscriptionId }` → `{ revision, result }`. When the
+  update topic lags, the socket gets one `{ type: 'query-subscription-update', lagged: true }` and
+  the client resyncs every live query.
+- A live query belongs to the RPC connection that opened it (`RequestContext::connection_id`):
+  only that socket gets its updates (they bypass `events.watch`), and `ws_rpc::serve` ends them
+  when the socket closes, and again as each call still in flight ends (a late subscribe). No keepalive; subscribing without a connection (REST) is a 400.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

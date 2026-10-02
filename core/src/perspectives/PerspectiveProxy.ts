@@ -18,6 +18,7 @@ import { AIClient } from "../ai/AIClient";
 import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators";
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
+import { LiveQuery, Subscribed } from "./LiveQuery";
 import type { TranscriptTurn } from "../generated/api";
 import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
@@ -39,426 +40,70 @@ function extractNamespaceFromUri(uri: string): string {
     return uri;
 }
 
-/** Proxy object for a subscribed Prolog query that provides real-time updates
- * 
- * This class handles:
- * - Keeping the subscription alive by sending periodic keepalive signals
- * - Managing callbacks for result updates
- * - Subscribing to query updates via WebSocket subscriptions
- * - Maintaining the latest query result
- * - Ensuring subscription is fully initialized before allowing access
- * - Cleaning up resources when disposed
- * 
- * The subscription will remain active as long as keepalive signals are sent.
- * Make sure to call dispose() when you're done with the subscription to clean up
- * resources, stop keepalive signals, and notify the backend to remove the subscription.
- * 
- * The subscription goes through an initialization process where it waits for the first
- * result to come through the subscription channel. You can await the `initialized` 
- * promise to ensure the subscription is ready. The initialization will timeout after
- * 30 seconds if no result is received.
- * 
- * Example usage:
+
+/** A live SPARQL or Prolog query with its latest result.
+ *
+ * `subscribe()` opens the query and resolves once the first result is in;
+ * `onResult()` callbacks then get every later result. The executor sends
+ * only changes; `LiveQuery` applies them, recovers from a missed update and
+ * re-opens the query after a reconnect. Call `dispose()` when done.
+ *
  * ```typescript
- * const subscription = await perspective.subscribeInfer("my_query(X)");
- * // At this point the subscription is already initialized since subscribeInfer waits
- * 
- * // Set up callback for future updates
- * const removeCallback = subscription.onResult(result => {
- *     console.log("New result:", result);
- * });
- * 
- * // Later: clean up subscription and notify backend
+ * const subscription = await perspective.subscribeQuery("SELECT ?s WHERE { ?s ?p ?o }");
+ * const remove = subscription.onResult(result => console.log(result));
  * subscription.dispose();
  * ```
  */
 export class QuerySubscriptionProxy {
-    #uuid: string;
-    #subscriptionId: string;
-    #client: PerspectiveClient;
-    #callbacks: Set<QueryCallback>;
-    #keepaliveTimer: number;
-    #unsubscribe?: () => void;
-    #reconnectUnsub?: () => void;
-    #latestResult: AllInstancesResult|null;
-    #disposed: boolean = false;
+    #live: LiveQuery;
+    #callbacks = new Set<QueryCallback>();
     #initialized: Promise<boolean>;
     #initResolve?: (value: boolean) => void;
     #initReject?: (reason?: any) => void;
-    #initTimeoutId?: NodeJS.Timeout;
-    #query: string;
-    // Monotonic token guarding the three concurrent writers of
-    // `#unsubscribe`/`#subscriptionId` (full subscribe() from the keepalive
-    // and init-timeout retry paths, and the reconnect swap handler). Each
-    // writer bumps it on entry and re-checks after every await; a mismatch
-    // means a newer writer took over while we were suspended, so the stale
-    // continuation must back out instead of clobbering the newer state
-    // (worst case otherwise: an overwritten-but-never-called unsubscribe
-    // leaks its callback in ApiClient._wsCallbacks for the client lifetime).
-    #generation: number = 0;
 
-    /** Creates a new query subscription
-     * @param uuid - The UUID of the perspective
-     * @param query - The Prolog query to subscribe to
-     * @param client - The PerspectiveClient instance to use for communication
-     */
     constructor(uuid: string, query: string, client: PerspectiveClient) {
-        this.#uuid = uuid;
-        this.#query = query;
-        this.#client = client;
-        this.#callbacks = new Set();
-        this.#latestResult = null;
-        
-        // Create the promise once and store its resolve/reject
+        this.#live = new LiveQuery(client, uuid, () => client.subscribeQuery(uuid, query), result => this.#deliver(result));
         this.#initialized = new Promise<boolean>((resolve, reject) => {
             this.#initResolve = resolve;
             this.#initReject = reject;
         });
     }
 
+    /** Open the query; resolves with the first result delivered. */
     async subscribe() {
-        // Invalidate any suspended writer (older subscribe() or reconnect
-        // swap parked on an await) — see #generation.
-        const generation = ++this.#generation;
-
-        // Remove any prior reconnect listener FIRST — before we touch
-        // `#unsubscribe`. Rationale: `#unsubscribe()` calls into
-        // `ApiClient.subscribe()`'s deleter, which closes the WebSocket
-        // whenever this query owned the last `_wsCallbacks` entry (and no
-        // RPCs are pending). The subsequent `subscribeQuery()` below then
-        // re-opens a fresh socket, and that fresh `onopen` fires the
-        // reconnect callback set. If the OLD reconnect listener is still
-        // in that set, it re-enters this method, closes the socket again,
-        // reopens again … an endless resubscribe loop. Clearing the
-        // listener up-front breaks the cycle; a fresh listener is
-        // installed at the end of a successful subscribe(), and a
-        // full-retry recovery listener in the catch block on failure.
-        if (this.#reconnectUnsub) {
-            this.#reconnectUnsub();
-            this.#reconnectUnsub = undefined;
-        }
-
-        // Clean up previous subscription attempt if retrying
-        if (this.#unsubscribe) {
-            this.#unsubscribe();
-            this.#unsubscribe = undefined;
-        }
-
-        // Clear any existing timeout
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-
-        // Clear any existing keepalive timer to prevent accumulation
-        if (this.#keepaliveTimer) {
-            clearTimeout(this.#keepaliveTimer);
-            this.#keepaliveTimer = undefined;
-        }
-
         try {
-            // Initialize the query subscription
-            let initialResult;
-            initialResult = await this.#client.subscribeQuery(this.#uuid, this.#query);
-
-            // A newer writer (another subscribe() or a reconnect swap) took
-            // over while we awaited — back out without touching shared state,
-            // and release the now-orphaned server-side subscription so it
-            // doesn't linger until its keepalive TTL expires.
-            if (this.#disposed || this.#generation !== generation) {
-                this.#client.disposeQuerySubscription(this.#uuid, initialResult.subscriptionId)
-                    .catch(e => console.error('Error disposing superseded query subscription:', e));
-                return;
-            }
-
-            this.#subscriptionId = initialResult.subscriptionId;
-
-            // Process the initial result immediately for fast UX.
-            // The subscribeQuery() RPC call already returns the initial result,
-            // so treat that as successful initialization instead of waiting for a
-            // follow-up WebSocket update that may never arrive until the query changes.
-            if (initialResult.result !== undefined) {
-                this.#deliverResult(initialResult.result);
-            } else {
-                console.warn('⚠️ No initial result returned from subscribeQuery!');
-
-                // Only keep the initialization timeout when the backend did not
-                // provide an initial result up front.
-                this.#initTimeoutId = setTimeout(() => {
-                    console.error('Subscription initialization timed out after 30 seconds. Resubscribing...');
-                    // Recursively retry subscription, catching any errors
-                    this.subscribe().catch(error => {
-                        console.error('Error during subscription retry after timeout:', error);
-                    });
-                }, 30000);
-            }
-            
-            // Subscribe to query updates
-            this.#unsubscribe = this.#client.subscribeToQueryUpdates(
-                this.#subscriptionId,
-                (updateResult) => this.#deliverResult(updateResult)
-            );
+            this.#deliver(await this.#live.start());
         } catch (error) {
-            console.error('Error setting up subscription:', error);
-
-            // Reject the promise if this is the first attempt
-            if (this.#initReject) {
-                this.#initReject(error);
-                this.#initResolve = undefined;
-                this.#initReject = undefined;
-            }
-
-            // Restore reconnect recovery before rethrowing. The listener was
-            // removed at the top of this method; without re-installing one
-            // here, a single failed resubscribe (e.g. subscribeQuery timing
-            // out during a network flap) would leave the proxy permanently
-            // dead: the keepalive loop stops itself on resubscribe failure,
-            // and nothing else retries. The recovery listener runs the FULL
-            // subscribe() (not the swap-in-place handler) because after a
-            // failed attempt there is no keepalive loop left to feed the new
-            // server subscription — subscribe() restarts it. This is
-            // loop-safe: in this failed state the proxy owns no
-            // `_wsCallbacks` entry (the old one was unsubscribed at the top
-            // of this method and no new one got registered), so the
-            // subscribe() it triggers has nothing to unsubscribe → the
-            // socket never closes/reopens under it → no re-entrant onopen.
-            if (!this.#disposed && this.#generation === generation && this.#client.onReconnect) {
-                this.#reconnectUnsub = this.#client.onReconnect(() => {
-                    if (this.#disposed) return;
-                    console.log('WebSocket reconnected — retrying failed subscription for query:', this.#query);
-                    this.subscribe().catch(e => {
-                        console.error('Error during subscription retry after reconnect:', e);
-                    });
-                });
-            }
-
-            throw error; // Re-throw so caller knows it failed
-        }
-
-        // Start keepalive loop
-        this.#startKeepalive(generation);
-
-        // Register for reconnect notification — on WebSocket reconnect,
-        // immediately re-establish a fresh server-side subscription instead
-        // of waiting up to 30s for the keepalive to fail.
-        //
-        // We deliberately do NOT call `this.subscribe()` here. Full subscribe
-        // runs `#unsubscribe` first, which delegates to `ApiClient.subscribe`'s
-        // deleter — that closes the WebSocket when this query owned the LAST
-        // `_wsCallbacks` entry. The subsequent `subscribeQuery` reopens the
-        // socket, whose fresh `onopen` fires every registered reconnect
-        // callback again → recursion (CodeRabbit's original finding). And
-        // during that close→reopen gap, RPCs in flight from OTHER proxies
-        // fail with `503 WebSocket not connected` (observed in
-        // integration-tests-mcp `should fire onWake when mention uses agent DID`
-        // after PR #899's initial fix — the WakerSubscriptionManager tests
-        // share a wakerClient across cases, so any dying reconnect handler
-        // interferes with sibling subscriptions).
-        //
-        // The correct shape is a swap-in-place: get a new server-side
-        // subscription ID via `subscribeQuery`, register a new client-side
-        // callback FIRST, and only then unsubscribe the old one. That way
-        // `_wsCallbacks.size` never dips to 0 during the transition, so the
-        // socket doesn't close, no reconnect loop, and no cross-proxy 503s.
-        // Any prior listener was already removed at the top of this method
-        // (see the note there for why cleanup must run before `#unsubscribe`,
-        // not here).
-        if (this.#client.onReconnect) {
-            this.#reconnectUnsub = this.#client.onReconnect(async () => {
-                if (this.#disposed) return;
-                // The handler is a writer of `#unsubscribe`/`#subscriptionId`
-                // too, so it takes its own generation — see #generation.
-                const swapGeneration = ++this.#generation;
-                console.log(
-                    'WebSocket reconnected — re-establishing server subscription for query:',
-                    this.#query,
-                );
-                try {
-                    const newInitial = await this.#client.subscribeQuery(this.#uuid, this.#query);
-                    if (this.#disposed || this.#generation !== swapGeneration) {
-                        // A newer writer took over while we awaited — back out
-                        // and release the orphaned server-side subscription.
-                        this.#client.disposeQuerySubscription(this.#uuid, newInitial.subscriptionId)
-                            .catch(e => console.error('Error disposing superseded query subscription:', e));
-                        return;
-                    }
-                    const newSubId = newInitial.subscriptionId;
-
-                    // Register the NEW client-side callback BEFORE removing the
-                    // old one — keeps `_wsCallbacks.size >= 1` across the swap.
-                    const newUnsub = this.#client.subscribeToQueryUpdates(
-                        newSubId,
-                        (updateResult) => this.#deliverResult(updateResult),
-                    );
-                    const oldUnsub = this.#unsubscribe;
-                    this.#unsubscribe = newUnsub;
-                    this.#subscriptionId = newSubId;
-                    if (oldUnsub) oldUnsub();
-
-                    // Our generation bump invalidated the running keepalive
-                    // loop — restart it under our generation so the new
-                    // server subscription keeps receiving keepalives.
-                    clearTimeout(this.#keepaliveTimer);
-                    this.#startKeepalive(swapGeneration);
-
-                    // Deliver the fresh initial result if the server included one
-                    // (matches the eager-delivery path in the main subscribe() body).
-                    // #deliverResult also clears a still-pending init timeout and
-                    // resolves #initialized, keeping this path symmetric with the
-                    // update callback in subscribe() — without it, a swap landing
-                    // while initialization was pending would leave the 30s init
-                    // timer armed and trigger a spurious full resubscribe.
-                    if (newInitial.result !== undefined) {
-                        this.#deliverResult(newInitial.result);
-                    }
-                } catch (error) {
-                    console.error(
-                        'Error re-establishing subscription after reconnect:',
-                        error,
-                    );
-                    // Our generation bump invalidated the running keepalive
-                    // loop; if nothing newer superseded us, restart it so
-                    // liveness is preserved — its keepAliveQuery against the
-                    // dead old subscription will fail and fall back to a
-                    // full subscribe(). The reconnect listener also remains
-                    // installed, so a later reconnect retries this handler.
-                    if (!this.#disposed && this.#generation === swapGeneration) {
-                        clearTimeout(this.#keepaliveTimer);
-                        this.#startKeepalive(swapGeneration);
-                    }
-                }
-            });
+            this.#initReject?.(error);
+            this.#initResolve = this.#initReject = undefined;
+            throw error;
         }
     }
 
-    /** Get the subscription ID for this query subscription
-     * 
-     * This is a unique identifier assigned when the subscription was created.
-     * It can be used to reference this specific subscription, for example when
-     * sending keepalive signals.
-     * 
-     * @returns The subscription ID string
-     */
+    /** The executor's id for this subscription. */
     get id(): string {
-        return this.#subscriptionId;
+        return this.#live.id;
     }
 
-/** Promise that resolves when the subscription has received its first result
- * through the subscription channel. This ensures the subscription is fully
- * set up before allowing access to results or updates.
- * 
- * If no result is received within 30 seconds, the subscription will automatically
- * retry. The promise will remain pending until a subscription message successfully
- * arrives, or until a fatal error occurs during subscription setup.
- * 
- * Note: You typically don't need to await this directly since the subscription
- * creation methods (like subscribeInfer) already wait for initialization.
- */
+    /** Resolves once the first result has arrived. */
     get initialized(): Promise<boolean> {
         return this.#initialized;
     }
 
-    /** Get the latest query result
-     * 
-     * This returns the most recent result from the query, which could be either:
-     * - The initial result from when the subscription was created
-     * - The latest update received through the subscription
-     * 
-     * @returns The latest query result as a string (usually a JSON array of bindings)
-     */
+    /** The latest result. */
     get result(): AllInstancesResult {
-        return this.#latestResult;
+        return this.#live.result;
     }
 
-    /** Add a callback that will be called whenever new results arrive
-     * 
-     * The callback will be called immediately with the current result,
-     * and then again each time the query results change.
-     * 
-     * @param callback - Function that takes a result string and processes it
-     * @returns A function that can be called to remove this callback
-     * 
-     * Example:
-     * ```typescript
-     * const removeCallback = subscription.onResult(result => {
-     *     const bindings = JSON.parse(result);
-     *     console.log("New bindings:", bindings);
-     * });
-     * 
-     * // Later: stop receiving updates
-     * removeCallback();
-     * ```
-     */
+    /** Call `callback` with every later result. Returns a remover. */
     onResult(callback: QueryCallback): () => void {
         this.#callbacks.add(callback);
         return () => this.#callbacks.delete(callback);
     }
 
-    /** Deliver a result to consumers: complete a still-pending
-     *  initialization (clear the 30s init timeout, resolve #initialized),
-     *  record the result as latest, and notify all callbacks. Shared by the
-     *  initial-result path, the update callback, and the reconnect swap
-     *  handler so all three stay lifecycle-symmetric. */
-    #deliverResult(result: AllInstancesResult) {
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-        // Resolve the initialization promise (only resolves once)
-        if (this.#initResolve) {
-            this.#initResolve(true);
-            this.#initResolve = undefined;  // Prevent double-resolve
-            this.#initReject = undefined;
-        }
-        this.#latestResult = result;
-        this.#notifyCallbacks(result);
-    }
-
-    /** Start the keepalive loop for the given generation. The loop runs
-     *  every 30s until it is superseded (generation mismatch — a newer
-     *  subscribe() or reconnect swap took over) or the proxy is disposed.
-     *  On a keepalive error it falls back to a full subscribe(). */
-    #startKeepalive(generation: number) {
-        const keepaliveLoop = async () => {
-            // Generation check kills orphaned loops: a loop whose
-            // keepAliveQuery was in flight while a newer writer ran is not
-            // cancelled by clearTimeout and would otherwise reschedule
-            // itself alongside the newer loop.
-            if (this.#disposed || this.#generation !== generation) return;
-
-            try {
-                await this.#client.keepAliveQuery(this.#uuid, this.#subscriptionId);
-            } catch (e) {
-                if (this.#disposed || this.#generation !== generation) return;
-                console.error('Error in keepalive:', e);
-                // try to reinitialize the subscription
-                console.log('Reinitializing subscription for query:', this.#query);
-                try {
-                    await this.subscribe();
-                    console.log('Subscription reinitialized');
-                } catch (resubscribeError) {
-                    console.error('Error during resubscription from keepalive:', resubscribeError);
-                    // Don't schedule another keepalive on resubscribe failure.
-                    // Recovery is not lost: the failed subscribe() installed a
-                    // reconnect listener that retries the full subscribe.
-                    return;
-                }
-                // subscribe() succeeded and started its own keepalive loop
-                // under a new generation — this loop is done.
-                return;
-            }
-
-            // Schedule next keepalive if still the active generation
-            if (!this.#disposed && this.#generation === generation) {
-                this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
-            }
-        };
-
-        this.#keepaliveTimer = setTimeout(keepaliveLoop, 30000) as unknown as number;
-    }
-
-    /** Internal method to notify all callbacks of a new result */
-    #notifyCallbacks(result: AllInstancesResult) {
+    #deliver(result: AllInstancesResult) {
+        this.#initResolve?.(true);
+        this.#initResolve = this.#initReject = undefined;
         for (const callback of this.#callbacks) {
             try {
                 callback(result);
@@ -468,41 +113,10 @@ export class QuerySubscriptionProxy {
         }
     }
 
-    /** Clean up the subscription and stop keepalive signals
-     * 
-     * This method:
-     * 1. Stops the keepalive timer
-     * 2. Unsubscribes from subscription updates
-     * 3. Clears all registered callbacks
-     * 4. Cleans up any pending initialization timeout
-     * 
-     * After calling this method, the subscription is no longer active and
-     * will not receive any more updates. The instance should be discarded.
-     */
+    /** End the subscription on the executor and drop all callbacks. */
     dispose() {
-        this.#disposed = true;
-        // Invalidate any suspended writer so a mid-flight subscribe() or
-        // reconnect swap backs out instead of resurrecting state.
-        this.#generation++;
-        clearTimeout(this.#keepaliveTimer);
-        if (this.#unsubscribe) {
-            this.#unsubscribe();
-        }
-        if (this.#reconnectUnsub) {
-            this.#reconnectUnsub();
-            this.#reconnectUnsub = undefined;
-        }
+        this.#live.dispose();
         this.#callbacks.clear();
-        if (this.#initTimeoutId) {
-            clearTimeout(this.#initTimeoutId);
-            this.#initTimeoutId = undefined;
-        }
-
-        // Tell the backend to dispose of the subscription
-        if (this.#subscriptionId) {
-            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
-                .catch(e => console.error('Error disposing query subscription:', e));
-        }
     }
 }
 
@@ -1077,18 +691,16 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Subscribe to model query changes. Builds trigger SPARQL from the model shape
-     * internally in Rust, registers a subscription, runs the initial query, and
-     * pushes updated results when relevant links change.
-     *
-     * The subscription reuses the same WS-RPC subscription channel as subscribeQuery().
-     * Use keepAliveQuery() / disposeQuerySubscription() with the returned subscriptionId.
+     * Open a live model query on the executor. Later changes arrive as
+     * updates; `LiveQuery` (or `ModelQueryBuilder.subscribe()`) applies them.
+     * The subscription ends with `disposeQuerySubscription()` or when the
+     * socket closes.
      *
      * @param className - The model class name
      * @param queryJson - JSON-serialized query parameters (same as modelQuery)
-     * @returns Object with `subscriptionId` and initial `result`
+     * @returns `subscriptionId`, initial `result` and `revision` (0)
      */
-    async modelSubscribe(className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
+    async modelSubscribe(className: string, queryJson: string): Promise<Subscribed> {
         return await this.#client.modelSubscribe(this.#handle.uuid, className, queryJson);
     }
 
@@ -2546,94 +2158,25 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Creates a subscription for a Prolog query that updates in real-time.
-     * 
-     * This method:
-     * 1. Creates the subscription on the Rust side
-     * 2. Sets up the subscription callback
-     * 3. Waits for the initial result to come through the subscription channel
-     * 4. Returns a fully initialized QuerySubscriptionProxy
-     * 
-     * The returned subscription is guaranteed to be ready to receive updates,
-     * as this method waits for the initialization process to complete.
-     * 
-     * The subscription will be automatically cleaned up on both frontend and backend
-     * when dispose() is called. Make sure to call dispose() when you're done to
-     * prevent memory leaks and ensure proper cleanup of resources.
-     * 
-     * @param query - Prolog query string
-     * @returns Initialized QuerySubscriptionProxy instance
-     * 
-     * @example
+     * Live Prolog query: resolves once the first result is in.
+     *
      * ```typescript
-     * // Subscribe to active todos
-     * const subscription = await perspective.subscribeInfer(`
-     *   instance(Todo, "Todo"),
-     *   property_getter("Todo", Todo, "state", "active")
-     * `);
-     * 
-     * // Subscription is already initialized here
-     * console.log("Initial result:", subscription.result);
-     * 
-     * // Set up callback for future updates
-     * subscription.onResult((todos) => {
-     *   console.log("Active todos:", todos);
-     * });
-     * 
-     * // Clean up subscription when done
+     * const subscription = await perspective.subscribeInfer(`instance(Todo, "Todo")`);
+     * console.log(subscription.result);
+     * subscription.onResult(todos => console.log(todos));
      * subscription.dispose();
      * ```
      */
     async subscribeInfer(query: string): Promise<QuerySubscriptionProxy> {
-        const subscriptionProxy = new QuerySubscriptionProxy(
-            this.uuid,
-            query,
-            this.#client
-        );
-
-        // Start the subscription on the Rust side first to get the real subscription ID
-        await subscriptionProxy.subscribe();
-
-        // Wait for the initial result
-        await subscriptionProxy.initialized;
-
-        return subscriptionProxy;
+        return this.subscribeQuery(query);
     }
 
-    /**
-     * Creates a subscription for a SPARQL query that updates in real-time.
-     * 
-     * This method:
-     * 1. Creates the subscription on the Rust side
-     * 2. Sets up the subscription callback
-     * 3. Waits for the initial result to come through the subscription channel
-     * 4. Returns a fully initialized QuerySubscriptionProxy
-     * 
-     * The returned subscription is guaranteed to be ready to receive updates,
-     * as this method waits for the initialization process to complete.
-     * 
-     * The subscription will be automatically cleaned up on both frontend and backend
-     * when dispose() is called. Make sure to call dispose() when you're done to
-     * prevent memory leaks and ensure proper cleanup of resources.
-     * 
-    /** Subscribe to a query with live updates via the SPARQL subscription endpoint.
-     * @param query - Query string
-     * @returns Initialized QuerySubscriptionProxy instance
-     */
+    /** Live SPARQL (or Prolog) query: resolves once the first result is in.
+     *  Call `dispose()` on the returned proxy when done. */
     async subscribeQuery(query: string): Promise<QuerySubscriptionProxy> {
-        const subscriptionProxy = new QuerySubscriptionProxy(
-            this.uuid,
-            query,
-            this.#client
-        );
-
-        // Start the subscription on the Rust side first to get the real subscription ID
-        await subscriptionProxy.subscribe();
-
-        // Wait for the initial result
-        await subscriptionProxy.initialized;
-
-        return subscriptionProxy;
+        const subscription = new QuerySubscriptionProxy(this.uuid, query, this.#client);
+        await subscription.subscribe();
+        return subscription;
     }
 
 }

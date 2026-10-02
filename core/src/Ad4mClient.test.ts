@@ -108,8 +108,8 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'perspective.getSubjectData': '{"name":"test"}',
     'perspective.createBatch': 'batch-id-1',
     'perspective.commitBatch': { additions: [], removals: [] },
-    'perspective.subscribeQuery': true,
-    'perspective.keepAliveQuery': true,
+    'perspective.subscribeQuery': { subscriptionId: 'sub-1', result: [{ s: 'a' }], revision: 0 },
+    'perspective.resyncSubscription': { revision: 3, result: [{ s: 'c' }] },
     'events.watch': true,
     'perspective.disposeQuery': true,
 
@@ -653,13 +653,10 @@ describe('PerspectiveClient', () => {
         expect(result).toEqual([{ X: 'test' }]);
     });
 
-    test('subscribeToQueryUpdates() routes through the WebSocket endpoint', async () => {
+    test('the last unsubscribe closes the socket', async () => {
         const freshClient = newClient();
-        const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.onQueryUpdate(jest.fn());
         const ws = lastOf(MockWebSocket.instances);
-
-        expect(ws.url).toBe('ws://127.0.0.1:12000/api/v1/ws?token=test-token');
 
         unsubscribe();
         expect(ws.closed).toBe(true);
@@ -705,25 +702,27 @@ describe('PerspectiveClient', () => {
         expect(linkUpdatedCallback).toHaveBeenCalledWith({ oldLink: wireLink('test://updated-old'), newLink: wireLink('test://updated-new') });
     });
 
-    test('subscribeToQueryUpdates() ignores unrelated events and parses the result', async () => {
+    test('onQueryUpdate() gets every live query update and lag signal on the socket', async () => {
         const freshClient = newClient();
         const callback = jest.fn();
-        const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
+        const unsubscribe = freshClient.perspective.onQueryUpdate(callback);
         const ws = lastOf(MockWebSocket.instances);
-        const update = (subscriptionId: string, result: unknown) => event('query-subscription-update', {
-            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result),
-        });
+        const update = {
+            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId: 'sub-1', revision: 1,
+            added: [{ id: 'community://1' }], removed: [],
+        };
 
         ws.emit(perspectiveAdded('uuid-ignored'));
-        ws.emit(update('sub-2', { ignored: true }));
         expect(callback).not.toHaveBeenCalled();
 
-        ws.emit(update('sub-1', [{ id: 'community://1', name: 'REST Smoke Community' }]));
-        expect(callback).toHaveBeenCalledWith([{ id: 'community://1', name: 'REST Smoke Community' }]);
+        ws.emit(event('query-subscription-update', update));
+        ws.emit(event('query-subscription-update', { lagged: true }));
+        expect(callback).toHaveBeenNthCalledWith(1, expect.objectContaining(update));
+        expect(callback).toHaveBeenNthCalledWith(2, expect.objectContaining({ lagged: true }));
 
         unsubscribe();
-        ws.emit(update('sub-1', [{ id: 'community://2', name: 'Should not arrive' }]));
-        expect(callback).toHaveBeenCalledTimes(1);
+        ws.emit(event('query-subscription-update', { ...update, revision: 2 }));
+        expect(callback).toHaveBeenCalledTimes(2);
     });
 
     test('a client asks the executor for the events its listeners need', async () => {
@@ -859,6 +858,34 @@ describe('PerspectiveClient', () => {
         ws.emit(signalEvent('B'));
         ws.emit(signalEvent('A'));
         expect(signal).toHaveBeenCalledTimes(1);
+    });
+
+    test('a live query applies updates and resyncs on a revision gap', async () => {
+        const freshClient = newClient();
+        const subscription = await freshClient.perspective.byUUID('uuid-1')
+            .then(p => p!.subscribeQuery('SELECT ?s WHERE { ?s ?p ?o }'));
+        const results: unknown[] = [];
+        subscription.onResult(r => results.push(r));
+        const ws = lastOf(MockWebSocket.instances);
+        expect(subscription.result).toEqual([{ s: 'a' }]);
+
+        ws.emit({ type: 'perspective-added', perspective: { uuid: 'uuid-ignored' } });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-2', revision: 1, added: [{ s: 'x' }], removed: [] });
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 1, added: [{ s: 'b' }], removed: [{ s: 'a' }] });
+        expect(results).toEqual([[{ s: 'b' }]]);
+
+        // Revision 2 never arrives: the client asks for the current state.
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 3, added: [{ s: 'z' }], removed: [] });
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.resyncSubscription', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
+        expect(subscription.result).toEqual([{ s: 'c' }]);
+
+        ws.emit({ type: 'query-subscription-update', subscriptionId: 'sub-1', revision: 4, added: [{ s: 'd' }], removed: [] });
+        expect(subscription.result).toEqual([{ s: 'c' }, { s: 'd' }]);
+
+        subscription.dispose();
+        await new Promise(r => setTimeout(r, 10));
+        expect(lastRpcCall).toEqual({ type: 'perspective.disposeQuery', params: { uuid: 'uuid-1', subscriptionId: 'sub-1' } });
     });
 
     test('publishSnapshotByUUID() publishes a snapshot', async () => {

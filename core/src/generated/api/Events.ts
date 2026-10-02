@@ -14,10 +14,10 @@ import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
 import type { PerspectiveLinkUpdatedWithOwner } from "./PerspectiveLinkUpdatedWithOwner";
 import type { PerspectiveLinkWithOwner } from "./PerspectiveLinkWithOwner";
-import type { PerspectiveQuerySubscriptionFilter } from "./PerspectiveQuerySubscriptionFilter";
 import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
 import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
+import type { QuerySubscriptionUpdateEvent } from "./QuerySubscriptionUpdateEvent";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -39,7 +39,7 @@ export interface EventMap {
   "exception-occurred": ExceptionOccurredEvent;
   "transcription-text": TranscriptionTextFilter;
   "model-loading-status": AIModelLoadingStatus;
-  "query-subscription-update": PerspectiveQuerySubscriptionFilter;
+  "query-subscription-update": QuerySubscriptionUpdateEvent;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
 }
