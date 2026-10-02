@@ -195,6 +195,12 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     if !ctx.is_admin_credential {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
     let _ = get_holochain_service().await;
     Ok(Value::Bool(true))
 }
@@ -471,6 +477,13 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+
     let hc = get_holochain_service().await;
     let infos = hc
         .agent_infos()
@@ -482,6 +495,13 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
 async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
 
     let body: AddAgentInfosRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -500,6 +520,13 @@ async fn get_network_metrics(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
 
     let hc = get_holochain_service().await;
     let metrics = hc

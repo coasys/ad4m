@@ -1,4 +1,4 @@
-import { LinkCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { LinkCallback, LinkUpdatedCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowValidOutput,
@@ -510,7 +510,12 @@ export class QuerySubscriptionProxy {
     }
 }
 
-type PerspectiveListenerTypes = "link-added" | "link-removed" | "link-updated"
+/** Callback type of each link event. */
+export interface LinkListeners {
+    "link-added": LinkCallback
+    "link-removed": LinkCallback
+    "link-updated": LinkUpdatedCallback
+}
 
 export type LinkStatus = "shared" | "local"
 interface Parameter {
@@ -583,10 +588,12 @@ export class PerspectiveProxy {
     /** @internal Exposed for ModelQueryBuilder subscription management */
     get client(): PerspectiveClient { return this.#client; }
 
-    #perspectiveLinkAddedCallbacks: LinkCallback[]
-    #perspectiveLinkRemovedCallbacks: LinkCallback[]
-    #perspectiveLinkUpdatedCallbacks: LinkCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
+    #linkListeners: { [K in keyof LinkListeners]: LinkListeners[K][] } = { "link-added": [], "link-removed": [], "link-updated": [] }
+    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[] = []
+    /** Release of the one socket listener per type that feeds a callback array. */
+    #typeReleases = new Map<keyof LinkListeners | 'sync-state-change', () => void>()
+    /** Releases of the auto-processor listeners; each call adds one. */
+    #autoProcessorReleases: (() => void)[] = []
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -596,10 +603,6 @@ export class PerspectiveProxy {
      * Note: Don't create this directly, use ad4m.perspective.add() instead.
      */
     constructor(handle: PerspectiveHandle, ad4m: PerspectiveClient) {
-        this.#perspectiveLinkAddedCallbacks = []
-        this.#perspectiveLinkRemovedCallbacks = []
-        this.#perspectiveLinkUpdatedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
         this.#handle = handle
         this.#client = ad4m
         this.uuid = this.#handle.uuid;
@@ -608,10 +611,19 @@ export class PerspectiveProxy {
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;
-        this.#client.addPerspectiveLinkAddedListener(this.#handle.uuid, this.#perspectiveLinkAddedCallbacks)
-        this.#client.addPerspectiveLinkRemovedListener(this.#handle.uuid, this.#perspectiveLinkRemovedCallbacks)
-        this.#client.addPerspectiveLinkUpdatedListener(this.#handle.uuid, this.#perspectiveLinkUpdatedCallbacks)
-        this.#client.addPerspectiveSyncStateChangeListener(this.#handle.uuid, this.#perspectiveSyncStateChangeCallbacks)
+    }
+
+    /** Registers the socket listener that feeds one callback array on first use,
+     *  so a proxy with no listeners holds no socket callbacks. */
+    #register(type: keyof LinkListeners | 'sync-state-change'): void {
+        if (this.#typeReleases.has(type)) return
+        const uuid = this.#handle.uuid
+        this.#typeReleases.set(type,
+            type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#linkListeners['link-added'])
+            : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#linkListeners['link-removed'])
+            : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#linkListeners['link-updated'])
+            : this.#client.addPerspectiveSyncStateChangeListener(uuid, this.#perspectiveSyncStateChangeCallbacks)
+        )
     }
 
     /** Update the proxy's internal handle and public fields in-place.
@@ -748,12 +760,14 @@ export class PerspectiveProxy {
      * @param transcript ordered `{ speaker, text }` turns
      * @param basePrefix URI namespace for new instance identities, e.g. `soa://ext/`
      * @param classes local names of the subject classes to extract into; omit for all
+     * @param options scopes, progress reporting, and `signal` / `timeoutMs`
+     *   (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretation(
         transcript: TranscriptTurn[],
         basePrefix: string,
         classes?: string[],
-        options?: {
+        options?: CallOptions & {
             existingScope?: RawScope,
             mintScope?: RawScope,
             /** Report progress while the pass runs — see {@link RunInterpretationObserveOptions}. */
@@ -764,14 +778,16 @@ export class PerspectiveProxy {
         // The scopes were already unreachable from here for that reason, and a fourth, fifth and
         // sixth positional parameter would have made `undefined, undefined, { … }` the normal way
         // to ask for the only one of them most callers want.
+        const { existingScope, mintScope, observe, ...callOptions } = options ?? {}
         return await this.#client.runInterpretation(
             this.#handle.uuid,
             transcript,
             basePrefix,
             classes,
-            options?.existingScope,
-            options?.mintScope,
-            options?.observe,
+            existingScope,
+            mintScope,
+            observe,
+            callOptions,
         )
     }
 
@@ -790,6 +806,7 @@ export class PerspectiveProxy {
      *   classic single-shot path)
      * @param classes local names of the subject classes to extract into; omit for all
      * @param modelOverride optional model override; omit for the default LLM
+     * @param options `signal` / `timeoutMs` (default {@link LONG_TIMEOUT_MS})
      */
     async runInterpretationWithHarness(
         transcript: TranscriptTurn[],
@@ -805,6 +822,7 @@ export class PerspectiveProxy {
         // live in a UI. Absent = fast headless path (no telemetry cost).
         observationId?: string,
         emitDebugEvents?: boolean,
+        options?: CallOptions,
     ): Promise<string[]> {
         return await this.#client.runInterpretationWithHarness(
             this.#handle.uuid,
@@ -816,6 +834,7 @@ export class PerspectiveProxy {
             undefined,
             observationId,
             emitDebugEvents,
+            options,
         )
     }
 
@@ -954,9 +973,9 @@ export class PerspectiveProxy {
         return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
     }
 
-    /** Subscribe to this perspective's auto-processor step signals. */
-    async addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): Promise<void> {
-        return await this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb)
+    /** Subscribe to this perspective's auto-processor step signals until `dispose()`. */
+    addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): void {
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -966,10 +985,10 @@ export class PerspectiveProxy {
      * auto-processing this" without receiving the batch payload. See
      * `AutoProcessorNeighbourhoodStateEvent`.
      */
-    async addAutoProcessorNeighbourhoodStateListener(
+    addAutoProcessorNeighbourhoodStateListener(
         cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): Promise<void> {
-        return await this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb)
+    ): void {
+        this.#autoProcessorReleases.push(this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -1314,16 +1333,16 @@ export class PerspectiveProxy {
      * perspective.addListener("link-removed", (link) => {
      *   console.log("Link removed:", link);
      * });
+     *
+     * // Listen for updated links: the callback receives { oldLink, newLink }
+     * perspective.addListener("link-updated", ({ oldLink, newLink }) => {
+     *   console.log("Link updated:", oldLink, "->", newLink);
+     * });
      * ```
      */
-    async addListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
-        if (type === 'link-added') {
-            this.#perspectiveLinkAddedCallbacks.push(cb);
-        } else if (type === 'link-removed') {
-            this.#perspectiveLinkRemovedCallbacks.push(cb);
-        } else if (type === 'link-updated') {
-            this.#perspectiveLinkUpdatedCallbacks.push(cb);
-        }
+    addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
+        this.#linkListeners[type].push(cb)
+        this.#register(type)
     }
 
     /**
@@ -1338,8 +1357,9 @@ export class PerspectiveProxy {
      * });
      * ```
      */
-    async addSyncStateChangeListener(cb: SyncStateChangeCallback) {
+    addSyncStateChangeListener(cb: SyncStateChangeCallback): void {
         this.#perspectiveSyncStateChangeCallbacks.push(cb)
+        this.#register('sync-state-change')
     }
 
     /**
@@ -1348,27 +1368,20 @@ export class PerspectiveProxy {
      * @param type - Type of change to stop listening for
      * @param cb - The callback function to remove
      */
-    async removeListener(type: PerspectiveListenerTypes, cb: LinkCallback) {
-        if (type === 'link-added') {
-            const index = this.#perspectiveLinkAddedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkAddedCallbacks.splice(index, 1);
-        } else if (type === 'link-removed') {
-            const index = this.#perspectiveLinkRemovedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkRemovedCallbacks.splice(index, 1);
-        } else if (type === 'link-updated') {
-            const index = this.#perspectiveLinkUpdatedCallbacks.indexOf(cb);
-            if (index >= 0) this.#perspectiveLinkUpdatedCallbacks.splice(index, 1);
-        }
+    removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
+        const listeners = this.#linkListeners[type]
+        const index = listeners.indexOf(cb)
+        if (index >= 0) listeners.splice(index, 1)
     }
 
-    /** Clean up all subscriptions registered by this proxy.
-     *  Call this when the proxy is no longer needed to prevent subscription leaks.
-     *  After calling dispose(), the proxy should not be used. */
+    /** Removes every listener this proxy registered. Other proxies for the same
+     *  perspective keep theirs. */
     dispose(): void {
-        this.#client.removeAllListeners(this.#handle.uuid)
-        this.#perspectiveLinkAddedCallbacks.length = 0
-        this.#perspectiveLinkRemovedCallbacks.length = 0
-        this.#perspectiveLinkUpdatedCallbacks.length = 0
+        this.#typeReleases.forEach(release => release())
+        this.#typeReleases.clear()
+        this.#autoProcessorReleases.forEach(release => release())
+        this.#autoProcessorReleases = []
+        for (const listeners of Object.values(this.#linkListeners)) listeners.length = 0
         this.#perspectiveSyncStateChangeCallbacks.length = 0
     }
 
@@ -1650,18 +1663,11 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Adds a subject class to the perspective.
-     * Alias for addSdna() with sdnaType='subject_class'.
-     */
-    async addSubjectClass(name: string, shaclJson: string) {
-        return this.addSdna(name, '', 'subject_class', shaclJson);
-    }
-
-    /**
      * **Recommended way to add SDNA schemas.**
      * 
-     * Store a SHACL shape in this Perspective using the type-safe `SHACLShape` class.
-     * The shape is serialized as RDF triples (links) for native AD4M storage and querying.
+     * Store a SHACL shape in this Perspective. The executor writes it as links, as it
+     * does for `@Model` classes. The shape needs a `targetClass` and keeps its
+     * `nodeShapeUri`, which must end with `{name}Shape`.
      * 
      * @param name - Unique name for this schema (e.g., 'Recipe', 'Task')
      * @param shape - SHACLShape instance defining the schema
@@ -1685,31 +1691,7 @@ export class PerspectiveProxy {
      * await perspective.addShacl('Recipe', shape);
      */
     async addShacl(name: string, shape: SHACLShape): Promise<void> {
-        // Serialize shape to links
-        const shapeLinks = shape.toLinks();
-        
-        // Create name -> shape mapping links
-        const nameMapping = Literal.fromUrl(`literal:string:shacl://${name}`);
-        const allLinks: Link[] = [
-            ...shapeLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_shacl",
-                target: nameMapping.toUrl()
-            }),
-            new Link({
-                source: nameMapping.toUrl(),
-                predicate: "ad4m://shacl_shape_uri",
-                target: shape.nodeShapeUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        await this.addSdna(name, '', 'subject_class', JSON.stringify(shape.toJSON()));
     }
     
     /**
@@ -1745,15 +1727,20 @@ export class PerspectiveProxy {
     /**
      * Get all SHACL shapes stored in this Perspective (one RPC call).
      * The executor resolves all shapes in-process and returns them in bulk.
+     * A shape that fails to decode is skipped with a `console.warn`, so it
+     * does not hide the others.
      */
     async getAllShacl(): Promise<Array<{name: string, shape: SHACLShape}>> {
         const entries = await this.#client.getAllShacl(this.#handle.uuid);
-        return entries
-            .map(({ name, shapeUri, links }) => {
-                const shape = SHACLShape.fromLinks(links as any, shapeUri);
-                return shape ? { name, shape } : null;
-            })
-            .filter((s): s is { name: string; shape: SHACLShape } => s !== null);
+        const shapes: Array<{name: string, shape: SHACLShape}> = [];
+        for (const { name, shapeUri, links } of entries) {
+            try {
+                shapes.push({ name, shape: SHACLShape.fromLinks(links as any, shapeUri) });
+            } catch (e) {
+                console.warn(`getAllShacl: skipping SHACL shape "${name}" that cannot be decoded:`, e);
+            }
+        }
+        return shapes;
     }
 
     /**
@@ -1792,31 +1779,21 @@ export class PerspectiveProxy {
      * ```
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
-        // Serialize flow to links
-        const flowLinks = flow.toLinks();
-        
-        // Create registration and mapping links
         const flowNameLiteral = Literal.from(name).toUrl();
-        const allLinks: Link[] = [
-            ...flowLinks.map(l => new Link({
-                source: l.source,
-                predicate: l.predicate,
-                target: l.target
-            })),
-            new Link({
-                source: "ad4m://self",
-                predicate: "ad4m://has_flow",
-                target: flowNameLiteral
-            }),
-            new Link({
-                source: flowNameLiteral,
-                predicate: "ad4m://flow_uri",
-                target: flow.flowUri
-            })
-        ];
-        
-        // Batch add all links at once
-        await this.addLinks(allLinks);
+        const additions = [
+            ...flow.toLinks(),
+            { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
+            { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
+        ].map(l => new Link(l));
+
+        // Re-adding a flow replaces its transitions. Their URIs may use an
+        // older scheme, so find them through the flow's hasTransition links.
+        const edges = await this.get(new LinkQuery({ source: flow.flowUri, predicate: "ad4m://hasTransition" }));
+        const transitionLinks = await Promise.all(
+            edges.map(l => this.get(new LinkQuery({ source: l.data.target })))
+        );
+
+        await this.linkMutations({ additions, removals: [...edges, ...transitionLinks.flat()] });
     }
 
     /**
