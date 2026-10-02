@@ -10,7 +10,7 @@
  */
 
 import { expect } from "chai";
-import { Ad4mClient, PerspectiveProxy, SHACLFlow } from "@coasys/ad4m";
+import { Ad4mClient, PerspectiveProxy, SHACLFlow, Link, LinkQuery, Literal } from "@coasys/ad4m";
 import { FlowInstance } from "@coasys/ad4m";
 import type { ConsensusRule } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property } from "@coasys/ad4m";
@@ -432,5 +432,68 @@ describe("proposeFlowTransition — manual proposals, no roles", function () {
     expect(settledInst.currentStateName).to.equal("Archived");
     const archivedProposals = (await settledInst.proposals()).filter((p) => p.toState === "Archived");
     expect(archivedProposals, "one proposal, co-signed — no twin").to.have.lengthOf(1);
+  });
+
+  // ── Test 6: the currentState cache is per user (#1024) ──────────────────
+  // On a multi-user host a Local link is private to its author, and the
+  // engine's `currentState` cache is a Local link. So Alice never reads the
+  // cache Bob's transition wrote: her read derives the state for her and
+  // writes her own cache. Test 1 already asserts that she sees Bob's move;
+  // this pins what is on the graph, and that a bogus own cache reaches nobody
+  // else.
+  it("each user derives the state for themselves and keeps their own currentState cache", async () => {
+    const { aliceP, bobP } = await sharedPerspective("flow-propose-per-user-cache");
+    const flow = makeFlow({ n: 2 });
+    await aliceP.addFlow("ProposeTaskFlow", flow);
+
+    const task = (await (Task as any).create(aliceP, { title: "Per-user cache" })) as Task;
+    const inst = await FlowInstance.start(aliceP, "ProposeTaskFlow", task.id);
+    expect(inst.currentStateName).to.equal("Ready");
+    const cacheQuery = new LinkQuery({ source: inst.uri, predicate: "ad4m://flow/current_state" });
+    const stateOf = (link: any) => Literal.fromUrl(link.data.target).get();
+
+    // Bob moves it: Ready → InProgress (n:1 fires on propose).
+    await createUnder<WorkLog>(WorkLog, bobP, task.id, { note: "Picked up." });
+    const moved = await (await instanceOn(bobP, task.id)).proposeTransition("InProgress");
+    expect(moved.derivedState).to.equal("InProgress");
+
+    // Alice's read derives InProgress for her, from the signed proposals —
+    // not from Bob's cache, which she cannot see.
+    expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InProgress");
+
+    // Two separate Local cache links, each visible only to its author.
+    const aliceLinks = await aliceP.get(cacheQuery);
+    expect(aliceLinks, "Alice sees exactly her own cache link").to.have.lengthOf(1);
+    expect(aliceLinks[0].author).to.equal(aliceDid);
+    expect(String(aliceLinks[0].status).toLowerCase()).to.equal("local");
+    expect(stateOf(aliceLinks[0])).to.equal("InProgress");
+    const bobLinks = await bobP.get(cacheQuery);
+    expect(bobLinks, "Bob sees exactly his own cache link").to.have.lengthOf(1);
+    expect(bobLinks[0].author).to.equal(bobDid);
+    expect(String(bobLinks[0].status).toLowerCase()).to.equal("local");
+    expect(stateOf(bobLinks[0])).to.equal("InProgress");
+
+    // Alice plants a bogus state in her own cache. It is her Local link, so
+    // it is hers alone: Bob still reads the derived state and only his own
+    // link, and Alice's next read replaces the bogus link with her derivation.
+    await aliceP.add(
+      new Link({
+        source: inst.uri,
+        predicate: "ad4m://flow/current_state",
+        target: Literal.from("Done").toUrl(),
+      }),
+      "local",
+    );
+    expect((await instanceOn(bobP, task.id)).currentStateName, "Bob is unaffected").to.equal("InProgress");
+    const bobAfter = await bobP.get(cacheQuery);
+    expect(bobAfter).to.have.lengthOf(1);
+    expect(bobAfter[0].author).to.equal(bobDid);
+    expect(stateOf(bobAfter[0])).to.equal("InProgress");
+
+    expect((await instanceOn(aliceP, task.id)).currentStateName, "Alice re-derives").to.equal("InProgress");
+    const aliceAfter = await aliceP.get(cacheQuery);
+    expect(aliceAfter, "the bogus link was replaced, not added to").to.have.lengthOf(1);
+    expect(aliceAfter[0].author).to.equal(aliceDid);
+    expect(stateOf(aliceAfter[0])).to.equal("InProgress");
   });
 });

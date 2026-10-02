@@ -22,7 +22,7 @@
 use crate::agent::AgentContext;
 use crate::perspectives::hardwired_class::ensure_subject_class;
 use crate::perspectives::perspective_instance::{PerspectiveInstance, SubjectClassOption};
-use crate::types::{Link, LinkQuery, LinkStatus};
+use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus};
 use ad4m_client::literal::Literal;
 
 pub(crate) const FLOW_INSTANCE_CLASS: &str = "FlowInstance";
@@ -32,9 +32,10 @@ pub(crate) const FLOW_INSTANCE_SDNA: &str = include_str!("hardwired_sdna/flow_in
 pub(crate) const FLOW_URI_PREDICATE: &str = "ad4m://flow/flow_uri";
 /// `FlowInstance → subject` — the base expression the flow runs on.
 pub(crate) const FLOW_BASE_PREDICATE: &str = "ad4m://flow/base";
-/// `FlowInstance → currentState` — the engine's per-replica cache of the
-/// derived state. Written [`LinkStatus::Local`] only (see
-/// [`write_local_current_state`]); the fold never reads it.
+/// `FlowInstance → currentState` — the engine's cache of the derived state,
+/// one per replica and, on a multi-user host, one per user. Written
+/// [`LinkStatus::Local`] only (see [`write_local_current_state`]); the fold
+/// never reads it.
 pub(crate) const FLOW_CURRENT_STATE_PREDICATE: &str = "ad4m://flow/current_state";
 
 pub(crate) const FLOW_TRANSITION_PROPOSAL_CLASS: &str = "FlowTransitionProposal";
@@ -363,12 +364,22 @@ pub(crate) async fn advance_flow_instance_state(
         .map_err(|e| anyhow::anyhow!("advance_flow_instance_state: {e:#}"))
 }
 
-/// Replace this replica's own `currentState` link with `state`, as a
+/// Replace the acting user's own `currentState` link with `state`, as a
 /// `Local` link. Same single-target semantics as the SDNA setter, restricted
-/// to what is ours: only existing **`Local`** `currentState` links are
-/// removed. A `Shared` value some peer wrote (the pre-#987 executor did) is
+/// to what is ours: only the existing **`Local`** `currentState` links the
+/// acting user can see, which are their own, are removed. On a multi-user
+/// host every user keeps their own cache (see
+/// [`viewer_cache`](crate::perspectives::flow_instance::viewer_cache)),
+/// so another user's Local cache on the same instance is neither read nor
+/// touched. A `Shared` value some peer wrote (the pre-#987 executor did) is
 /// left where it is — this engine deletes nothing shared, and hydration
 /// prefers the later write, which is ours.
+///
+/// The link is signed as the acting user but is not billed and needs no
+/// compute credits: it is the engine's bookkeeping of a state the fold
+/// derived, and a `FlowInstance` read writes it too
+/// (`viewer_cache::sync_for_context`). A read must not fail or cost credits
+/// because of it.
 pub(crate) async fn write_local_current_state(
     perspective: &mut PerspectiveInstance,
     flow_instance_uri: &str,
@@ -377,11 +388,14 @@ pub(crate) async fn write_local_current_state(
     context: &AgentContext,
 ) -> anyhow::Result<()> {
     let existing = perspective
-        .get_links(&LinkQuery {
-            source: Some(flow_instance_uri.to_string()),
-            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-            ..Default::default()
-        })
+        .get_links_for_context(
+            &LinkQuery {
+                source: Some(flow_instance_uri.to_string()),
+                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+                ..Default::default()
+            },
+            context,
+        )
         .await
         .map_err(|e| anyhow::anyhow!("reading the currentState cache failed: {e:#}"))?;
     for link in existing
@@ -396,17 +410,17 @@ pub(crate) async fn write_local_current_state(
     let target = Literal::from_string(state.to_string())
         .to_url()
         .map_err(|e| anyhow::anyhow!("encoding state `{state}` failed: {e:#}"))?;
+    let link = Link {
+        source: flow_instance_uri.to_string(),
+        predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+        target,
+    };
+    link.validate()?;
+    // `add_link` minus its credit check and billing (see above).
+    let signed: LinkExpression =
+        crate::agent::create_signed_expression(link.normalize(), context)?.into();
     perspective
-        .add_link(
-            Link {
-                source: flow_instance_uri.to_string(),
-                predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
-                target,
-            },
-            LinkStatus::Local,
-            batch_id,
-            context,
-        )
+        .add_link_expression(signed, LinkStatus::Local, batch_id)
         .await
         .map_err(|e| anyhow::anyhow!("writing the currentState cache failed: {e:#}"))?;
     Ok(())

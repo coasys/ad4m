@@ -104,6 +104,7 @@ pub(crate) mod test_support;
 pub mod time;
 pub mod trigger;
 pub mod verify;
+pub mod viewer_cache;
 
 pub(crate) use pass::local_cached_state;
 pub use read_set::{fold_read_set, ProposalLinks, ReadSet};

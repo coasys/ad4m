@@ -50,6 +50,24 @@ fn make_link_with_status(
     link
 }
 
+/// `make_link` signed by a named author, with an explicit [`LinkStatus`].
+///
+/// The multi-tenancy tests turn on *who signed a link*, which every other
+/// helper here fixes to one DID.
+fn make_link_by(
+    author: &str,
+    source: &str,
+    predicate: &str,
+    target: &str,
+    ts: &str,
+    status: crate::types::LinkStatus,
+) -> LinkExpression {
+    let mut link = make_link(source, predicate, target, ts);
+    link.author = author.to_string();
+    link.status = Some(status);
+    link
+}
+
 /// `query` with the #1113 opt-in set, unless it sets the flag itself.
 ///
 /// `make_link` proofs are `key`/`sig` and its timestamps are `"1"`, `"2"`…, so
@@ -74,7 +92,7 @@ async fn fixture_query(
     query: &ModelQueryInput,
     resolver: &dyn super::types::ShapeResolver,
 ) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
-    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver, None).await
 }
 
 async fn fixture_query_from_json(
@@ -84,6 +102,25 @@ async fn fixture_query_from_json(
     shape_json: &str,
 ) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
     execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
+}
+
+/// [`fixture_query_from_json`] read as `viewer`: the multi-tenancy tests
+/// (#1024) turn on who may see a Local link, not on signatures.
+async fn fixture_query_from_json_for_viewer(
+    store: &SparqlStore,
+    class_name: &str,
+    query: &ModelQueryInput,
+    shape_json: &str,
+    viewer: Option<&str>,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    super::test_helpers::execute_model_query_from_json_for_viewer(
+        store,
+        class_name,
+        &with_unverified(query),
+        shape_json,
+        viewer,
+    )
+    .await
 }
 
 const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
@@ -194,6 +231,431 @@ async fn local_property_hydrates_only_from_local_links() {
         json!("warm"),
         "a Local link on a local predicate must hydrate normally"
     );
+}
+
+/// Two managed users on ONE executor must not see each other's Local links.
+///
+/// This is the whole of issue #1024. `LinkStatus::Local` means "not replicated
+/// by the link language", which on a single-user executor coincides with
+/// "private to me". On a multi-user executor it does not: managed users who
+/// join the same neighbourhood co-own one `PerspectiveInstance` backed by a
+/// single row set, so before this change a Local link written by Alice was
+/// fully readable by Bob on the same node. It was hidden only from *other*
+/// executors.
+///
+/// The shape's `state` property is declared `local: true`, so both agents write
+/// it as a Local link. The `type` flag is Shared and is what keeps both
+/// instances discoverable to both viewers — the test would be vacuous if the
+/// instances themselves vanished, because then it would be proving that
+/// filtering hides rows rather than that it hides the right field.
+#[tokio::test]
+async fn local_links_are_private_per_user_on_one_executor() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+
+    let store = SparqlStore::new(None).unwrap();
+
+    // Alice's instance: discoverable by everyone, private state authored by Alice.
+    let alice_base = "literal:string:cache_alice";
+    store
+        .add_link(&make_link_by(
+            ALICE,
+            alice_base,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000000",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_by(
+            ALICE,
+            alice_base,
+            "cache://state",
+            "literal:string:alice_secret",
+            "1700000000001",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    // Bob's instance, same perspective, same shape.
+    let bob_base = "literal:string:cache_bob";
+    store
+        .add_link(&make_link_by(
+            BOB,
+            bob_base,
+            "ad4m://type",
+            "cache://Cache",
+            "1700000000002",
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link_by(
+            BOB,
+            bob_base,
+            "cache://state",
+            "literal:string:bob_secret",
+            "1700000000003",
+            LinkStatus::Local,
+        ))
+        .unwrap();
+
+    let state_of = |res: &super::types::ModelQueryResult, base: &str| -> Value {
+        res.instances
+            .iter()
+            .find(|i| i["id"].as_str() == Some(base))
+            .unwrap_or_else(|| panic!("instance {base} missing from result"))["state"]
+            .clone()
+    };
+
+    // ── Alice's view ────────────────────────────────────────────────────────
+    let as_alice = fixture_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        Some(ALICE),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        as_alice.instances.len(),
+        2,
+        "both instances stay discoverable: the Shared type flag is not filtered"
+    );
+    assert_eq!(
+        state_of(&as_alice, alice_base),
+        json!("alice_secret"),
+        "Alice must still read her own Local link"
+    );
+    assert!(
+        state_of(&as_alice, bob_base).is_null(),
+        "Alice must NOT read Bob's Local link — this is issue #1024"
+    );
+
+    // ── Bob's view: the mirror image ────────────────────────────────────────
+    let as_bob = fixture_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        Some(BOB),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(as_bob.instances.len(), 2);
+    assert_eq!(
+        state_of(&as_bob, bob_base),
+        json!("bob_secret"),
+        "Bob must still read his own Local link"
+    );
+    assert!(
+        state_of(&as_bob, alice_base).is_null(),
+        "Bob must NOT read Alice's Local link"
+    );
+
+    // ── Executor scope still sees everything ────────────────────────────────
+    // The flow engine's `currentState` cache and the auto-processor read in
+    // this scope. If filtering leaked into it, those would silently stop
+    // seeing their own derivations.
+    let as_executor = fixture_query_from_json_for_viewer(
+        &store,
+        "Cache",
+        &ModelQueryInput::default(),
+        LOCAL_CACHE_SHAPE_JSON,
+        None,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(as_executor.instances.len(), 2);
+    assert_eq!(
+        state_of(&as_executor, alice_base),
+        json!("alice_secret"),
+        "executor scope reads every Local link"
+    );
+    assert_eq!(
+        state_of(&as_executor, bob_base),
+        json!("bob_secret"),
+        "executor scope reads every Local link"
+    );
+}
+
+/// A shape with one engine-derived Local property (`ad4m://flow/current_state`,
+/// the flow engine's cache) next to an ordinary Local property.
+const ENGINE_CACHE_SHAPE_JSON: &str = r#"{
+    "className": "EngineCached",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "cache://EngineCached"
+        },
+        "currentState": {
+            "predicate": "ad4m://flow/current_state",
+            "required": false,
+            "resolveLanguage": "literal",
+            "local": true
+        },
+        "note": {
+            "predicate": "cache://note",
+            "required": false,
+            "resolveLanguage": "literal",
+            "local": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// `total_count` must count only the instances the viewer gets back.
+///
+/// `hidden` is built entirely from Alice's Local links on the shape's own
+/// predicates. It also carries one Shared link on a predicate the shape does
+/// not declare. Bob may see that link, but hydration does not read its
+/// predicate, so `hidden` is not returned to Bob. The count guard used to
+/// accept any visible link on the source, so it counted `hidden` anyway and
+/// told Bob that an instance exists that he cannot read.
+///
+/// `listed` has a Shared type flag and Alice's Local state. Bob gets it back
+/// with no state, so counting it is correct: the count says the instance
+/// exists, as the rows do, and hides only what the rows hide.
+#[tokio::test]
+async fn total_count_matches_what_the_viewer_can_hydrate() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+
+    let store = SparqlStore::new(None).unwrap();
+    let add = |author: &str, source: &str, pred: &str, target: &str, ts: &str, st: LinkStatus| {
+        store
+            .add_link(&make_link_by(author, source, pred, target, ts, st))
+            .unwrap();
+    };
+
+    let hidden = "literal:string:cache_hidden";
+    add(
+        ALICE,
+        hidden,
+        "ad4m://type",
+        "cache://Cache",
+        "1700000000000",
+        LinkStatus::Local,
+    );
+    add(
+        ALICE,
+        hidden,
+        "cache://state",
+        "literal:string:secret",
+        "1700000000001",
+        LinkStatus::Local,
+    );
+    add(
+        ALICE,
+        hidden,
+        "other://tag",
+        "literal:string:public",
+        "1700000000002",
+        LinkStatus::Shared,
+    );
+
+    let listed = "literal:string:cache_listed";
+    add(
+        ALICE,
+        listed,
+        "ad4m://type",
+        "cache://Cache",
+        "1700000000003",
+        LinkStatus::Shared,
+    );
+    add(
+        ALICE,
+        listed,
+        "cache://state",
+        "literal:string:secret2",
+        "1700000000004",
+        LinkStatus::Local,
+    );
+
+    let run = |input: ModelQueryInput, viewer: Option<&'static str>| {
+        let store = &store;
+        async move {
+            fixture_query_from_json_for_viewer(
+                store,
+                "Cache",
+                &input,
+                LOCAL_CACHE_SHAPE_JSON,
+                viewer,
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    // Rows Bob actually gets back.
+    let rows = run(ModelQueryInput::default(), Some(BOB)).await;
+    let ids: Vec<&str> = rows
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![listed],
+        "Bob gets back only the instance he can read"
+    );
+    // `listed` is an empty shell for Bob: counted and returned, with no value
+    // for the property he cannot read. The count hides nothing more.
+    assert!(
+        rows.instances[0]["state"].is_null(),
+        "Alice's Local state must not hydrate for Bob: {}",
+        rows.instances[0]
+    );
+
+    // count(): the COUNT-only fast path.
+    let count_only = run(
+        ModelQueryInput {
+            limit: Some(0),
+            ..Default::default()
+        },
+        Some(BOB),
+    )
+    .await;
+    assert_eq!(
+        count_only.total_count, 1,
+        "count() must not include an instance Bob cannot hydrate"
+    );
+
+    // A paged read: total_count comes from the COUNT query too.
+    let paged = run(
+        ModelQueryInput {
+            limit: Some(10),
+            ..Default::default()
+        },
+        Some(BOB),
+    )
+    .await;
+    assert_eq!(paged.instances.len(), 1);
+    assert_eq!(
+        paged.total_count, 1,
+        "a paged total must not include an instance Bob cannot hydrate"
+    );
+
+    // Alice reads both, and executor scope is unchanged.
+    for viewer in [Some(ALICE), None] {
+        let count = run(
+            ModelQueryInput {
+                limit: Some(0),
+                ..Default::default()
+            },
+            viewer,
+        )
+        .await;
+        assert_eq!(
+            count.total_count, 2,
+            "viewer {viewer:?} sees both instances"
+        );
+    }
+}
+
+/// `total_count` for a viewer counts only the instances hydration returns,
+/// when what selects an instance is not one of its own rows.
+///
+/// A class with no flag and no required property is selected by its scope
+/// alone: `<folder> <note://in> ?source`, a Shared link on the *parent*,
+/// which Bob may see. `hidden`'s only row is Alice's Local `body`, so
+/// hydration returns nothing for it to Bob, and without
+/// `count_visibility_guard` the count would still include it. `listed` has a
+/// Shared `body` and is counted for everyone. Alice and executor scope get
+/// both.
+#[tokio::test]
+async fn total_count_does_not_count_a_scoped_instance_the_viewer_cannot_hydrate() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+    const NOTE_SHAPE_JSON: &str = r#"{
+        "className": "Note",
+        "properties": {
+            "body": { "predicate": "note://body", "required": false }
+        },
+        "relations": {}
+    }"#;
+
+    let store = SparqlStore::new(None).unwrap();
+    for (source, pred, target, ts, status) in [
+        (
+            "note://folder",
+            "note://in",
+            "note://hidden",
+            "1700000000000",
+            LinkStatus::Shared,
+        ),
+        (
+            "note://hidden",
+            "note://body",
+            "literal:string:secret",
+            "1700000000001",
+            LinkStatus::Local,
+        ),
+        (
+            "note://folder",
+            "note://in",
+            "note://listed",
+            "1700000000002",
+            LinkStatus::Shared,
+        ),
+        (
+            "note://listed",
+            "note://body",
+            "literal:string:public",
+            "1700000000003",
+            LinkStatus::Shared,
+        ),
+    ] {
+        store
+            .add_link(&make_link_by(ALICE, source, pred, target, ts, status))
+            .unwrap();
+    }
+
+    let run = |limit: usize, viewer: Option<&'static str>| {
+        let store = &store;
+        async move {
+            let input = ModelQueryInput {
+                parent: Some(Scope::Raw {
+                    id: "note://folder".to_string(),
+                    predicate: "note://in".to_string(),
+                }),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            fixture_query_from_json_for_viewer(store, "Note", &input, NOTE_SHAPE_JSON, viewer)
+                .await
+                .unwrap()
+        }
+    };
+
+    let paged = run(10, Some(BOB)).await;
+    let ids: Vec<&str> = paged
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["note://listed"], "Bob's rows");
+    assert_eq!(paged.total_count, 1, "Bob's paged total");
+    assert_eq!(run(0, Some(BOB)).await.total_count, 1, "Bob's count()");
+
+    for viewer in [Some(ALICE), None] {
+        assert_eq!(run(10, viewer).await.instances.len(), 2, "{viewer:?}");
+        assert_eq!(run(10, viewer).await.total_count, 2, "{viewer:?}");
+        assert_eq!(run(0, viewer).await.total_count, 2, "{viewer:?} count()");
+    }
 }
 
 #[tokio::test]
@@ -896,6 +1358,7 @@ async fn test_resolve_projections_count() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -952,6 +1415,7 @@ async fn test_resolve_projections_list() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1007,6 +1471,7 @@ async fn test_resolve_projections_scalar() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1054,6 +1519,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1131,6 +1597,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1205,6 +1672,7 @@ async fn test_resolve_projections_where_filter_by_author() {
             0,
             None,
             Some(true),
+            None,
         )
         .await
         .unwrap();
@@ -1485,8 +1953,7 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result =
-        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
+    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY);
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -2057,7 +2524,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2136,7 +2603,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2263,7 +2730,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2335,7 +2802,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2405,7 +2872,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2498,7 +2965,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, LinkGuard::ANY).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2933,7 +3400,7 @@ async fn test_build_instance_sparql_scalar_only_model_uses_values_clause() {
         scalar_prop("description", "flux://description", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -2967,7 +3434,7 @@ async fn test_build_instance_sparql_excludes_getter_backed_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         sparql.contains("VALUES ?predicate"),
@@ -3001,7 +3468,7 @@ async fn test_build_instance_sparql_retains_raw_predicate_collections() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     assert!(sparql.contains("<flux://entry_type>"));
@@ -3032,7 +3499,7 @@ async fn test_build_instance_sparql_shared_predicate_mixed_getter() {
         ),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // ad4m://has_child should appear because raw_children needs it
@@ -3048,7 +3515,7 @@ async fn test_build_instance_sparql_empty_shape_falls_back_to_wildcard() {
     // unrestricted wildcard (no VALUES clause).
     let shape = make_shape(vec![]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(
         !sparql.contains("VALUES ?predicate"),
@@ -3068,7 +3535,7 @@ async fn test_build_instance_sparql_values_clause_is_deduplicated() {
         scalar_prop("name", "ns://name", false, false),
     ]);
     let query = ModelQueryInput::default();
-    let sparql = build_instance_sparql(&shape, &query, None, None).into_single();
+    let sparql = build_instance_sparql(&shape, &query, None, None, None).into_single();
 
     assert!(sparql.contains("VALUES ?predicate"));
     // Count occurrences of the shared predicate in the VALUES clause
@@ -4481,6 +4948,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
+        None,
     )
     .await
     .unwrap();
@@ -4516,6 +4984,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         0,
         None,
         Some(true),
+        None,
     )
     .await
     .unwrap();
@@ -9068,6 +9537,508 @@ async fn a_transitive_read_totals_what_it_returns() {
     );
 }
 
+// --- Scope edges in agent scope (#1024) ------------------------------------
+
+const EDGE_ALICE: &str = "did:key:z6MkAlice";
+const EDGE_BOB: &str = "did:key:z6MkBob";
+
+/// A Comment whose own links are unannotated, so every viewer may read it.
+/// Whether a viewer finds it then depends only on the edge that leads to it.
+fn add_comment(store: &SparqlStore, id: &str) {
+    for (predicate, target) in [
+        ("ad4m://type", "we://Comment".to_string()),
+        (
+            "we://text",
+            format!("literal:string:{}", id.trim_start_matches("we://")),
+        ),
+    ] {
+        store
+            .add_link(&make_link(id, predicate, &target, "2026-01-02T00:00:00Z"))
+            .unwrap();
+    }
+}
+
+/// `source --predicate--> target` as Alice's Local link.
+fn add_alice_local_edge(store: &SparqlStore, source: &str, predicate: &str, target: &str) {
+    store
+        .add_link(&make_link_by(
+            EDGE_ALICE,
+            source,
+            predicate,
+            target,
+            "2026-01-02T00:00:01Z",
+            crate::types::LinkStatus::Local,
+        ))
+        .unwrap();
+}
+
+async fn comment_ids(
+    store: &SparqlStore,
+    query: ModelQueryInput,
+    viewer: Option<&str>,
+) -> Vec<String> {
+    let result =
+        fixture_query_from_json_for_viewer(store, "Comment", &query, COMMENT_SHAPE_JSON, viewer)
+            .await
+            .expect("query should execute");
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    ids.sort();
+    ids
+}
+
+async fn comment_count(store: &SparqlStore, parent: Scope, viewer: Option<&str>) -> usize {
+    fixture_query_from_json_for_viewer(
+        store,
+        "Comment",
+        &ModelQueryInput {
+            parent: Some(parent),
+            limit: Some(0),
+            ..Default::default()
+        },
+        COMMENT_SHAPE_JSON,
+        viewer,
+    )
+    .await
+    .expect("count should execute")
+    .total_count
+}
+
+fn sorted(ids: &[&str]) -> Vec<String> {
+    let mut ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+    ids.sort();
+    ids
+}
+
+/// The link that files a record under its parent must be one the viewer may
+/// see. `we://secret` is a Comment with its own readable links, filed under
+/// `we://root` only by Alice's Local link. Scoped to `we://root`, Bob used to
+/// get it back, hydrated from its own links: the scope edge was matched as a
+/// raw triple, which carries no author.
+///
+/// Every scope form that names a parent edge is checked: `Raw`, `Model` with
+/// and without a field, and a one-step `Traverse`.
+#[tokio::test]
+async fn parent_scope_edges_follow_the_viewer() {
+    let store = comment_tree_store();
+    add_comment(&store, "we://secret");
+    add_alice_local_edge(&store, "we://root", "we://comment", "we://secret");
+    // `Model` without a field matches any predicate ending in `/Comment`.
+    store
+        .add_link(&make_link(
+            "we://root",
+            "we://has/Comment",
+            "we://c1",
+            "2026-01-02T00:00:02Z",
+        ))
+        .unwrap();
+    add_alice_local_edge(&store, "we://root", "we://has/Comment", "we://secret");
+
+    let children = sorted(&["we://c1", "we://c2", "we://c3"]);
+    let with_secret = sorted(&["we://c1", "we://c2", "we://c3", "we://secret"]);
+    let scopes = [
+        (
+            "Raw",
+            Scope::Raw {
+                id: "we://root".to_string(),
+                predicate: "we://comment".to_string(),
+            },
+            children.clone(),
+            with_secret.clone(),
+        ),
+        (
+            "Model with a field",
+            Scope::Model {
+                model: "Comment".to_string(),
+                id: "we://root".to_string(),
+                field: Some("we://comment".to_string()),
+            },
+            children.clone(),
+            with_secret.clone(),
+        ),
+        (
+            "Model without a field",
+            Scope::Model {
+                model: "Comment".to_string(),
+                id: "we://root".to_string(),
+                field: None,
+            },
+            sorted(&["we://c1"]),
+            sorted(&["we://c1", "we://secret"]),
+        ),
+        (
+            "one-step Traverse",
+            traverse_scope(&["we://root"], false, ScopeDirection::Out, None),
+            children.clone(),
+            with_secret.clone(),
+        ),
+    ];
+
+    for (name, scope, bob_sees, alice_sees) in scopes {
+        let query = ModelQueryInput {
+            parent: Some(scope.clone()),
+            ..Default::default()
+        };
+        assert_eq!(
+            comment_ids(&store, query.clone(), Some(EDGE_BOB)).await,
+            bob_sees,
+            "{name}: Bob must not reach a record through Alice's Local link"
+        );
+        assert_eq!(
+            comment_count(&store, scope.clone(), Some(EDGE_BOB)).await,
+            bob_sees.len(),
+            "{name}: Bob's count must not include it either"
+        );
+        assert_eq!(
+            comment_ids(&store, query.clone(), Some(EDGE_ALICE)).await,
+            alice_sees,
+            "{name}: Alice reaches it through her own link"
+        );
+        assert_eq!(
+            comment_ids(&store, query, None).await,
+            alice_sees,
+            "{name}: executor scope is unchanged"
+        );
+    }
+}
+
+/// A transitive traversal must reach only what the viewer can reach through
+/// links it may see. A `+` path cannot filter its hops, so the executor walks
+/// the visible edges and the query keeps those pairs.
+///
+/// ```text
+/// root ── c1 ── r1 ── rr1
+///   │  │   └─── r2 ·· hid1 ── hid2      ·· is Alice's Local link
+///   │  ├── c2
+///   │  └── c3
+///   └·········· rr1
+/// ```
+///
+/// `hid1` and `hid2` hang only off Alice's Local link, so Bob must not get
+/// them. `rr1` is also under Alice's link from `root`, but Bob reaches it
+/// through `c1 → r1` as well, so he keeps it.
+#[tokio::test]
+async fn transitive_traversal_follows_only_links_the_viewer_may_see() {
+    let store = comment_tree_store();
+    add_comment(&store, "we://hid1");
+    add_comment(&store, "we://hid2");
+    add_alice_local_edge(&store, "we://r2", "we://comment", "we://hid1");
+    store
+        .add_link(&make_link(
+            "we://hid1",
+            "we://comment",
+            "we://hid2",
+            "2026-01-02T00:00:03Z",
+        ))
+        .unwrap();
+    add_alice_local_edge(&store, "we://root", "we://comment", "we://rr1");
+
+    let whole_tree = traverse_scope(&["we://root"], true, ScopeDirection::Out, None);
+    let query = ModelQueryInput {
+        parent: Some(whole_tree.clone()),
+        ..Default::default()
+    };
+    let visible = sorted(&[
+        "we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1",
+    ]);
+    let everything = sorted(&[
+        "we://c1",
+        "we://c2",
+        "we://c3",
+        "we://r1",
+        "we://r2",
+        "we://rr1",
+        "we://hid1",
+        "we://hid2",
+    ]);
+
+    assert_eq!(
+        comment_ids(&store, query.clone(), Some(EDGE_BOB)).await,
+        visible
+    );
+    assert_eq!(
+        comment_count(&store, whole_tree.clone(), Some(EDGE_BOB)).await,
+        visible.len()
+    );
+    assert_eq!(
+        comment_ids(&store, query.clone(), Some(EDGE_ALICE)).await,
+        everything
+    );
+    assert_eq!(comment_ids(&store, query, None).await, everything);
+
+    // Inward: from `hid2`, Bob reaches `hid1` by an unannotated link and
+    // stops there, because the only way on to `r2` is Alice's Local link.
+    let inward = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://hid2"],
+            true,
+            ScopeDirection::In,
+            None,
+        )),
+        ..Default::default()
+    };
+    assert_eq!(
+        comment_ids(&store, inward.clone(), Some(EDGE_BOB)).await,
+        sorted(&["we://hid1"])
+    );
+    // Alice walks on up to `root`, which is not a Comment.
+    assert_eq!(
+        comment_ids(&store, inward, Some(EDGE_ALICE)).await,
+        sorted(&["we://hid1", "we://r2", "we://c1"])
+    );
+
+    // A per-anchor limit projects the anchor. `c2` has no children, and
+    // `c1`'s descendants through Alice's link must still not appear.
+    let per_anchor = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://c1", "we://c2"],
+            true,
+            ScopeDirection::Out,
+            Some(10),
+        )),
+        ..Default::default()
+    };
+    assert_eq!(
+        comment_ids(&store, per_anchor.clone(), Some(EDGE_BOB)).await,
+        sorted(&["we://r1", "we://r2", "we://rr1"])
+    );
+    assert_eq!(
+        comment_ids(&store, per_anchor, Some(EDGE_ALICE)).await,
+        sorted(&["we://r1", "we://r2", "we://rr1", "we://hid1", "we://hid2"])
+    );
+}
+
+/// A `levels` walk takes one step per level, so each step must follow only
+/// links the viewer may see. Otherwise the walk also continues below a node
+/// reached through another user's Local link.
+#[tokio::test]
+async fn a_level_walk_follows_only_links_the_viewer_may_see() {
+    let store = comment_tree_store();
+    add_comment(&store, "we://hid1");
+    add_alice_local_edge(&store, "we://c2", "we://comment", "we://hid1");
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10]),
+        }),
+        ..Default::default()
+    };
+    let two_levels = sorted(&["we://c1", "we://c2", "we://c3", "we://r1", "we://r2"]);
+    assert_eq!(
+        comment_ids(&store, query.clone(), Some(EDGE_BOB)).await,
+        two_levels
+    );
+
+    let mut with_hidden = two_levels.clone();
+    with_hidden.push("we://hid1".to_string());
+    with_hidden.sort();
+    assert_eq!(
+        comment_ids(&store, query.clone(), Some(EDGE_ALICE)).await,
+        with_hidden
+    );
+    assert_eq!(comment_ids(&store, query, None).await, with_hidden);
+}
+
+/// A reverse include (`belongsTo`) reads the edges that point at each record.
+/// Those must be edges the viewer may see: `we://c/2` holds the block only
+/// through Alice's Local link, so Bob must not see it as a container.
+#[tokio::test]
+async fn reverse_include_follows_only_links_the_viewer_may_see() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "1"))
+        .unwrap();
+    for container in ["we://c/1", "we://c/2"] {
+        store
+            .add_link(&make_link(container, "we://flag", "we://collection", "2"))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "3"))
+        .unwrap();
+    add_alice_local_edge(&store, "we://c/2", "we://children", "we://t/1");
+
+    let block_json = r#"{
+        "className": "TextBlock",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+        },
+        "relations": {
+            "containers": {
+                "predicate": "we://children",
+                "kind": "belongsToMany",
+                "direction": "reverse",
+                "targetClassName": "Collection"
+            }
+        }
+    }"#;
+    let (resolver, block_shape) = StaticShapeResolver::from_json("TextBlock", block_json).unwrap();
+    resolver.register(
+        "Collection",
+        parse_shape_from_json(
+            r#"{"className":"Collection","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+               },"relations":{}}"#,
+            "Collection",
+        )
+        .unwrap(),
+    );
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "containers".to_string(),
+            super::types::IncludeValue::Bool(true),
+        )])),
+        ..Default::default()
+    };
+
+    let containers = |viewer: Option<&'static str>| {
+        let (store, resolver, shape, query) = (&store, &resolver, &block_shape, &query);
+        async move {
+            let result = super::query::execute_model_query(
+                store,
+                shape.as_ref(),
+                &with_unverified(query),
+                resolver,
+                viewer,
+            )
+            .await
+            .unwrap();
+            let mut ids: Vec<String> = result.instances[0]["containers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|c| c["id"].as_str().map(|s| s.to_string()))
+                .collect();
+            ids.sort();
+            ids
+        }
+    };
+
+    assert_eq!(
+        containers(Some(EDGE_BOB)).await,
+        vec!["we://c/1".to_string()]
+    );
+    let both = vec!["we://c/1".to_string(), "we://c/2".to_string()];
+    assert_eq!(containers(Some(EDGE_ALICE)).await, both);
+    assert_eq!(containers(None).await, both);
+}
+
+/// A transitive projection read by a viewer counts (and lists) what the
+/// parent reaches through links that viewer may see, at every depth.
+///
+/// Uses the tree from [`comment_tree_store`] plus `hid1`, which hangs off
+/// `r2` only through Alice's Local link, and `hid2` below `hid1`. The
+/// projection used to check the direct edge `?parent <p> ?t` for the viewer.
+/// That cut every transitive reach down to the direct children, so any agent
+/// scope counted 3 where the subtree has 6 (Bob) or 8 (Alice).
+#[tokio::test]
+async fn a_transitive_projection_follows_only_links_the_viewer_may_see() {
+    use super::types::{ProjectionInput, WhereCondition};
+
+    let store = comment_tree_store();
+    add_comment(&store, "we://root");
+    add_comment(&store, "we://hid1");
+    add_comment(&store, "we://hid2");
+    add_alice_local_edge(&store, "we://r2", "we://comment", "we://hid1");
+    store
+        .add_link(&make_link(
+            "we://hid1",
+            "we://comment",
+            "we://hid2",
+            "2026-01-02T00:00:03Z",
+        ))
+        .unwrap();
+
+    let shape_json = r#"{
+        "className": "Comment",
+        "properties": {
+            "type": { "predicate": "ad4m://type", "required": true, "flag": true, "initial": "we://Comment" },
+            "text": { "predicate": "we://text", "required": false }
+        },
+        "relations": {
+            "replies": { "predicate": "we://comment", "target": "Comment" }
+        }
+    }"#;
+    let projection = |count: bool, transitive: bool| ProjectionInput {
+        transitive,
+        from: "replies".to_string(),
+        count,
+        target_class_name: None,
+        where_clause: None,
+        limit: None,
+        order: None,
+    };
+    let query = ModelQueryInput {
+        where_clause: Some(BTreeMap::from([(
+            "id".to_string(),
+            WhereCondition::String("we://root".to_string()),
+        )])),
+        projections: Some(HashMap::from([
+            ("$direct".to_string(), projection(true, false)),
+            ("$all".to_string(), projection(true, true)),
+            ("$subtree".to_string(), projection(false, true)),
+        ])),
+        ..Default::default()
+    };
+    let root_as = |viewer: Option<&'static str>| {
+        let store = &store;
+        let query = &query;
+        async move {
+            let result =
+                fixture_query_from_json_for_viewer(store, "Comment", query, shape_json, viewer)
+                    .await
+                    .expect("query should execute");
+            assert_eq!(result.instances.len(), 1, "root is returned");
+            let root = result.instances[0].clone();
+            let mut subtree: Vec<String> = root["$subtree"]
+                .as_array()
+                .expect("$subtree is a list")
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+            subtree.sort();
+            (root["$direct"].clone(), root["$all"].clone(), subtree)
+        }
+    };
+
+    let bob_reaches = sorted(&[
+        "we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1",
+    ]);
+    let everything = sorted(&[
+        "we://c1",
+        "we://c2",
+        "we://c3",
+        "we://hid1",
+        "we://hid2",
+        "we://r1",
+        "we://r2",
+        "we://rr1",
+    ]);
+
+    let (direct, all, subtree) = root_as(Some(EDGE_BOB)).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(6), "Bob counts his whole visible subtree");
+    assert_eq!(subtree, bob_reaches, "and lists exactly that");
+
+    let (direct, all, subtree) = root_as(Some(EDGE_ALICE)).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(8), "Alice also reaches past her own Local link");
+    assert_eq!(subtree, everything);
+
+    let (direct, all, subtree) = root_as(None).await;
+    assert_eq!(direct, json!(3));
+    assert_eq!(all, json!(8), "executor scope is unchanged");
+    assert_eq!(subtree, everything);
+}
+
 // ---------------------------------------------------------------------------
 // `links` — per-link rows, including undeclared predicates (#1046 §3/§4,
 // #1111, #1112)
@@ -9610,5 +10581,109 @@ async fn links_inside_an_include_sub_query() {
     assert!(
         result.instances[0].get("__links").is_none(),
         "the parent did not ask"
+    );
+}
+
+/// `links` rows follow the same viewer rule as hydration (#1024). The option
+/// accepts any predicate IRI, so without it a co-owner could read another
+/// user's Local links by naming their predicate. The flow engine's
+/// `currentState` cache is a Local link like any other: its author's alone.
+#[tokio::test]
+async fn links_rows_are_viewer_scoped() {
+    use crate::types::LinkStatus;
+
+    const ALICE: &str = "did:key:z6MkAlice";
+    const BOB: &str = "did:key:z6MkBob";
+
+    let store = SparqlStore::new(None).unwrap();
+    let base = "literal:string:links_scoped";
+    for (author, pred, target, ts, status) in [
+        (
+            BOB,
+            "ad4m://type",
+            "cache://EngineCached",
+            "1700000000000",
+            LinkStatus::Shared,
+        ),
+        (
+            BOB,
+            "ad4m://flow/current_state",
+            "literal:string:InReview",
+            "1700000000001",
+            LinkStatus::Local,
+        ),
+        (
+            BOB,
+            "app://undeclared",
+            "literal:string:bob_private",
+            "1700000000002",
+            LinkStatus::Local,
+        ),
+        (
+            ALICE,
+            "app://undeclared",
+            "literal:string:alice_own",
+            "1700000000003",
+            LinkStatus::Local,
+        ),
+    ] {
+        store
+            .add_link(&make_link_by(author, base, pred, target, ts, status))
+            .unwrap();
+    }
+
+    let input = ModelQueryInput {
+        links: Some(vec![
+            "app://undeclared".to_string(),
+            "currentState".to_string(),
+        ]),
+        ..Default::default()
+    };
+    let targets = |viewer: Option<&'static str>, key: &'static str| {
+        let (store, input) = (&store, &input);
+        async move {
+            let res = fixture_query_from_json_for_viewer(
+                store,
+                "EngineCached",
+                input,
+                ENGINE_CACHE_SHAPE_JSON,
+                viewer,
+            )
+            .await
+            .unwrap();
+            assert_eq!(res.instances.len(), 1);
+            // A key with no visible row may be absent altogether.
+            let mut t: Vec<String> = res.instances[0]["__links"][key]
+                .as_array()
+                .map(|rows| {
+                    rows.iter()
+                        .map(|r| r["data"]["target"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .unwrap_or_default();
+            t.sort();
+            t
+        }
+    };
+
+    assert_eq!(
+        targets(Some(ALICE), "app://undeclared").await,
+        vec!["literal:string:alice_own"],
+        "Alice gets her own Local row, not Bob's"
+    );
+    assert_eq!(
+        targets(Some(ALICE), "currentState").await,
+        Vec::<String>::new(),
+        "Bob's Local currentState cache is his alone; Alice derives her own"
+    );
+    assert_eq!(
+        targets(Some(BOB), "currentState").await,
+        vec!["literal:string:InReview"],
+        "Bob reads his own cache"
+    );
+    assert_eq!(
+        targets(None, "app://undeclared").await,
+        vec!["literal:string:alice_own", "literal:string:bob_private"],
+        "executor scope reads every row"
     );
 }

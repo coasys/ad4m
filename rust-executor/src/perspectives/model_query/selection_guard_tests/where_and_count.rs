@@ -253,9 +253,10 @@ async fn selection_a_forged_link_does_not_pass_a_scope_or_a_projection_where() {
             }))
             .unwrap();
             let shape = resolver.get_shape("Grant").unwrap();
-            let got = super::super::query::execute_model_query(store, &shape, &query, resolver)
-                .await
-                .unwrap();
+            let got =
+                super::super::query::execute_model_query(store, &shape, &query, resolver, None)
+                    .await
+                    .unwrap();
             got.instances[0]["$x"].clone()
         }
     };
@@ -356,7 +357,7 @@ async fn selection_a_forged_link_does_not_pass_a_quantifier_or_structural_confor
         async move {
             let query: ModelQueryInput = serde_json::from_value(query).unwrap();
             let shape = resolver.get_shape(class).unwrap();
-            super::super::query::execute_model_query(store, &shape, &query, resolver)
+            super::super::query::execute_model_query(store, &shape, &query, resolver, None)
                 .await
                 .unwrap()
         }
@@ -506,7 +507,7 @@ async fn selection_two_passing_links_on_one_triple_do_not_duplicate_an_instance(
         serde_json::from_value(json!({ "where": { "name": "x", "members": "sg://a/carol" } }))
             .unwrap();
     let super::super::types::InstanceQueryPlan::Single(sparql) =
-        super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None)
+        super::super::sparql_builder::build_instance_sparql(&shape, &query, None, None, None)
     else {
         panic!("expected the single plan");
     };

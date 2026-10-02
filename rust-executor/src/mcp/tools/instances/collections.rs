@@ -148,7 +148,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
@@ -178,12 +185,17 @@ impl Ad4mMcpHandler {
         // item is already in it.
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
+        // Only the members this agent can see: another user's Local
+        // membership link must not answer "already a member" (#1024).
         let existing = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate.clone()),
-                ..Default::default()
-            })
+            .get_links_for_viewer(
+                &LinkQuery {
+                    source: Some(base_uri.clone()),
+                    predicate: Some(predicate.clone()),
+                    ..Default::default()
+                },
+                viewer.as_deref(),
+            )
             .await
         {
             Ok(links) => links,
@@ -261,7 +273,7 @@ impl Ad4mMcpHandler {
         params: Parameters<InstanceRemoveFromCollectionParams>,
     ) -> String {
         let p = &params.0;
-        let (mut perspective, _agent_context) =
+        let (mut perspective, agent_context) =
             match self.get_writable_perspective(&p.perspective_id).await {
                 Ok(v) => v,
                 Err(e) => return e,
@@ -281,7 +293,14 @@ impl Ad4mMcpHandler {
             Ok(uri) => uri,
             Err(e) => return e,
         };
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {}
             Ok(None) => return not_found(&class_name, &base_uri),
             Err(e) => return error_json(format!("Error reading {class_name} instance: {e}")),
@@ -306,12 +325,17 @@ impl Ad4mMcpHandler {
 
         let wanted = p.item_uri.trim();
         let encoded = link_target(wanted);
+        // Only the membership links this agent can see. Another user's
+        // Local membership link is private to them and is not removed (#1024).
         let links = match perspective
-            .get_links(&LinkQuery {
-                source: Some(base_uri.clone()),
-                predicate: Some(predicate),
-                ..Default::default()
-            })
+            .get_links_for_viewer(
+                &LinkQuery {
+                    source: Some(base_uri.clone()),
+                    predicate: Some(predicate),
+                    ..Default::default()
+                },
+                viewer.as_deref(),
+            )
             .await
         {
             Ok(links) => links,

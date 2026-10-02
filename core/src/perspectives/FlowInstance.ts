@@ -239,6 +239,11 @@ export class FlowInstance {
    * shape matches the Rust-side hardwired SDNA (parity-locked in
    * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
    *
+   * The initial `currentState` is written as the caller's own `local` link.
+   * On a multi-user host that cache is private to the caller: every other
+   * user derives the state for themselves when they read the instance, and
+   * keeps their own cache (see `FlowInstanceRecord.currentState`).
+   *
    * The returned wrapper carries the parsed `SHACLFlow` alongside the
    * on-graph record, so `currentState` / `availableTransitions` /
    * `proposals` accessors work without further round-trips.

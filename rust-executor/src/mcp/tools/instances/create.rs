@@ -70,7 +70,14 @@ impl Ad4mMcpHandler {
         // Three arms, not `if let Ok(Some(_))`: a store/query failure must not
         // read as "no instance found" and let the create land on top of an
         // existing instance, merging its property links.
-        match fetch_instance(&perspective, &class_name, &base_uri).await {
+        // Reads made while serving this tool call stay in the calling
+        // agent's visibility scope (issue #1024).
+        let viewer =
+            match crate::perspectives::link_visibility::viewer_did_for_context(&agent_context) {
+                Ok(v) => v,
+                Err(e) => return error_json(e.to_string()),
+            };
+        match fetch_instance(&perspective, &class_name, &base_uri, viewer.as_deref()).await {
             Ok(Some(_)) => {
                 return error_json(format!(
                     "A {class_name} instance already exists at '{base_uri}'. Use instance_update \

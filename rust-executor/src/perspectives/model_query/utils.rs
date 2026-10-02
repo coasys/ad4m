@@ -51,7 +51,7 @@ pub(super) fn format_literal_number(n: f64) -> Option<String> {
 }
 
 /// Escape a string value for use inside a SPARQL string literal (double-quoted).
-pub(super) fn escape_sparql_string(s: &str) -> String {
+pub(crate) fn escape_sparql_string(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")

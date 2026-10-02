@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
 use super::query::execute_model_query_inner;
-use super::sparql_builder::verified_link_exists;
+use super::sparql_builder::LinkGuard;
 use super::types::{
     IncludeValue, ModelQueryInput, ModelShape, ShapeRelation, ShapeResolver, WhereCondition,
 };
@@ -36,14 +36,16 @@ use crate::types::LinkStatus;
 ///
 /// With a `link_status` (#1116), only links of that status are read, and a
 /// link whose signature did not verify is not read unless the query opted in
-/// with `include_unverified` (#1113). Both are checked on one reifier
-/// ([`verified_link_exists`]).
+/// with `include_unverified` (#1113). For `viewer_did`, another agent's
+/// `Local` link is not read (#1024). All three are checked on one reifier
+/// ([`LinkGuard::exists`]).
 pub fn resolve_reverse_relations(
     store: &SparqlStore,
     instances: &mut [Value],
     relations: &[(String, String, bool)], // (name, predicate, is_single)
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -67,13 +69,15 @@ pub fn resolve_reverse_relations(
             Err(_) => continue,
         };
 
-        let filter = verified_link_exists(
-            "?source",
-            safe_pred,
-            "?target",
-            link_status,
+        // One reifier carries every check, the viewer's included: another
+        // user's Local edge and a forged Shared one on the same triple must
+        // not pass between them (#1024, #1120).
+        let filter = LinkGuard {
+            status: link_status,
             include_unverified,
-        );
+            viewer: viewer_did,
+        }
+        .exists("?source", &format!("<{safe_pred}>"), "?target");
         let sparql = format!(
             "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
             target_constraint
@@ -139,6 +143,7 @@ pub(super) async fn resolve_includes_recursive(
     depth: u8,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     for (rel_name, include_val) in include {
         match include_val {
@@ -171,9 +176,15 @@ pub(super) async fn resolve_includes_recursive(
         reject_pagination_on_polymorphic(rel_name, &sub_query)?;
 
         if rel.direction == "reverse" {
-            resolve_reverse_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_reverse_include(
+                store, instances, rel, &sub_query, resolver, depth, viewer_did,
+            )
+            .await?;
         } else {
-            resolve_forward_include(store, instances, rel, &sub_query, resolver, depth).await?;
+            resolve_forward_include(
+                store, instances, rel, &sub_query, resolver, depth, viewer_did,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -309,6 +320,7 @@ async fn hydrate_polymorphic(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
     hydrated: &mut HashMap<String, Value>,
     ordered_ids: &mut Vec<String>,
 ) -> Result<(), Error> {
@@ -369,6 +381,7 @@ async fn hydrate_polymorphic(
             &group_query,
             resolver,
             depth + 1,
+            viewer_did,
         ))
         .await?;
 
@@ -412,6 +425,7 @@ async fn resolve_forward_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     let mut seen = std::collections::HashSet::new();
     let mut all_ids: Vec<String> = Vec::new();
@@ -466,6 +480,7 @@ async fn resolve_forward_include(
             &query,
             resolver,
             depth,
+            viewer_did,
             &mut hydrated,
             &mut ordered_ids,
         )
@@ -490,6 +505,7 @@ async fn resolve_forward_include(
             &query,
             resolver,
             depth + 1,
+            viewer_did,
         ))
         .await?;
 
@@ -561,6 +577,7 @@ async fn resolve_reverse_include(
     sub_query: &ModelQueryInput,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    viewer_did: Option<&str>,
 ) -> Result<(), Error> {
     let all_ids: Vec<String> = instances
         .iter()
@@ -583,13 +600,16 @@ async fn resolve_reverse_include(
         Err(_) => return Ok(()),
     };
     let target_constraint = values_or_str_filter("target", &safe_ids);
-    let filter = verified_link_exists(
-        "?source",
-        safe_pred,
-        "?target",
-        sub_query.link_status.as_ref(),
-        sub_query.include_unverified,
-    );
+    // Only edges the viewer may see, on the same reifier as the status and
+    // proof checks. Otherwise a source that points here only through another
+    // user's Local link is included, hydrated from its own Shared links
+    // (#1024).
+    let filter = LinkGuard {
+        status: sub_query.link_status.as_ref(),
+        include_unverified: sub_query.include_unverified,
+        viewer: viewer_did,
+    }
+    .exists("?source", &format!("<{safe_pred}>"), "?target");
     let sparql = format!(
         "SELECT ?source ?target WHERE {{ ?source <{safe_pred}> ?target . {target_constraint}{filter} }}"
     );
@@ -655,6 +675,7 @@ async fn resolve_reverse_include(
                 &query,
                 resolver,
                 depth,
+                viewer_did,
                 &mut hydrated,
                 &mut ordered_result_ids,
             )
@@ -678,6 +699,7 @@ async fn resolve_reverse_include(
                 &query,
                 resolver,
                 depth + 1,
+                viewer_did,
             ))
             .await?;
 

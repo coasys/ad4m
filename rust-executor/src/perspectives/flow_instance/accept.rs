@@ -34,7 +34,7 @@ use super::atom::{
     check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
     FLOW_INSTANCE_PREDICATE,
 };
-use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::pass::{catch_up_before_voting, run_flow_consensus_pass, FireOutcome};
 use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
@@ -149,9 +149,11 @@ pub async fn accept_flow_proposal(
             && l.data.target == did
             && signed_by(l, &did)
     });
+    let mut outcomes = Vec::new();
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
     } else {
+        outcomes = catch_up_before_voting(perspective, &instance_uri, context).await;
         perspective
             .add_link(
                 Link {
@@ -166,14 +168,17 @@ pub async fn accept_flow_proposal(
             .await
             .map_err(|e| anyhow::anyhow!("accept_flow_proposal: add_link failed: {e:#}"))?;
     }
-    Ok(run_flow_consensus_pass(
-        perspective,
-        None,
-        context,
-        None,
-        Some(std::slice::from_ref(&instance_uri)),
-    )
-    .await)
+    outcomes.extend(
+        run_flow_consensus_pass(
+            perspective,
+            None,
+            context,
+            None,
+            Some(std::slice::from_ref(&instance_uri)),
+        )
+        .await,
+    );
+    Ok(outcomes)
 }
 
 /// Reject a proposal: retract the links on it that this replica signed.

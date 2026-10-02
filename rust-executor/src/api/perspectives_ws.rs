@@ -286,6 +286,18 @@ async fn get_perspective_handler(
     Ok(serde_json::to_value(handle)?)
 }
 
+/// Visibility scope for a request on this surface.
+///
+/// Every handler below serves a request on behalf of an agent, so reads go
+/// through the `*_for_viewer` entry points with this DID rather than the
+/// executor-scoped ones. See
+/// [`link_visibility`](crate::perspectives::link_visibility).
+fn viewer_did(ctx: &RequestContext) -> Result<Option<String>, WsRpcError> {
+    let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+    crate::perspectives::link_visibility::viewer_did_for_context(&agent_context)
+        .map_err(|e| WsRpcError::internal(e.to_string()))
+}
+
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let uuid = params.require_str("uuid")?;
     check_capability(
@@ -300,15 +312,19 @@ async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         Err(e) if e.code == 403 || e.code == 404 => return Ok(Value::Null),
         Err(e) => return Err(e),
     };
+    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links(&LinkQuery {
-            source: None,
-            target: None,
-            predicate: None,
-            from_date: None,
-            until_date: None,
-            limit: None,
-        })
+        .get_links_for_viewer(
+            &LinkQuery {
+                source: None,
+                target: None,
+                predicate: None,
+                from_date: None,
+                until_date: None,
+                limit: None,
+            },
+            viewer.as_deref(),
+        )
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(crate::types::domain::Perspective {
@@ -356,8 +372,9 @@ async fn query_links(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             .map(|v| v as i32),
     };
 
+    let viewer = viewer_did(&ctx)?;
     let links = perspective
-        .get_links(&query)
+        .get_links_for_viewer(&query, viewer.as_deref())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
     Ok(serde_json::to_value(links)?)
@@ -1148,12 +1165,32 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     let class_name = params.require_str("class_name")?;
     let query_json = params.require_str("query_json")?;
 
-    let perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let mut perspective = get_perspective_with_access(&uuid, &ctx).await?;
+    let viewer = viewer_did(&ctx)?;
+
+    // A `FlowInstance` read is where a user learns a flow's state, and the
+    // `currentState` cache is a Local link private to whoever's request wrote
+    // it. So the state is derived for the requesting user first and their
+    // own cache brought in line with it; the query below then returns it.
+    // Only this class pays for the derivation. Best effort: a read-only token
+    // gets no refresh, and a failed one is logged, never the read's error.
+    // See `flow_instance::viewer_cache`.
+    if class_name == crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS {
+        let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
+        crate::perspectives::flow_instance::viewer_cache::refresh_for_read(
+            &mut perspective,
+            &uuid,
+            &query_json,
+            &ctx.capabilities,
+            &agent_context,
+        )
+        .await;
+    }
 
     // Run async model query with timeout
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
-        perspective.model_query(&class_name, &query_json),
+        perspective.model_query_for_viewer(&class_name, &query_json, viewer.as_deref()),
     )
     .await;
 

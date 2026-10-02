@@ -164,7 +164,16 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow state: {:#}", e),
         };
 
-        match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
+        // No viewer DID means no own cache to read: derive.
+        let viewer = self.viewer_did().await.ok().flatten();
+        match Self::flow_instance_for(
+            &perspective,
+            &p.expression_address,
+            &flow_uri,
+            viewer.as_deref(),
+        )
+        .await
+        {
             Err(e) => format!("Error querying flow state: {:#}", e),
             Ok(None) => format!(
                 "Expression {} is not in any state of flow {}",
@@ -255,12 +264,12 @@ impl Ad4mMcpHandler {
     /// the loader pushes the filter down to `model_query` instead of sweeping
     /// every instance on the perspective (Model C scope discipline).
     ///
-    /// **Cache-first (#987)**: when this replica's `Local` `currentState` link
-    /// is present it is returned directly — no fold, no flow catalogue load.
-    /// The cache is `Local`-verified (peers cannot write it since #987's Local
-    /// switch), so it is exactly what *this* replica last derived.  On a cache
-    /// miss (`None`) the full derive path runs as before, which is the only
-    /// path on a never-derived instance.
+    /// **The caller's own cache first (#987, #1024)**: when `viewer_did`
+    /// holds a verified `Local` `currentState` link of their own, its value is
+    /// returned directly, with no fold and no flow catalogue load. Another
+    /// user's cache is never read: any user may write one with any value
+    /// (`flow_instance::local_cached_state`). Without a viewer, or without a
+    /// cache of the viewer's own, the state is derived.
     ///
     /// Freshness note: the sync-triggered pass (`trigger.rs`) re-derives on
     /// every incoming flow link, so residual staleness is bounded by the
@@ -269,6 +278,7 @@ impl Ad4mMcpHandler {
         perspective: &PerspectiveInstance,
         expression: &str,
         flow_uri: &str,
+        viewer_did: Option<&str>,
     ) -> anyhow::Result<Option<FlowInstanceRecord>> {
         let instances = load_flow_instances(perspective, &[expression.to_string()]).await?;
         let Some(record) = instances
@@ -277,16 +287,19 @@ impl Ad4mMcpHandler {
         else {
             return Ok(None);
         };
-        if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
-            perspective,
-            &record.instance_uri,
-        )
-        .await?
-        {
-            return Ok(Some(FlowInstanceRecord {
-                current_state: cached,
-                ..record
-            }));
+        if let Some(viewer_did) = viewer_did {
+            if let Some(cached) = crate::perspectives::flow_instance::local_cached_state(
+                perspective,
+                &record.instance_uri,
+                viewer_did,
+            )
+            .await?
+            {
+                return Ok(Some(FlowInstanceRecord {
+                    current_state: cached,
+                    ..record
+                }));
+            }
         }
         let flows = load_shacl_flows(perspective).await?;
         let derived = crate::perspectives::flow_instance::derive_states(
@@ -333,17 +346,24 @@ impl Ad4mMcpHandler {
             Err(e) => return format!("Error querying flow actions: {:#}", e),
         };
 
-        let instance =
-            match Self::flow_instance_for(&perspective, &p.expression_address, &flow_uri).await {
-                Err(e) => return format!("Error querying flow actions: {:#}", e),
-                Ok(None) => {
-                    return format!(
-                        "Expression {} is not in any state of flow {}",
-                        p.expression_address, p.flow_name
-                    )
-                }
-                Ok(Some(instance)) => instance,
-            };
+        let viewer = self.viewer_did().await.ok().flatten();
+        let instance = match Self::flow_instance_for(
+            &perspective,
+            &p.expression_address,
+            &flow_uri,
+            viewer.as_deref(),
+        )
+        .await
+        {
+            Err(e) => return format!("Error querying flow actions: {:#}", e),
+            Ok(None) => {
+                return format!(
+                    "Expression {} is not in any state of flow {}",
+                    p.expression_address, p.flow_name
+                )
+            }
+            Ok(Some(instance)) => instance,
+        };
 
         // An instance can outlive its definition (flow removed from the
         // perspective's SDNA while instances remain). Report that as "no
@@ -626,17 +646,21 @@ mod tests {
         assert!(flow.is_none());
 
         // Instance lookup is keyed on (expression, flow URI).
-        let found =
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for");
+        let found = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            base_uri,
+            "delivery://DeliveryFlow",
+            None,
+        )
+        .await
+        .expect("flow_instance_for");
         let found = found.expect("the minted instance must be found");
         assert_eq!(found.instance_uri, inst_uri);
         assert_eq!(found.current_state, "identified");
         assert_eq!(found.subject, base_uri);
 
         assert!(
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow")
+            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "other://OtherFlow", None)
                 .await
                 .expect("flow_instance_for(other flow)")
                 .is_none(),
@@ -646,7 +670,8 @@ mod tests {
             Ad4mMcpHandler::flow_instance_for(
                 &perspective,
                 "ad4m://task/unrelated",
-                "delivery://DeliveryFlow"
+                "delivery://DeliveryFlow",
+                None,
             )
             .await
             .expect("flow_instance_for(other subject)")
@@ -655,8 +680,8 @@ mod tests {
         );
     }
 
-    /// `flow_instance_for` must return the `Local` cache value without
-    /// running the fold.  Observable: advance the cache to "scoped" with no
+    /// `flow_instance_for` must return the caller's own `Local` cache value
+    /// without running the fold.  Observable: advance the cache to "scoped" with no
     /// proposals in the graph — the fold would return "identified" (genesis);
     /// only a cache-first path produces "scoped".
     #[tokio::test(flavor = "multi_thread")]
@@ -693,14 +718,202 @@ mod tests {
             .await
             .expect("advance_flow_instance_state");
 
-        let record =
-            Ad4mMcpHandler::flow_instance_for(&perspective, base_uri, "delivery://DeliveryFlow")
-                .await
-                .expect("flow_instance_for")
-                .expect("instance must be found");
+        let own_did = crate::agent::did_for_context(&ctx).expect("DID");
+        let record = Ad4mMcpHandler::flow_instance_for(
+            &perspective,
+            base_uri,
+            "delivery://DeliveryFlow",
+            Some(&own_did),
+        )
+        .await
+        .expect("flow_instance_for")
+        .expect("instance must be found");
         assert_eq!(
             record.current_state, "scoped",
             "Local cache 'scoped' must win over fold-derived 'identified' (no proposals in graph)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Whose cache a tool reads
+    // -----------------------------------------------------------------------
+
+    /// Unregisters the fixture perspective when the test ends.
+    struct PerspectiveGuard(String);
+    impl Drop for PerspectiveGuard {
+        fn drop(&mut self) {
+            crate::perspectives::unregister_perspective(&self.0);
+        }
+    }
+
+    /// The Delivery flow with one instance whose only `currentState` link is
+    /// `plant`, written by `write`, and a handler whose caller is the main
+    /// agent, who has never read the instance. The fold has no proposals to
+    /// count, so the derived state is `identified`.
+    async fn instance_with_a_foreign_cache(
+        plant: impl FnOnce(
+            &mut PerspectiveInstance,
+            String,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>>,
+    ) -> (Ad4mMcpHandler, String, PerspectiveGuard) {
+        use crate::mcp::server::McpContext;
+        use tokio::sync::RwLock;
+
+        let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        for link in
+            parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links")
+        {
+            perspective
+                .add_link(link, LinkStatus::Local, None, &ctx)
+                .await
+                .expect("add_link(flow definition)");
+        }
+        // The instance as sync delivers it: no cache from anyone.
+        let inst_uri = mint_flow_instance(
+            &mut perspective,
+            "delivery://DeliveryFlow",
+            FOREIGN_BASE,
+            "identified",
+            "foreign-cache-inst-1",
+            None,
+            &ctx,
+        )
+        .await
+        .expect("mint_flow_instance");
+        let own = perspective
+            .get_links(&crate::types::LinkQuery {
+                source: Some(inst_uri.clone()),
+                predicate: Some(
+                    crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE.to_string(),
+                ),
+                ..Default::default()
+            })
+            .await
+            .expect("get_links");
+        perspective
+            .remove_links(own.into_iter().map(Into::into).collect(), None)
+            .await
+            .expect("drop the minter's cache");
+        plant(&mut perspective, inst_uri).await;
+
+        let uuid = perspective.persisted.lock().await.uuid.clone();
+        crate::perspectives::register_perspective(uuid.clone(), perspective);
+        let handler = Ad4mMcpHandler::new(McpContext {
+            admin_credential: Some("test-admin".to_string()),
+            auth_token: std::sync::Arc::new(RwLock::new(Some("test-admin".to_string()))),
+            dynamic_class_tools: false,
+        });
+        (handler, uuid.clone(), PerspectiveGuard(uuid))
+    }
+
+    const FOREIGN_BASE: &str = "ad4m://task/foreign-cache";
+
+    /// Mallory, a second managed user, writes a Local `currentState` of her
+    /// choosing: what `FlowInstanceRecord.create({ currentState })` or a
+    /// plain add lets any co-owner write.
+    fn mallory_plants(
+        perspective: &mut PerspectiveInstance,
+        inst_uri: String,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+            let email = "mallory-mcp@1058.test";
+            crate::agent::AgentService::ensure_user_key_exists(email).expect("key");
+            let mallory = crate::agent::AgentContext::for_user_email(email.to_string());
+            perspective
+                .add_link(
+                    crate::types::Link {
+                        source: inst_uri,
+                        predicate: Some(
+                            crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE
+                                .to_string(),
+                        ),
+                        target: "literal:string:scoped".to_string(),
+                    },
+                    LinkStatus::Local,
+                    None,
+                    &mallory,
+                )
+                .await
+                .expect("a co-owner may write a Local link of their own");
+        })
+    }
+
+    fn params(uuid: &str) -> Parameters<FlowExprParams> {
+        Parameters(FlowExprParams {
+            perspective_id: uuid.to_string(),
+            flow_name: "Delivery".to_string(),
+            expression_address: FOREIGN_BASE.to_string(),
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_state_ignores_a_co_owners_cache() {
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(mallory_plants).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
+        assert_eq!(
+            out["state"], "identified",
+            "the caller's derived state, not the co-owner's cache: {out}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_actions_ignores_a_co_owners_cache() {
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(mallory_plants).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_actions(params(&uuid)).await).expect("JSON");
+        assert_eq!(out["current_state"], "identified", "{out}");
+        let actions = out["available_actions"].as_array().expect("actions");
+        assert_eq!(
+            actions.len(),
+            1,
+            "the transitions leaving the derived state: {out}"
+        );
+        assert_eq!(actions[0]["action"], "Scope");
+    }
+
+    /// A Local link that names the caller as its author counts as the
+    /// caller's cache only when the caller's signature on it verifies.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_state_ignores_a_cache_the_caller_did_not_sign() {
+        fn unsigned_in_callers_name(
+            perspective: &mut PerspectiveInstance,
+            inst_uri: String,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                let main_did =
+                    crate::agent::did_for_context(&crate::agent::AgentContext::main_agent())
+                        .expect("main DID");
+                perspective
+                    .add_link_expression(
+                        crate::types::LinkExpression {
+                            author: main_did,
+                            timestamp: chrono::Utc::now().to_rfc3339(),
+                            data: crate::types::Link {
+                                source: inst_uri,
+                                predicate: Some(
+                                    crate::perspectives::flow_classes::FLOW_CURRENT_STATE_PREDICATE
+                                        .to_string(),
+                                ),
+                                target: "literal:string:scoped".to_string(),
+                            },
+                            proof: crate::types::ExpressionProof {
+                                key: "not-the-callers-key".to_string(),
+                                signature: "not-the-callers-signature".to_string(),
+                            },
+                            status: None,
+                        },
+                        LinkStatus::Local,
+                        None,
+                    )
+                    .await
+                    .expect("add_link_expression");
+            })
+        }
+        let (handler, uuid, _guard) = instance_with_a_foreign_cache(unsigned_in_callers_name).await;
+        let out: serde_json::Value =
+            serde_json::from_str(&handler.flow_state(params(&uuid)).await).expect("JSON");
+        assert_eq!(out["state"], "identified", "{out}");
     }
 }
