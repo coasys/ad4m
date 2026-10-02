@@ -52,6 +52,20 @@ pub struct Scope {
     pub delegate: bool,
 }
 
+/// Device/executor lane — categorises what kind of device holds a key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lane {
+    /// A local device (laptop, desktop) under the user's direct control.
+    LocalDevice,
+    /// A mobile device (phone, tablet).
+    Mobile,
+    /// A hosted/platform executor running on infrastructure the user does not control.
+    HostedExecutor,
+    /// A community node serving a neighbourhood.
+    CommunityNode,
+}
+
 impl Scope {
     /// A full-authority scope (inception key, recovery key).
     pub fn full() -> Self {
@@ -140,6 +154,12 @@ pub enum KeyEventBody {
     Delegate {
         key: KeyEntry,
         from_seq: u64,
+        /// Human-readable device name (e.g. "MacBook — local executor").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+        /// Device/executor lane.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lane: Option<Lane>,
     },
     Rotate {
         keys: Vec<KeyEntry>,
@@ -260,10 +280,14 @@ impl std::error::Error for KelError {}
 
 /// A key's validity window in the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct KeyValidity {
-    entry: KeyEntry,
-    delegated_at: u64,
-    revoked_at: Option<u64>,
+pub(crate) struct KeyValidity {
+    pub entry: KeyEntry,
+    pub delegated_at: u64,
+    pub revoked_at: Option<u64>,
+    /// Human-readable device label (from Delegate body).
+    pub label: Option<String>,
+    /// Device/executor lane (from Delegate body).
+    pub lane: Option<Lane>,
 }
 
 /// The result of folding an event log — the full key state at a point.
@@ -272,7 +296,7 @@ pub struct KeyState {
     /// The `did:scid` master identifier.
     pub master: String,
     /// All keys ever delegated, with their validity windows.
-    key_history: Vec<KeyValidity>,
+    pub(crate) key_history: Vec<KeyValidity>,
     /// The agent type (sealed in inception).
     agent_type: AgentType,
     /// The controller SCID (for assistants).
@@ -281,6 +305,8 @@ pub struct KeyState {
     recovery_commitment: String,
     /// The sequence of the last processed event.
     head_seq: u64,
+    /// The hash of the last processed event (for event chaining).
+    head_hash: String,
 }
 
 impl KeyState {
@@ -326,6 +352,16 @@ impl KeyState {
     /// The sequence of the last processed event.
     pub fn head_seq(&self) -> u64 {
         self.head_seq
+    }
+
+    /// The hash of the last processed event (for event chaining).
+    pub fn head_hash(&self) -> &str {
+        &self.head_hash
+    }
+
+    /// The total number of keys ever delegated (for key_id indexing).
+    pub fn key_count(&self) -> usize {
+        self.key_history.len()
     }
 
     /// Convert to the PR1 `signatures::KeyState` shape for the resolver seam.
@@ -455,6 +491,8 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
             entry: key.clone(),
             delegated_at: 0,
             revoked_at: None,
+            label: None,
+            lane: None,
         });
     }
 
@@ -468,6 +506,7 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
         controller,
         recovery_commitment,
         head_seq: 0,
+        head_hash: e0.hash.clone(),
     };
 
     // Verify owner binding if present.
@@ -581,11 +620,18 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
 
         // Apply the event to the state.
         match effective_body {
-            KeyEventBody::Delegate { key, from_seq } => {
+            KeyEventBody::Delegate {
+                key,
+                from_seq,
+                label,
+                lane,
+            } => {
                 state.key_history.push(KeyValidity {
                     entry: key.clone(),
                     delegated_at: *from_seq,
                     revoked_at: None,
+                    label: label.clone(),
+                    lane: lane.clone(),
                 });
             }
             KeyEventBody::Rotate { keys } => {
@@ -604,6 +650,8 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
                         entry: key.clone(),
                         delegated_at: ev.seq,
                         revoked_at: None,
+                        label: None,
+                        lane: None,
                     });
                 }
             }
@@ -629,6 +677,7 @@ pub fn fold(events: &[KeyEvent]) -> Result<KeyState, KelError> {
         }
 
         state.head_seq = ev.seq;
+        state.head_hash = ev.hash.clone();
     }
 
     Ok(state)
@@ -827,6 +876,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did), &did),
             from_seq: 2,
+            label: None,
+            lane: None,
         };
         let ev = KeyEvent::new(2, Some(events[0].hash.clone()), body, &key_id, &kp);
         events.push(ev);
@@ -852,6 +903,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: full_key(&key_id1, &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
 
@@ -871,6 +924,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         // Fabricated prev_hash.
         let ev1 = KeyEvent::new(1, Some("Efabricated_hash".to_string()), body1, &key_id, &kp);
@@ -893,6 +948,8 @@ mod tests {
         let body = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did_rogue), &did_rogue),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body, &rogue_id, &kp_rogue);
         let result = fold(&[ev0, ev1]);
@@ -913,6 +970,8 @@ mod tests {
         let body_delegate = KeyEventBody::Delegate {
             key: sign_key,
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body_delegate, &key_id0, &kp0);
 
@@ -942,6 +1001,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: key_k,
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
 
@@ -977,6 +1038,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: enc_key,
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
 
@@ -1040,6 +1103,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: full_key(&format!("{}#key-1", did1), &did1),
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
 
@@ -1110,6 +1175,8 @@ mod tests {
         let body1 = KeyEventBody::Delegate {
             key: dup_key,
             from_seq: 1,
+            label: None,
+            lane: None,
         };
         let ev1 = KeyEvent::new(1, Some(ev0.hash.clone()), body1, &key_id0, &kp0);
         let result = fold(&[ev0, ev1]);
