@@ -17,15 +17,44 @@ pub struct AuthContext {
     pub is_admin_credential: bool,
 }
 
+/// Resolves the user behind a token, and keeps the session from acting as anyone else.
+///
+/// Returns the capabilities to use, the user's email and the user's DID. A token that names
+/// a user whose DID cannot load (a wallet or shared-backend error) gets no capabilities:
+/// perspective checks treat a missing DID as the node's main agent, so the session must not
+/// run with one.
+pub(crate) fn resolve_user_session(
+    auth_token: &str,
+    capabilities: Result<Vec<Capability>, String>,
+) -> (
+    Result<Vec<Capability>, String>,
+    Option<String>,
+    Option<String>,
+) {
+    let user_email = user_email_from_token(auth_token.to_string());
+    match &user_email {
+        None => (capabilities, None, None),
+        Some(email) => match AgentService::get_user_did_by_email(email) {
+            Ok(did) => (capabilities, user_email, Some(did)),
+            Err(e) => (
+                Err(format!(
+                    "Could not load the identity of this user session; reconnect: {}",
+                    e
+                )),
+                user_email,
+                None,
+            ),
+        },
+    }
+}
+
 impl AuthContext {
     /// Convert to the existing RequestContext used by internal functions.
     pub fn to_request_context(&self) -> RequestContext {
-        let user_email = user_email_from_token(self.auth_token.clone());
-        let user_did = user_email
-            .as_ref()
-            .and_then(|email| AgentService::get_user_did_by_email(email).ok());
+        let (capabilities, user_email, user_did) =
+            resolve_user_session(&self.auth_token, self.capabilities.clone());
         RequestContext {
-            capabilities: self.capabilities.clone(),
+            capabilities,
             auto_permit_cap_requests: self.auto_permit_cap_requests,
             auth_token: self.auth_token.clone(),
             is_admin_credential: self.is_admin_credential,
@@ -95,5 +124,57 @@ pub trait FromRef<T> {
 impl FromRef<AppState> for AppState {
     fn from_ref(input: &AppState) -> Self {
         input.clone()
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use crate::agent::capabilities::{get_user_default_capabilities, ALL_CAPABILITY};
+    use crate::test_utils::MultiUserMode;
+
+    // A user token whose DID could not load used to run with that user's capabilities and
+    // no DID, and perspective checks treat a missing DID as the node's main agent.
+    #[test]
+    fn a_user_session_without_a_loadable_identity_gets_no_capabilities() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let token = crate::user_management::generate_user_jwt("no.key@example.org", "test")
+            .expect("the wallet is unlocked in tests");
+
+        let (capabilities, user_email, user_did) =
+            resolve_user_session(&token, Ok(get_user_default_capabilities()));
+        assert!(capabilities.is_err(), "the session must not act at all");
+        assert_eq!(user_email.as_deref(), Some("no.key@example.org"));
+        assert!(user_did.is_none());
+    }
+
+    #[test]
+    fn a_user_session_with_an_identity_keeps_its_capabilities() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = "has.key@example.org";
+        AgentService::ensure_user_key_exists(email).unwrap();
+        let token = crate::user_management::generate_user_jwt(email, "test").unwrap();
+
+        let (capabilities, user_email, user_did) =
+            resolve_user_session(&token, Ok(get_user_default_capabilities()));
+        assert!(capabilities.is_ok());
+        assert_eq!(user_email.as_deref(), Some(email));
+        assert_eq!(
+            user_did,
+            Some(AgentService::get_user_did_by_email(email).unwrap())
+        );
+    }
+
+    #[test]
+    fn an_operator_session_is_unchanged() {
+        let (capabilities, user_email, user_did) =
+            resolve_user_session("", Ok(vec![ALL_CAPABILITY.clone()]));
+        assert!(capabilities.is_ok());
+        assert!(user_email.is_none());
+        assert!(user_did.is_none());
     }
 }

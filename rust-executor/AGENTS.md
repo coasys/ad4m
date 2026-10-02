@@ -62,6 +62,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
 - **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
   Any signing/DID/billing path takes it explicitly.
+- **Notifications** post perspective data to any webhook URL. Their grant, update and delivery
+  rules live in `runtime_service/notification_access.rs`: a notification fires only when granted
+  and its owner may read the perspective. The owner is a DID (`owner_did`: a managed user's, or the
+  main agent's), never an email; operator sessions act as the main agent. `runtime_ws.rs` refuses
+  perspectives the owner cannot read; `events_ws.rs` sends `notification-triggered` only to sessions
+  with the owner's DID. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
+  moves rows of older executors from `user_email` to `owner_did`.
 
 ## Do / don't
 
