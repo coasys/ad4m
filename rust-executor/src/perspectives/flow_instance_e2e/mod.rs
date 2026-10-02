@@ -27,6 +27,7 @@ use super::flow_instance::atom::{
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
+use super::flow_instance::trigger::FLOW_PASS_DEBOUNCE;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};

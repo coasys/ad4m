@@ -292,12 +292,66 @@ async fn a_synced_vote_triggers_this_replicas_own_pass() {
     );
 }
 
+/// A peer's change to the flow's definition re-derives every instance: the
+/// fold reads the rules the reader holds now, so the cache must follow when
+/// they change. Raising Scoped's rule to `{n: 2}` after one vote settled it
+/// derives Identified again; before this was a trigger, the cache kept
+/// saying Scoped until some unrelated flow link arrived.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_synced_rule_change_rederives_the_cache() {
+    let mut f = seed_satisfied_fixture(None).await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    assert_eq!(
+        f.cached_state().await,
+        "scoped",
+        "the default {{n: 1}} settles on the mint's vote"
+    );
+
+    let peer = TestSigner::generate();
+    let rule = peer.sign(
+        Link {
+            source: "delivery://Delivery.scoped".to_string(),
+            predicate: Some("ad4m://consensusRule".to_string()),
+            target: literal(r#"{"n":2}"#),
+        }
+        .normalize(),
+    );
+    sync_in(&f, vec![LinkExpression::from(rule)]).await;
+
+    assert!(
+        cache_reaches(&f, "identified").await,
+        "the synced rule change must trigger the pass that re-derives the cache"
+    );
+    assert_eq!(f.derived().await.state, "identified");
+}
+
+/// The same change written on this replica. The author's own node has no
+/// vote or mint to run the pass after, so the local write queues it itself.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_rule_change_rederives_the_cache() {
+    let mut f = seed_satisfied_fixture(None).await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    assert_eq!(f.cached_state().await, "scoped");
+
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+
+    assert!(
+        cache_reaches(&f, "identified").await,
+        "a local rule change must re-derive this replica's own cache"
+    );
+}
+
 /// A synced chat message queues nothing: the trigger is keyed on the flow
 /// vocabulary, so ordinary traffic never re-derives a flow. Pinned by the
 /// cache staying put where a pass would have healed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_synced_chat_message_does_not_trigger_a_pass() {
     let mut f = seed_satisfied_fixture(None).await;
+    // Seeding writes the flow's definition, which queues a sweep of its own;
+    // let it run before forging, so only the chat message could heal the cache.
+    tokio::time::sleep(FLOW_PASS_DEBOUNCE * 3).await;
     forge_cached_state(&mut f, "scoped").await;
     let bob = TestSigner::generate();
     let chat = bob.sign(
