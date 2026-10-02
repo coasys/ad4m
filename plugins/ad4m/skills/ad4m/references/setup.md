@@ -253,7 +253,7 @@ the WebSocket URL:
 ws://localhost:12000/api/v1/ws?token=<admin-credential-or-jwt>
 ```
 
-Remember: an empty token resolves to full access when no admin credential is configured — this is intentional for local/test setups, and it's exactly why a node without an admin credential must never be exposed beyond loopback.
+Remember: an executor only starts without an admin credential when it is run with `--insecure-no-admin-credential` (tests and local development only). An empty token then resolves to full access, which is exactly why such a node must never be exposed beyond loopback.
 **Endpoint:** `ws://localhost:12000/api/v1/ws` (port configurable via `--port`; remote/external mode: your `executorUrl` host and port, not localhost)
 
 ## Appendix: running an executor by hand (node operators only)
@@ -287,6 +287,7 @@ ad4m-executor run --app-data-path ~/.ad4m --port 12000 \
 | Symptom | Cause | Fix |
 |---------|-------|-----|
 | `App data path not set` panic | Missing `--app-data-path` | Always pass the flag |
+| `run` exits: `no admin credential` | `AD4M_ADMIN_CREDENTIAL` unset or empty | Export the credential; `--insecure-no-admin-credential` is for tests only |
 | `mainnet_seed.seed` not found | Skipped `init` | Run `ad4m-executor init` first |
 | `Failed to spawn Lair keystore` | Stale lair socket/pid | Delete `h/c/ks/pid_file` and `h/c/ks/socket` |
 | Holochain conductor `IoError(internal)` | Corrupted conductor DB | Nuke `h/c/` directory, re-generate agent |

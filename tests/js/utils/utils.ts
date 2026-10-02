@@ -300,7 +300,10 @@ export async function startExecutor(dataPath: string,
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (dynamicClassTools) { args.push('--dynamic-class-tools', 'true'); }
+    // Without a credential the executor refuses to start unless it is told
+    // that this is a test run; the empty token is then the operator.
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
+    else { args.push('--insecure-no-admin-credential'); }
 
     executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     let executorReady = new Promise<void>((resolve, reject) => {

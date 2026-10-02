@@ -4,10 +4,11 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
-import { ChildProcess } from 'node:child_process';
+import { ChildProcess, execFileSync, spawn } from 'node:child_process';
 import { ExceptionInfo } from "@coasys/ad4m";
+import { callMcpTool, initializeMcp } from './mcp-utils';
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -16,6 +17,116 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 describe("Authentication integration tests", () => {
+    // Secure by default (#1215): `run` without an admin credential and without
+    // --insecure-no-admin-credential must exit, not serve every caller as admin.
+    // startExecutor() passes the testing flag whenever it gets no credential, so
+    // these cases spawn the binary directly.
+    describe("executor refuses to start without an admin credential", () => {
+        const executorBin = path.resolve(__dirname, "..", "..", "..", "target", "release", "ad4m-executor");
+        const bootstrapSeedPath = path.join(`${__dirname}/../bootstrapSeed.json`);
+        const appDataPath = path.join(`${__dirname}/../tst-tmp`, "agents", "no-credential-agent");
+
+        before(() => {
+            fs.removeSync(appDataPath);
+            fs.mkdirSync(appDataPath, { recursive: true });
+            execFileSync(executorBin, ["init", "--data-path", appDataPath, "--network-bootstrap-seed", bootstrapSeedPath]);
+        })
+
+        after(() => {
+            fs.removeSync(appDataPath);
+        })
+
+        async function runWithoutCredential(extraArgs: string[]) {
+            const [apiPort] = await getFreePorts(1);
+            const childEnv = { ...process.env };
+            delete childEnv.AD4M_ADMIN_CREDENTIAL;
+            delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;
+            const child = spawn(executorBin, [
+                "run",
+                "--app-data-path", appDataPath,
+                "--port", String(apiPort),
+                "--run-dapp-server", "false",
+                "--run-holochain", "false",
+                ...extraArgs,
+            ], { stdio: ["ignore", "pipe", "pipe"], env: childEnv });
+            let output = "";
+            child.stdout!.on("data", (d) => { output += d.toString(); });
+            child.stderr!.on("data", (d) => { output += d.toString(); });
+            // The check runs before any service starts, so the exit is quick;
+            // 60 s leaves room for a loaded CI box.
+            const exited = await waitForExit(child, 60000);
+            if (!exited) await stopChildProcess(child);
+            return { exited, code: child.exitCode, output };
+        }
+
+        function expectRefusal(result: { exited: boolean, code: number | null, output: string }) {
+            expect(result.exited, `executor kept running:\n${result.output.slice(-2000)}`).to.be.true;
+            expect(result.code).to.not.equal(0);
+            expect(result.output).to.contain("no admin credential");
+            // The message names both ways out.
+            expect(result.output).to.contain("--admin-credential");
+            expect(result.output).to.contain("AD4M_ADMIN_CREDENTIAL");
+            expect(result.output).to.contain("--insecure-no-admin-credential");
+        }
+
+        it("run without a credential and without the testing flag exits with an error", async () => {
+            expectRefusal(await runWithoutCredential([]));
+        })
+
+        it("an empty credential counts as no credential", async () => {
+            expectRefusal(await runWithoutCredential(["--admin-credential", ""]));
+        })
+
+        // With the testing flag, an empty credential is the same as none for
+        // every reader, not only the startup check: MCP binds loopback and
+        // lets a tokenless caller read, as REST does. Before, MCP took "" for
+        // a real credential, bound 0.0.0.0 and rejected the caller.
+        it("an empty credential with the testing flag is no credential for MCP either", async () => {
+            const [apiPort, mcpPort] = await getFreePorts(2);
+            registerPorts([apiPort, mcpPort]);
+            const childEnv = { ...process.env };
+            delete childEnv.AD4M_ADMIN_CREDENTIAL;
+            delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;
+            delete childEnv.MCP_HOST;
+            const child = spawn(executorBin, [
+                "run",
+                "--app-data-path", appDataPath,
+                "--port", String(apiPort),
+                "--run-dapp-server", "false",
+                "--run-holochain", "false",
+                "--admin-credential", "",
+                "--insecure-no-admin-credential",
+                "--enable-mcp", "true",
+                "--mcp-port", String(mcpPort),
+            ], { stdio: ["ignore", "pipe", "pipe"], env: childEnv });
+            let output = "";
+            child.stdout!.on("data", (d) => { output += d.toString(); });
+            child.stderr!.on("data", (d) => { output += d.toString(); });
+            try {
+                await pollUntil(async () => output.includes("MCP HTTP server listening"),
+                    { timeoutMs: 120000, label: "MCP server listening" });
+                expect(output).to.contain(`MCP HTTP server listening on 127.0.0.1:${mcpPort}`);
+
+                // REST: the empty token is the operator.
+                const client = new Ad4mClient(`http://127.0.0.1:${apiPort}`, "");
+                await pollUntil(async () => { await client.agent.status(); return true; },
+                    { timeoutMs: 15000, label: "executor API ready" });
+                await client.agent.generate("test-passphrase");
+                const perspective = await client.perspective.add("empty-credential");
+
+                // MCP: the same tokenless caller reads that perspective.
+                const mcpUrl = `http://127.0.0.1:${mcpPort}/mcp`;
+                const { sessionId } = await initializeMcp(mcpUrl);
+                const links = await callMcpTool(mcpUrl, "query_links",
+                    { perspective_id: perspective.uuid }, sessionId);
+                expect(links, JSON.stringify(links)).to.be.an("array");
+            } finally {
+                await stopChildProcess(child);
+                deregisterPorts([apiPort, mcpPort]);
+            }
+        })
+    })
+
     describe("admin credential is not set", () => {
         const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
         const appDataPath = path.join(TEST_DIR, "agents", "unauth-agent");

@@ -116,6 +116,12 @@ wait_for_executor() {
     local attempt=0
     local max_attempts=120  # 2 minutes
     until curl -sf "http://localhost:12000/" >/dev/null 2>&1; do
+        # The executor refuses to start without ADMIN_CREDENTIAL (unless
+        # AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true); fail with its exit code.
+        if ! kill -0 "${EXECUTOR_PID}" 2>/dev/null; then
+            wait "${EXECUTOR_PID}"
+            exit $?
+        fi
         attempt=$(( attempt + 1 ))
         if [ "${attempt}" -ge "${max_attempts}" ]; then
             echo "ERROR: AD4M executor did not become ready within 120 seconds." >&2
