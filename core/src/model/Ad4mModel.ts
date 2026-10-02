@@ -538,6 +538,7 @@ export class Ad4mModel {
         predicate: options.predicate || "",
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
+        ...(options.readOnly && { readOnly: true }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
         ...(options.kind !== undefined && { kind: options.kind }),
         ...(options.maxCount !== undefined && { maxCount: options.maxCount }),
@@ -1574,13 +1575,14 @@ export class Ad4mModel {
       // Skip unchanged fields when a snapshot is available
       if (dirty && !dirty.has(key)) continue;
 
-      // Skip read-only computed relations — explicit getters never write links.
+      // Skip read-only relations — explicit getters never write links, and
+      // neither does a relation declared `readOnly`.
       // For target+filter relations, skip only when another relation on this
       // model claims the same predicate (i.e., this is a filtered *view* of a
       // base relation and writing would collide).
       const relMeta = metadata.relations[key];
       if (relMeta) {
-        if (relMeta.getter) continue;
+        if (relMeta.getter || relMeta.readOnly) continue;
         if (relMeta.target && relMeta.filter !== false) {
           // Check for predicate collision with a sibling relation
           const hasCollision = Object.entries(metadata.relations).some(

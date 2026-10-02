@@ -258,7 +258,7 @@ describe("FlowTransitionProposal — @Model", function () {
     // Votes and marks are read, never written, through the model; and the vote
     // getter restates the engine's rule, so both sides must carry the same one.
     const rustProps = (JSON.parse(raw) as {
-      properties: Array<{ path: string; writable?: boolean; getter?: string }>;
+      properties: Array<{ path: string; writable?: boolean; getter?: string; local?: boolean }>;
     }).properties;
     for (const path of ["ad4m://acceptedBy", "ad4m://flow/resolved_as"]) {
       const ts = shape.properties.find((prop: any) => prop.path === path);
@@ -272,6 +272,12 @@ describe("FlowTransitionProposal — @Model", function () {
       shape.properties.find((prop: any) => prop.path === "ad4m://acceptedBy").getter,
       "the vote getter must be the Rust SDNA's, byte for byte",
     ).to.equal(rustProps.find((prop) => prop.path === "ad4m://acceptedBy")!.getter);
+    // The mark is this replica's own: a peer's Shared one must not read as fired.
+    expect(
+      shape.properties.find((prop: any) => prop.path === "ad4m://flow/resolved_as").local,
+      "resolvedAs reads Local links only",
+    ).to.equal(true);
+    expect(rustProps.find((prop) => prop.path === "ad4m://flow/resolved_as")!.local).to.equal(true);
   });
 });
 

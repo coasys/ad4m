@@ -14,6 +14,7 @@ import {
   Property,
   Flag,
   HasMany,
+  HasOne,
   Optional,
   buildConformanceFilter,
 } from "./decorators";
@@ -910,5 +911,43 @@ describe("readOnly relations", () => {
   it("leave an ordinary relation writable", () => {
     expect(prop("tags").adder).toBeDefined();
     expect(prop("tags").writable).not.toBe(false);
+  });
+});
+
+@Model({ name: "SavesReadOnly" })
+class SavesReadOnly extends Ad4mModel {
+  @HasMany({ through: "test://read_only", readOnly: true })
+  readOnlyLinks: string[] = ["test://a"];
+
+  @HasMany({ through: "test://writable" })
+  writableLinks: string[] = ["test://b"];
+}
+
+describe("readOnly relations when saving", () => {
+  it("are skipped by save() and create(), even without a getter", async () => {
+    const proto = SavesReadOnly.prototype as any;
+    const set = jest.spyOn(proto, "setRelationValues").mockResolvedValue(undefined);
+    const add = jest.spyOn(proto, "addRelationValue").mockResolvedValue(undefined);
+    try {
+      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
+      await (instance as any).innerUpdate(true);
+
+      const touched = [...set.mock.calls, ...add.mock.calls].map((call) => call[0]);
+      expect(touched).toContain("writableLinks");
+      expect(touched).not.toContain("readOnlyLinks");
+    } finally {
+      set.mockRestore();
+      add.mockRestore();
+    }
+  });
+
+  it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {
+    expect(() => {
+      class Refused extends Ad4mModel {
+        @HasOne({ through: "test://one", getter: "SELECT ?target WHERE { ?source <test://one> ?target . }", readOnly: true })
+        one: string = "";
+      }
+      return Refused;
+    }).toThrow(/@HasOne.*through.*getter/);
   });
 });

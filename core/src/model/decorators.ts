@@ -1221,6 +1221,15 @@ export function HasOne(
     second?: Omit<RelationOptions, 'target'>,
 ): PropertyDecorator {
     const opts = resolveRelationArgs(first, second);
+    // `readOnly` lets `through` and `getter` stand together on `@HasMany`.
+    // `@HasOne` reads through its predicate as a property and carries no
+    // getter, so the pair would read the predicate unfiltered.
+    if (opts.through && opts.getter) {
+        throw new Error(
+            '@HasOne: `through` with `getter` is not supported, even with `readOnly`. ' +
+            'Use `@HasMany` for a read-only relation read through a getter.'
+        );
+    }
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});

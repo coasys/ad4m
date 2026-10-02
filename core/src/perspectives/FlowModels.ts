@@ -31,7 +31,7 @@ import { Model } from "../model/decorators";
  * shape.
  */
 export const ACCEPTED_BY_GETTER =
-  'SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") }';
+  'SELECT ?target WHERE { ?source <ad4m://acceptedBy> ?target . FILTER EXISTS { ?_vote <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?source <ad4m://acceptedBy> ?target )>> ; <ad4m://ontology/author> ?_author ; <ad4m://ontology/proofValid> ?_valid . FILTER(STR(?_author) = STR(?target) && STR(?_valid) = "true") } }';
 
 // ── FlowTransitionProposal ──────────────────────────────────────────────────
 // Mirrors the Rust hardwired `flow_transition_proposal.json` SDNA (once wired
@@ -135,11 +135,12 @@ export class FlowTransitionProposal extends Ad4mModel {
   rationale?: string;
 
   /**
-   * DIDs that co-signed this proposal, as the consensus engine counts them:
+   * DIDs that accepted this proposal, as the consensus engine counts them:
    * an `ad4m://acceptedBy` link counts only when it is signed by the DID it
-   * names, since anyone can write one naming someone else. The proposer's
-   * own vote is implicit, so the voters are `proposer` plus these. Read-only:
-   * vote with `acceptProposal`, withdraw with `rejectProposal`.
+   * names, since anyone can write one naming someone else, and each DID once.
+   * The proposer's vote is implicit and the proposer may also accept, so the
+   * voters are the *set* `{ proposer } ∪ acceptedBy`, not its sum.
+   * Read-only: vote with `acceptProposal`, withdraw with `rejectProposal`.
    */
   @HasMany({ through: "ad4m://acceptedBy", getter: ACCEPTED_BY_GETTER, readOnly: true })
   acceptedBy: string[] = [];
@@ -147,9 +148,11 @@ export class FlowTransitionProposal extends Ad4mModel {
   /**
    * `"fired"` once this replica's consensus pass has recorded the transition
    * this proposal settled. Per-replica bookkeeping, never an input to the
-   * engine's own derivation. Read-only.
+   * engine's own derivation. Only this replica's own `Local` mark is read:
+   * a Shared one a peer wrote says nothing about what happened here.
+   * Read-only.
    */
-  @Optional({ through: "ad4m://flow/resolved_as", readOnly: true })
+  @Optional({ through: "ad4m://flow/resolved_as", readOnly: true, local: true })
   resolvedAs?: string;
 
   // "When was this proposal written?" is answered by `Ad4mModel`'s built-in

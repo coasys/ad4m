@@ -161,31 +161,70 @@ async fn a_serialised_read_set_re_derives_the_same_state() {
     );
 }
 
-/// The proposal model's `acceptedBy` lists exactly the co-signers the fold
-/// counts. A vote is an authorship claim: an `acceptedBy` naming Carol that Bob
-/// signed is on the graph, but the fold ignores it, so the model must too.
-/// `resolvedAs` reads the pass's own mark once the edge fires.
+/// The proposal model's `acceptedBy` lists exactly the votes the fold counts,
+/// and the voters it documents, `{ proposer } ∪ acceptedBy`, are the fold's.
+/// A vote is an authorship claim with a valid signature, counted once per DID,
+/// so each of these is on the graph and must not show up twice or at all:
+/// a vote for Carol that Bob signed, a vote whose signature fails, Bob voting
+/// twice, and the proposer accepting their own proposal. `resolvedAs` reads
+/// only this replica's own mark, never a peer's Shared one.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
     let mut f = seed_satisfied_fixture(None).await;
-    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":3}"#).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":4}"#).await;
     let minted = f.mint_one().await;
+    let proposer = acting_did(&f);
+
+    let sync_signed =
+        |link: Link, signer: &TestSigner, at: Option<chrono::DateTime<chrono::Utc>>| {
+            let expr = match at {
+                Some(at) => signer.sign_at(link.normalize(), at),
+                None => signer.sign(link.normalize()),
+            };
+            LinkExpression::from(expr)
+        };
+    let vote = |did: &str| Link {
+        source: minted.clone(),
+        predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+        target: did.to_string(),
+    };
 
     let bob = TestSigner::generate();
     let carol = TestSigner::generate();
+    let eve = TestSigner::generate();
     sync_vote_from(&mut f, &bob, &minted).await;
-    let forged = bob.sign(
-        Link {
-            source: minted.clone(),
-            predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
-            target: carol.did.clone(),
-        }
-        .normalize(),
-    );
-    f.perspective
-        .add_link_expression(LinkExpression::from(forged), LinkStatus::Shared, None)
+    let later = chrono::Utc::now() + chrono::Duration::seconds(1);
+    let mut synced = vec![
+        // Bob again, a second later: a second device, or a re-sync.
+        sync_signed(vote(&bob.did), &bob, Some(later)),
+        // Bob names Carol: a valid signature, but not Carol's.
+        sync_signed(vote(&carol.did), &bob, None),
+        // A peer's Shared `resolved_as`: says nothing about what happened here.
+        sync_signed(
+            Link {
+                source: minted.clone(),
+                predicate: Some(RESOLVED_AS_PREDICATE.to_string()),
+                target: literal(FIRED_MARK),
+            },
+            &bob,
+            None,
+        ),
+    ];
+    // Eve names herself, but the signature does not cover what is stored.
+    let mut tampered = eve.sign(vote(&eve.did).normalize());
+    tampered.timestamp = (chrono::Utc::now() + chrono::Duration::seconds(5)).to_rfc3339();
+    synced.push(LinkExpression::from(tampered));
+    for link in synced {
+        f.perspective
+            .add_link_expression(link, LinkStatus::Shared, None)
+            .await
+            .expect("sync a link in");
+    }
+    // The proposer accepts their own proposal as well.
+    let ctx = f.ctx.clone();
+    accept_flow_proposal(&mut f.perspective, &minted, &ctx)
         .await
-        .expect("sync a vote signed by someone other than the DID it names");
+        .expect("the proposer may accept too");
 
     let proposal = |raw: String| -> serde_json::Value {
         let result: serde_json::Value = serde_json::from_str(&raw).expect("model_query JSON");
@@ -197,17 +236,15 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             .cloned()
             .expect("the minted proposal is listed")
     };
-    let read = |p: &serde_json::Value| -> Vec<String> {
-        let mut dids: Vec<String> = p["acceptedBy"]
+    let accepted = |p: &serde_json::Value| -> Vec<String> {
+        p["acceptedBy"]
             .as_array()
             .map(|a| {
                 a.iter()
                     .filter_map(|v| v.as_str().map(str::to_string))
                     .collect()
             })
-            .unwrap_or_default();
-        dids.sort();
-        dids
+            .unwrap_or_default()
     };
 
     let p = proposal(
@@ -216,14 +253,16 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
             .await
             .expect("query proposals"),
     );
+    let mut listed = accepted(&p);
+    listed.sort();
+    let mut expected = vec![bob.did.clone(), proposer.clone()];
+    expected.sort();
     assert_eq!(
-        read(&p),
-        vec![bob.did.clone()],
-        "Bob's own vote, not the one he wrote for Carol"
+        listed, expected,
+        "Bob once and the proposer; not Carol, not Eve"
     );
 
-    // Held to the fold, not to a list written here: the fold's voters are the
-    // proposer (implicit) plus `acceptedBy`.
+    // Held to the fold, not to a list written here.
     let atom = f
         .read_set()
         .await
@@ -231,25 +270,24 @@ async fn the_proposal_model_lists_only_the_votes_the_fold_counts() {
         .into_iter()
         .find(|a| a.uri == minted)
         .expect("the proposal is an atom");
-    let mut counted: Vec<String> = atom
-        .votes
-        .iter()
-        .map(|v| v.did.clone())
-        .filter(|did| *did != atom.proposer)
+    let counted: std::collections::BTreeSet<String> =
+        atom.votes.iter().map(|v| v.did.clone()).collect();
+    let documented: std::collections::BTreeSet<String> = std::iter::once(proposer.clone())
+        .chain(accepted(&p))
         .collect();
-    counted.sort();
     assert_eq!(
-        read(&p),
-        counted,
-        "the model and the fold agree on who voted"
+        documented, counted,
+        "{{ proposer }} ∪ acceptedBy is the fold's voter set"
     );
     assert!(
         p["resolvedAs"].is_null(),
-        "short of quorum, nothing is marked"
+        "a peer's Shared mark is not this replica's"
     );
 
-    let dave = TestSigner::generate();
-    sync_vote_from(&mut f, &dave, &minted).await;
+    for _ in 0..2 {
+        let signer = TestSigner::generate();
+        sync_vote_from(&mut f, &signer, &minted).await;
+    }
     consensus_pass(&mut f).await;
     let p = proposal(
         f.perspective
