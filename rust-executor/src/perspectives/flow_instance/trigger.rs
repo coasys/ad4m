@@ -57,6 +57,12 @@ pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(300);
 /// flow or on a state). `rdf://type`, `ad4m://context` and the
 /// interpretation fields are left out — the first two are written by every
 /// class, and none of them changes what an instance derives.
+///
+/// A `fromRole` gate is inside the rule literal, so changing the gate is
+/// covered. Not covered: an edit to the role class's own shape, which the
+/// gate's model query reads to resolve grants. That is rare, and triggering
+/// on `sh://path` would sweep on every class registration in the perspective;
+/// such an edit is picked up on the next flow-relevant diff instead.
 pub const FLOW_DEFINITION_PREDICATES: [&str; 7] = [
     "ad4m://consensusRule",
     "ad4m://hasState",
@@ -152,6 +158,10 @@ impl FlowTouch {
 pub struct FlowPassQueue {
     pending: FlowTouch,
     scheduled: bool,
+    /// Passes taken from the queue and not yet finished. Only read by
+    /// [`PerspectiveInstance::settle_flow_passes`], which tests use to wait
+    /// out a sweep instead of sleeping past the debounce.
+    running: usize,
 }
 
 impl FlowPassQueue {
@@ -167,7 +177,18 @@ impl FlowPassQueue {
     /// spawns a fresh pass, so nothing lands in a gap.
     pub fn take(&mut self) -> FlowTouch {
         self.scheduled = false;
+        self.running += 1;
         std::mem::take(&mut self.pending)
+    }
+
+    /// The pass handed work by [`take`](Self::take) has finished.
+    pub fn finish(&mut self) {
+        self.running = self.running.saturating_sub(1);
+    }
+
+    /// Nothing queued and nothing running.
+    pub fn is_idle(&self) -> bool {
+        !self.scheduled && self.running == 0
     }
 }
 
@@ -211,11 +232,38 @@ impl PerspectiveInstance {
                 .lock()
                 .expect("flow pass queue poisoned")
                 .take();
-            if this.is_teardown.load(Ordering::Acquire) {
+            if !this.is_teardown.load(Ordering::Acquire) {
+                this.run_sync_triggered_flow_pass(touch).await;
+            }
+            this.flow_pass_queue
+                .lock()
+                .expect("flow pass queue poisoned")
+                .finish();
+        });
+    }
+
+    /// Wait until no flow pass is queued or running here. For tests: a write
+    /// to a flow definition queues a sweep that runs a debounce later, and a
+    /// test that runs its own pass meanwhile can find the sweep has already
+    /// recorded what it expected to record. Panics after ten seconds.
+    #[cfg(test)]
+    pub(crate) async fn settle_flow_passes(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if self
+                .flow_pass_queue
+                .lock()
+                .expect("flow pass queue poisoned")
+                .is_idle()
+            {
                 return;
             }
-            this.run_sync_triggered_flow_pass(touch).await;
-        });
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a flow pass was still queued or running after 10 s"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Resolve the touched proposals to their instances, then sweep **once

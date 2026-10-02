@@ -343,15 +343,49 @@ async fn a_local_rule_change_rederives_the_cache() {
     );
 }
 
+/// A rule changed through `update_link` re-derives too. An update publishes its
+/// own topic rather than going through `pubsub_publish_diff`, so it needs the
+/// definition hook of its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rule_updated_in_place_rederives_the_cache() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":1}"#).await;
+    f.mint_one().await;
+    consensus_pass(&mut f).await;
+    assert_eq!(f.cached_state().await, "scoped");
+
+    let rule = links_of(&f, "delivery://Delivery.scoped")
+        .await
+        .into_iter()
+        .find(|l| l.data.predicate.as_deref() == Some("ad4m://consensusRule"))
+        .expect("the rule just written");
+    let ctx = f.ctx.clone();
+    f.perspective
+        .update_link(
+            LinkExpression::from(rule),
+            Link {
+                source: "delivery://Delivery.scoped".to_string(),
+                predicate: Some("ad4m://consensusRule".to_string()),
+                target: literal(r#"{"n":2}"#),
+            },
+            None,
+            &ctx,
+        )
+        .await
+        .expect("update_link");
+
+    assert!(
+        cache_reaches(&f, "identified").await,
+        "a rule updated in place must re-derive the cache"
+    );
+}
+
 /// A synced chat message queues nothing: the trigger is keyed on the flow
 /// vocabulary, so ordinary traffic never re-derives a flow. Pinned by the
 /// cache staying put where a pass would have healed it.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_synced_chat_message_does_not_trigger_a_pass() {
     let mut f = seed_satisfied_fixture(None).await;
-    // Seeding writes the flow's definition, which queues a sweep of its own;
-    // let it run before forging, so only the chat message could heal the cache.
-    tokio::time::sleep(FLOW_PASS_DEBOUNCE * 3).await;
     forge_cached_state(&mut f, "scoped").await;
     let bob = TestSigner::generate();
     let chat = bob.sign(
@@ -363,7 +397,8 @@ async fn a_synced_chat_message_does_not_trigger_a_pass() {
         .normalize(),
     );
     sync_in(&f, vec![LinkExpression::from(chat)]).await;
-    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    // Waits out any pass the message queued, which is what a sleep stood in for.
+    f.perspective.settle_flow_passes().await;
     assert_eq!(
         f.cached_state().await,
         "scoped",

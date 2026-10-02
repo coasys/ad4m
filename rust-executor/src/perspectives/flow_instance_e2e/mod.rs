@@ -27,7 +27,6 @@ use super::flow_instance::atom::{
 use super::flow_instance::fold::DerivedState;
 use super::flow_instance::pass::{run_flow_consensus_pass, FireOutcome};
 use super::flow_instance::propose::propose_flow_transition;
-use super::flow_instance::trigger::FLOW_PASS_DEBOUNCE;
 use super::flow_instance::{fold_read_set, FlowInstance, ReadSet};
 use crate::agent::signatures::TestSigner;
 use crate::types::{Link, LinkExpression, LinkQuery, LinkStatus, PerspectiveDiff};
@@ -115,6 +114,9 @@ async fn set_consensus_rule(f: &mut Fixture, state_uri: &str, rule: &str) {
         LinkStatus::Local,
     )
     .await;
+    // A rule is part of the definition, so this queued a sweep. Wait it out,
+    // or it can record an edge before the test's own pass does.
+    f.perspective.settle_flow_passes().await;
 }
 
 async fn consensus_pass(f: &mut Fixture) -> Vec<FireOutcome> {
