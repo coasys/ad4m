@@ -34,6 +34,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- `ai.setDefaultModel` keeps a default for every model type, not only `LLM` [#1239](https://github.com/coasys/ad4m/pull/1239)
+  - For `EMBEDDING` and `TRANSCRIPTION` it answered `true` and wrote nothing, so `ai.getDefaultModel` read back `null`, and the OpenAI-compatible endpoints could never resolve `model: "default"` for those types. The write had been moved inside the guard meant only for respawning `"default"` LLM tasks.
+  - It is refused unless the model exists and has that type, so an LLM can no longer become the default embedding model. `ai.removeModel` clears any default that pointed at the removed model.
 - Holochain zome calls no longer queue behind each other node-wide [#1133](https://github.com/coasys/ad4m/issues/1133)
   - The Holochain service loop awaited every request to completion, so a cheap telepresence `send_broadcast` waited behind every other space's `sync()`/`pull`, and presence, call signalling and cursors stalled for 10–30 s. Requests are now dispatched concurrently (bounded at 32 in flight); only `InstallApp`/`RemoveApp`/`EnableApp`/`Shutdown` serialize, and they wait for in-flight calls and hold back new ones for their duration only.
   - Both queues report: the service loop logs `[hc-actor] <request> waited N ms in queue, M in flight` and the language runtime logs `[lang:<addr>] <op> waited N ms in queue` (`debug`; `warn` above 1 s).

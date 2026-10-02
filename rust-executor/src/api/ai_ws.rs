@@ -208,7 +208,13 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     service
         .set_default_model(body.model_type, id)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if e.downcast_ref::<crate::db::InvalidDefaultModel>().is_some() {
+                WsRpcError::bad_request(e.to_string())
+            } else {
+                WsRpcError::internal(e.to_string())
+            }
+        })?;
 
     Ok(Value::Bool(true))
 }
