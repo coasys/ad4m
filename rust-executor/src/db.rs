@@ -850,6 +850,19 @@ impl Ad4mDb {
                  WHERE owner_did IS NULL AND user_email IS NOT NULL",
                 [],
             )?;
+            let ownerless: Vec<String> = tx
+                .prepare(
+                    "SELECT id FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
+                )?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            if !ownerless.is_empty() {
+                log::warn!(
+                    "Deleting {} notification(s) whose user no longer exists or has no DID: {:?}",
+                    ownerless.len(),
+                    ownerless
+                );
+            }
             tx.execute(
                 "DELETE FROM notifications WHERE owner_did IS NULL AND user_email IS NOT NULL",
                 [],
