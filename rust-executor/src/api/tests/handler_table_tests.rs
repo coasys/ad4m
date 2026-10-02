@@ -63,7 +63,7 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
     out.push_str("}\n\nexport type EventName = keyof EventMap;\n\n");
     let scoped: Vec<String> = specs
         .iter()
-        .filter(|s| s.scoped)
+        .filter(|s| s.scope.is_some())
         .map(|s| format!("\"{}\"", s.name))
         .collect();
     out.push_str("/** Events about one perspective: they carry `perspectiveUuid`. */\n");
@@ -76,7 +76,7 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
     out.push_str(&quoted(
         specs
             .iter()
-            .filter(|s| s.scoped)
+            .filter(|s| s.scope.is_some())
             .map(|s| s.name.to_string()),
     ));
     out.push_str("]);\n");

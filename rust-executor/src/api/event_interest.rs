@@ -29,22 +29,25 @@ pub type EventInterest = HashMap<String, Option<HashSet<String>>>;
 /// Per-connection interest; empty = no events.
 pub type SharedInterest = Arc<RwLock<EventInterest>>;
 
-/// The event types that carry `perspectiveUuid` (`EventSpec.scoped`).
-static SCOPED: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+/// Core event type → its scope field (`EventSpec.scope`).
+static SCOPES: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new(|| {
     super::events_ws::event_specs()
         .into_iter()
-        .filter(|s| s.scoped)
-        .map(|s| s.name)
+        .filter_map(|s| s.scope.map(|f| (s.name, f)))
         .collect()
 });
 
-/// The perspective an event is about. `None` for events that are not
-/// perspective-scoped.
-fn event_perspective<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> {
-    if !SCOPED.contains(event_type) {
-        return None;
+/// The scope value of an event: its perspective for core events, the
+/// interface-declared field for service events. `None` when unscoped.
+fn event_scope<'a>(event_type: &str, event: &'a Value) -> Option<&'a str> {
+    match SCOPES.get(event_type) {
+        Some(field) => event.get(*field).and_then(Value::as_str),
+        None if crate::services::is_service_method(event_type) => {
+            let field = crate::services::host().registry().event_scope(event_type)?;
+            event.get(field.as_str()).and_then(Value::as_str)
+        }
+        None => None,
     }
-    event.get("perspectiveUuid").and_then(Value::as_str)
 }
 
 /// The TypeScript type of `events.watch` params: event name → the
@@ -89,7 +92,7 @@ pub fn wants(interest: &SharedInterest, event_json: &str) -> bool {
         None => false,
         Some(None) => true,
         Some(Some(wanted)) => {
-            event_perspective(event_type, &event).is_some_and(|p| wanted.contains(p))
+            event_scope(event_type, &event).is_some_and(|p| wanted.contains(p))
         }
     }
 }

@@ -1,5 +1,5 @@
 mod byte_array;
-pub mod capability;
+pub mod feature;
 mod conductor_languages;
 pub mod error;
 pub mod language;
@@ -271,7 +271,7 @@ impl LanguageController {
                     address: language_address.clone(),
                     message: format!("Failed to register callbacks: {}", e),
                 })?;
-        capability::register_capabilities(&language_address, capabilities);
+        feature::register_features(&language_address, capabilities);
         info!("Callbacks registered for {}", label);
 
         // Cache the language name for use by other log sites
@@ -329,7 +329,7 @@ impl LanguageController {
         names.remove(language_address);
 
         // Drop the cached capability set so a later reload re-detects it.
-        capability::remove_capabilities(language_address);
+        feature::remove_features(language_address);
 
         info!("Successfully unloaded language: {}", label);
         Ok(())

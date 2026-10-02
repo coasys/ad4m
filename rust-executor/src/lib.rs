@@ -14,6 +14,7 @@ pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
+pub mod services;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;

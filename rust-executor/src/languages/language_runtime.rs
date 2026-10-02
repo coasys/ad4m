@@ -1,6 +1,6 @@
 use crate::agent::AgentContext;
 use crate::js_core::JsCore;
-use crate::languages::capability::{parse_capability_list, Capability};
+use crate::languages::feature::{parse_feature_list, LanguageFeature};
 use crate::languages::LanguageContext;
 use log::{debug, error, info, warn};
 use serde_json::Value as JsonValue;
@@ -261,11 +261,11 @@ impl LanguageRuntime {
     ///    registration step below doesn't care which mechanism a language
     ///    picks.)
     ///
-    /// 2. **Capability probing.** Returns the set of capabilities the
+    /// 2. **LanguageFeature probing.** Returns the set of capabilities the
     ///    language actually exports. The caller stores the set in the
     ///    global capability registry so `Language::new(address)` can later
-    ///    answer `has(Capability::…)` without another v8 round-trip.
-    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
+    ///    answer `has(LanguageFeature::…)` without another v8 round-trip.
+    pub async fn register_callbacks(&self) -> Result<HashSet<LanguageFeature>, String> {
         // JSON-encode the language address so it embeds as a proper JS
         // string literal — defensive against addresses containing quotes,
         // backslashes, or newlines.
@@ -303,7 +303,7 @@ impl LanguageRuntime {
         let _ = self.execute(&callback_script).await?;
 
         // Detect which capabilities the language actually exports. Returns
-        // a JSON array of kebab-case capability names that parse_capability_list
+        // a JSON array of kebab-case capability names that parse_feature_list
         // converts to the typed enum set. Kept as one v8 round-trip per
         // language load, not per call.
         let detect_script = r#"
@@ -335,7 +335,7 @@ impl LanguageRuntime {
         "#;
 
         let raw = self.execute(detect_script).await?;
-        let caps = parse_capability_list(raw.trim());
+        let caps = parse_feature_list(raw.trim());
 
         info!(
             "Detected capabilities for language {}: {:?}",
@@ -435,21 +435,21 @@ impl LanguageRuntime {
                                             // kebab-case wire names so the handle side can
                                             // parse it back into the same enum.
                                             let names: Vec<&'static str> = caps.iter().map(|c| match c {
-                                                Capability::ExpressionCreate => "expression-create",
-                                                Capability::ExpressionGet => "expression-get",
-                                                Capability::PerspectiveCommit => "perspective-commit",
-                                                Capability::PerspectiveSync => "perspective-sync",
-                                                Capability::PerspectiveRender => "perspective-render",
-                                                Capability::PerspectiveCurrentRevision => "perspective-current-revision",
-                                                Capability::PerspectiveQuery => "perspective-query",
-                                                Capability::PeersLocal => "peers-local",
-                                                Capability::PeersRemote => "peers-remote",
-                                                Capability::TelepresenceSetStatus => "telepresence-set-status",
-                                                Capability::TelepresenceGetAgents => "telepresence-get-agents",
-                                                Capability::TelepresenceSendSignal => "telepresence-send-signal",
-                                                Capability::TelepresenceSendBroadcast => "telepresence-send-broadcast",
-                                                Capability::LanguageGetSource => "language-get-source",
-                                                Capability::HolochainSignal => "holochain-signal",
+                                                LanguageFeature::ExpressionCreate => "expression-create",
+                                                LanguageFeature::ExpressionGet => "expression-get",
+                                                LanguageFeature::PerspectiveCommit => "perspective-commit",
+                                                LanguageFeature::PerspectiveSync => "perspective-sync",
+                                                LanguageFeature::PerspectiveRender => "perspective-render",
+                                                LanguageFeature::PerspectiveCurrentRevision => "perspective-current-revision",
+                                                LanguageFeature::PerspectiveQuery => "perspective-query",
+                                                LanguageFeature::PeersLocal => "peers-local",
+                                                LanguageFeature::PeersRemote => "peers-remote",
+                                                LanguageFeature::TelepresenceSetStatus => "telepresence-set-status",
+                                                LanguageFeature::TelepresenceGetAgents => "telepresence-get-agents",
+                                                LanguageFeature::TelepresenceSendSignal => "telepresence-send-signal",
+                                                LanguageFeature::TelepresenceSendBroadcast => "telepresence-send-broadcast",
+                                                LanguageFeature::LanguageGetSource => "language-get-source",
+                                                LanguageFeature::HolochainSignal => "holochain-signal",
                                             }).collect();
                                             serde_json::to_string(&names).map_err(|e| e.to_string())
                                         })

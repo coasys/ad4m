@@ -1,0 +1,145 @@
+{
+  "name": "echo",
+  "author": "did:key:z6MkFixture",
+  "version": "1.0.0",
+  "description": "Test service.",
+  "selection": "per-user",
+  "methods": {
+    "say": {
+      "description": "Say `text` in `room`; everyone watching the room sees it.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "room": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "room",
+          "text"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/SayResult"
+      },
+      "action": "SAY",
+      "read": true,
+      "errors": {
+        "Muted": {
+          "code": 409
+        }
+      }
+    },
+    "count": {
+      "description": "Count from 1 to `to`, one `count-tick` per number.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "to": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 1,
+            "maximum": 10
+          },
+          "streamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "streamId"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/CountResult"
+      },
+      "action": "SAY",
+      "long": true,
+      "stream": {
+        "event": "count-tick"
+      }
+    }
+  },
+  "events": {
+    "said": {
+      "description": "Text said in a room.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "room": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "room",
+          "text"
+        ]
+      },
+      "action": "SAY",
+      "scope": "room"
+    },
+    "count-tick": {
+      "description": "One number of a count.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "streamId",
+          "n"
+        ]
+      },
+      "action": "SAY",
+      "scope": "streamId"
+    }
+  },
+  "actions": {
+    "SAY": {
+      "label": "Say things",
+      "description": "Echo text back.",
+      "risk": "safe"
+    }
+  },
+  "types": {
+    "SayResult": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ]
+    },
+    "CountResult": {
+      "type": "object",
+      "properties": {
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total"
+      ]
+    }
+  }
+}

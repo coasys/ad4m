@@ -167,20 +167,24 @@ pub mod events {
 }
 
 /// One emitted event: its name, the TypeScript type of its payload (the
-/// wire message without `type`) and whether it is about one perspective
-/// (carries `perspectiveUuid`, so `events.watch` can narrow it).
+/// wire message without `type`) and its scope: the payload field
+/// `events.watch` narrows on. Core events are scoped by `perspectiveUuid`;
+/// service events name their own field (SPEC_SERVICE_LANGUAGES §9.2).
 pub struct EventSpec {
     pub name: &'static str,
     pub payload: super::ws_handler::TsType,
-    pub scoped: bool,
+    pub scope: Option<&'static str>,
 }
 
+/// The scope field of perspective-scoped core events.
+pub const PERSPECTIVE_SCOPE: &str = "perspectiveUuid";
+
 impl EventSpec {
-    fn of<T: ts_rs::TS + 'static>(name: &'static str, scoped: bool) -> Self {
+    fn of<T: ts_rs::TS + 'static>(name: &'static str, perspective_scoped: bool) -> Self {
         Self {
             name,
             payload: super::ws_handler::TsType::of::<T>(),
-            scoped,
+            scope: perspective_scoped.then_some(PERSPECTIVE_SCOPE),
         }
     }
 }
@@ -261,7 +265,10 @@ pub async fn events_ws(
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    let capabilities = context.capabilities.clone().unwrap_or_default();
+    Ok(ws.on_upgrade(move |socket| {
+        handle_events_ws(socket, auth_token, user_email, is_admin, capabilities)
+    }))
 }
 
 /// Build the merged event stream for a given user.
@@ -272,6 +279,7 @@ pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    capabilities: Vec<crate::agent::capabilities::Capability>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // Resolve the DID once at subscription time — avoids repeated JWT decode +
     // DB / AgentService lookups on every single event. If the client connected
@@ -281,7 +289,7 @@ pub(crate) async fn build_event_stream(
         let ctx = AgentContext::from_auth_token(auth_token.clone());
         did_for_context(&ctx).ok()
     };
-    build_event_stream_for(auth_token, resolved_did, user_email, is_admin).await
+    build_event_stream_for(auth_token, resolved_did, user_email, is_admin, capabilities).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
@@ -291,6 +299,7 @@ pub(crate) async fn build_event_stream_for(
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
+    capabilities: Vec<crate::agent::capabilities::Capability>,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -315,6 +324,7 @@ pub(crate) async fn build_event_stream_for(
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
     // streams share the same lazy cell — one resolution serves both.
+    let d_service = resolved_did.clone();
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
 
@@ -654,7 +664,22 @@ pub(crate) async fn build_event_stream_for(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    Box::pin(top)
+    // ── Service events (SPEC_SERVICE_LANGUAGES §9.2) ──
+    // Only to the owning agent's sockets (or an admin), and only when the
+    // socket holds the event's action.
+    let s_services = BroadcastStream::new(crate::services::host().subscribe_events())
+        .filter_map(|r| async { r.ok() })
+        .filter_map(move |e| {
+            let deliver = crate::services::ServiceHost::delivers(
+                &e,
+                d_service.as_deref(),
+                is_admin,
+                &capabilities,
+            );
+            async move { deliver.then_some(e.wire) }
+        });
+
+    Box::pin(stream::select(top, s_services))
 }
 
 async fn handle_events_ws(
@@ -662,11 +687,12 @@ async fn handle_events_ws(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    capabilities: Vec<crate::agent::capabilities::Capability>,
 ) {
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let event_stream = build_event_stream(auth_token, user_email, is_admin, capabilities).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),
