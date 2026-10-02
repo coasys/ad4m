@@ -1,7 +1,10 @@
 //! Runtime WS-native handlers.
 
+use base64::Engine;
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::AgentService;
@@ -9,15 +12,17 @@ use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
 use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
+use crate::types::domain::{ComputeLogEntry, ImportResult};
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::types::{
-    AddAgentInfosRequest, ExportRequest, FriendSendMessageRequest, FriendsListRequest,
-    ImportRequest, LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput,
-    OpenLinkRequest, VerifySignatureRequest,
+    AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
+    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
+    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    VerifySignatureRequest,
 };
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 async fn get_runtime_info(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     let info = AgentService::with_global_instance(|agent_service| {
@@ -269,24 +274,17 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(friends)?)
 }
 
+/// Not implemented: nothing delivers an outbox message, and the outbox has no owner, so every
+/// user could read every other user's messages through `runtime.outbox`. The params are still
+/// checked against the contract.
 async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let did = params.require_str("did")?;
-    let body: FriendSendMessageRequest = serde_json::from_value(params.clone())
+    let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let message_expr: PerspectiveExpression = serde_json::from_value(body.message)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid message format: {}", e)))?;
-    RuntimeService::with_global_instance(|runtime| {
-        runtime.add_message_to_outbox(SentMessage {
-            message: message_expr,
-            recipient: did.clone(),
-        });
-    });
-
-    Ok(Value::Bool(true))
+    Err(WsRpcError::not_implemented(
+        "Direct messages are not implemented: there is no delivery and no per-user outbox",
+    ))
 }
 
 async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -587,18 +585,103 @@ async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-    let _ = params;
-    Err(WsRpcError::not_implemented(
-        "PUT /runtime/host-rates is not yet implemented on the server",
-    ))
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetHostRatesRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    let rates = validate_host_rates(body.rates)?;
+
+    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rates))
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+
+    Ok(Value::Bool(true))
 }
 
-async fn get_host_rates(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "GET /runtime/host-rates is not yet implemented on the server",
-    ))
+fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
+    let mut seen = std::collections::HashSet::new();
+    rates
+        .into_iter()
+        .enumerate()
+        .map(|(i, r)| {
+            if r.description.is_empty() || !r.price_in_hot.is_finite() || r.price_in_hot < 0.0 {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} needs a description and a non-negative priceInHOT",
+                    i
+                )));
+            }
+            // `description` is the table's primary key.
+            if !seen.insert(r.description.clone()) {
+                return Err(WsRpcError::bad_request(format!(
+                    "Rate {} repeats description '{}'",
+                    i, r.description
+                )));
+            }
+            Ok((r.description, r.price_in_hot))
+        })
+        .collect()
+}
+
+async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+
+    let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
+        .map_err(|e| WsRpcError::internal(e.to_string()))?
+        .into_iter()
+        .map(|(description, price_in_hot)| HostRate {
+            description,
+            price_in_hot,
+        })
+        .collect();
+
+    Ok(serde_json::to_value(rates)?)
+}
+
+/// Stores the membrane proof for the Unyt alliance DNA, then installs the DNA
+/// in the background: installation waits for Holochain and can outlast the call.
+/// `runtime.unytVersionInfo` reports the outcome.
+async fn set_unyt_membrane_proof(
+    params: Value,
+    ctx: Arc<RequestContext>,
+) -> Result<Value, WsRpcError> {
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden("Admin credential required"));
+    }
+    let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
+    if body.proof.is_empty() {
+        return Err(WsRpcError::bad_request("'proof' must not be empty"));
+    }
+    // The install decodes it later and, if that fails, installs without a proof.
+    if let Err(e) = base64::engine::general_purpose::STANDARD.decode(&body.proof) {
+        return Err(WsRpcError::bad_request(format!(
+            "'proof' is not valid base64: {}",
+            e
+        )));
+    }
+
+    crate::unyt_service::set_membrane_proof(&body.proof)
+        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+    tokio::spawn(async {
+        match crate::unyt_service::ensure_installed().await {
+            Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
+            Err(e) => log::error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+
+    Ok(Value::Bool(true))
+}
+
+async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
+        .map_err(WsRpcError::forbidden)?;
+    let (installed, bundled) = crate::unyt_service::version_info();
+    Ok(serde_json::to_value(UnytVersionInfo {
+        installed,
+        bundled,
+        install_error: crate::unyt_service::install_error(),
+    })?)
 }
 
 // ── Stubs for unyt endpoints ──
@@ -610,56 +693,210 @@ async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Valu
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("runtime.info", get_runtime_info);
-    map.register("runtime.quit", quit_runtime);
-    map.register("runtime.setStatus", set_status);
-    map.register("runtime.openLink", open_link);
-    map.register("runtime.exportData", export_data);
-    map.register("runtime.importData", import_data);
-    map.register("runtime.restartHolochain", restart_holochain);
-    map.register("runtime.verifySignature", verify_signature);
-    map.register("runtime.tlsDomain", get_tls_domain);
-    map.register("runtime.computeLog", get_compute_log);
+    map.method::<NoParams, RuntimeInfo>("runtime.info", get_runtime_info)
+        .read();
+    map.method::<NoParams, bool>("runtime.quit", quit_runtime);
+    // Always errors: status updates have no implementation yet. The contract
+    // is the SDK's call.
+    map.method::<SetStatusRequest, bool>("runtime.setStatus", set_status);
+    map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
+    map.method::<ExportRequest, bool>("runtime.exportData", export_data);
+    map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
+    map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
+        .long();
+    map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
+        .read();
+    map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
+        .read();
+    map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
+        "runtime.computeLog",
+        get_compute_log,
+    )
+    .read();
     // Friends & messages
-    map.register("runtime.friends", list_friends);
-    map.register("runtime.addFriends", add_friends);
-    map.register("runtime.removeFriends", remove_friends);
-    map.register("runtime.friendStatus", get_friend_status);
-    map.register("runtime.sendFriendMessage", send_friend_message);
-    map.register("runtime.inbox", get_inbox);
-    map.register("runtime.outbox", get_outbox);
+    map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
+        .read();
+    map.method::<FriendsListRequest, Vec<String>>("runtime.addFriends", add_friends);
+    map.method::<FriendsListRequest, Vec<String>>("runtime.removeFriends", remove_friends);
+    // Always errors: friend status has no implementation yet.
+    map.method::<RuntimeFriendStatusParams, Option<PerspectiveExpression>>(
+        "runtime.friendStatus",
+        get_friend_status,
+    )
+    .read();
+    map.method::<RuntimeSendFriendMessageParams, bool>(
+        "runtime.sendFriendMessage",
+        send_friend_message,
+    );
+    // Always empty: the inbox has no implementation yet.
+    map.method::<NoParams, Vec<PerspectiveExpression>>("runtime.inbox", get_inbox)
+        .read();
+    map.method::<NoParams, Vec<SentMessage>>("runtime.outbox", get_outbox)
+        .read();
     // Notifications
-    map.register("runtime.notifications", list_notifications);
-    map.register("runtime.createNotification", create_notification);
-    map.register("runtime.updateNotification", update_notification);
-    map.register("runtime.grantNotification", grant_notification);
-    map.register("runtime.deleteNotification", delete_notification);
+    map.method::<NoParams, Vec<Notification>>("runtime.notifications", list_notifications)
+        .read();
+    map.method::<NotificationInput, String>("runtime.createNotification", create_notification);
+    map.method::<RuntimeUpdateNotificationParams, bool>(
+        "runtime.updateNotification",
+        update_notification,
+    );
+    map.method::<RuntimeGrantNotificationParams, bool>(
+        "runtime.grantNotification",
+        grant_notification,
+    );
+    map.method::<RuntimeNotificationIdParams, bool>(
+        "runtime.deleteNotification",
+        delete_notification,
+    );
     // Link language templates
-    map.register("runtime.linkLanguageTemplates", get_link_language_templates);
-    map.register(
+    map.method::<NoParams, Vec<String>>(
+        "runtime.linkLanguageTemplates",
+        get_link_language_templates,
+    )
+    .read();
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.addLinkLanguageTemplates",
         add_link_language_templates,
     );
-    map.register(
+    map.method::<LinkLanguageTemplatesRequest, Vec<String>>(
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
     );
     // Holochain
-    map.register("runtime.hcAgentInfos", get_hc_agent_infos);
-    map.register("runtime.addHcAgentInfos", add_hc_agent_infos);
-    map.register("runtime.networkMetrics", get_network_metrics);
+    map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
+        .read();
+    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
+    map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
+        .read();
     // Hosting flags
-    map.register("runtime.freeHostingEnabled", get_free_hosting_enabled);
-    map.register("runtime.setFreeHostingEnabled", set_free_hosting_enabled);
-    map.register("runtime.hostRates", get_host_rates);
-    map.register("runtime.setHostRates", set_host_rates);
-    // Unyt stubs
-    map.register("runtime.unytAgentKey", stub_not_impl);
-    map.register("runtime.unytSendHot", stub_not_impl);
-    map.register("runtime.unytWalletBalance", stub_not_impl);
-    map.register("runtime.unytWalletHistory", stub_not_impl);
-    map.register("runtime.unytVersionInfo", stub_not_impl);
-    map.register("runtime.unytHotAgentPubkey", stub_not_impl);
-    map.register("runtime.unytMembraneProof", stub_not_impl);
-    map.register("runtime.unytReinstallDna", stub_not_impl);
+    map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
+        .read();
+    map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
+        "runtime.setFreeHostingEnabled",
+        set_free_hosting_enabled,
+    );
+    map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
+        .read();
+    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
+    map.method::<SetUnytMembraneProofRequest, bool>(
+        "runtime.setUnytMembraneProof",
+        set_unyt_membrane_proof,
+    );
+    map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
+        .read();
+    // Always error: the remaining unyt endpoints have no implementation yet.
+    map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
+        .read();
+    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
+    map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
+        .read();
+    map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
+        .read();
+    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytWalletHistoryParams {
+    #[ts(optional)]
+    pub page: Option<u32>,
+    #[ts(optional)]
+    pub per_page: Option<u32>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUnytSendHotParams {
+    pub recipient: String,
+    pub amount: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeComputeLogParams {
+    /// Defaults to the caller's own email.
+    #[ts(optional)]
+    pub user_email: Option<String>,
+    /// ISO 8601; only entries after this timestamp.
+    #[ts(optional)]
+    pub since: Option<String>,
+    /// Defaults to 100.
+    #[ts(optional, type = "number")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeFriendStatusParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSendFriendMessageParams {
+    pub did: String,
+    /// The perspective to sign as this agent.
+    #[ts(as = "super::neighbourhoods_ws::NeighbourhoodSignedPerspective")]
+    pub message: crate::types::PerspectiveInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeUpdateNotificationParams {
+    pub id: String,
+    #[serde(flatten)]
+    #[ts(flatten)]
+    pub notification: NotificationInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeGrantNotificationParams {
+    pub id: String,
+    pub granted: bool,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeNotificationIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeSetFreeHostingEnabledParams {
+    pub enabled: bool,
+}
+
+/// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum RuntimeImportResult {
+    Db(ImportResult),
+    Perspective(RuntimeImportPerspectiveResult),
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct RuntimeImportPerspectiveResult {
+    pub success: bool,
+    // The file's raw contents: import does not validate the snapshot shape.
+    #[ts(type = "any")]
+    pub snapshot: Value,
 }

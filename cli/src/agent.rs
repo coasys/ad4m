@@ -204,7 +204,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: AgentFunctions) -> Result<()>
         AgentFunctions::Watch {} => {
             println!("Watching for agent status changes...");
             println!("(Press Ctrl+C to stop)\n");
-            let mut rx = ad4m_client.subscribe_events();
+            let mut rx = ad4m_client
+                .watch_events(serde_json::json!({
+                    "agent-status-changed": null, "agent-updated": null
+                }))
+                .await?;
             loop {
                 match rx.recv().await {
                     Ok(event) => {

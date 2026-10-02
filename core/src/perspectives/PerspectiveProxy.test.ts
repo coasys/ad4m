@@ -136,9 +136,9 @@ describe('QuerySubscriptionProxy', () => {
   // integration-tests-mcp failure the first fix exposed.
   //
   // CodeRabbit warned about the "final-subscriber" loop: when this query
-  // owns the LAST `_wsCallbacks` entry in ApiClient, calling `#unsubscribe`
+  // owns the LAST `_handlers` entry in ApiClient, calling `#unsubscribe`
   // inside a reconnect-driven `subscribe()` closes the WebSocket
-  // (ApiClient.subscribe()'s deleter: "if no more callbacks and no pending
+  // (the release ApiClient.on() returns: "if no more handlers and no pending
   // calls, close the socket"). The subsequent `subscribeQuery` reopens the
   // socket, whose fresh `onopen` fires every registered reconnect callback
   // → recursion.
@@ -147,7 +147,7 @@ describe('QuerySubscriptionProxy', () => {
   // calling `subscribe()` from the reconnect handler at all. Instead it
   // swap-in-place: get a new server-side subscription ID via
   // `subscribeQuery`, register the new client-side callback FIRST, then
-  // dispose the old callback. `_wsCallbacks.size` never dips to 0 across
+  // dispose the old callback. `_handlers.size` never dips to 0 across
   // the swap, so the socket stays open, no `onopen` re-fires, no
   // cross-proxy RPCs die with 503 (the mcp-http.test.ts "should fire
   // onWake when mention uses agent DID" failure).
@@ -157,7 +157,7 @@ describe('QuerySubscriptionProxy', () => {
     // Real Set so we can observe the swap ordering.
     const reconnectCallbacks = new Set<() => void>();
     // Count of live client-side callback subscriptions (proxy analogue of
-    // ApiClient._wsCallbacks.size). Bumped by subscribeToQueryUpdates, and
+    // ApiClient._handlers.size). Bumped by subscribeToQueryUpdates, and
     // decremented by the returned unsubscribe. If this ever drops to 0
     // during the swap, ApiClient would close the socket — which is
     // exactly the loop CodeRabbit flagged.
@@ -289,7 +289,7 @@ describe('QuerySubscriptionProxy', () => {
   // `#subscriptionId`. Without the generation guard, a swap handler parked
   // on its subscribeQuery while a full subscribe() ran could register a
   // client-side callback that the subscribe() then overwrote WITHOUT
-  // disposing — leaking the callback in ApiClient._wsCallbacks for the
+  // disposing — leaking the callback in ApiClient._handlers for the
   // client lifetime (holding the socket open and firing into a dead
   // subscription). The stale writer must back out and release its
   // server-side subscription instead.

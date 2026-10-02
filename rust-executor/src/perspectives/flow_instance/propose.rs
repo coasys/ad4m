@@ -89,8 +89,9 @@ use crate::types::LinkQuery;
 /// A bare `Vec<FireOutcome>` could not say: an empty vec meant "queued for
 /// other voters", "you already proposed this", and "the instance is stuck"
 /// alike. Each field below separates one of those.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ProposeOutcome {
     /// The live proposal this call minted or joined. A client needs it to
     /// render "pending — withdraw?", or to hand to another agent's
