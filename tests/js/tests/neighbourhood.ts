@@ -157,6 +157,57 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 expect(bobLinks.length).to.be.equal(0)
             })
 
+            // #1146: Bob re-sends Alice's link with a signature that does not
+            // verify. His executor keeps the verified proof it stored, and
+            // Alice's executor drops the copy when it arrives by sync, so on
+            // both nodes the link still reads back with Alice's signature and
+            // `proof.valid`. A genuine link Bob adds afterwards shows the sync
+            // reached Alice.
+            it("Bob's copy of Alice's link with a bad signature does not flip it", async () => {
+                const alice = testContext.alice
+                const bob = testContext.bob
+
+                const aliceP = await alice.perspective.add("forged copy")
+                const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's neighbourhood with Bob test forged copy");
+                const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(aliceP.uuid, socialContext.address, new Perspective())
+                const bobP = await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+
+                await testContext.makeAllNodesKnown()
+                await pollUntil(async () => {
+                    const p = await alice.perspective.byUUID(aliceP.uuid);
+                    const s = p?.state;
+                    return s !== PerspectiveState.Private
+                        && s !== PerspectiveState.NeighboudhoodCreationInitiated;
+                }, { timeoutMs: 30000, intervalMs: 500, label: "Alice link language wired (forged copy)" });
+
+                const query = new LinkQuery({source: 'ad4m://forged-copy-1146'})
+                const genuine = await alice.perspective.addLink(aliceP.uuid, {source: 'ad4m://forged-copy-1146', predicate: 'ad4m://pred', target: 'test://genuine'})
+                await pollUntil(async () => (await bob.perspective.queryLinks(bobP.uuid, query)).length === 1,
+                    { timeoutMs: 60000, intervalMs: 1000, label: "Bob received Alice's link" })
+
+                const badSignature = genuine.proof.signature.replace(/./g, (c: string) => c === '0' ? '1' : '0')
+                await bob.perspective.addLinkExpression(bobP.uuid, {
+                    author: genuine.author,
+                    timestamp: genuine.timestamp,
+                    data: genuine.data,
+                    proof: { key: genuine.proof.key, signature: badSignature },
+                } as LinkExpression)
+
+                const marker = new LinkQuery({source: 'ad4m://forged-copy-1146-marker'})
+                await bob.perspective.addLink(bobP.uuid, {source: 'ad4m://forged-copy-1146-marker', target: 'test://marker'})
+                await pollUntil(async () => (await alice.perspective.queryLinks(aliceP.uuid, marker)).length === 1,
+                    { timeoutMs: 60000, intervalMs: 1000, label: "Alice received Bob's later link" })
+
+                for (const [who, links] of [
+                    ["Alice", await alice.perspective.queryLinks(aliceP.uuid, query)],
+                    ["Bob", await bob.perspective.queryLinks(bobP.uuid, query)],
+                ] as const) {
+                    expect(links.length, `${who} holds the link once`).to.be.equal(1)
+                    expect(links[0].proof.signature, `${who} keeps Alice's signature`).to.be.equal(genuine.proof.signature)
+                    expect(links[0].proof.valid, `${who} still reads it verified`).to.be.true
+                }
+            })
+
             it('stress test - Bob receives 1500 links created rapidly by Alice', async () => {
                 const alice = testContext.alice
                 const bob = testContext.bob

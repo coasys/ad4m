@@ -11,6 +11,7 @@ mod flow_instance_e2e;
 pub(crate) mod flow_semantic_check;
 pub(crate) mod flow_spawn;
 pub(crate) mod hardwired_class;
+pub(crate) mod ingest;
 pub mod interpretation;
 #[cfg(test)]
 mod interpretation_e2e;
@@ -20,6 +21,8 @@ mod interpretation_harness_e2e;
 // tools, which read flow state through the same loaders) can seed a real
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
 // so it never reaches a release build.
+#[cfg(test)]
+mod ingest_proof_tests;
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
