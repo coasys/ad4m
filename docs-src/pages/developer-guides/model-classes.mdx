@@ -450,9 +450,9 @@ an ID or a model instance and replaces whatever the relation held. Writing works
 or not the relation names a target class, so a `polymorphic` to-one is written the same way.
 
 `add*` writes a second link and leaves the first in place. A read then returns the newest link,
-unless the relation names a `target` class that has a flag or a required property. Such a read goes
-through a type-checking query and returns whichever row that query yields first. Either way the old
-link stays in the graph.
+unless the relation names a `target` class that has a flag or a required property, and does not set
+`filter: false`. Such a read goes through a type-checking query and returns whichever row that query
+yields first. Either way the old link stays in the graph.
 
 ```typescript
 @Model({ name: "Note" })
