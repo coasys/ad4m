@@ -3128,11 +3128,14 @@ describe("Prolog + Literals", () => {
         })
 
         it("can get all smart literals in a perspective",async () => {
-            let all = await SmartLiteral.getAllSmartLiterals(perspective!)
+            // Links created in the same millisecond have no defined order, so match by base.
+            const all = await SmartLiteral.getAllSmartLiterals(perspective!)
             expect(all.length).to.equal(2)
-            expect(all[1].base).to.equal(Literal.from("base").toUrl())
-            expect(await all[0].get()).to.equal(5)
-            expect(await all[1].get()).to.equal("Hello World 2")
+            const named = all.find(sl => sl.base === Literal.from("base").toUrl())
+            const other = all.find(sl => sl !== named)
+            expect(named, "the literal added by base").to.not.be.undefined
+            expect(await named!.get()).to.equal("Hello World 2")
+            expect(await other!.get()).to.equal(5)
         })
 
     })
