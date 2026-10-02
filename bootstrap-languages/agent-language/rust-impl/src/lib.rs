@@ -65,7 +65,7 @@ impl ExpressionCapability for AgentLanguage {
         }
 
         // Only the agent themselves may author their own Agent expression.
-        let my_did = rt::agent_did();
+        let my_did = rt::agent_did()?;
         if did != my_did {
             return Err(LanguageError::permission_denied(
                 "Can't set Agent Expression for foreign DID - only for self"
@@ -95,7 +95,7 @@ impl ExpressionCapability for AgentLanguage {
 
         // Wrap in an agent-signed expression envelope, then write it to
         // the agent store DHT.
-        let signed = rt::agent_create_signed_expression_typed(&content);
+        let signed = rt::agent_create_signed_expression_typed(&content)?;
         rt::holochain_call(DNA_NICK, ZOME_NAME, "create_agent_expression", signed)
             .await
             .map_err(|e| LanguageError::internal(format!(
