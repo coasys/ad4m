@@ -7,6 +7,7 @@ use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
 use crate::types::RequestContext;
 
+use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, WsRpcError};
 
@@ -57,6 +58,8 @@ async fn get_hosting_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Va
 async fn get_hosting_wallet(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    // The node's own ledger: reading it can also create the node's ledger key.
+    refuse_user_session(&ctx, "hosting.wallet")?;
 
     let balance = match crate::unyt_service::get_ledger().await {
         Ok(ledger) => Some(ledger),
@@ -80,6 +83,7 @@ async fn get_hosting_wallet_history(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+    refuse_user_session(&ctx, "hosting.walletHistory")?;
 
     let history = crate::unyt_service::get_history(None, 50)
         .await
