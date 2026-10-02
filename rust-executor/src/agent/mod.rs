@@ -15,6 +15,7 @@ pub mod capabilities;
 pub mod enrolment;
 pub mod guardians;
 pub mod kel;
+pub mod keyring;
 pub mod resolver;
 pub mod revocation;
 pub mod signatures;
