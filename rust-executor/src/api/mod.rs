@@ -17,13 +17,12 @@ mod tests;
 
 // ── WS-native handler modules ──
 pub mod agent_ws;
-pub mod ai_ws;
 pub mod expressions_ws;
-pub mod hosting_ws;
 pub mod languages_ws;
 pub mod neighbourhoods_ws;
 pub mod perspectives_ws;
 pub mod runtime_ws;
+pub mod transcription_feed;
 pub mod users_ws;
 pub mod ws_handler;
 
@@ -101,7 +100,7 @@ pub fn api_router(state: AppState) -> Router {
             // ── HTTP-only: binary transcription feed (can't go through WS JSON) ──
             .route(
                 "/ai/transcription/feed",
-                post(ai_ws::feed_transcription_stream),
+                post(transcription_feed::feed_transcription_stream),
             ),
     )
     // ── OpenAI-compatible /v1 surface ──
@@ -124,6 +123,12 @@ pub fn api_router(state: AppState) -> Router {
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
     crate::config::set_smtp_config(config.smtp_config.clone())?;
+
+    // Built-in services run on this runtime: their event bridges live as
+    // long as the server does.
+    crate::services::builtins::start_all(&crate::services::host())
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("built-in services failed to start: {}", e))?;
 
     let port = config
         .port

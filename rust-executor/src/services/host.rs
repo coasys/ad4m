@@ -9,7 +9,7 @@ use serde_json::{Map, Value};
 use tokio::sync::broadcast;
 
 use super::builtin::{
-    CallContext, Caller, EventEmitter, ServiceCaller, ServiceError, ServiceHealth,
+    CallContext, Caller, EventEmitter, EventOwner, ServiceCaller, ServiceError, ServiceHealth,
     ServiceImplementation, StartContext,
 };
 use super::capability::{allowed, service_capability, service_domain};
@@ -29,8 +29,8 @@ const LONG_CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub struct ServiceEvent {
     /// `<interface hash>.<event>`
     pub event_type: String,
-    /// The agent DID the event belongs to.
-    pub owner: String,
+    /// Whose sockets get it.
+    pub owner: EventOwner,
     /// The capability a socket needs to receive it.
     pub needs: Capability,
     /// The wire message: the payload plus `type`.
@@ -42,6 +42,7 @@ pub struct ServiceHost {
     validators: Mutex<HashMap<String, Arc<jsonschema::Validator>>>,
     events: broadcast::Sender<ServiceEvent>,
     data_root: RwLock<Option<std::path::PathBuf>>,
+    meter: RwLock<Option<String>>,
 }
 
 static HOST: LazyLock<Arc<ServiceHost>> = LazyLock::new(ServiceHost::new);
@@ -87,6 +88,7 @@ impl ServiceHost {
             validators: Mutex::new(HashMap::new()),
             events,
             data_root: RwLock::new(None),
+            meter: RwLock::new(None),
         })
     }
 
@@ -101,6 +103,42 @@ impl ServiceHost {
     /// Where service data directories live (`<root>/<genesis hash>/`).
     pub fn set_data_root(&self, root: std::path::PathBuf) {
         *self.data_root.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
+    }
+
+    /// Meter `meter`-declared methods against this ledger interface: before
+    /// such a call the host asks `<ledger>.check { operation }` for the
+    /// caller, and answers 402 when the ledger refuses.
+    pub fn set_meter(&self, ledger_interface: Option<String>) {
+        *self.meter.write().unwrap_or_else(|e| e.into_inner()) = ledger_interface;
+    }
+
+    async fn meter_check(&self, operation: &str, ctx: &CallContext) -> Result<(), WsRpcError> {
+        let Some(ledger) = self.meter.read().unwrap_or_else(|e| e.into_inner()).clone() else {
+            return Ok(());
+        };
+        // The host asks on the caller's behalf; the caller needs no ledger grant.
+        let host_ctx = CallContext {
+            origin: vec![ctx.caller.clone()],
+            grants: vec![vec![
+                crate::agent::capabilities::defs::ALL_CAPABILITY.clone()
+            ]],
+            ..ctx.clone()
+        };
+        let allowed = Box::pin(self.dispatch(
+            &format!("{}.check", ledger),
+            serde_json::json!({ "operation": operation }),
+            host_ctx,
+        ))
+        .await?;
+        if allowed == Value::Bool(true) {
+            Ok(())
+        } else {
+            Err(
+                WsRpcError::new(402, "Insufficient compute credits").with_data(
+                    serde_json::json!({ "name": "InsufficientCredit", "operation": operation }),
+                ),
+            )
+        }
     }
 
     pub fn subscribe_events(&self) -> broadcast::Receiver<ServiceEvent> {
@@ -258,6 +296,8 @@ impl ServiceHost {
             origin: Vec::new(),
             agent_did,
             user: req.user_email.clone(),
+            auth_token: Some(req.auth_token.clone()),
+            is_admin: req.is_admin_credential,
             grants: vec![req.capabilities.clone().unwrap_or_default()],
             deadline: None,
         }
@@ -315,6 +355,10 @@ impl ServiceHost {
             )));
         }
 
+        if let Some(meter) = &def.meter {
+            self.meter_check(&meter.operation, &ctx).await?;
+        }
+
         let timeout = if def.long {
             LONG_CALL_TIMEOUT
         } else {
@@ -325,7 +369,7 @@ impl ServiceHost {
         ctx.deadline = Some(deadline);
         let stream_end = def.stream.as_ref().and_then(|_| {
             let id = params.get("streamId").and_then(Value::as_str)?.to_string();
-            Some((id, ctx.agent_did.clone()?))
+            Some((id, EventOwner::Agent(ctx.agent_did.clone()?)))
         });
         let outcome =
             tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
@@ -353,6 +397,7 @@ impl ServiceHost {
                 ))
             }
             Ok(Err(ServiceError::Unavailable(m))) => return Err(unavailable(m)),
+            Ok(Err(ServiceError::Forbidden(m))) => return Err(WsRpcError::forbidden(m)),
             Ok(Err(ServiceError::Internal(m))) => return Err(WsRpcError::internal(m)),
             Ok(Err(ServiceError::Method {
                 name,
@@ -430,7 +475,7 @@ impl ServiceHost {
         &self,
         implementation: &str,
         event: &str,
-        owner: &str,
+        owner: EventOwner,
         payload: Value,
     ) -> Result<(), String> {
         let targets = self.registry().event_targets(implementation, event);
@@ -465,7 +510,7 @@ impl ServiceHost {
             wire.insert("type".into(), Value::String(event_type.clone()));
             let _ = self.events.send(ServiceEvent {
                 event_type,
-                owner: owner.to_string(),
+                owner: owner.clone(),
                 needs: service_capability(&doc.module_id(), &doc.compat(), &def.action),
                 wire: Value::Object(wire).to_string(),
             });
@@ -473,14 +518,20 @@ impl ServiceHost {
         Ok(())
     }
 
-    /// Should a socket of `did` holding `capabilities` (or an admin) get `event`?
+    /// Should a socket of agent `did` / account `user` holding `capabilities`
+    /// (or an admin) get `event`?
     pub fn delivers(
         event: &ServiceEvent,
         did: Option<&str>,
+        user: Option<&str>,
         is_admin: bool,
         capabilities: &[Capability],
     ) -> bool {
-        (is_admin || did == Some(event.owner.as_str()))
-            && allowed(&[capabilities.to_vec()], &event.needs)
+        let owns = match &event.owner {
+            EventOwner::Agent(d) => did == Some(d.as_str()),
+            EventOwner::User(u) => user == Some(u.as_str()),
+            EventOwner::All => true,
+        };
+        (is_admin || owns) && allowed(&[capabilities.to_vec()], &event.needs)
     }
 }

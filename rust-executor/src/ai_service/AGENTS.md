@@ -39,4 +39,4 @@ edges; item 7 moves harness + interpretation + flows + auto_processor into `agen
   `CreditGate` path.
 - Model name strings (whisper table, default model ids) are data; don't scatter new ones.
 - Streaming responses go through `prompt_messages_stream`; the OpenAI shim (`api/openai_compat`)
-  and WS `ai.*` handlers both sit on it.
+  and the `ai.inference` service (`services/builtins/ai.rs`) both sit on it.

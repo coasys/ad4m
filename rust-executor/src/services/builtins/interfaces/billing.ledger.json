@@ -1,0 +1,294 @@
+{
+  "name": "billing.ledger",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "Compute credits, host rates, free access and the compute log of this executor.",
+  "selection": "executor",
+  "methods": {
+    "account": {
+      "description": "The caller's credits and free access; `null` outside multi-user mode.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/types/Account"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "action": "READ",
+      "read": true
+    },
+    "check": {
+      "description": "May the caller run a metered operation now?",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "type": "string",
+            "description": "The metered operation, e.g. `ai.prompt`."
+          }
+        },
+        "required": [
+          "operation"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
+    },
+    "rates": {
+      "description": "The host rates.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "$ref": "#/types/HostRate"
+        }
+      },
+      "action": "READ",
+      "read": true
+    },
+    "setRates": {
+      "description": "Replace the host rates. Needs the admin credential.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "rates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/types/HostRate"
+            }
+          }
+        },
+        "required": [
+          "rates"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "ADMIN",
+      "errors": {
+        "InvalidRates": {
+          "code": 422
+        }
+      }
+    },
+    "freeHostingEnabled": {
+      "description": "Is hosting free for everyone?",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
+    },
+    "setFreeHostingEnabled": {
+      "description": "Make hosting free for everyone, or not; answers the new state.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "enabled"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "ADMIN"
+    },
+    "computeLog": {
+      "description": "Compute log entries, newest first.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "userEmail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to the caller. Another user's log needs the admin credential.",
+            "default": null
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "ISO 8601; only entries after this timestamp.",
+            "default": null
+          },
+          "limit": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Defaults to 100.",
+            "default": null
+          }
+        }
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "$ref": "#/types/ComputeLogEntry"
+        }
+      },
+      "action": "READ",
+      "read": true
+    }
+  },
+  "events": {
+    "account-changed": {
+      "description": "A user's credits, wallet or free access changed.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "remainingCredits": {
+            "type": "string"
+          },
+          "hotWalletAddress": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "freeAccess": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "email",
+          "remainingCredits",
+          "freeAccess"
+        ]
+      },
+      "action": "READ"
+    }
+  },
+  "actions": {
+    "READ": {
+      "label": "See credits and rates",
+      "description": "Read your credits, the host rates and your compute log.",
+      "risk": "safe"
+    },
+    "ADMIN": {
+      "label": "Administer billing",
+      "description": "Set host rates and free hosting.",
+      "risk": "admin"
+    }
+  },
+  "types": {
+    "Account": {
+      "type": "object",
+      "properties": {
+        "email": {
+          "type": "string"
+        },
+        "credits": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double",
+          "description": "`null` when the credits cannot be read."
+        },
+        "freeAccess": {
+          "type": "boolean",
+          "description": "The user, or the whole executor, is free of charge."
+        }
+      },
+      "required": [
+        "email",
+        "freeAccess"
+      ],
+      "description": "The caller's account. `null` outside multi-user mode."
+    },
+    "HostRate": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "priceInHOT": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "description",
+        "priceInHOT"
+      ],
+      "description": "Price in HOT the host charges for one metered operation."
+    },
+    "ComputeLogEntry": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "userEmail": {
+          "type": "string"
+        },
+        "timestamp": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cost": {
+          "type": "number",
+          "format": "double"
+        },
+        "creditsAfter": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "id",
+        "userEmail",
+        "timestamp",
+        "operation",
+        "cost",
+        "creditsAfter"
+      ]
+    }
+  }
+}

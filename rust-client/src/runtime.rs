@@ -89,22 +89,22 @@ impl RuntimeClient {
             .await
     }
 
-    pub async fn hc_agent_infos(&self) -> Result<String> {
+    pub async fn hc_agent_infos(&self) -> Result<Vec<String>> {
         self.ws
-            .call("runtime.hcAgentInfos", serde_json::json!({}))
+            .call(&holochain("agentInfos"), serde_json::json!({}))
             .await
     }
 
     pub async fn network_metrics(&self) -> Result<String> {
         self.ws
-            .call("runtime.networkMetrics", serde_json::json!({}))
+            .call(&holochain("networkMetrics"), serde_json::json!({}))
             .await
     }
 
     pub async fn hc_add_agent_infos(&self, agent_infos: Vec<String>) -> Result<serde_json::Value> {
         self.ws
             .call(
-                "runtime.addHcAgentInfos",
+                &holochain("addAgentInfos"),
                 serde_json::json!({ "agentInfos": agent_infos }),
             )
             .await
@@ -150,7 +150,12 @@ impl RuntimeClient {
 
     pub async fn restart_holochain(&self) -> Result<serde_json::Value> {
         self.ws
-            .call("runtime.restartHolochain", serde_json::json!({}))
+            .call(&holochain("restart"), serde_json::json!({}))
             .await
     }
+}
+
+/// A `holochain.conductor` method, addressed by the interface hash.
+fn holochain(method: &str) -> String {
+    format!("{}.{}", crate::services::HOLOCHAIN_CONDUCTOR, method)
 }

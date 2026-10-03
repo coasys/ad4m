@@ -478,14 +478,28 @@ pub struct Notification {
     pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
+#[derive(
+    Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS, schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamples {
     pub input: String,
     pub output: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Debug,
+    Default,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    TS,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
     pub name: String,
@@ -537,7 +551,7 @@ pub struct NotificationTriggeredEvent {
     pub notification: TriggeredNotification,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS, schemars::JsonSchema)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
@@ -577,9 +591,10 @@ impl ToString for ModelApiType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApi {
+    #[schemars(with = "String")]
     pub base_url: Url,
     pub api_key: String,
     pub model: String,
@@ -595,7 +610,7 @@ pub struct ModelApi {
     pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
@@ -604,7 +619,7 @@ pub struct LocalModel {
     pub revision: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSource {
     pub repo: String,
@@ -612,7 +627,7 @@ pub struct TokenizerSource {
     pub file_name: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TS, schemars::JsonSchema)]
 #[serde(rename_all = "UPPERCASE")]
 #[ts(export)]
 pub enum ModelType {
@@ -635,7 +650,7 @@ impl Display for ModelType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,

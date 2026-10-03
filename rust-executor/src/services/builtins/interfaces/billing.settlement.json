@@ -1,0 +1,103 @@
+{
+  "name": "billing.settlement",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "The HoT wallet a user's credits settle to.",
+  "selection": "executor",
+  "methods": {
+    "linkWallet": {
+      "description": "Link a HoT wallet address to the caller's account.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "address": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "address"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "LINK",
+      "errors": {
+        "NoAccount": {
+          "code": 409
+        }
+      }
+    },
+    "linkedWallet": {
+      "description": "The caller's linked wallet address.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "action": "READ",
+      "read": true
+    },
+    "requestPayment": {
+      "description": "Request a payment of `amountHOT`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "amountHOT": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "amountHOT"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/PaymentRequested"
+      },
+      "action": "PAY"
+    }
+  },
+  "events": {},
+  "actions": {
+    "READ": {
+      "label": "See your wallet",
+      "description": "Read the wallet linked to your account.",
+      "risk": "safe"
+    },
+    "LINK": {
+      "label": "Link a wallet",
+      "description": "Link a HoT wallet to your account.",
+      "risk": "write"
+    },
+    "PAY": {
+      "label": "Request payments",
+      "description": "Ask for a payment to your wallet.",
+      "risk": "spend"
+    }
+  },
+  "types": {
+    "PaymentRequested": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "amountHOT": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success",
+        "amountHOT"
+      ]
+    }
+  }
+}

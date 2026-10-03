@@ -3,6 +3,15 @@ import { ApiClient } from './apiClient';
 import { Perspective } from './perspectives/Perspective';
 import { LinkQuery } from './perspectives/LinkQuery';
 import type { EventMap, EventName } from './generated/api/Events';
+import { AiInference_1_0_0 } from './generated/services/ai.inference';
+import { AiModels_1_0_0 } from './generated/services/ai.models';
+import { BillingLedger_1_0_0 } from './generated/services/billing.ledger';
+import { BillingSettlement_1_0_0 } from './generated/services/billing.settlement';
+import { HolochainConductor_1_0_0 } from './generated/services/holochain.conductor';
+import { UnytWallet_1_0_0 } from './generated/services/unyt.wallet';
+
+/** The wire name of a built-in service method or event. */
+const svc = (def: { hash: string }, name: string) => `${def.hash}.${name}`;
 import type { DecoratedLinkExpression } from './generated/api/DecoratedLinkExpression';
 import type { PerspectiveHandle } from './generated/api/PerspectiveHandle';
 
@@ -193,30 +202,30 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'runtime.linkLanguageTemplates': ['lang://template1'],
     'runtime.addLinkLanguageTemplates': ['lang://template1', 'lang://template2'],
     'runtime.removeLinkLanguageTemplates': ['lang://template1'],
-    'runtime.hcAgentInfos': ['hc-agent-info-1', 'hc-agent-info-2'],
-    'runtime.addHcAgentInfos': true,
-    'runtime.networkMetrics': 'metrics-data',
-    'runtime.restartHolochain': true,
+    [svc(HolochainConductor_1_0_0, 'agentInfos')]: ['hc-agent-info-1', 'hc-agent-info-2'],
+    [svc(HolochainConductor_1_0_0, 'addAgentInfos')]: true,
+    [svc(HolochainConductor_1_0_0, 'networkMetrics')]: 'metrics-data',
+    [svc(HolochainConductor_1_0_0, 'restart')]: true,
     'runtime.verifySignature': true,
     'runtime.exportData': true,
     'runtime.importData': { success: true, count: 5 },
-    'runtime.freeHostingEnabled': false,
-    'runtime.setFreeHostingEnabled': true,
-    'runtime.computeLog': [],
+    [svc(BillingLedger_1_0_0, 'freeHostingEnabled')]: false,
+    [svc(BillingLedger_1_0_0, 'setFreeHostingEnabled')]: true,
+    [svc(BillingLedger_1_0_0, 'computeLog')]: [],
 
     // ── AI ──
-    'ai.models': [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
-    'ai.addModel': 'model-new-id',
-    'ai.updateModel': true,
-    'ai.removeModel': true,
-    'ai.setDefaultModel': true,
-    'ai.getDefaultModel': { id: 'model-1', name: 'GPT-Test', modelType: 'LLM' },
-    'ai.tasks': [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
-    'ai.addTask': { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
-    'ai.updateTask': { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
-    'ai.removeTask': true,
-    'ai.prompt': 'This is the AI response',
-    'ai.modelLoadingStatus': { model: 'model-1', progress: 100, status: 'loaded' },
+    [svc(AiModels_1_0_0, 'models')]: [{ id: 'model-1', name: 'GPT-Test', modelType: 'LLM', api: 'openai' }],
+    [svc(AiModels_1_0_0, 'addModel')]: 'model-new-id',
+    [svc(AiModels_1_0_0, 'updateModel')]: true,
+    [svc(AiModels_1_0_0, 'removeModel')]: true,
+    [svc(AiModels_1_0_0, 'setDefaultModel')]: true,
+    [svc(AiModels_1_0_0, 'getDefaultModel')]: { id: 'model-1', name: 'GPT-Test', modelType: 'LLM' },
+    [svc(AiInference_1_0_0, 'tasks')]: [{ taskId: 'task-1', name: 'summarize', modelId: 'model-1', systemPrompt: 'Summarize', promptExamples: [] }],
+    [svc(AiInference_1_0_0, 'addTask')]: { taskId: 'task-new', name: 'new-task', modelId: 'model-1', systemPrompt: 'Do stuff', promptExamples: [] },
+    [svc(AiInference_1_0_0, 'updateTask')]: { taskId: 'task-1', name: 'updated', modelId: 'model-1', systemPrompt: 'Updated', promptExamples: [] },
+    [svc(AiInference_1_0_0, 'removeTask')]: true,
+    [svc(AiInference_1_0_0, 'prompt')]: 'This is the AI response',
+    [svc(AiModels_1_0_0, 'modelLoadingStatus')]: { model: 'model-1', progress: 100, status: 'loaded' },
 
     // ── Users (unauthenticated on server — empty token allowed) ──
     'user.create': { success: true, did: 'did:test:new-user' },
@@ -235,25 +244,22 @@ const MOCK_RESPONSES: Record<string, RpcHandler> = {
     },
 
     // ── Hosting ──
-    'hosting.info': {
-        userInfo: { email: 'test@test.com', credits: 5, hotWalletAddress: null, freeAccess: false },
-        rates: null,
-        version: { dnaHash: null, buildVersion: 'test' },
-    },
-    'hosting.setHotWallet': true,
-    'hosting.requestPayment': { paymentUrl: 'https://pay.test' },
+    [svc(BillingLedger_1_0_0, 'account')]: { email: 'test@test.com', credits: 5, freeAccess: false },
+    [svc(BillingSettlement_1_0_0, 'linkedWallet')]: null,
+    [svc(BillingSettlement_1_0_0, 'linkWallet')]: true,
+    [svc(BillingSettlement_1_0_0, 'requestPayment')]: { paymentUrl: 'https://pay.test' },
 
     // ── Runtime: host rates & Unyt ──
-    'runtime.hostRates': [{ description: 'Link write', priceInHOT: 0.001 }],
-    'runtime.setHostRates': true,
-    'runtime.unytAgentKey': 'unyt-agent-key-123',
-    'runtime.unytHotAgentPubkey': 'unyt-hot-pubkey-456',
-    'runtime.unytWalletBalance': '1000.50',
-    'runtime.unytWalletHistory': '[]',
-    'runtime.unytVersionInfo': { installed: null, bundled: '0.61.0', installError: 'install failed' },
-    'runtime.setUnytMembraneProof': true,
-    'runtime.unytReinstallDna': { success: true, message: 'reinstalled' },
-    'runtime.unytSendHot': { success: true, message: 'sent' },
+    [svc(BillingLedger_1_0_0, 'rates')]: [{ description: 'Link write', priceInHOT: 0.001 }],
+    [svc(BillingLedger_1_0_0, 'setRates')]: true,
+    [svc(UnytWallet_1_0_0, 'agentKey')]: 'unyt-agent-key-123',
+    [svc(UnytWallet_1_0_0, 'hotAgentPubkey')]: 'unyt-hot-pubkey-456',
+    [svc(UnytWallet_1_0_0, 'balance')]: { wHOT: '1000.50' },
+    [svc(UnytWallet_1_0_0, 'history')]: [],
+    [svc(UnytWallet_1_0_0, 'versionInfo')]: { installed: null, bundled: '0.61.0', installError: 'install failed' },
+    [svc(UnytWallet_1_0_0, 'setMembraneProof')]: true,
+    [svc(UnytWallet_1_0_0, 'reinstallDna')]: { success: true, message: 'reinstalled' },
+    [svc(UnytWallet_1_0_0, 'sendHot')]: { success: true, message: 'sent' },
 };
 
 // ===================== MOCK WEBSOCKET =====================
@@ -1286,7 +1292,7 @@ describe('Multi-user and Hosting', () => {
 
     test('hostRates() returns the rates', async () => {
         const rates = await ad4m.runtime.hostRates();
-        expect(lastRpcCall!.type).toBe('runtime.hostRates');
+        expect(lastRpcCall!.type).toBe(svc(BillingLedger_1_0_0, 'rates'));
         expect(rates).toHaveLength(1);
         expect(rates[0].description).toBe('Link write');
         expect(rates[0].priceInHOT).toBe(0.001);
@@ -1296,7 +1302,7 @@ describe('Multi-user and Hosting', () => {
         const rates = [{ description: 'test', priceInHOT: 1 }];
         const result = await ad4m.runtime.setHostRates(rates);
         expect(result).toBe(true);
-        expect(lastRpcCall!.type).toBe('runtime.setHostRates');
+        expect(lastRpcCall!.type).toBe(svc(BillingLedger_1_0_0, 'setRates'));
         expect(lastRpcCall!.params).toEqual({ rates });
     });
 });
@@ -1315,7 +1321,7 @@ describe('Unyt Integration', () => {
 
     test('unytWalletBalance() returns balance', async () => {
         const balance = await ad4m.runtime.unytWalletBalance();
-        expect(balance).toBe('1000.50');
+        expect(JSON.parse(balance)).toEqual({ wHOT: '1000.50' });
     });
 
     test('unytWalletHistory() returns history', async () => {
@@ -1325,14 +1331,14 @@ describe('Unyt Integration', () => {
 
     test('unytVersionInfo() returns version info and the install error', async () => {
         const info = await ad4m.runtime.unytVersionInfo();
-        expect(lastRpcCall!.type).toBe('runtime.unytVersionInfo');
+        expect(lastRpcCall!.type).toBe(svc(UnytWallet_1_0_0, 'versionInfo'));
         expect(info).toEqual({ installed: null, bundled: '0.61.0', installError: 'install failed' });
     });
 
     test('setUnytMembraneProof() sets proof', async () => {
         const result = await ad4m.runtime.setUnytMembraneProof('proof-data');
         expect(result).toBe(true);
-        expect(lastRpcCall!.type).toBe('runtime.setUnytMembraneProof');
+        expect(lastRpcCall!.type).toBe(svc(UnytWallet_1_0_0, 'setMembraneProof'));
         expect(lastRpcCall!.params.proof).toBe('proof-data');
     });
 
@@ -1415,7 +1421,7 @@ describe('Ad4mClient', () => {
             requestId: 'app1', token: 'tok', revoked: null,
             auth: { appName: 'a', appDesc: 'd', appDomain: null, appUrl: null, appIconPath: null, capabilities: null, userEmail: null },
         }));
-        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit({ type: svc(BillingLedger_1_0_0, 'account-changed'), email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false });
         ws.emit(perspectiveAdded('uuid-a'));
         ws.emit(event('perspective-updated', { perspectiveUuid: 'uuid-a', owner: OWNER, perspective: wireHandle('uuid-a') }));
         ws.emit(event('perspective-removed', { perspectiveUuid: 'uuid-a', uuid: 'uuid-a', owner: OWNER }));
@@ -1451,7 +1457,7 @@ describe('Ad4mClient', () => {
         await freshClient.agent.me();
 
         const ws = lastOf(MockWebSocket.instances);
-        ws.emit(event('hosting-user-info-changed', { email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false }));
+        ws.emit({ type: svc(BillingLedger_1_0_0, 'account-changed'), email: 'a@b.c', remainingCredits: '1', hotWalletAddress: null, freeAccess: false });
         ws.emit(event('exception-occurred', { exception: { addon: null, title: 't', message: 'm', type: 'CAPABILITY_REQUESTED' } }));
 
         expect(hosting).not.toHaveBeenCalled();

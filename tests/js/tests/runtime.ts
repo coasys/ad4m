@@ -153,7 +153,9 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
 
                 const bad = await ad4mClient.runtime.setHostRates([{ description: "x", priceInHOT: -1 }]).catch(e => e)
-                expect(bad.status, bad.message).to.equal(400)
+                // Inside the contract but refused: the declared method error.
+                expect(bad.status, bad.message).to.equal(422)
+                expect(bad.data?.name).to.equal("InvalidRates")
                 expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
             } finally {
                 await ad4mClient.runtime.setHostRates(before)
@@ -165,7 +167,8 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             // A non-empty proof starts the Unyt DNA install, so only the
             // validation path runs here.
             const error = await ad4mClient.runtime.setUnytMembraneProof("").catch(e => e)
-            expect(error.status, error.message).to.equal(400)
+            expect(error.status, error.message).to.equal(422)
+            expect(error.data?.name).to.equal("InvalidProof")
         })
 
         it("unytVersionInfo() reports the bundled version and the install state", async () => {

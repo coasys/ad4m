@@ -39,6 +39,12 @@ pub struct CallContext {
     pub agent_did: Option<String>,
     /// Multi-user account id: the session's user.
     pub user: Option<String>,
+    /// The caller's auth token, for implementations that scope per session
+    /// (billing, transcription streams). `None` for calls the host makes itself.
+    pub auth_token: Option<String>,
+    /// The call came with the executor's admin credential. Some operations
+    /// (host rates, Holochain restart) need it beyond any grant.
+    pub is_admin: bool,
     /// Grant layers. A call needs an action allowed by **every** layer: the
     /// original caller's grants, then each intermediate service's own grants.
     /// This is the intersection rule that prevents a confused deputy.
@@ -57,6 +63,8 @@ pub enum ServiceError {
     },
     /// The service cannot serve right now (→ 503).
     Unavailable(String),
+    /// The caller may not do this, whatever its grants say (→ 403).
+    Forbidden(String),
     /// Anything else (→ 500).
     Internal(String),
 }
@@ -88,11 +96,22 @@ pub struct EventEmitter {
     pub(crate) implementation: String,
 }
 
+/// Whose sockets a service event goes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventOwner {
+    /// The sockets of one agent DID.
+    Agent(String),
+    /// The sockets of one multi-user account (by email).
+    User(String),
+    /// Every socket.
+    All,
+}
+
 impl EventEmitter {
-    /// Emit `event` (as the interface names it) for the agent `owner`. The
-    /// host checks the payload against the interface and delivers it only to
-    /// that agent's sockets that hold the event's action.
-    pub async fn emit(&self, event: &str, owner: &str, payload: Value) -> Result<(), String> {
+    /// Emit `event` (as the interface names it) to `owner`. The host checks
+    /// the payload against the interface and delivers it only to the owner's
+    /// sockets that hold the event's action (admins see every owner's).
+    pub async fn emit(&self, event: &str, owner: EventOwner, payload: Value) -> Result<(), String> {
         self.host
             .emit_event(&self.implementation, event, owner, payload)
             .await

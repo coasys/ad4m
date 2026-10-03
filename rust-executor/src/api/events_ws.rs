@@ -95,11 +95,10 @@ impl LazyDid {
     }
 }
 use crate::pubsub::{
-    get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, AI_MODEL_LOADING_STATUS,
-    AI_TRANSCRIPTION_TEXT_TOPIC, APPS_CHANGED, AUTO_PROCESSOR_EVENT_TOPIC,
-    AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
-    HOSTING_USER_INFO_CHANGED_TOPIC, NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC,
-    PERSPECTIVE_LINK_ADDED_TOPIC, PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
+    get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC, APPS_CHANGED,
+    AUTO_PROCESSOR_EVENT_TOPIC, AUTO_PROCESSOR_NEIGHBOURHOOD_STATE_TOPIC, EXCEPTION_OCCURRED_TOPIC,
+    NEIGHBOURHOOD_SIGNAL_TOPIC, PERSPECTIVE_ADDED_TOPIC, PERSPECTIVE_LINK_ADDED_TOPIC,
+    PERSPECTIVE_LINK_REMOVED_TOPIC, PERSPECTIVE_LINK_UPDATED_TOPIC,
     PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, PERSPECTIVE_REMOVED_TOPIC,
     PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC, PERSPECTIVE_UPDATED_TOPIC,
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
@@ -108,11 +107,10 @@ use crate::pubsub::{
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
 use crate::types::{
-    AIModelLoadingStatus, Agent, AgentStatus, Apps, ExceptionInfo, HostingUserInfo,
-    NeighbourhoodSignalFilter, NotificationTriggeredEvent, PerspectiveExpression,
-    PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner, PerspectiveQuerySubscriptionFilter,
-    PerspectiveRemovedWithOwner, PerspectiveStateFilter, PerspectiveWithOwner,
-    TranscriptionTextFilter,
+    Agent, AgentStatus, Apps, ExceptionInfo, NeighbourhoodSignalFilter, NotificationTriggeredEvent,
+    PerspectiveExpression, PerspectiveLinkUpdatedWithOwner, PerspectiveLinkWithOwner,
+    PerspectiveQuerySubscriptionFilter, PerspectiveRemovedWithOwner, PerspectiveStateFilter,
+    PerspectiveWithOwner,
 };
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -123,7 +121,6 @@ pub mod events {
     pub const AGENT_STATUS_CHANGED: &str = "agent-status-changed";
     pub const AGENT_UPDATED: &str = "agent-updated";
     pub const APPS_CHANGED_EVENT: &str = "apps-changed";
-    pub const HOSTING_USER_INFO_CHANGED: &str = "hosting-user-info-changed";
     pub const PERSPECTIVE_ADDED: &str = "perspective-added";
     pub const PERSPECTIVE_REMOVED: &str = "perspective-removed";
     pub const PERSPECTIVE_UPDATED: &str = "perspective-updated";
@@ -135,8 +132,6 @@ pub mod events {
     pub const MESSAGE_RECEIVED: &str = "message-received";
     pub const NOTIFICATION_TRIGGERED: &str = "notification-triggered";
     pub const EXCEPTION_OCCURRED: &str = "exception-occurred";
-    pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
-    pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
     /// A service stream finished. It travels
     /// the same path as the stream's chunks, so it arrives after all of them.
@@ -145,11 +140,10 @@ pub mod events {
     pub const AUTO_PROCESSOR_NEIGHBOURHOOD_STATE: &str = "auto-processor-neighbourhood-state";
 
     /// Every name above, in stream-builder order.
-    pub const ALL: [&str; 21] = [
+    pub const ALL: [&str; 18] = [
         AGENT_STATUS_CHANGED,
         AGENT_UPDATED,
         APPS_CHANGED_EVENT,
-        HOSTING_USER_INFO_CHANGED,
         PERSPECTIVE_ADDED,
         PERSPECTIVE_REMOVED,
         PERSPECTIVE_UPDATED,
@@ -161,8 +155,6 @@ pub mod events {
         MESSAGE_RECEIVED,
         NOTIFICATION_TRIGGERED,
         EXCEPTION_OCCURRED,
-        TRANSCRIPTION_TEXT,
-        MODEL_LOADING_STATUS,
         QUERY_SUBSCRIPTION_UPDATE,
         AUTO_PROCESSOR_EVENT,
         AUTO_PROCESSOR_NEIGHBOURHOOD_STATE,
@@ -238,7 +230,6 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<AgentStatusChangedEvent>(AGENT_STATUS_CHANGED, false),
         EventSpec::of::<AgentUpdatedEvent>(AGENT_UPDATED, false),
         EventSpec::of::<Apps>(APPS_CHANGED_EVENT, false),
-        EventSpec::of::<HostingUserInfo>(HOSTING_USER_INFO_CHANGED, false),
         EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_ADDED, true),
         EventSpec::of::<PerspectiveRemovedWithOwner>(PERSPECTIVE_REMOVED, true),
         EventSpec::of::<PerspectiveWithOwner>(PERSPECTIVE_UPDATED, true),
@@ -250,8 +241,6 @@ pub fn event_specs() -> Vec<EventSpec> {
         EventSpec::of::<MessageReceivedEvent>(MESSAGE_RECEIVED, false),
         EventSpec::of::<NotificationTriggeredEvent>(NOTIFICATION_TRIGGERED, true),
         EventSpec::of::<ExceptionOccurredEvent>(EXCEPTION_OCCURRED, false),
-        EventSpec::of::<TranscriptionTextFilter>(TRANSCRIPTION_TEXT, false),
-        EventSpec::of::<AIModelLoadingStatus>(MODEL_LOADING_STATUS, false),
         EventSpec::of::<PerspectiveQuerySubscriptionFilter>(QUERY_SUBSCRIPTION_UPDATE, true),
         EventSpec::of::<AutoProcessorEvent>(AUTO_PROCESSOR_EVENT, true),
         EventSpec::of::<AutoProcessorNeighbourhoodState>(AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, true),
@@ -334,7 +323,6 @@ pub(crate) async fn build_event_stream_for(
     let d_agent_status = resolved_did.clone();
     let d_agent_updated = resolved_did.clone();
     let d_apps = resolved_did.clone();
-    let d_trans = resolved_did.clone();
     let d_notif = resolved_did.clone();
     let d_query_sub = resolved_did.clone();
 
@@ -345,6 +333,7 @@ pub(crate) async fn build_event_stream_for(
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
     // streams share the same lazy cell — one resolution serves both.
     let d_service = resolved_did.clone();
+    let u_service = user_email.clone();
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
 
@@ -454,23 +443,6 @@ pub(crate) async fn build_event_stream_for(
         matches_apps_user
     );
 
-    let s_hosting = {
-        let hosting_rx = pubsub.subscribe(&HOSTING_USER_INFO_CHANGED_TOPIC).await;
-        BroadcastStream::new(hosting_rx)
-            .filter_map(|r| async { handle_broadcast_result(r) })
-            .filter_map(move |result| {
-                let email = user_email.clone();
-                async move {
-                    match result {
-                        Ok(ref msg) if matches_hosting_user(msg, email.as_deref()) => {
-                            Some(wrap_event(events::HOSTING_USER_INFO_CHANGED, msg))
-                        }
-                        _ => None,
-                    }
-                }
-            })
-    };
-
     // ── Perspective lifecycle ──
     let s_persp_added = owner_stream!(
         pubsub.subscribe(&PERSPECTIVE_ADDED_TOPIC).await,
@@ -557,18 +529,6 @@ pub(crate) async fn build_event_stream_for(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
         events::EXCEPTION_OCCURRED,
         "exception"
-    );
-
-    // ── AI events ──
-    let s_trans = did_stream!(
-        pubsub.subscribe(&AI_TRANSCRIPTION_TEXT_TOPIC).await,
-        events::TRANSCRIPTION_TEXT,
-        d_trans,
-        matches_transcription_user
-    );
-    let s_loading = broadcast_stream!(
-        pubsub.subscribe(&AI_MODEL_LOADING_STATUS).await,
-        events::MODEL_LOADING_STATUS
     );
 
     // ── Query subscriptions ──
@@ -658,10 +618,7 @@ pub(crate) async fn build_event_stream_for(
     };
 
     // ── Merge all streams ──
-    let agent = stream::select(
-        stream::select(s_status, s_apps),
-        stream::select(s_agent_updated, s_hosting),
-    );
+    let agent = stream::select(stream::select(s_status, s_apps), s_agent_updated);
     let persp = stream::select(
         stream::select(s_persp_added, s_persp_removed),
         stream::select(s_persp_updated, s_sync),
@@ -669,14 +626,8 @@ pub(crate) async fn build_event_stream_for(
     let links = stream::select(s_link_added, stream::select(s_link_removed, s_link_updated));
     let runtime = stream::select(s_msg, stream::select(s_notif, s_exc));
     let ai = stream::select(
-        s_trans,
-        stream::select(
-            s_loading,
-            stream::select(
-                s_query_sub,
-                stream::select(s_auto_processor, s_auto_processor_state),
-            ),
-        ),
+        s_query_sub,
+        stream::select(s_auto_processor, s_auto_processor_state),
     );
 
     let top = stream::select(
@@ -693,6 +644,7 @@ pub(crate) async fn build_event_stream_for(
             let deliver = crate::services::ServiceHost::delivers(
                 &e,
                 d_service.as_deref(),
+                u_service.as_deref(),
                 is_admin,
                 &capabilities,
             );
@@ -856,34 +808,6 @@ pub(crate) fn matches_apps_user(msg: &str, current_did: Option<&str>) -> bool {
                     if let Some(serde_json::Value::String(user_did)) = auth.get("user_did") {
                         return user_did == did;
                     }
-                }
-            }
-            true
-        }
-    }
-}
-
-pub(crate) fn matches_hosting_user(msg: &str, user_email: Option<&str>) -> bool {
-    match user_email {
-        None => true,
-        Some(email) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(msg_email)) = map.get("email") {
-                    return msg_email == email;
-                }
-            }
-            true
-        }
-    }
-}
-
-pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -> bool {
-    match current_did {
-        None => true,
-        Some(did) => {
-            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) {
-                if let Some(serde_json::Value::String(user_did)) = map.get("userDid") {
-                    return user_did == did;
                 }
             }
             true

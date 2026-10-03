@@ -3,6 +3,7 @@
 //! caller reaches them through.
 
 pub mod builtin;
+pub mod builtins;
 pub mod capability;
 pub mod codegen;
 pub mod host;

@@ -1,0 +1,551 @@
+{
+  "name": "ai.models",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "The executor's AI models: which exist, which are the defaults, and their loading state.",
+  "selection": "executor",
+  "methods": {
+    "models": {
+      "description": "Every model.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "$ref": "#/types/Model"
+        }
+      },
+      "action": "READ",
+      "read": true
+    },
+    "discoverModels": {
+      "description": "Ask a remote endpoint which models it serves, with credentials of a model not added yet. The upstream error body comes back on failure.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string"
+          },
+          "apiKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "apiType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`OPEN_AI` (default), `ANTHROPIC` or `OLLAMA`; parsed leniently.",
+            "default": null
+          }
+        },
+        "required": [
+          "baseUrl"
+        ]
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "action": "MANAGE",
+      "read": true,
+      "errors": {
+        "InvalidEndpoint": {
+          "code": 422
+        },
+        "CleartextCredential": {
+          "code": 422
+        },
+        "EndpointRefused": {
+          "code": 424
+        }
+      }
+    },
+    "addModel": {
+      "description": "Add a model; answers its id.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "$ref": "#/types/ModelInput"
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "MANAGE",
+      "long": true,
+      "errors": {
+        "CleartextCredential": {
+          "code": 422
+        }
+      }
+    },
+    "updateModel": {
+      "description": "Change a model.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "$ref": "#/types/ModelInput"
+          }
+        },
+        "required": [
+          "id",
+          "model"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "MANAGE",
+      "errors": {
+        "CleartextCredential": {
+          "code": 422
+        }
+      }
+    },
+    "removeModel": {
+      "description": "Remove a model.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "MANAGE"
+    },
+    "setDefaultModel": {
+      "description": "Make a model the default of its type.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "modelType": {
+            "$ref": "#/types/ModelType"
+          }
+        },
+        "required": [
+          "id",
+          "modelType"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "MANAGE"
+    },
+    "getDefaultModel": {
+      "description": "The default model of a type.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelType": {
+            "$ref": "#/types/ModelType"
+          }
+        },
+        "required": [
+          "modelType"
+        ]
+      },
+      "result": {
+        "anyOf": [
+          {
+            "$ref": "#/types/Model"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "action": "READ",
+      "read": true
+    },
+    "modelLoadingStatus": {
+      "description": "Download and load progress of a model.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "The model id."
+          }
+        },
+        "required": [
+          "model"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/AIModelLoadingStatus"
+      },
+      "action": "READ",
+      "read": true
+    }
+  },
+  "events": {
+    "model-loading-status": {
+      "description": "A model's download or load progress changed.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number",
+            "format": "double"
+          },
+          "status": {
+            "type": "string"
+          },
+          "downloaded": {
+            "type": "boolean"
+          },
+          "loaded": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "model",
+          "progress",
+          "status",
+          "downloaded",
+          "loaded"
+        ]
+      },
+      "action": "READ"
+    }
+  },
+  "actions": {
+    "READ": {
+      "label": "See AI models",
+      "description": "List the AI models and their loading state.",
+      "risk": "safe"
+    },
+    "MANAGE": {
+      "label": "Manage AI models",
+      "description": "Add, change and remove AI models and pick the defaults.",
+      "risk": "admin"
+    }
+  },
+  "types": {
+    "Model": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "api": {
+          "anyOf": [
+            {
+              "$ref": "#/types/ModelApi"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local": {
+          "anyOf": [
+            {
+              "$ref": "#/types/LocalModel"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "modelType": {
+          "$ref": "#/types/ModelType"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "modelType"
+      ]
+    },
+    "ModelApi": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "apiKey": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "apiType": {
+          "$ref": "#/types/ModelApiType"
+        },
+        "maxNumCtx": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Ceiling for the context window requested from the provider, in tokens.\n\nOnly the Ollama provider reads this today: `num_ctx` sizes the KV\ncache at model load, so the right ceiling depends on how much VRAM\nthe operator of that Ollama host can spend — a per-model decision,\nnot a compile-time one. Unset falls back to the provider's built-in\ndefault."
+        }
+      },
+      "required": [
+        "baseUrl",
+        "apiKey",
+        "model",
+        "apiType"
+      ]
+    },
+    "ModelApiType": {
+      "type": "string",
+      "enum": [
+        "OPEN_AI",
+        "ANTHROPIC",
+        "OLLAMA"
+      ]
+    },
+    "LocalModel": {
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "type": "string"
+        },
+        "tokenizerSource": {
+          "anyOf": [
+            {
+              "$ref": "#/types/TokenizerSource"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "huggingfaceRepo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fileName"
+      ]
+    },
+    "TokenizerSource": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "revision",
+        "fileName"
+      ]
+    },
+    "ModelType": {
+      "type": "string",
+      "enum": [
+        "LLM",
+        "EMBEDDING",
+        "TRANSCRIPTION"
+      ]
+    },
+    "ModelInput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "api": {
+          "anyOf": [
+            {
+              "$ref": "#/types/ModelApiInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "local": {
+          "anyOf": [
+            {
+              "$ref": "#/types/LocalModelInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "type": {
+          "$ref": "#/types/ModelType"
+        }
+      },
+      "required": [
+        "name",
+        "type"
+      ]
+    },
+    "ModelApiInput": {
+      "type": "object",
+      "properties": {
+        "baseUrl": {
+          "type": "string"
+        },
+        "apiKey": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "apiType": {
+          "type": "string"
+        },
+        "maxNumCtx": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0,
+          "description": "Optional ceiling for the provider's context window, in tokens.\nSee [`crate::types::ModelApi::max_num_ctx`]."
+        }
+      },
+      "required": [
+        "baseUrl",
+        "apiKey",
+        "model",
+        "apiType"
+      ]
+    },
+    "LocalModelInput": {
+      "type": "object",
+      "properties": {
+        "fileName": {
+          "type": "string"
+        },
+        "tokenizerSource": {
+          "anyOf": [
+            {
+              "$ref": "#/types/TokenizerSourceInput"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "huggingfaceRepo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "fileName"
+      ]
+    },
+    "TokenizerSourceInput": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        },
+        "fileName": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "revision",
+        "fileName"
+      ]
+    },
+    "AIModelLoadingStatus": {
+      "type": "object",
+      "properties": {
+        "model": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "number",
+          "format": "double"
+        },
+        "status": {
+          "type": "string"
+        },
+        "downloaded": {
+          "type": "boolean"
+        },
+        "loaded": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "model",
+        "progress",
+        "status",
+        "downloaded",
+        "loaded"
+      ]
+    }
+  }
+}

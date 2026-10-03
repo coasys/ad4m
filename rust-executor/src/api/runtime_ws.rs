@@ -1,6 +1,5 @@
 //! Runtime WS-native handlers.
 
-use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -10,16 +9,14 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentService;
 use crate::db::Ad4mDb;
 use crate::globals::AD4M_VERSION;
-use crate::holochain_service::get_holochain_service;
 use crate::runtime_service::RuntimeService;
-use crate::types::domain::{ComputeLogEntry, ImportResult};
+use crate::types::domain::ImportResult;
 use crate::types::Notification;
 use crate::types::{PerspectiveExpression, RequestContext, RuntimeInfo, SentMessage};
 
 use super::types::{
-    AddAgentInfosRequest, ExportRequest, FriendsListRequest, HostRate, ImportRequest,
-    LinkLanguageTemplatesRequest, NotificationGrantRequest, NotificationInput, OpenLinkRequest,
-    SetHostRatesRequest, SetStatusRequest, SetUnytMembraneProofRequest, UnytVersionInfo,
+    ExportRequest, FriendsListRequest, ImportRequest, LinkLanguageTemplatesRequest,
+    NotificationGrantRequest, NotificationInput, OpenLinkRequest, SetStatusRequest,
     VerifySignatureRequest,
 };
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
@@ -194,20 +191,6 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
             other
         ))),
     }
-}
-
-async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-    let config = crate::config::get_global_config();
-    if !config.run_holochain.unwrap_or(true) {
-        return Err(WsRpcError::bad_request(
-            "Holochain is disabled on this executor (run_holochain=false)",
-        ));
-    }
-    let _ = get_holochain_service().await;
-    Ok(Value::Bool(true))
 }
 
 async fn verify_signature(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -471,225 +454,8 @@ async fn remove_link_language_templates(
 
 // ── Holochain ──
 
-async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let config = crate::config::get_global_config();
-    if !config.run_holochain.unwrap_or(true) {
-        return Err(WsRpcError::bad_request(
-            "Holochain is disabled on this executor (run_holochain=false)",
-        ));
-    }
-
-    let hc = get_holochain_service().await;
-    let infos = hc
-        .agent_infos()
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(serde_json::to_value(infos)?)
-}
-
-async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let config = crate::config::get_global_config();
-    if !config.run_holochain.unwrap_or(true) {
-        return Err(WsRpcError::bad_request(
-            "Holochain is disabled on this executor (run_holochain=false)",
-        ));
-    }
-
-    let body: AddAgentInfosRequest = serde_json::from_value(params)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    let hc = get_holochain_service().await;
-    hc.add_agent_infos(body.agent_infos)
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
-async fn get_network_metrics(
-    _params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let config = crate::config::get_global_config();
-    if !config.run_holochain.unwrap_or(true) {
-        return Err(WsRpcError::bad_request(
-            "Holochain is disabled on this executor (run_holochain=false)",
-        ));
-    }
-
-    let hc = get_holochain_service().await;
-    let metrics = hc
-        .get_network_metrics()
-        .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::String(metrics))
-}
-
-async fn get_free_hosting_enabled(
-    _params: Value,
-    _ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    let enabled = Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    Ok(Value::Bool(enabled))
-}
-
-async fn set_free_hosting_enabled(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_QUIT_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let enabled = params
-        .get("enabled")
-        .and_then(|v| v.as_bool())
-        .ok_or_else(|| WsRpcError::bad_request("'enabled' boolean required"))?;
-
-    Ad4mDb::with_global_instance(|db| db.set_free_hosting_enabled(enabled))
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(enabled))
-}
-
 async fn get_tls_domain(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     Ok(Value::Null)
-}
-
-async fn get_compute_log(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &AGENT_READ_CAPABILITY)
-        .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let user_email = params
-        .opt_str("userEmail")
-        .or_else(|| ctx.user_email.clone());
-
-    let email = user_email.unwrap_or_default();
-    let since = params.opt_str("since");
-    let limit = params.get("limit").and_then(|l| l.as_i64()).unwrap_or(100);
-
-    let logs =
-        Ad4mDb::with_global_instance(|db| db.get_compute_log(&email, since.as_deref(), limit))
-            .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(serde_json::to_value(logs).unwrap_or_default())
-}
-
-async fn set_host_rates(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-    let body: SetHostRatesRequest = serde_json::from_value(params)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    let rates = validate_host_rates(body.rates)?;
-
-    Ad4mDb::with_global_instance(|db| db.set_host_rates(&rates))
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-
-    Ok(Value::Bool(true))
-}
-
-fn validate_host_rates(rates: Vec<HostRate>) -> Result<Vec<(String, f64)>, WsRpcError> {
-    let mut seen = std::collections::HashSet::new();
-    rates
-        .into_iter()
-        .enumerate()
-        .map(|(i, r)| {
-            if r.description.is_empty() || !r.price_in_hot.is_finite() || r.price_in_hot < 0.0 {
-                return Err(WsRpcError::bad_request(format!(
-                    "Rate {} needs a description and a non-negative priceInHOT",
-                    i
-                )));
-            }
-            // `description` is the table's primary key.
-            if !seen.insert(r.description.clone()) {
-                return Err(WsRpcError::bad_request(format!(
-                    "Rate {} repeats description '{}'",
-                    i, r.description
-                )));
-            }
-            Ok((r.description, r.price_in_hot))
-        })
-        .collect()
-}
-
-async fn get_host_rates(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
-
-    let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())
-        .map_err(|e| WsRpcError::internal(e.to_string()))?
-        .into_iter()
-        .map(|(description, price_in_hot)| HostRate {
-            description,
-            price_in_hot,
-        })
-        .collect();
-
-    Ok(serde_json::to_value(rates)?)
-}
-
-/// Stores the membrane proof for the Unyt alliance DNA, then installs the DNA
-/// in the background: installation waits for Holochain and can outlast the call.
-/// `runtime.unytVersionInfo` reports the outcome.
-async fn set_unyt_membrane_proof(
-    params: Value,
-    ctx: Arc<RequestContext>,
-) -> Result<Value, WsRpcError> {
-    if !ctx.is_admin_credential {
-        return Err(WsRpcError::forbidden("Admin credential required"));
-    }
-    let body: SetUnytMembraneProofRequest = serde_json::from_value(params)
-        .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-    if body.proof.is_empty() {
-        return Err(WsRpcError::bad_request("'proof' must not be empty"));
-    }
-    // The install decodes it later and, if that fails, installs without a proof.
-    if let Err(e) = base64::engine::general_purpose::STANDARD.decode(&body.proof) {
-        return Err(WsRpcError::bad_request(format!(
-            "'proof' is not valid base64: {}",
-            e
-        )));
-    }
-
-    crate::unyt_service::set_membrane_proof(&body.proof)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    tokio::spawn(async {
-        match crate::unyt_service::ensure_installed().await {
-            Ok(()) => log::info!("Unyt alliance DNA installed after membrane proof was set"),
-            Err(e) => log::error!("Failed to install Unyt alliance DNA: {}", e),
-        }
-    });
-
-    Ok(Value::Bool(true))
-}
-
-async fn unyt_version_info(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    check_capability(&ctx.capabilities, &RUNTIME_HOSTING_READ_CAPABILITY)
-        .map_err(WsRpcError::forbidden)?;
-    let (installed, bundled) = crate::unyt_service::version_info();
-    Ok(serde_json::to_value(UnytVersionInfo {
-        installed,
-        bundled,
-        install_error: crate::unyt_service::install_error(),
-    })?)
-}
-
-// ── Stubs for unyt endpoints ──
-
-async fn stub_not_impl(_params: Value, _ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
-    Err(WsRpcError::not_implemented(
-        "Not yet implemented on the server",
-    ))
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
@@ -702,17 +468,10 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.method::<OpenLinkRequest, bool>("runtime.openLink", open_link);
     map.method::<ExportRequest, bool>("runtime.exportData", export_data);
     map.method::<ImportRequest, RuntimeImportResult>("runtime.importData", import_data);
-    map.method::<NoParams, bool>("runtime.restartHolochain", restart_holochain)
-        .long();
     map.method::<VerifySignatureRequest, bool>("runtime.verifySignature", verify_signature)
         .read();
     map.method::<NoParams, Option<String>>("runtime.tlsDomain", get_tls_domain)
         .read();
-    map.method::<RuntimeComputeLogParams, Vec<ComputeLogEntry>>(
-        "runtime.computeLog",
-        get_compute_log,
-    )
-    .read();
     // Friends & messages
     map.method::<NoParams, Vec<String>>("runtime.friends", list_friends)
         .read();
@@ -763,75 +522,9 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
         "runtime.removeLinkLanguageTemplates",
         remove_link_language_templates,
     );
-    // Holochain
-    map.method::<NoParams, Vec<String>>("runtime.hcAgentInfos", get_hc_agent_infos)
-        .read();
-    map.method::<AddAgentInfosRequest, bool>("runtime.addHcAgentInfos", add_hc_agent_infos);
-    map.method::<NoParams, String>("runtime.networkMetrics", get_network_metrics)
-        .read();
-    // Hosting flags
-    map.method::<NoParams, bool>("runtime.freeHostingEnabled", get_free_hosting_enabled)
-        .read();
-    map.method::<RuntimeSetFreeHostingEnabledParams, bool>(
-        "runtime.setFreeHostingEnabled",
-        set_free_hosting_enabled,
-    );
-    map.method::<NoParams, Vec<HostRate>>("runtime.hostRates", get_host_rates)
-        .read();
-    map.method::<SetHostRatesRequest, bool>("runtime.setHostRates", set_host_rates);
-    map.method::<SetUnytMembraneProofRequest, bool>(
-        "runtime.setUnytMembraneProof",
-        set_unyt_membrane_proof,
-    );
-    map.method::<NoParams, UnytVersionInfo>("runtime.unytVersionInfo", unyt_version_info)
-        .read();
-    // Always error: the remaining unyt endpoints have no implementation yet.
-    map.method::<NoParams, ()>("runtime.unytAgentKey", stub_not_impl)
-        .read();
-    map.method::<RuntimeUnytSendHotParams, ()>("runtime.unytSendHot", stub_not_impl);
-    map.method::<NoParams, ()>("runtime.unytWalletBalance", stub_not_impl)
-        .read();
-    map.method::<RuntimeUnytWalletHistoryParams, ()>("runtime.unytWalletHistory", stub_not_impl)
-        .read();
-    map.method::<NoParams, ()>("runtime.unytHotAgentPubkey", stub_not_impl)
-        .read();
-    map.method::<NoParams, ()>("runtime.unytReinstallDna", stub_not_impl);
 }
 
 // ── Contracts ──
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RuntimeUnytWalletHistoryParams {
-    #[ts(optional)]
-    pub page: Option<u32>,
-    #[ts(optional)]
-    pub per_page: Option<u32>,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RuntimeUnytSendHotParams {
-    pub recipient: String,
-    pub amount: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RuntimeComputeLogParams {
-    /// Defaults to the caller's own email.
-    #[ts(optional)]
-    pub user_email: Option<String>,
-    /// ISO 8601; only entries after this timestamp.
-    #[ts(optional)]
-    pub since: Option<String>,
-    /// Defaults to 100.
-    #[ts(optional, type = "number")]
-    pub limit: Option<i64>,
-}
 
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -873,13 +566,6 @@ pub struct RuntimeGrantNotificationParams {
 #[ts(export)]
 pub struct RuntimeNotificationIdParams {
     pub id: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RuntimeSetFreeHostingEnabledParams {
-    pub enabled: bool,
 }
 
 /// `type: "db"` yields import stats; `type: "perspective"` echoes the file's snapshot.
