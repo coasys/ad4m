@@ -17,8 +17,25 @@ through.
 | `ws.rs` | Core RPC methods `services.describe`, `services.interface`, `services.setPreference` |
 | `schema_export.rs` | `InterfaceBuilder`: builtin interface documents from Rust types (`schemars`) |
 | `codegen.rs` | TS client module, MCP tool descriptors, Markdown; used by `ad4m service-gen` (`cli/src/service_gen.rs`) |
+| `builtins/` | The executor's own services (below) |
 | `tests.rs` | Test-only `echo` service: host dispatch, grants, events, and a round trip over the RPC socket |
 | `fixtures/echo.interface.json` | Checked-in echo interface. Regenerate: `UPDATE_SERVICE_FIXTURES=1 cargo test --lib services::tests::echo_interface_is_current` |
+
+## Built-in services (`builtins/`)
+
+| Interface | Module | Over |
+|---|---|---|
+| `ai.inference` (prompt, embed, transcription, tasks) · `ai.models` | `ai.rs` | `AIService` |
+| `billing.ledger` (credits, rates, free access, compute log, `check`) · `billing.settlement` (linked HoT wallet) | `billing.rs` | `Ad4mDb` billing tables |
+| `unyt.wallet` | `unyt.rs` | `unyt_service` |
+| `holochain.conductor` (agent infos, metrics, restart) | `holochain.rs` | `HolochainServiceInterface` |
+
+- All built-ins share one author DID (`builtins::AUTHOR`) and are registered and started by `builtins::start_all`, called from `api::start_server`. Their event bridges (pubsub topic → service event) run on that runtime.
+- `interfaces/*.json` are the checked-in contracts. Regenerate: `UPDATE_SERVICE_FIXTURES=1 cargo test --lib services::builtins::tests::interfaces_are_current`. `pnpm run generate:api-types` in `core/` also writes `core/src/generated/services/*.ts` and `rust-client/src/services.rs`; a test fails when either is stale.
+- The host meters methods that declare `meter` by calling `billing.ledger.check` first (402 on refusal). Charging itself still happens inside `AIService`.
+- Operator-only actions (host rates, Unyt DNA, Holochain restart, another user's compute log) check `CallContext::is_admin` (the admin credential) on top of the grant.
+- `get_user_default_capabilities` grants users the built-in actions they need; operator actions are not in it.
+- Entry points outside the host (OpenAI-compatible API, transcription feed) check grants with `builtins::capability(Builtin, action)`.
 
 ## Wire
 

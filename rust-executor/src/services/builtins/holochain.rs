@@ -84,10 +84,10 @@ pub fn conductor_interface() -> Value {
 pub struct Holochain;
 
 fn enabled() -> Result<(), ServiceError> {
-    if crate::config::get_global_config()
-        .run_holochain
-        .unwrap_or(true)
-    {
+    let enabled = crate::config::try_get_global_config()
+        .and_then(|c| c.run_holochain)
+        .unwrap_or(true);
+    if enabled {
         Ok(())
     } else {
         Err(ServiceError::Unavailable(
