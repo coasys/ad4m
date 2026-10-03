@@ -33,12 +33,12 @@ use axum::{
 use base64::Engine;
 use futures::SinkExt;
 use serde_json::{json, Value};
-use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
 use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
+use crate::services::builtins::{self, ai, Builtin};
+use crate::services::{CallContext, ServiceHost};
 use crate::types::ModelType;
 
 pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
@@ -58,8 +58,10 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         return;
     }
 
+    let ctx = ServiceHost::context_for_request(&auth.to_request_context());
     let mut stream_id: Option<String> = None;
-    let mut delta_rx: Option<broadcast::Receiver<String>> = None;
+    // `transcription-text` payloads of the open stream.
+    let mut delta_rx: Option<tokio::sync::mpsc::UnboundedReceiver<Value>> = None;
     let mut audio_format = AudioFormat::Pcm16;
 
     loop {
@@ -69,7 +71,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
 
         enum Ev {
             Ws(Option<Result<Message, axum::Error>>),
-            Delta(Result<String, broadcast::error::RecvError>),
+            Delta(Option<Value>),
         }
 
         let ev = if let Some(ref mut rx) = rx_taken {
@@ -84,7 +86,8 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
         delta_rx = rx_taken;
 
         let msg = match ev {
-            Ev::Delta(Ok(text)) => {
+            Ev::Delta(Some(event)) => {
+                let text = event.get("text").and_then(Value::as_str).unwrap_or("");
                 if !text.is_empty() {
                     let delta = json!({
                         "type": "conversation.item.input_audio_transcription.delta",
@@ -94,8 +97,7 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                 }
                 continue;
             }
-            Ev::Delta(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-            Ev::Delta(Err(broadcast::error::RecvError::Closed)) => {
+            Ev::Delta(None) => {
                 delta_rx = None;
                 continue;
             }
@@ -165,32 +167,30 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                         continue;
                     }
                 };
-                let service = match AIService::global_instance().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
-                        continue;
-                    }
-                };
-
                 // Tear down any prior session before opening a new one.
                 if let Some(old_sid) = stream_id.take() {
-                    let _ = service
-                        .close_transcription_stream(&old_sid, &auth.auth_token)
-                        .await;
+                    close_stream(&ctx, &old_sid).await;
                 }
                 delta_rx = None;
 
-                let sid = match service
-                    .open_transcription_stream(model_id.clone(), None, auth.auth_token.clone())
-                    .await
+                let sid: String = match builtins::call(
+                    Builtin::AiInference,
+                    "transcriptionOpen",
+                    json!({ "modelId": model_id }),
+                    &ctx,
+                )
+                .await
                 {
                     Ok(id) => id,
                     Err(e) => {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                        let _ = send_error(&mut socket, "server_error", &e.message).await;
                         continue;
                     }
                 };
+                delta_rx = Some(crate::services::host().watch(
+                    builtins::event_type(Builtin::AiInference, "transcription-text"),
+                    Some(sid.clone()),
+                ));
                 let created = json!({
                     "type": "transcription_session.created",
                     "session_id": sid,
@@ -233,29 +233,14 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
                     AudioFormat::Pcm16 => pcm16_to_f32(&bytes),
                 };
 
-                let service = match AIService::global_instance().await {
-                    Ok(s) => s,
-                    Err(e) => {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
-                        continue;
-                    }
-                };
-                if delta_rx.is_none() {
-                    match service
-                        .feed_transcription_stream_with_broadcast(sid, samples, &auth.auth_token)
-                        .await
-                    {
-                        Ok(rx) => delta_rx = Some(rx),
-                        Err(e) => {
-                            let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                match ai::transcription_feed(&ctx, std::slice::from_ref(sid), &samples).await {
+                    Ok(failed) => {
+                        for f in failed {
+                            let _ = send_error(&mut socket, "server_error", &f.error).await;
                         }
                     }
-                } else {
-                    if let Err(e) = service
-                        .feed_transcription_stream(sid, samples, &auth.auth_token)
-                        .await
-                    {
-                        let _ = send_error(&mut socket, "server_error", &e.to_string()).await;
+                    Err(e) => {
+                        let _ = send_error(&mut socket, "server_error", &e.message).await;
                     }
                 }
             }
@@ -280,13 +265,26 @@ async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
     }
 
     if let Some(ref sid) = stream_id {
-        if let Ok(service) = AIService::global_instance().await {
-            let _ = service
-                .close_transcription_stream(sid, &auth.auth_token)
-                .await;
-        }
+        close_stream(&ctx, sid).await;
     }
     let _ = socket.close().await;
+}
+
+async fn close_stream(ctx: &CallContext, stream_id: &str) {
+    let closed: Result<bool, _> = builtins::call(
+        Builtin::AiInference,
+        "transcriptionClose",
+        json!({ "streamId": stream_id }),
+        ctx,
+    )
+    .await;
+    if let Err(e) = closed {
+        log::warn!(
+            "realtime: closing transcription stream {} failed: {}",
+            stream_id,
+            e.message
+        );
+    }
 }
 
 async fn send_error(socket: &mut WebSocket, code: &str, message: &str) -> Result<(), ()> {

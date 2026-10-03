@@ -145,6 +145,101 @@ impl ServiceHost {
         self.events.subscribe()
     }
 
+    /// Live subscribers to the event bus (watches included).
+    #[cfg(test)]
+    pub fn event_subscribers(&self) -> usize {
+        self.events.receiver_count()
+    }
+
+    /// In-process subscription to one stream: the payloads of `chunk_type`
+    /// events of `stream_id`, in order, ending (channel closed) after the
+    /// stream's `service-stream-end`. One subscriber serves both, so no
+    /// chunk can arrive after the end.
+    pub fn watch_stream(
+        &self,
+        chunk_type: String,
+        stream_id: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut events = self.events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                let next = tokio::select! {
+                    e = events.recv() => e,
+                    _ = tx.closed() => break,
+                };
+                match next {
+                    Ok(e) if e.event_type == chunk_type || e.event_type == SERVICE_STREAM_END => {
+                        let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
+                            continue;
+                        };
+                        if payload.get("streamId").and_then(Value::as_str)
+                            != Some(stream_id.as_str())
+                        {
+                            continue;
+                        }
+                        if e.event_type == SERVICE_STREAM_END || tx.send(payload).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    // A lost chunk or end marker would leave the stream
+                    // incomplete or open forever: end it here.
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("stream watch {} lagged by {}; ending it", stream_id, n);
+                        break;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        rx
+    }
+
+    /// In-process subscription to one service event type (`<hash>.<event>`),
+    /// optionally narrowed to one scope value. Yields the payloads; the
+    /// executor's own consumers hold no grants, so nothing is filtered by
+    /// owner.
+    pub fn watch(
+        &self,
+        event_type: String,
+        scope: Option<String>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut events = self.events.subscribe();
+        let field = self.registry().event_scope(&event_type);
+        tokio::spawn(async move {
+            loop {
+                let next = tokio::select! {
+                    e = events.recv() => e,
+                    _ = tx.closed() => break,
+                };
+                match next {
+                    Ok(e) if e.event_type == event_type => {
+                        let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
+                            continue;
+                        };
+                        let in_scope = match (&scope, &field) {
+                            (Some(want), Some(f)) => {
+                                payload.get(f).and_then(Value::as_str) == Some(want.as_str())
+                            }
+                            _ => true,
+                        };
+                        if in_scope && tx.send(payload).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("service event watch on {} lagged by {}", event_type, n)
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        rx
+    }
+
     /// Register an interface version (see [`Registry::register_interface`]).
     pub fn register_interface(
         &self,
@@ -369,8 +464,18 @@ impl ServiceHost {
         ctx.deadline = Some(deadline);
         let stream_end = def.stream.as_ref().and_then(|_| {
             let id = params.get("streamId").and_then(Value::as_str)?.to_string();
-            Some((id, EventOwner::Agent(ctx.agent_did.clone()?)))
+            let owner = ctx
+                .agent_did
+                .clone()
+                .map(EventOwner::Agent)
+                .unwrap_or(EventOwner::Executor);
+            Some((id, owner))
         });
+        // The admin credential is the executor's to honour: only its own
+        // (builtin) services see it.
+        if !builtin {
+            ctx.is_admin = false;
+        }
         let outcome =
             tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
         // Sent after every chunk the service emitted, on the same path, so it
@@ -531,6 +636,7 @@ impl ServiceHost {
             EventOwner::Agent(d) => did == Some(d.as_str()),
             EventOwner::User(u) => user == Some(u.as_str()),
             EventOwner::All => true,
+            EventOwner::Executor => false,
         };
         (is_admin || owns) && allowed(&[capabilities.to_vec()], &event.needs)
     }

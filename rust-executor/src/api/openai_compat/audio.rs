@@ -30,9 +30,7 @@ use super::model_selector::resolve_model;
 use super::tts_passthrough;
 use super::types::{SpeechRequest, TranscriptionResponse};
 use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, check_compute_credits};
 use crate::types::ModelType;
 
 pub async fn transcriptions(
@@ -100,19 +98,12 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
-    }
-
-    let service = AIService::global_instance()
+    // The host checks credits (`transcribe` is metered); the AI service
+    // charges per transcribed word.
+    let ctx = crate::services::ServiceHost::context_for_request(&auth.to_request_context());
+    let text = crate::services::builtins::ai::transcribe(&ctx, &model_id, &samples)
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    let text = service
-        .transcribe_buffer(model_id, samples, auth.auth_token.clone())
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(super::ai_error)?;
 
     if response_format == "text" {
         return Ok(([(header::CONTENT_TYPE, "text/plain")], text).into_response());
@@ -135,10 +126,18 @@ pub async fn speech(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email, "ai_tts").await?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
-        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
+        crate::services::builtins::billing::charge_user(
+            "openai_compat",
+            &email,
+            amount,
+            None,
+            "ai_tts",
+            Some("v1/audio/speech".into()),
+        )
+        .await
+        .map_err(super::charge_error)?;
     }
 
     let response_format = req

@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use deno_core::error::AnyError;
-use holochain::prelude::{ExternIO, ZomeCallResponse};
+use holochain::prelude::ExternIO;
 use log::{error, info, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -17,10 +17,8 @@ use tokio::sync::RwLock;
 
 use crate::db::Ad4mDb;
 use crate::holochain_service::holochain_service_extension::msgpack_value_to_json;
-use crate::holochain_service::interface::{
-    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
-};
 use crate::pubsub::mark_credits_dirty;
+use crate::services::builtins::holochain::RawZomeResponse;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,7 +40,7 @@ lazy_static! {
     static ref ALLIANCE_DNA_HASH: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> =
         Arc::new(tokio::sync::Mutex::new(false));
-    /// Held across every alliance zome call (`call_alliance_zome`). Unyt reaches the
+    /// Held across every alliance zome call (`one_at_a_time`). Unyt reaches the
     /// dispatcher from Rust, not through a language runtime, so nothing else serializes it,
     /// and since #1133 the dispatcher runs zome calls concurrently. Unyt's writes race each
     /// other on one source chain: the per-signal `handle_signal` tasks and the poll loop
@@ -51,6 +49,138 @@ lazy_static! {
     /// Why the last install of the alliance DNA failed. Cleared by a successful
     /// install and by a new membrane proof. Read by `runtime.unytVersionInfo`.
     static ref INSTALL_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+}
+
+// ---------------------------------------------------------------------------
+// Conductor access: `holochain.conductor`, through the service host
+// ---------------------------------------------------------------------------
+
+/// Unyt's handle on the conductor. Every operation is a `holochain.conductor`
+/// call through the service host, as the Unyt service.
+pub(crate) struct Conductor;
+
+impl Conductor {
+    fn ctx() -> crate::services::CallContext {
+        crate::services::CallContext::system(
+            crate::services::Caller::Executor {
+                module: "unyt".into(),
+            },
+            None,
+            None,
+        )
+    }
+
+    async fn call<R: serde::de::DeserializeOwned>(
+        method: &str,
+        params: JsonValue,
+    ) -> Result<R, AnyError> {
+        crate::services::builtins::call(
+            crate::services::builtins::Builtin::HolochainConductor,
+            method,
+            params,
+            &Self::ctx(),
+        )
+        .await
+        .map_err(|e| deno_core::anyhow::anyhow!("holochain.conductor {}: {}", method, e.message))
+    }
+
+    /// The conductor, when it runs now.
+    pub(crate) async fn running() -> Option<Conductor> {
+        Self::call::<bool>("running", serde_json::json!({}))
+            .await
+            .unwrap_or(false)
+            .then_some(Conductor)
+    }
+
+    /// The conductor, waiting up to `limit` for it to come up.
+    async fn within(limit: std::time::Duration) -> Result<Conductor, AnyError> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(c) = Self::running().await {
+                return Ok(c);
+            }
+            if started.elapsed() > limit {
+                return Err(deno_core::anyhow::anyhow!(
+                    "Holochain service not available"
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn get_app_info(
+        &self,
+        app_id: String,
+    ) -> Result<Option<holochain::conductor::api::AppInfo>, AnyError> {
+        Self::call("appInfo", serde_json::json!({ "appId": app_id })).await
+    }
+
+    async fn enable_app(&self, app_id: String) -> Result<(), AnyError> {
+        Self::call::<bool>("enableApp", serde_json::json!({ "appId": app_id }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {
+        Self::call::<bool>("removeApp", serde_json::json!({ "appId": app_id }))
+            .await
+            .map(|_| ())
+    }
+
+    async fn pack_happ(&self, path: String) -> Result<String, AnyError> {
+        Self::call("packHapp", serde_json::json!({ "path": path })).await
+    }
+
+    async fn install_app(
+        &self,
+        payload: holochain::prelude::InstallAppPayload,
+    ) -> Result<holochain::conductor::api::AppInfo, AnyError> {
+        let payload = serde_json::to_value(&payload)?;
+        Self::call("installApp", serde_json::json!({ "payload": payload })).await
+    }
+
+    async fn new_sign_keypair_random(&self) -> Result<holochain::prelude::AgentPubKey, AnyError> {
+        Self::call("newSignKeypair", serde_json::json!({})).await
+    }
+
+    async fn sign_with_key(
+        &self,
+        key: holochain::prelude::AgentPubKey,
+        data: Vec<u8>,
+    ) -> Result<holochain::prelude::Signature, AnyError> {
+        Self::call(
+            "signWithKey",
+            serde_json::json!({
+                "key": key.get_raw_39(),
+                "data": base64::engine::general_purpose::STANDARD.encode(data),
+            }),
+        )
+        .await
+    }
+
+    async fn restart_service() -> Result<(), AnyError> {
+        Self::call::<bool>("restartService", serde_json::json!({}))
+            .await
+            .map(|_| ())
+    }
+
+    async fn call_zome_raw(
+        &self,
+        fn_name: &str,
+        payload: Option<ExternIO>,
+    ) -> Result<RawZomeResponse, AnyError> {
+        Self::call(
+            "callZomeRaw",
+            serde_json::json!({
+                "appId": UNYT_APP_ID,
+                "cellName": UNYT_CELL_NAME,
+                "zomeName": UNYT_ZOME,
+                "fnName": fn_name,
+                "payload": payload.map(|p| base64::engine::general_purpose::STANDARD.encode(p.as_bytes())),
+            }),
+        )
+        .await
+    }
 }
 
 /// Why the last install of the alliance DNA failed, if it did.
@@ -146,7 +276,7 @@ pub async fn ensure_installed() -> Result<(), AnyError> {
     }
 
     // Wait for holochain service to become available (no timeout — agent unlock may take a while)
-    while maybe_get_holochain_service().await.is_none() {
+    while Conductor::running().await.is_none() {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
     }
 
@@ -198,16 +328,11 @@ async fn install_with_retries(installed: &mut bool) -> Result<(), AnyError> {
 /// Install the alliance DNA on the Holochain conductor.
 ///
 /// Writes the embedded DNA to a temp directory, creates a happ manifest,
-/// packs it, and installs via `HolochainService::install_app()`.
+/// packs it, and installs it through `holochain.conductor`.
 pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
-    let hc = match maybe_get_holochain_service().await {
-        Some(hc) => hc,
-        None => {
-            return Err(deno_core::anyhow::anyhow!(
-                "Holochain service not available"
-            ))
-        }
-    };
+    let hc = Conductor::running()
+        .await
+        .ok_or_else(|| deno_core::anyhow::anyhow!("Holochain service not available"))?;
 
     // Check if already installed with correct version
     if let Ok(Some(app_info)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
@@ -301,10 +426,7 @@ pub async fn install_alliance_dna(data_path: &Path) -> Result<(), AnyError> {
 }
 
 /// Actually perform the DNA installation (shared by install and reinstall).
-async fn do_install(
-    data_path: &Path,
-    hc: &crate::holochain_service::interface::HolochainServiceInterface,
-) -> Result<(), AnyError> {
+async fn do_install(data_path: &Path, hc: &Conductor) -> Result<(), AnyError> {
     info!("Installing Unyt alliance DNA v{}...", ALLIANCE_DNA_VERSION);
 
     // Write DNA to data directory
@@ -463,14 +585,7 @@ roles:
 
 /// Reinstall the alliance DNA (uninstall old, install new).
 pub async fn reinstall() -> Result<(), AnyError> {
-    let hc = match crate::holochain_service::holochain_service_once_started().await {
-        Some(hc) => hc,
-        None => {
-            return Err(deno_core::anyhow::anyhow!(
-                "Holochain service not available"
-            ))
-        }
-    };
+    let hc = Conductor::within(std::time::Duration::from_secs(120)).await?;
 
     // Uninstall existing
     info!("Uninstalling old Unyt alliance DNA...");
@@ -549,14 +664,7 @@ pub async fn get_or_create_agent_key() -> Result<String, AnyError> {
         warn!("Stored Unyt agent key is in invalid format, regenerating...");
     }
 
-    let hc = match crate::holochain_service::holochain_service_once_started().await {
-        Some(hc) => hc,
-        None => {
-            return Err(deno_core::anyhow::anyhow!(
-                "Holochain service not available"
-            ))
-        }
-    };
+    let hc = Conductor::within(std::time::Duration::from_secs(120)).await?;
 
     let agent_key = hc.new_sign_keypair_random().await?;
     // Use Holochain's native Display format: "u" + base64url_no_pad(39 bytes)
@@ -647,7 +755,7 @@ async fn create_auth_material() -> Result<String, AnyError> {
     }
 
     // Sign the raw 32-byte payload with the unyt agent key
-    let hc = get_holochain_service().await;
+    let hc = Conductor::within(std::time::Duration::from_secs(120)).await?;
     let signature = hc
         .sign_with_key(agent_key, payload_bytes)
         .await
@@ -740,12 +848,12 @@ async fn setup_bootstrap_auth() {
 
     // Restart the conductor so the space override takes effect
     info!("Restarting Holochain conductor to apply unyt space override...");
-    match crate::holochain_service::HolochainService::restart_service().await {
+    match Conductor::restart_service().await {
         Ok(()) => {
             info!("Holochain conductor restarted with unyt space override");
             // Wait for holochain service to come back up
             let mut waited = 0;
-            while maybe_get_holochain_service().await.is_none() {
+            while Conductor::running().await.is_none() {
                 tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                 waited += 2;
                 if waited > 60 {
@@ -763,7 +871,7 @@ async fn setup_bootstrap_auth() {
 /// Returns the DnaHash in Holochain's native string representation (e.g. "uhC0k..."),
 /// which is the key format used for `space_overrides` in the conductor config.
 pub async fn get_alliance_dna_hash_b64() -> Option<String> {
-    let hc = maybe_get_holochain_service().await?;
+    let hc = Conductor::running().await?;
     let app_info = hc.get_app_info(UNYT_APP_ID.to_string()).await.ok()??;
     for (_role, cells) in &app_info.cell_info {
         for cell_info in cells {
@@ -778,9 +886,8 @@ pub async fn get_alliance_dna_hash_b64() -> Option<String> {
 /// Capture the DNA hash from the installed app for signal routing and persist
 /// the base64 DNA hash to the DB for conductor space-override configuration.
 async fn capture_dna_hash() {
-    let hc = match maybe_get_holochain_service().await {
-        Some(hc) => hc,
-        None => return,
+    let Some(hc) = Conductor::running().await else {
+        return;
     };
 
     if let Ok(Some(app_info)) = hc.get_app_info(UNYT_APP_ID.to_string()).await {
@@ -830,13 +937,13 @@ async fn capture_dna_hash() {
 /// Automatically ensures the DNA is installed first.
 async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue, AnyError> {
     ensure_installed().await?;
-    let hc = get_holochain_service().await;
+    let hc = Conductor::within(std::time::Duration::from_secs(120)).await?;
 
-    let response = call_alliance_zome(&hc, fn_name, payload).await?;
+    let response = one_at_a_time(hc.call_zome_raw(fn_name, payload)).await?;
 
     match response {
-        ZomeCallResponse::Ok(extern_io) => {
-            let bytes = extern_io.as_bytes().to_vec();
+        RawZomeResponse::Ok(b64) => {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
             let mut cursor = std::io::Cursor::new(&bytes);
             match rmpv::decode::read_value(&mut cursor) {
                 Ok(msgpack_val) => Ok(msgpack_value_to_json(msgpack_val)),
@@ -846,44 +953,32 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
                 )),
             }
         }
-        ZomeCallResponse::Unauthorized(_, _, _, _) => Err(deno_core::anyhow::anyhow!(
+        RawZomeResponse::Unauthorized(_) => Err(deno_core::anyhow::anyhow!(
             "Unauthorized zome call: {}",
             fn_name
         )),
-        ZomeCallResponse::NetworkError(msg) => Err(deno_core::anyhow::anyhow!(
+        RawZomeResponse::NetworkError(msg) => Err(deno_core::anyhow::anyhow!(
             "Network error in zome call {}: {}",
             fn_name,
             msg
         )),
-        ZomeCallResponse::CountersigningSession(msg) => Err(deno_core::anyhow::anyhow!(
+        RawZomeResponse::CountersigningSession(msg) => Err(deno_core::anyhow::anyhow!(
             "Countersigning error in zome call {}: {}",
             fn_name,
             msg
         )),
-        ZomeCallResponse::AuthenticationFailed(_, _) => Err(deno_core::anyhow::anyhow!(
+        RawZomeResponse::AuthenticationFailed(_) => Err(deno_core::anyhow::anyhow!(
             "Authentication failed for zome call: {}",
             fn_name
         )),
     }
 }
 
-/// Runs one zome call on the alliance cell, after any other Unyt call has finished
+/// Runs one alliance zome call after any other Unyt call has finished
 /// (`ALLIANCE_CALL_LOCK`).
-async fn call_alliance_zome(
-    hc: &HolochainServiceInterface,
-    fn_name: &str,
-    payload: Option<ExternIO>,
-) -> Result<ZomeCallResponse, AnyError> {
+async fn one_at_a_time<T>(call: impl std::future::Future<Output = T>) -> T {
     let _one_at_a_time = ALLIANCE_CALL_LOCK.lock().await;
-    hc.call_zome_function(
-        UNYT_APP_ID.to_string(),
-        UNYT_CELL_NAME.to_string(),
-        UNYT_ZOME.to_string(),
-        fn_name.to_string(),
-        payload,
-        None,
-    )
-    .await
+    call.await
 }
 
 fn encode_payload<T: Serialize + std::fmt::Debug>(val: &T) -> Result<ExternIO, AnyError> {
@@ -1587,65 +1682,35 @@ pub async fn check_pending_sends() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::holochain_service::interface::{
-        Envelope, HolochainServiceRequest, HolochainServiceResponse,
-    };
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
-    use tokio::sync::{mpsc, Mutex};
 
     /// Two Unyt writes started together must reach the alliance cell one after the other,
-    /// even though the dispatch loop runs zome calls concurrently since #1133: overlapping
-    /// writes to one source chain fail with `HeadMoved` under `Strict` ordering, and the
-    /// signal handler and the poll loop could accept the same commitment twice.
+    /// even though the conductor runs zome calls concurrently: overlapping writes to one
+    /// source chain fail with `HeadMoved` under `Strict` ordering, and the signal handler
+    /// and the poll loop could accept the same commitment twice.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn alliance_zome_calls_run_one_at_a_time() {
-        let (sender, mut receiver) = mpsc::unbounded_channel::<Envelope>();
-        let (_signals, signal_rx) = mpsc::unbounded_channel();
-        let hc = HolochainServiceInterface {
-            sender,
-            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        let events = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let call = |name: &'static str| {
+            let events = events.clone();
+            async move {
+                events.lock().unwrap().push(format!("start:{name}"));
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                events.lock().unwrap().push(format!("done:{name}"));
+            }
         };
 
-        // A dispatcher that, like the real loop, runs every zome call concurrently.
-        let events = Arc::new(StdMutex::new(Vec::<String>::new()));
-        let recorded = events.clone();
-        tokio::spawn(async move {
-            while let Some(envelope) = receiver.recv().await {
-                let HolochainServiceRequest::CallZomeFunction {
-                    fn_name, response, ..
-                } = envelope.request
-                else {
-                    panic!("unexpected request {}", envelope.request.name());
-                };
-                let recorded = recorded.clone();
-                tokio::spawn(async move {
-                    recorded.lock().unwrap().push(format!("start:{fn_name}"));
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    recorded.lock().unwrap().push(format!("done:{fn_name}"));
-                    let _ = response.send(HolochainServiceResponse::CallZomeFunction(Ok(
-                        ZomeCallResponse::Ok(ExternIO::encode(()).unwrap()),
-                    )));
-                });
-            }
-        });
-
-        let (commit, accept) = tokio::join!(
-            call_alliance_zome(&hc, "create_commitment", None),
-            call_alliance_zome(&hc, "create_accept", None),
+        tokio::join!(
+            one_at_a_time(call("create_commitment")),
+            one_at_a_time(call("create_accept")),
         );
-        commit.unwrap();
-        accept.unwrap();
 
-        assert_eq!(
-            *events.lock().unwrap(),
-            vec![
-                "start:create_commitment",
-                "done:create_commitment",
-                "start:create_accept",
-                "done:create_accept",
-            ],
-            "the second Unyt call must start only after the first one finished"
-        );
+        let events = events.lock().unwrap().clone();
+        assert_eq!(events.len(), 4);
+        // Whichever call went first finished before the other started.
+        assert!(events[0].starts_with("start:") && events[1].starts_with("done:"));
+        assert_eq!(events[0][6..], events[1][5..]);
+        assert!(events[2].starts_with("start:") && events[3].starts_with("done:"));
     }
 }

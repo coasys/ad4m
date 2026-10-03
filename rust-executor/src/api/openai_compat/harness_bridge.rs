@@ -1,7 +1,6 @@
 //! `OpenAiCompatBridge` — the real `CompletionSource` that wires the
-//! interpretation-pass harness loop to `AIService::prompt_messages` +
-//! the tool-grammar constrained-decoding path Josh cherry-picked into
-//! `/v1/chat/completions`.
+//! interpretation-pass harness loop to `ai.inference` (`chat`,
+//! `chatWithTools`) and the tool-grammar path `/v1/chat/completions` uses.
 //!
 //! Lives here (not under `ai_service::harness`) because it depends on
 //! [`super::tool_grammar`] and [`super::types::ToolDef`] which are already
@@ -19,31 +18,27 @@ use super::types::{FunctionDef, ToolDef};
 use crate::ai_service::harness::provider::ToolSchema;
 use crate::ai_service::harness::{CompletionSource, HarnessCompletion, HarnessToolCall};
 use crate::ai_service::providers::{ChatTurn, ToolCall, ToolSpec};
-use crate::ai_service::AIService;
+use crate::services::builtins::ai;
+use crate::services::CallContext;
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use uuid::Uuid;
 
-/// Bridge that lets the harness loop talk to a real `AIService`.
-///
-/// Held as a plain field, not an `Arc<AIService>`, because `AIService` is
-/// a global singleton reached via `AIService::global_instance()` — the
-/// bridge just remembers a handle for the duration of the interpretation
-/// pass. `auth_token` is per-pass (billing context follows the pass owner).
+/// Bridge that lets the harness loop talk to the `ai.inference` service.
+/// `ctx` is per-pass: grants and billing follow the pass owner.
 pub struct OpenAiCompatBridge {
-    service: Arc<AIService>,
-    auth_token: Option<String>,
+    ctx: CallContext,
 }
 
 impl OpenAiCompatBridge {
-    pub fn new(service: Arc<AIService>, auth_token: Option<String>) -> Self {
-        Self {
-            service,
-            auth_token,
-        }
+    pub fn new(ctx: CallContext) -> Self {
+        Self { ctx }
     }
+}
+
+fn service_error(e: crate::api::ws_handler::WsRpcError) -> anyhow::Error {
+    anyhow!("ai.inference: {} ({})", e.message, e.code)
 }
 
 #[async_trait::async_trait]
@@ -58,7 +53,7 @@ impl CompletionSource for OpenAiCompatBridge {
         // definitions, and answers with structured calls. Everything else
         // takes the prompt-injection path below, which works against any model
         // at all — including every local one, which is why it stays.
-        if !tools.is_empty() && AIService::model_supports_native_tools(model_id) {
+        if !tools.is_empty() && ai::supports_native_tools(model_id).await {
             return self.complete_natively(model_id, messages, tools).await;
         }
 
@@ -93,17 +88,9 @@ impl CompletionSource for OpenAiCompatBridge {
         // (XML `<tool_call>`, fenced JSON, bare-JSON, and wrapped array
         // shapes). Switching to `Required` would preclude the model from
         // ever emitting a plain-text terminating turn.
-        let constraint: Option<kalosm::language::ArcParser<()>> = None;
-
-        let result = self
-            .service
-            .prompt_messages(
-                model_id.to_string(),
-                flat,
-                self.auth_token.clone(),
-                constraint,
-            )
-            .await?;
+        let result = ai::chat(&self.ctx, model_id, flat, None)
+            .await
+            .map_err(service_error)?;
 
         // The model's text is either a plain answer or a tool-call block
         // (or both — some models emit a short pre-thought before the call).
@@ -178,7 +165,7 @@ impl OpenAiCompatBridge {
     ) -> Result<HarnessCompletion> {
         let turns = structured_turns(messages)?;
 
-        let specs = tools
+        let specs: Vec<ToolSpec> = tools
             .iter()
             .map(|schema| ToolSpec {
                 name: schema.name.clone(),
@@ -187,10 +174,9 @@ impl OpenAiCompatBridge {
             })
             .collect();
 
-        let reply = self
-            .service
-            .prompt_with_tools(model_id.to_string(), turns, specs, self.auth_token.clone())
-            .await?;
+        let reply = ai::chat_with_tools(&self.ctx, model_id, &turns, &specs)
+            .await
+            .map_err(service_error)?;
 
         Ok(HarnessCompletion {
             content: reply.text,

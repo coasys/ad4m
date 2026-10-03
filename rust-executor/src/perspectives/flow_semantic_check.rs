@@ -99,8 +99,8 @@ pub fn semantic_check_passed(raw: &str) -> bool {
     token == "YES"
 }
 
-/// Runs the check on the same AIService task as the extraction pass, so both
-/// share one worker and billing scope.
+/// Runs the check on the same AI task as the extraction pass, so both share
+/// one worker and billing scope.
 pub struct AIServiceSemanticCheck {
     pub task_id: String,
 }
@@ -108,14 +108,14 @@ pub struct AIServiceSemanticCheck {
 #[async_trait::async_trait]
 impl SemanticCheckLlm for AIServiceSemanticCheck {
     async fn confirm(&self, prompt: &str) -> Result<String> {
-        let ai = crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("AIService not ready: {e:#}"))?;
-        let res = ai
-            .prompt(self.task_id.clone(), prompt.to_string(), None)
-            .await
-            .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
-        Ok(res.text)
+        use crate::services::builtins::ai;
+        ai::prompt(
+            &ai::executor_ctx("flow_semantic_check"),
+            &self.task_id,
+            prompt,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("ai.inference prompt failed: {}", e.message))
     }
 }
 

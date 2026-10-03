@@ -115,6 +115,36 @@ pub fn capability(builtin: Builtin, action: &str) -> Capability {
     service_capability(&doc.module_id(), &doc.compat(), action)
 }
 
+/// Call a built-in service method in-process, through the host (grants,
+/// validation and metering apply), and decode the result.
+pub async fn call<R: DeserializeOwned>(
+    builtin: Builtin,
+    method: &str,
+    params: Value,
+    ctx: &CallContext,
+) -> Result<R, crate::api::ws_handler::WsRpcError> {
+    let value = super::host::host()
+        .dispatch(
+            &format!("{}.{}", document(builtin).hash, method),
+            params,
+            ctx.clone(),
+        )
+        .await?;
+    serde_json::from_value(value).map_err(|e| {
+        crate::api::ws_handler::WsRpcError::internal(format!(
+            "{} {} answered outside its type: {}",
+            builtin.file_stem(),
+            method,
+            e
+        ))
+    })
+}
+
+/// The wire type of a built-in event (`<hash>.<event>`).
+pub fn event_type(builtin: Builtin, event: &str) -> String {
+    format!("{}.{}", document(builtin).hash, event)
+}
+
 fn manifest(name: &str, implements: &[Builtin], requires: Vec<Requirement>) -> BuiltinManifest {
     BuiltinManifest {
         name: name.into(),
@@ -150,11 +180,15 @@ pub async fn start_all(host: &Arc<ServiceHost>) -> Result<(), String> {
             vec![Builtin::BillingLedger, Builtin::BillingSettlement],
             Arc::new(billing::Billing::default()),
         ),
-        ("unyt", vec![Builtin::UnytWallet], Arc::new(unyt::Unyt)),
+        (
+            "unyt",
+            vec![Builtin::UnytWallet],
+            Arc::new(unyt::Unyt::default()),
+        ),
         (
             "holochain",
             vec![Builtin::HolochainConductor],
-            Arc::new(holochain::Holochain),
+            Arc::new(holochain::Holochain::default()),
         ),
     ];
     for (name, implements, service) in services {
@@ -165,10 +199,7 @@ pub async fn start_all(host: &Arc<ServiceHost>) -> Result<(), String> {
             .find(|i| i.manifest == m)
             .map(|i| (i.hash.clone(), i.is_running()));
         let hash = match existing {
-            Some((hash, true)) => {
-                let _ = hash;
-                continue;
-            }
+            Some((_, true)) => continue,
             Some((hash, false)) => hash,
             None => host.register_builtin(m, service)?,
         };

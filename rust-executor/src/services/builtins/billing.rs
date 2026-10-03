@@ -4,15 +4,17 @@
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::sync::OnceCell;
 
-use super::ai::bridge;
+use super::Builtin;
 use super::{internal, params, require_admin, to_value, NoParams};
 use crate::api::types::HostRate;
+use crate::api::ws_handler::WsRpcError;
 use crate::db::Ad4mDb;
 use crate::services::builtin::{
-    CallContext, EventOwner, ServiceError, ServiceHealth, ServiceImplementation, StartContext,
+    CallContext, EventEmitter, EventOwner, ServiceError, ServiceHealth, ServiceImplementation,
+    StartContext,
 };
 use crate::services::interface::{Risk, Selection};
 use crate::services::schema_export::{InterfaceBuilder, MethodOptions};
@@ -37,6 +39,48 @@ pub struct Account {
 pub struct CheckParams {
     /// The metered operation, e.g. `ai.prompt`.
     pub operation: String,
+    /// Check another account than the caller's (admin credential only).
+    #[serde(default)]
+    pub user_email: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChargeParams {
+    /// Credits to deduct; with `rateKey`, units priced at that host rate.
+    #[schemars(range(min = 0.0))]
+    pub amount: f64,
+    /// A host-rate key, e.g. `link write`: `amount` counts units of it
+    /// (the executor's default rate applies when none is set).
+    #[serde(default)]
+    pub rate_key: Option<String>,
+    /// What the charge is for, e.g. `link_write`; goes to the compute log.
+    pub operation: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// Charge another account than the caller's (admin credential only).
+    #[serde(default)]
+    pub user_email: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChargeUsageParams {
+    /// The model the usage is priced by: its name is the host-rate key.
+    pub model_id: String,
+    pub operation: String,
+    pub units: u64,
+    /// What a unit is, e.g. `tokens`, `words`; goes to the compute log.
+    pub unit_label: String,
+    #[serde(default)]
+    pub user_email: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RateParams {
+    /// The host-rate key, e.g. `link write`.
+    pub key: String,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -79,6 +123,7 @@ pub fn ledger_interface() -> Value {
         "Read your credits, the host rates and your compute log.",
         Risk::Safe,
     )
+    .action("CHARGE", "Charge credits", "Deduct compute credits for work done.", Risk::Spend)
     .action(
         "ADMIN",
         "Administer billing",
@@ -102,6 +147,24 @@ pub fn ledger_interface() -> Value {
             read: true,
             ..Default::default()
         },
+    )
+    .method::<ChargeParams, bool>(
+        "charge",
+        "CHARGE",
+        "Deduct credits and log the operation. Answers `false` when no account is charged (single-user executor).",
+        MethodOptions { errors: vec![("InsufficientCredits", 409), ("UnknownAccount", 422)], ..Default::default() },
+    )
+    .method::<ChargeUsageParams, bool>(
+        "chargeUsage",
+        "CHARGE",
+        "Charge `units` of a model's usage at the model's host rate. Answers `false` when no account is charged.",
+        MethodOptions { errors: vec![("InsufficientCredits", 409), ("UnknownAccount", 422)], ..Default::default() },
+    )
+    .method::<RateParams, Option<f64>>(
+        "rate",
+        "READ",
+        "The host rate of a key, with the executor's defaults; `null` when unpriced.",
+        MethodOptions { read: true, ..Default::default() },
     )
     .method::<NoParams, Vec<HostRate>>(
         "rates",
@@ -262,6 +325,34 @@ fn global_free() -> bool {
     Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true)
 }
 
+/// The account a call acts on: `explicit` (admin credential only, unless it
+/// is the caller's own), else the caller's.
+fn target_email(
+    ctx: &CallContext,
+    explicit: Option<String>,
+) -> Result<Option<String>, ServiceError> {
+    match explicit {
+        Some(e) if Some(&e) != email(ctx).as_ref() => {
+            require_admin(ctx)?;
+            Ok(Some(e))
+        }
+        Some(e) => Ok(Some(e)),
+        None => Ok(email(ctx)),
+    }
+}
+
+fn charge_error(e: crate::billing::BillingError) -> ServiceError {
+    match e {
+        crate::billing::BillingError::InsufficientCredits => {
+            ServiceError::method("InsufficientCredits", "Insufficient compute credits")
+        }
+        crate::billing::BillingError::UserNotFound(u) => {
+            ServiceError::method("UnknownAccount", format!("User not found: {}", u))
+        }
+        other => internal(format!("{:?}", other)),
+    }
+}
+
 /// The caller's account email: the session's user, else the one in its token.
 fn email(ctx: &CallContext) -> Option<String> {
     ctx.user.clone().or_else(|| {
@@ -275,19 +366,134 @@ fn email(ctx: &CallContext) -> Option<String> {
 /// and single-user executors always may; otherwise the account needs credits.
 /// Fails closed when the account cannot be read.
 pub fn may_spend(ctx: &CallContext) -> bool {
+    may_spend_email(email(ctx).as_deref())
+}
+
+fn may_spend_email(email: Option<&str>) -> bool {
     if global_free() {
         return true;
     }
-    let Some(email) = email(ctx) else {
+    let Some(email) = email else {
         return true;
     };
-    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(&email)) {
+    match Ad4mDb::with_global_instance(|db| db.get_user_free_access(email)) {
         Ok(true) => true,
         Ok(false) => {
-            Ad4mDb::with_global_instance(|db| db.get_user_credits(&email)).is_ok_and(|c| c > 0.0)
+            Ad4mDb::with_global_instance(|db| db.get_user_credits(email)).is_ok_and(|c| c > 0.0)
         }
         Err(_) => false,
     }
+}
+
+/// Every 2 s, announce `account-changed` for the accounts whose credits,
+/// free access or wallet changed since (`pubsub::mark_credits_dirty`).
+async fn announce_account_changes(events: EventEmitter) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let dirty: Vec<String> = match crate::pubsub::DIRTY_CREDIT_USERS.lock() {
+            Ok(mut set) => set.drain().collect(),
+            Err(e) => {
+                log::error!("billing: dirty-account set poisoned: {}", e);
+                continue;
+            }
+        };
+        for email in dirty {
+            match account_info(&email) {
+                Ok(info) => {
+                    let payload = serde_json::to_value(&info).unwrap_or_default();
+                    if let Err(e) = events
+                        .emit("account-changed", EventOwner::User(email), payload)
+                        .await
+                    {
+                        log::error!("billing: account-changed dropped: {}", e);
+                    }
+                }
+                Err(e) => log::error!("billing: cannot read account {}: {}", email, e),
+            }
+        }
+    }
+}
+
+fn account_info(email: &str) -> Result<HostingUserInfo, String> {
+    let free_access = global_free()
+        || Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
+            .map_err(|e| e.to_string())?;
+    let remaining_credits = if free_access {
+        "unlimited".to_string()
+    } else {
+        Ad4mDb::with_global_instance(|db| db.get_user_credits(email))
+            .map_err(|e| e.to_string())?
+            .to_string()
+    };
+    let hot_wallet_address = Ad4mDb::with_global_instance(|db| db.get_user_hot_wallet(email))
+        .map_err(|e| e.to_string())?;
+    Ok(HostingUserInfo {
+        email: email.to_string(),
+        remaining_credits,
+        hot_wallet_address,
+        free_access,
+    })
+}
+
+// ── Executor-internal billing, through the ledger ───────────────────────────
+
+fn system_ctx(module: &str, email: &str) -> CallContext {
+    CallContext::system(
+        crate::services::Caller::Executor {
+            module: module.into(),
+        },
+        Some(email.to_string()),
+        None,
+    )
+}
+
+/// May `email` start compute now? Fails closed when the ledger is unreachable.
+pub async fn check_user(module: &str, email: &str, operation: &str) -> bool {
+    super::call::<bool>(
+        Builtin::BillingLedger,
+        "check",
+        json!({ "operation": operation }),
+        &system_ctx(module, email),
+    )
+    .await
+    .unwrap_or(false)
+}
+
+/// Charge `email` for executor work: `amount` credits, or `amount` units of
+/// the host rate `rate_key`. `Ok(false)` when nothing was charged.
+pub async fn charge_user(
+    module: &str,
+    email: &str,
+    amount: f64,
+    rate_key: Option<&str>,
+    operation: &str,
+    summary: Option<String>,
+) -> Result<bool, WsRpcError> {
+    super::call(
+        Builtin::BillingLedger,
+        "charge",
+        json!({ "amount": amount, "rateKey": rate_key, "operation": operation, "summary": summary }),
+        &system_ctx(module, email),
+    )
+    .await
+}
+
+/// Charge `email` for `units` of a model's usage at its host rate.
+pub async fn charge_usage(
+    module: &str,
+    email: &str,
+    model_id: &str,
+    operation: &str,
+    units: u64,
+    unit_label: &str,
+) -> Result<bool, WsRpcError> {
+    super::call(
+        Builtin::BillingLedger,
+        "chargeUsage",
+        json!({ "modelId": model_id, "operation": operation, "units": units, "unitLabel": unit_label }),
+        &system_ctx(module, email),
+    )
+    .await
 }
 
 #[derive(Default)]
@@ -299,15 +505,7 @@ pub struct Billing {
 impl ServiceImplementation for Billing {
     async fn start(&self, ctx: StartContext) -> Result<(), String> {
         if self.started.set(()).is_ok() {
-            bridge(
-                &crate::pubsub::HOSTING_USER_INFO_CHANGED_TOPIC,
-                ctx.events,
-                "account-changed",
-                |v| {
-                    let email = v.get("email")?.as_str()?.to_string();
-                    Some((EventOwner::User(email), v))
-                },
-            );
+            tokio::spawn(announce_account_changes(ctx.events));
         }
         Ok(())
     }
@@ -338,8 +536,41 @@ impl ServiceImplementation for Billing {
                 }))
             }
             "check" => {
-                let _: CheckParams = params(p)?;
-                to_value(may_spend(&ctx))
+                let p: CheckParams = params(p)?;
+                let email = target_email(&ctx, p.user_email)?;
+                to_value(may_spend_email(email.as_deref()))
+            }
+            "charge" => {
+                let p: ChargeParams = params(p)?;
+                let Some(email) = target_email(&ctx, p.user_email)? else {
+                    return to_value(false);
+                };
+                let amount = match &p.rate_key {
+                    Some(key) => p.amount * crate::billing::host_rate(key).unwrap_or(0.0),
+                    None => p.amount,
+                };
+                crate::billing::bill_compute(&email, amount, &p.operation, p.summary.as_deref())
+                    .map_err(charge_error)?;
+                to_value(true)
+            }
+            "chargeUsage" => {
+                let p: ChargeUsageParams = params(p)?;
+                let Some(email) = target_email(&ctx, p.user_email)? else {
+                    return to_value(false);
+                };
+                crate::billing::bill_ai_operation(
+                    &email,
+                    &p.model_id,
+                    &p.operation,
+                    p.units as usize,
+                    &p.unit_label,
+                )
+                .map_err(charge_error)?;
+                to_value(true)
+            }
+            "rate" => {
+                let p: RateParams = params(p)?;
+                to_value(crate::billing::host_rate(&p.key))
             }
             "rates" => {
                 let rates: Vec<HostRate> = Ad4mDb::with_global_instance(|db| db.get_host_rates())

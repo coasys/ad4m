@@ -129,6 +129,7 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     crate::services::builtins::start_all(&crate::services::host())
         .await
         .map_err(|e| deno_core::anyhow::anyhow!("built-in services failed to start: {}", e))?;
+    crate::languages::holochain_signals::start_router();
 
     let port = config
         .port

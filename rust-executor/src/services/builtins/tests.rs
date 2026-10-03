@@ -324,3 +324,136 @@ fn users_get_the_service_grants_they_need() {
         assert!(!has(b, action), "{:?} {}", b, action);
     }
 }
+
+/// Outside the services and each service's own module, executor code reaches
+/// AI, billing, Unyt and Holochain operations only through the service host.
+/// Lifecycle (starting the AI service, stopping the conductor) is exempt.
+#[test]
+fn internal_callers_go_through_the_host() {
+    const FORBIDDEN: &[&str] = &[
+        "AIService::",
+        "crate::billing::",
+        "unyt_service::",
+        "get_holochain_service()",
+        "maybe_get_holochain_service()",
+        "holochain_service_once_started()",
+        "HolochainService::",
+    ];
+    /// The service modules themselves.
+    const OWN: &[&str] = &[
+        "ai_service/",
+        "billing.rs",
+        "unyt_service.rs",
+        "holochain_service/",
+        "services/",
+    ];
+    /// Lifecycle orchestration.
+    const LIFECYCLE: &[(&str, &str)] = &[
+        ("lib.rs", "AIService::init_global_instance()"),
+        ("lib.rs", "holochain_service::maybe_get_holochain_service()"),
+    ];
+    fn is_test_file(rel: &str) -> bool {
+        rel.ends_with("tests.rs")
+            || rel.contains("test_support")
+            || rel.contains("e2e")
+            || rel.contains("real_llm")
+    }
+    let root = manifest_dir().join("src");
+    let mut stack = vec![root.clone()];
+    let mut offenders = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if OWN.iter().any(|o| rel.starts_with(o)) || is_test_file(&rel) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Code after `#[cfg(test)] mod tests` is test code.
+            let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+            for (n, line) in code.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                for needle in FORBIDDEN {
+                    if line.contains(needle)
+                        && !LIFECYCLE.iter().any(|(f, l)| rel == *f && line.contains(l))
+                    {
+                        offenders.push(format!("{}:{}: {}", rel, n + 1, trimmed));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "direct service calls outside the host:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// An in-memory database when no test installed one yet.
+fn ensure_db() {
+    let missing = crate::db::Ad4mDb::global_instance()
+        .lock()
+        .map(|g| g.is_none())
+        .unwrap_or(false);
+    if missing {
+        let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+    }
+}
+
+/// `billing.ledger.charge` with a `rateKey` prices `amount` as units of that
+/// host rate; without one, `amount` is credits.
+#[tokio::test]
+async fn charge_prices_units_at_a_host_rate() {
+    use crate::billing::test_seam;
+    ensure_db();
+    super::start_all(&crate::services::host()).await.unwrap();
+    let rate = crate::billing::host_rate("link write").expect("link write has a default rate");
+    let charge = |params: Value| async move {
+        test_seam::force_result(test_seam::ForcedResult::Success);
+        super::call::<bool>(
+            Builtin::BillingLedger,
+            "charge",
+            params,
+            &ctx(Some("u@ex.test")),
+        )
+        .await
+        .unwrap()
+    };
+    test_seam::reset();
+    assert!(
+        charge(json!({ "amount": 3.0, "rateKey": "link write", "operation": "link_write" })).await
+    );
+    assert!(charge(json!({ "amount": 2.0, "operation": "ai_tts" })).await);
+    let amounts: Vec<f64> = test_seam::calls().iter().map(|c| c.amount).collect();
+    assert_eq!(amounts, vec![3.0 * rate, 2.0]);
+    test_seam::reset();
+}
+
+/// Work done for a session's token holds that token's grants and admin
+/// flag, never the executor's; without a token it is the executor's call.
+#[test]
+fn token_context_holds_only_the_tokens_grants() {
+    ensure_db();
+    let session = super::ai::token_ctx("t", Some("not-a-valid-token".into()));
+    assert!(!session.is_admin);
+    assert!(session.grants.len() == 1 && session.grants[0].is_empty());
+    assert_eq!(session.auth_token.as_deref(), Some("not-a-valid-token"));
+    let executor = super::ai::token_ctx("t", None);
+    assert!(executor.is_admin);
+    assert!(executor.auth_token.is_none());
+}

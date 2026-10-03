@@ -5,9 +5,9 @@
 //!   - unit-testable without spinning up a runtime or mocking `bill_compute`.
 //!
 //! Handlers MUST route their amount calculation through these helpers and
-//! pass the result to `bill_compute` — do NOT inline a different formula.
+//! charge the result through `billing.ledger.charge` — do NOT inline a different formula.
 //!
-//! Operation labels used with `bill_compute`:
+//! Operation labels charged at the handler level:
 //!   - `"ai_tts"` → speech
 //!   - `"ai_transcription"` → NOT billed at the handler level. Transcription
 //!     is billed exactly once in the worker (`ai_service/mod.rs::open_transcription_stream`).
@@ -17,7 +17,7 @@
 //!     test will fail — that's the guard.
 //!
 //! Chat/completions (streaming and non-streaming) and embeddings are billed
-//! by `AIService` via host_rates (`crate::billing::bill_ai_operation`), not
+//! by `AIService` via host_rates (`billing.ledger` `chargeUsage`), not
 //! here.
 
 /// TTS speech: characters synthesised / 1000, floored at 1.0 so any

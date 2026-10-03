@@ -212,6 +212,26 @@
       },
       "action": "READ",
       "read": true
+    },
+    "supportsNativeTools": {
+      "description": "Does this model take tools as data (rather than through a rendered prompt)?",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "modelId"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
     }
   },
   "events": {

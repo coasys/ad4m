@@ -125,7 +125,7 @@ fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
 /// A JS-friendly version of ZomeCallResponse that decodes ExternIO bytes to JSON.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
-enum DecodedZomeCallResponse {
+pub(crate) enum DecodedZomeCallResponse {
     Ok { value: serde_json::Value },
     NetworkError { value: String },
     CountersigningSession { value: String },
@@ -198,50 +198,6 @@ async fn start_holochain_conductor(
     Ok(())
 }
 
-#[op2(async(lazy), fast)]
-async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
-    let Some(interface) = holochain_service_once_started().await else {
-        return Ok(());
-    };
-    let res = timeout(TIMEOUT_DURATION, interface.log_network_metrics()).await;
-    match res {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            error!("Timeout error logging dht status");
-            Ok(())
-        }
-    }
-}
-
-#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
-#[serde]
-async fn install_app(
-    #[serde] install_app_payload: InstallAppPayload,
-) -> Result<AppInfo, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(
-        APP_INSTALL_TIMEOUT_DURATION,
-        interface.install_app(install_app_payload),
-    )
-    .await
-    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-    .map_err(AnyhowWrapperError::from)
-}
-
-#[op2(async(lazy), fast)]
-#[serde]
-async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.get_app_info(app_id))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
-}
-
 /// The body of the `call_zome_function` op: waits for the conductor (`started`), then runs
 /// the call with `budget` as its timeout.
 ///
@@ -271,8 +227,201 @@ pub(crate) async fn call_zome_within(
     .map_err(|_| anyhow!("Timeout error"))?
 }
 
-//TODO
-//Have install app use lair to generate the membrane proof
+/// The conductor operations behind `holochain.conductor`. The service
+/// implementation calls these; everything else goes through the service.
+pub(crate) mod direct {
+    use super::*;
+
+    /// The conductor did not come up in time (or Holochain is off).
+    #[derive(Debug)]
+    pub struct NotRunning;
+
+    impl std::fmt::Display for NotRunning {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Holochain conductor not available")
+        }
+    }
+
+    impl std::error::Error for NotRunning {}
+
+    /// The conductor, once started (waits for a start in progress).
+    pub async fn conductor() -> Result<HolochainServiceInterface, AnyError> {
+        holochain_service_once_started()
+            .await
+            .ok_or_else(|| NotRunning.into())
+    }
+
+    async fn within<T>(
+        budget: Duration,
+        f: impl Future<Output = Result<T, AnyError>>,
+    ) -> Result<T, AnyError> {
+        timeout(budget, f)
+            .await
+            .map_err(|_| anyhow!("Timeout error"))?
+    }
+
+    pub async fn log_network_status() -> Result<(), AnyError> {
+        let Some(interface) = holochain_service_once_started().await else {
+            return Ok(());
+        };
+        if timeout(TIMEOUT_DURATION, interface.log_network_metrics())
+            .await
+            .is_err()
+        {
+            error!("Timeout error logging dht status");
+        }
+        Ok(())
+    }
+
+    pub async fn install_app(payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
+        let interface = conductor().await?;
+        within(APP_INSTALL_TIMEOUT_DURATION, interface.install_app(payload)).await
+    }
+
+    pub async fn app_info(app_id: String) -> Result<Option<AppInfo>, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.get_app_info(app_id)).await
+    }
+
+    pub async fn enable_app(app_id: String) -> Result<(), AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.enable_app(app_id)).await
+    }
+
+    pub async fn remove_app(app_id: String) -> Result<(), AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.remove_app(app_id)).await
+    }
+
+    pub async fn shutdown() -> Result<(), AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.shutdown()).await
+    }
+
+    pub async fn agent_key() -> Result<HoloHash<Agent>, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.get_agent_key()).await
+    }
+
+    pub async fn new_sign_keypair() -> Result<HoloHash<Agent>, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.new_sign_keypair_random()).await
+    }
+
+    pub async fn sign_with_key(
+        key: HoloHash<Agent>,
+        data: Vec<u8>,
+    ) -> Result<holochain::prelude::Signature, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.sign_with_key(key, data)).await
+    }
+
+    pub async fn pack_dna(path: String) -> Result<String, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.pack_dna(path)).await
+    }
+
+    pub async fn unpack_dna(path: String) -> Result<String, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.unpack_dna(path)).await
+    }
+
+    pub async fn pack_happ(path: String) -> Result<String, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.pack_happ(path)).await
+    }
+
+    pub async fn unpack_happ(path: String) -> Result<String, AnyError> {
+        let interface = conductor().await?;
+        within(TIMEOUT_DURATION, interface.unpack_happ(path)).await
+    }
+
+    /// A zome call with raw msgpack in and out.
+    pub async fn call_zome_raw(
+        app_id: String,
+        cell_name: String,
+        zome_name: String,
+        fn_name: String,
+        payload: Option<ExternIO>,
+    ) -> Result<ZomeCallResponse, AnyError> {
+        call_zome_within(
+            holochain_service_once_started(),
+            TIMEOUT_DURATION,
+            app_id,
+            cell_name,
+            zome_name,
+            fn_name,
+            payload,
+        )
+        .await
+    }
+
+    /// A zome call with JSON in and out: `Uint8Array`s travel as
+    /// `{ "__binary": [...] }` markers both ways, as languages send them.
+    pub async fn call_zome_json(
+        app_id: String,
+        cell_name: String,
+        zome_name: String,
+        fn_name: String,
+        payload: Option<serde_json::Value>,
+    ) -> Result<DecodedZomeCallResponse, AnyError> {
+        let extern_payload = match payload {
+            Some(val) => {
+                let msgpack_val = json_to_msgpack_value(&val);
+                let mut buf = Vec::new();
+                rmpv::encode::write_value(&mut buf, &msgpack_val)
+                    .map_err(|e| anyhow!("Failed to encode payload to msgpack: {}", e))?;
+                Some(ExternIO::from(buf))
+            }
+            None => None,
+        };
+        let response = call_zome_raw(app_id, cell_name, zome_name, fn_name, extern_payload).await?;
+        DecodedZomeCallResponse::from_zome_call_response(response).map_err(|e| anyhow!("{}", e))
+    }
+}
+
+// ── Language host imports: through the `holochain.conductor` service ─────────
+
+/// Call `holochain.conductor` on behalf of a language and decode the answer.
+async fn conductor_call<R: serde::de::DeserializeOwned>(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<R, AnyhowWrapperError> {
+    use crate::services::builtins::{self, Builtin};
+    let ctx = crate::services::CallContext::system(
+        crate::services::Caller::Executor {
+            module: "language_host".into(),
+        },
+        None,
+        None,
+    );
+    builtins::call(Builtin::HolochainConductor, method, params, &ctx)
+        .await
+        .map_err(|e| AnyhowWrapperError::from(anyhow!("{}", e.message)))
+}
+
+#[op2(async(lazy), fast)]
+async fn log_dht_status() -> Result<(), AnyhowWrapperError> {
+    let _: Result<bool, _> = conductor_call("logNetworkStatus", serde_json::json!({})).await;
+    Ok(())
+}
+
+#[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
+#[serde]
+async fn install_app(
+    #[serde] install_app_payload: InstallAppPayload,
+) -> Result<AppInfo, AnyhowWrapperError> {
+    let payload = serde_json::to_value(&install_app_payload)
+        .map_err(|e| AnyhowWrapperError::from(anyhow!("install payload: {}", e)))?;
+    conductor_call("installApp", serde_json::json!({ "payload": payload })).await
+}
+
+#[op2(async(lazy), fast)]
+#[serde]
+async fn get_app_info(#[string] app_id: String) -> Result<Option<AppInfo>, AnyhowWrapperError> {
+    conductor_call("appInfo", serde_json::json!({ "appId": app_id })).await
+}
+
 #[op2(async(lazy))] // op2 v2.9: not fast-compatible (complex serde arg)
 #[serde]
 async fn call_zome_function(
@@ -282,46 +431,23 @@ async fn call_zome_function(
     #[string] fn_name: String,
     #[serde] payload: Option<serde_json::Value>,
 ) -> Result<DecodedZomeCallResponse, AnyhowWrapperError> {
-    // Convert the JSON value to ExternIO (msgpack-encoded bytes) that Holochain expects.
-    // We use json_to_msgpack_value to properly reconvert __binary markers and byte arrays
-    // back to msgpack Binary type, preserving round-trip fidelity for Holochain hashes etc.
-    let extern_payload = match payload {
-        Some(val) => {
-            let msgpack_val = json_to_msgpack_value(&val);
-            let mut buf = Vec::new();
-            rmpv::encode::write_value(&mut buf, &msgpack_val).map_err(|e| {
-                AnyhowWrapperError::from(anyhow!("Failed to encode payload to msgpack: {}", e))
-            })?;
-            Some(ExternIO::from(buf))
-        }
-        None => None,
-    };
-    let response = call_zome_within(
-        holochain_service_once_started(),
-        TIMEOUT_DURATION,
-        app_id,
-        cell_name,
-        zome_name,
-        fn_name,
-        extern_payload,
+    conductor_call(
+        "callZome",
+        serde_json::json!({
+            "appId": app_id,
+            "cellName": cell_name,
+            "zomeName": zome_name,
+            "fnName": fn_name,
+            "payload": payload,
+        }),
     )
     .await
-    .map_err(AnyhowWrapperError::from)?;
-
-    // Decode ExternIO bytes to JSON before returning to JS
-    DecodedZomeCallResponse::from_zome_call_response(response)
 }
 
 #[op2(async(lazy), fast)]
 #[serde]
 async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.agent_infos())
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("agentInfos", serde_json::json!({})).await
 }
 
 // op2 v2.9 lint: not fast-compatible (Vec<String> serde arg).
@@ -329,98 +455,54 @@ async fn agent_infos() -> Result<Vec<String>, AnyhowWrapperError> {
 async fn add_agent_infos(
     #[serde] agent_infos_payload: Vec<String>,
 ) -> Result<(), AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(
-        TIMEOUT_DURATION,
-        interface.add_agent_infos(agent_infos_payload),
+    let _: bool = conductor_call(
+        "addAgentInfos",
+        serde_json::json!({ "agentInfos": agent_infos_payload }),
     )
-    .await
-    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-    .map_err(AnyhowWrapperError::from)
+    .await?;
+    Ok(())
 }
 
 #[op2(async(lazy), fast)]
 async fn remove_app(#[string] app_id: String) -> Result<(), AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.remove_app(app_id))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    let _: bool = conductor_call("removeApp", serde_json::json!({ "appId": app_id })).await?;
+    Ok(())
 }
 
 #[op2(async(lazy), fast)]
 async fn shutdown() -> Result<(), AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.shutdown())
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    let _: bool = conductor_call("shutdown", serde_json::json!({})).await?;
+    Ok(())
 }
 
 #[op2(async(lazy), fast)]
 #[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.get_agent_key())
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("agentKey", serde_json::json!({})).await
 }
 
 #[op2(async(lazy), fast)]
 #[string]
 async fn pack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.pack_dna(path))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("packDna", serde_json::json!({ "path": path })).await
 }
 
 #[op2(async(lazy), fast)]
 #[string]
 async fn unpack_dna(#[string] path: String) -> Result<String, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.unpack_dna(path))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("unpackDna", serde_json::json!({ "path": path })).await
 }
 
 #[op2(async(lazy), fast)]
 #[string]
 async fn pack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.pack_happ(path))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("packHapp", serde_json::json!({ "path": path })).await
 }
 
 #[op2(async(lazy), fast)]
 #[string]
 async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperError> {
-    let interface = holochain_service_once_started()
-        .await
-        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
-    timeout(TIMEOUT_DURATION, interface.unpack_happ(path))
-        .await
-        .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
-        .map_err(AnyhowWrapperError::from)
+    conductor_call("unpackHapp", serde_json::json!({ "path": path })).await
 }
 
 //Implement signal callbacks from dna/holochain to js
