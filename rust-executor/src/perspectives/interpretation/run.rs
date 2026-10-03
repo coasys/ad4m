@@ -675,9 +675,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             &speaker_names,
         );
 
-        let service = crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("run_interpretation: AIService not ready: {e:#}"))?;
+        let ai_ctx = crate::services::builtins::ai::executor_ctx("interpretation");
 
         // Mid-pass observability (Nico 2026-08-20 + CodeRabbit #903 CR #6):
         // `LlmRequestSent` fires right before EACH `service.prompt` call and
@@ -698,7 +696,7 @@ pub async fn run_interpretation_with_strategy_and_model(
             instances,
             flow_proposals: llm_proposals,
         } = retry_interpretation_parse(|_attempt| {
-            let service = service.clone();
+            let ai_ctx = ai_ctx.clone();
             let task_id = task.task_id.clone();
             let prompt = prompt.clone();
             let capture = debug_response_capture.clone();
@@ -723,11 +721,10 @@ pub async fn run_interpretation_with_strategy_and_model(
                     .await;
                 }
 
-                let result = service
-                    // Internal caller (interpretation runner) — no user auth context; billing skipped.
-                    .prompt(task_id, prompt, None)
+                // Internal caller (interpretation runner): no user, so not billed.
+                let text = crate::services::builtins::ai::prompt(&ai_ctx, &task_id, &prompt)
                     .await
-                    .map_err(|e| anyhow::anyhow!("AIService::prompt failed: {e:#}"))?;
+                    .map_err(|e| anyhow::anyhow!("ai.inference prompt failed: {}", e.message))?;
 
                 if let Some(ctx) = emit_ctx_cloned.as_ref() {
                     emit(
@@ -739,17 +736,17 @@ pub async fn run_interpretation_with_strategy_and_model(
                         .with_agent_did(&ctx.agent_did)
                         .with_items(&ctx.item_ids)
                         .with_batch_key(&ctx.batch_key)
-                        .with_llm_output(result.text.clone()),
+                        .with_llm_output(text.clone()),
                     )
                     .await;
                 }
 
                 if emit_debug_events {
                     if let Ok(mut slot) = capture.lock() {
-                        *slot = Some(result.text.clone());
+                        *slot = Some(text.clone());
                     }
                 }
-                Ok(result.text)
+                Ok(text)
             }
         })
         .await?;
@@ -1169,16 +1166,12 @@ pub async fn run_interpretation_with_harness_and_model(
         flow_buffer.clone(),
     ));
 
-    // OpenAI-compat bridge: real CompletionSource that talks to AIService
-    // via the tool-grammar constrained-decoding path Josh cherry-picked
-    // into /v1. Local + remote models both go through this one seam.
-    let service = crate::ai_service::AIService::global_instance()
-        .await
-        .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // OpenAI-compat bridge: the CompletionSource that talks to ai.inference
+    // through the tool-grammar path /v1 uses. Local and remote models both
+    // go through this one seam; billing follows the pass owner's token.
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
-            Arc::new(service),
-            auth_token,
+            crate::services::builtins::ai::token_ctx("interpretation_harness", auth_token),
         ),
     );
 

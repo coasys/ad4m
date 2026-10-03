@@ -128,6 +128,8 @@ pub enum EventOwner {
     User(String),
     /// Every socket.
     All,
+    /// No user's sockets: admin sockets and the executor's own consumers.
+    Executor,
 }
 
 impl EventEmitter {

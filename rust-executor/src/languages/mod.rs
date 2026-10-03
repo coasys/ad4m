@@ -2,6 +2,7 @@ mod byte_array;
 mod conductor_languages;
 pub mod error;
 pub mod feature;
+pub mod holochain_signals;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
@@ -1255,20 +1256,13 @@ impl LanguageController {
 
         // Unpack hApp bundle
         info!("readAndTemplateHolochainDna: unpacking hApp bundle");
-        let holochain_service = crate::holochain_service::holochain_service_once_started()
-            .await
-            .ok_or_else(|| LanguageError::RuntimeError {
-                address: source_language_hash.to_string(),
-                message: "Holochain service not available".to_string(),
-            })?;
-
-        let unpack_happ_path = holochain_service
-            .unpack_happ(temp_happ_path.to_string_lossy().to_string())
-            .await
-            .map_err(|e| LanguageError::RuntimeError {
-                address: source_language_hash.to_string(),
-                message: format!("Failed to unpack hApp: {}", e),
-            })?;
+        let unpack_happ_path =
+            conductor_path_op("unpackHapp", temp_happ_path.to_string_lossy().to_string())
+                .await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: source_language_hash.to_string(),
+                    message: format!("Failed to unpack hApp: {}", e),
+                })?;
         let unpack_happ_path = unpack_happ_path.trim().to_string();
 
         // Delete the .happ file after unpacking
@@ -1307,13 +1301,13 @@ impl LanguageController {
 
         // Unpack DNA
         info!("readAndTemplateHolochainDna: unpacking DNA");
-        let unpack_dna_path = holochain_service
-            .unpack_dna(dna_bundle_path.to_string_lossy().to_string())
-            .await
-            .map_err(|e| LanguageError::RuntimeError {
-                address: source_language_hash.to_string(),
-                message: format!("Failed to unpack DNA: {}", e),
-            })?;
+        let unpack_dna_path =
+            conductor_path_op("unpackDna", dna_bundle_path.to_string_lossy().to_string())
+                .await
+                .map_err(|e| LanguageError::RuntimeError {
+                    address: source_language_hash.to_string(),
+                    message: format!("Failed to unpack DNA: {}", e),
+                })?;
         let unpack_dna_path = unpack_dna_path.trim().to_string();
 
         // Read dna.yaml
@@ -1362,8 +1356,7 @@ impl LanguageController {
 
         // Pack DNA
         info!("readAndTemplateHolochainDna: packing DNA");
-        let pack_dna_path = holochain_service
-            .pack_dna(unpack_dna_path.clone())
+        let pack_dna_path = conductor_path_op("packDna", unpack_dna_path.clone())
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: source_language_hash.to_string(),
@@ -1386,8 +1379,7 @@ impl LanguageController {
 
         // Pack hApp bundle
         info!("readAndTemplateHolochainDna: packing hApp bundle");
-        let pack_happ_path = holochain_service
-            .pack_happ(unpack_happ_path.clone())
+        let pack_happ_path = conductor_path_op("packHapp", unpack_happ_path.clone())
             .await
             .map_err(|e| LanguageError::RuntimeError {
                 address: source_language_hash.to_string(),
@@ -1603,17 +1595,18 @@ impl LanguageController {
         }
 
         // Remove Holochain DNA for this language
-        if let Some(holochain_service) =
-            crate::holochain_service::holochain_service_once_started().await
-        {
-            match holochain_service.remove_app(address.to_string()).await {
-                Ok(()) => {
-                    info!("Removed Holochain app for language {}", address);
-                }
-                Err(e) => {
-                    warn!("No DNA found for language {}: {}", address, e);
-                }
-            }
+        let removed: Result<bool, _> = crate::services::builtins::call(
+            crate::services::builtins::Builtin::HolochainConductor,
+            "removeApp",
+            serde_json::json!({ "appId": address }),
+            &conductor_ctx(),
+        )
+        .await;
+        match removed {
+            Ok(_) => info!("Removed Holochain app for language {}", address),
+            // 503: the conductor is not running, so there is nothing to remove.
+            Err(e) if e.code == 503 => {}
+            Err(e) => warn!("No DNA found for language {}: {}", address, e.message),
         }
 
         // Remove language files from disk
@@ -2986,4 +2979,27 @@ mod template_tests {
             "UID gets replaced"
         );
     }
+}
+
+/// The context of the language controller's own Holochain calls.
+fn conductor_ctx() -> crate::services::CallContext {
+    crate::services::CallContext::system(
+        crate::services::Caller::Executor {
+            module: "languages".into(),
+        },
+        None,
+        None,
+    )
+}
+
+/// A `holochain.conductor` pack / unpack call; answers the resulting path.
+async fn conductor_path_op(method: &str, path: String) -> Result<String, String> {
+    crate::services::builtins::call(
+        crate::services::builtins::Builtin::HolochainConductor,
+        method,
+        serde_json::json!({ "path": path }),
+        &conductor_ctx(),
+    )
+    .await
+    .map_err(|e| e.message)
 }

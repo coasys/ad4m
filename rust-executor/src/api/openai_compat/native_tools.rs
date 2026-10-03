@@ -32,7 +32,7 @@ use axum::response::{sse::Event, IntoResponse, Json, Sse};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use super::chat::{epoch_seconds, user_email};
+use super::chat::epoch_seconds;
 use super::errors::OpenAIError;
 use super::harness_bridge::structured_turns;
 use super::types::{
@@ -41,8 +41,9 @@ use super::types::{
     ToolCall, ToolCallDelta, ToolDef, Usage,
 };
 use crate::ai_service::providers::{ChatReply, ChatTurn, ChatUsage, ToolSpec};
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
+use crate::services::builtins::ai;
+use crate::services::ServiceHost;
 
 /// Answer a tool-carrying chat request through the model's native tool calling.
 pub async fn chat_with_native_tools(
@@ -53,10 +54,6 @@ pub async fn chat_with_native_tools(
     tools: &[ToolDef],
     stream: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = user_email(&auth) {
-        super::require_credits(&email).await?;
-    }
-
     if let Some(name) = duplicate_tool_name(tools) {
         return Err(OpenAIError::invalid_request(format!(
             "`tools` names `{name}` twice"
@@ -66,14 +63,30 @@ pub async fn chat_with_native_tools(
     let turns = to_turns(messages).map_err(|e| OpenAIError::invalid_request(e.to_string()))?;
     let specs = to_specs(tools);
 
-    let service = AIService::global_instance()
+    // The host checks credits (`chatWithTools` is metered); the AI service
+    // charges on success only.
+    let ctx = ServiceHost::context_for_request(&auth.to_request_context());
+    let reply = ai::chat_with_tools(&ctx, &model_id, &turns, &specs)
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    // Billing happens inside prompt_with_tools, on success only.
-    let reply = service
-        .prompt_with_tools(model_id, turns, specs, Some(auth.auth_token.clone()))
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(super::ai_error)?;
+    let reply = ChatReply {
+        text: reply.text,
+        tool_calls: reply
+            .tool_calls
+            .into_iter()
+            .map(|c| crate::ai_service::providers::ToolCall {
+                id: c.id,
+                name: c.name,
+                arguments: c.arguments,
+            })
+            .collect(),
+        usage: ChatUsage {
+            input_tokens: reply.usage.input_tokens,
+            output_tokens: reply.usage.output_tokens,
+            cache_read_tokens: reply.usage.cache_read_tokens,
+            cache_write_tokens: reply.usage.cache_write_tokens,
+        },
+    };
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();

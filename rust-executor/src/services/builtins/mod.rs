@@ -180,11 +180,15 @@ pub async fn start_all(host: &Arc<ServiceHost>) -> Result<(), String> {
             vec![Builtin::BillingLedger, Builtin::BillingSettlement],
             Arc::new(billing::Billing::default()),
         ),
-        ("unyt", vec![Builtin::UnytWallet], Arc::new(unyt::Unyt)),
+        (
+            "unyt",
+            vec![Builtin::UnytWallet],
+            Arc::new(unyt::Unyt::default()),
+        ),
         (
             "holochain",
             vec![Builtin::HolochainConductor],
-            Arc::new(holochain::Holochain),
+            Arc::new(holochain::Holochain::default()),
         ),
     ];
     for (name, implements, service) in services {

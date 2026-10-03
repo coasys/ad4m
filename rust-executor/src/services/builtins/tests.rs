@@ -324,3 +324,82 @@ fn users_get_the_service_grants_they_need() {
         assert!(!has(b, action), "{:?} {}", b, action);
     }
 }
+
+/// Outside the services and each service's own module, executor code reaches
+/// AI, billing, Unyt and Holochain operations only through the service host.
+/// Lifecycle (starting the AI service, stopping the conductor) is exempt.
+#[test]
+fn internal_callers_go_through_the_host() {
+    const FORBIDDEN: &[&str] = &[
+        "AIService::",
+        "crate::billing::",
+        "unyt_service::",
+        "get_holochain_service()",
+        "maybe_get_holochain_service()",
+        "holochain_service_once_started()",
+        "HolochainService::",
+    ];
+    /// The service modules themselves.
+    const OWN: &[&str] = &[
+        "ai_service/",
+        "billing.rs",
+        "unyt_service.rs",
+        "holochain_service/",
+        "services/",
+    ];
+    /// Lifecycle orchestration.
+    const LIFECYCLE: &[(&str, &str)] = &[
+        ("lib.rs", "AIService::init_global_instance()"),
+        ("lib.rs", "holochain_service::maybe_get_holochain_service()"),
+    ];
+    fn is_test_file(rel: &str) -> bool {
+        rel.ends_with("tests.rs")
+            || rel.contains("test_support")
+            || rel.contains("e2e")
+            || rel.contains("real_llm")
+    }
+    let root = manifest_dir().join("src");
+    let mut stack = vec![root.clone()];
+    let mut offenders = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if OWN.iter().any(|o| rel.starts_with(o)) || is_test_file(&rel) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            // Code after `#[cfg(test)] mod tests` is test code.
+            let code = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+            for (n, line) in code.lines().enumerate() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("//") {
+                    continue;
+                }
+                for needle in FORBIDDEN {
+                    if line.contains(needle)
+                        && !LIFECYCLE.iter().any(|(f, l)| rel == *f && line.contains(l))
+                    {
+                        offenders.push(format!("{}:{}: {}", rel, n + 1, trimmed));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "direct service calls outside the host:\n{}",
+        offenders.join("\n")
+    );
+}

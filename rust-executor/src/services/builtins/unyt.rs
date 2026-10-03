@@ -76,11 +76,58 @@ pub fn wallet_interface() -> Value {
     .build()
 }
 
-pub struct Unyt;
+#[derive(Default)]
+pub struct Unyt {
+    started: tokio::sync::OnceCell<()>,
+}
+
+/// Unyt's background work, when the executor runs Holochain: install the
+/// alliance DNA (if a membrane proof is stored), settle payments every 30 s,
+/// and handle the alliance cell's signals.
+fn start_background() {
+    tokio::spawn(async {
+        if crate::unyt_service::get_membrane_proof().is_none() {
+            log::info!("No Unyt membrane proof stored — skipping eager DNA install");
+            return;
+        }
+        match crate::unyt_service::ensure_installed().await {
+            Ok(()) => log::info!("Unyt alliance DNA ready"),
+            Err(e) => log::error!("Failed to install Unyt alliance DNA: {}", e),
+        }
+    });
+    tokio::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            crate::unyt_service::check_pending_payments().await;
+            crate::unyt_service::check_pending_sends().await;
+        }
+    });
+    let mut signals = crate::services::host().watch(
+        super::event_type(super::Builtin::HolochainConductor, "signal"),
+        None,
+    );
+    tokio::spawn(async move {
+        while let Some(signal) = signals.recv().await {
+            let Some(cell_id) = signal.get("cellId").and_then(Value::as_str) else {
+                continue;
+            };
+            if crate::unyt_service::is_alliance_cell(cell_id).await {
+                let payload = signal.get("payload").cloned().unwrap_or(Value::Null);
+                tokio::spawn(async move { crate::unyt_service::handle_signal(&payload).await });
+            }
+        }
+    });
+}
 
 #[async_trait]
 impl ServiceImplementation for Unyt {
     async fn start(&self, _ctx: StartContext) -> Result<(), String> {
+        let holochain = crate::config::try_get_global_config()
+            .and_then(|c| c.run_holochain)
+            .unwrap_or(true);
+        if holochain && self.started.set(()).is_ok() {
+            start_background();
+        }
         Ok(())
     }
 

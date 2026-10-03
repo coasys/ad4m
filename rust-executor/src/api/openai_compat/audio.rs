@@ -30,7 +30,6 @@ use super::model_selector::resolve_model;
 use super::tts_passthrough;
 use super::types::{SpeechRequest, TranscriptionResponse};
 use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::types::ModelType;
 
@@ -99,18 +98,12 @@ pub async fn transcriptions(
 
     let samples = audio_decode(&bytes, content_type.as_deref())?;
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        super::require_credits(&email).await?;
-    }
-
-    let service = AIService::global_instance()
+    // The host checks credits (`transcribe` is metered); the AI service
+    // charges per transcribed word.
+    let ctx = crate::services::ServiceHost::context_for_request(&auth.to_request_context());
+    let text = crate::services::builtins::ai::transcribe(&ctx, &model_id, &samples)
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    let text = service
-        .transcribe_buffer(model_id, samples, auth.auth_token.clone())
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(super::ai_error)?;
 
     if response_format == "text" {
         return Ok(([(header::CONTENT_TYPE, "text/plain")], text).into_response());

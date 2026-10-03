@@ -145,6 +145,44 @@ impl ServiceHost {
         self.events.subscribe()
     }
 
+    /// In-process subscription to one stream: the payloads of `chunk_type`
+    /// events of `stream_id`, in order, ending (channel closed) after the
+    /// stream's `service-stream-end`. One subscriber serves both, so no
+    /// chunk can arrive after the end.
+    pub fn watch_stream(
+        &self,
+        chunk_type: String,
+        stream_id: String,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut events = self.events.subscribe();
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(e) if e.event_type == chunk_type || e.event_type == SERVICE_STREAM_END => {
+                        let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
+                            continue;
+                        };
+                        if payload.get("streamId").and_then(Value::as_str)
+                            != Some(stream_id.as_str())
+                        {
+                            continue;
+                        }
+                        if e.event_type == SERVICE_STREAM_END || tx.send(payload).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("stream watch {} lagged by {}", stream_id, n)
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        rx
+    }
+
     /// In-process subscription to one service event type (`<hash>.<event>`),
     /// optionally narrowed to one scope value. Yields the payloads; the
     /// executor's own consumers hold no grants, so nothing is filtered by
@@ -409,7 +447,12 @@ impl ServiceHost {
         ctx.deadline = Some(deadline);
         let stream_end = def.stream.as_ref().and_then(|_| {
             let id = params.get("streamId").and_then(Value::as_str)?.to_string();
-            Some((id, EventOwner::Agent(ctx.agent_did.clone()?)))
+            let owner = ctx
+                .agent_did
+                .clone()
+                .map(EventOwner::Agent)
+                .unwrap_or(EventOwner::All);
+            Some((id, owner))
         });
         let outcome =
             tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
@@ -571,6 +614,7 @@ impl ServiceHost {
             EventOwner::Agent(d) => did == Some(d.as_str()),
             EventOwner::User(u) => user == Some(u.as_str()),
             EventOwner::All => true,
+            EventOwner::Executor => false,
         };
         (is_admin || owns) && allowed(&[capabilities.to_vec()], &event.needs)
     }

@@ -184,9 +184,284 @@
         "type": "boolean"
       },
       "action": "TASKS"
+    },
+    "chat": {
+      "description": "Answer a conversation. `toolGrammar` constrains the answer to well-formed tool calls.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/types/ChatMessage"
+            }
+          },
+          "toolGrammar": {
+            "anyOf": [
+              {
+                "$ref": "#/types/ToolGrammar"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "modelId",
+          "messages"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/ChatResult"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "meter": {
+        "operation": "ai.prompt"
+      }
+    },
+    "chatStream": {
+      "description": "`chat`, with the answer streamed as `chat-delta` events while it is generated.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/types/ChatMessage"
+            }
+          },
+          "toolGrammar": {
+            "anyOf": [
+              {
+                "$ref": "#/types/ToolGrammar"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "streamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "modelId",
+          "messages",
+          "streamId"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/ChatResult"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "stream": {
+        "event": "chat-delta"
+      },
+      "meter": {
+        "operation": "ai.prompt"
+      }
+    },
+    "chatWithTools": {
+      "description": "Answer a conversation on a model with native tool calling; answers text and the calls it wants.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "turns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/types/ChatTurnInput"
+            }
+          },
+          "tools": {
+            "type": "array",
+            "items": {
+              "$ref": "#/types/ToolSpecInput"
+            }
+          }
+        },
+        "required": [
+          "modelId",
+          "turns",
+          "tools"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/ToolReply"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "meter": {
+        "operation": "ai.prompt"
+      },
+      "errors": {
+        "InvalidRole": {
+          "code": 422
+        }
+      }
+    },
+    "embedding": {
+      "description": "`embed` as a plain vector, with the token count.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "modelId",
+          "text"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/Embedding"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "meter": {
+        "operation": "ai.embed"
+      }
+    },
+    "transcribe": {
+      "description": "Transcribe one buffer of audio.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "audio": {
+            "type": "string",
+            "description": "Mono PCM, Float32 little-endian, base64.",
+            "contentEncoding": "base64"
+          }
+        },
+        "required": [
+          "modelId",
+          "audio"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "TRANSCRIBE",
+      "long": true,
+      "meter": {
+        "operation": "ai.transcription"
+      },
+      "errors": {
+        "InvalidAudio": {
+          "code": 422
+        }
+      }
+    },
+    "transcriptionFeed": {
+      "description": "Feed audio to open transcription streams; answers the streams that refused it. Text arrives as `transcription-text`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "streamIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "audio": {
+            "type": "string",
+            "description": "Mono PCM, Float32 little-endian, base64.",
+            "contentEncoding": "base64"
+          }
+        },
+        "required": [
+          "streamIds",
+          "audio"
+        ]
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "$ref": "#/types/FeedFailure"
+        }
+      },
+      "action": "TRANSCRIBE",
+      "meter": {
+        "operation": "ai.transcription"
+      },
+      "errors": {
+        "AllStreamsFailed": {
+          "code": 409
+        },
+        "InvalidAudio": {
+          "code": 422
+        }
+      }
+    },
+    "ensureTask": {
+      "description": "The task with this name, created and spawned when missing.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task": {
+            "$ref": "#/types/AITaskInput",
+            "description": "Tasks are matched by name: an existing one is returned as it is."
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/EnsuredTask"
+      },
+      "action": "TASKS"
     }
   },
   "events": {
+    "chat-delta": {
+      "description": "The next piece of a streaming chat answer.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string"
+          },
+          "delta": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "streamId",
+          "delta"
+        ],
+        "description": "`chat-delta`: the next piece of a streaming answer."
+      },
+      "action": "PROMPT",
+      "scope": "streamId"
+    },
     "transcription-text": {
       "description": "Text recognised in an open transcription stream.",
       "payload": {
@@ -371,6 +646,312 @@
       "required": [
         "input",
         "output"
+      ]
+    },
+    "ChatMessage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "`system`, `user` or `assistant`."
+        },
+        "content": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ],
+      "description": "One chat message."
+    },
+    "ToolGrammar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/GrammarTool"
+          }
+        },
+        "choice": {
+          "$ref": "#/types/GrammarChoice"
+        },
+        "parallel": {
+          "type": "boolean",
+          "description": "Allow several calls in one answer."
+        }
+      },
+      "required": [
+        "tools",
+        "choice",
+        "parallel"
+      ],
+      "description": "Constrain decoding to well-formed tool calls (models without native tools)."
+    },
+    "GrammarTool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "parameters": {
+          "description": "JSON Schema of the arguments.",
+          "default": null
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "description": "A tool the model may call when its answer is grammar-constrained."
+    },
+    "GrammarChoice": {
+      "oneOf": [
+        {
+          "type": "string",
+          "const": "auto",
+          "description": "The model may answer with a call or with text (not constrained)."
+        },
+        {
+          "type": "string",
+          "const": "required",
+          "description": "The model must call one of the tools."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "named": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "named"
+          ],
+          "additionalProperties": false,
+          "description": "The model must call this tool."
+        }
+      ]
+    },
+    "ChatResult": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "promptTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "completionTokens": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "modelId": {
+          "type": "string",
+          "description": "The model that answered, after variable resolution."
+        }
+      },
+      "required": [
+        "text",
+        "promptTokens",
+        "completionTokens",
+        "modelId"
+      ]
+    },
+    "ChatTurnInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "`system`, `user` or `assistant`."
+        },
+        "content": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/WireToolCall"
+          },
+          "description": "Calls this assistant turn made.",
+          "default": []
+        },
+        "toolResultFor": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Set when this turn is a tool result: the call it answers.",
+          "default": null
+        }
+      },
+      "required": [
+        "role",
+        "content"
+      ]
+    },
+    "WireToolCall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "arguments": {
+          "description": "The arguments object."
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "arguments"
+      ]
+    },
+    "ToolSpecInput": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "JSON Schema of the arguments."
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "parameters"
+      ]
+    },
+    "ToolReply": {
+      "type": "object",
+      "properties": {
+        "text": {
+          "type": "string"
+        },
+        "toolCalls": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/WireToolCall"
+          }
+        },
+        "usage": {
+          "$ref": "#/types/Usage"
+        }
+      },
+      "required": [
+        "text",
+        "toolCalls",
+        "usage"
+      ]
+    },
+    "Usage": {
+      "type": "object",
+      "properties": {
+        "inputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cacheReadTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "cacheWriteTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      }
+    },
+    "Embedding": {
+      "type": "object",
+      "properties": {
+        "vector": {
+          "type": "array",
+          "items": {
+            "type": "number",
+            "format": "float"
+          }
+        },
+        "tokenCount": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "vector",
+        "tokenCount"
+      ]
+    },
+    "FeedFailure": {
+      "type": "object",
+      "properties": {
+        "streamId": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "streamId",
+        "error"
+      ]
+    },
+    "EnsuredTask": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "$ref": "#/types/AITask"
+        },
+        "created": {
+          "type": "boolean",
+          "description": "This call created (and spawned) the task."
+        }
+      },
+      "required": [
+        "task",
+        "created"
       ]
     }
   }

@@ -27,7 +27,6 @@ use axum::{
     Json,
 };
 use futures::Stream;
-use kalosm::language::ArcParser;
 use uuid::Uuid;
 
 use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
@@ -41,8 +40,9 @@ use super::types::{
     ToolCallDelta, ToolDef, Usage,
 };
 use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
+use crate::services::builtins::ai::{self, GrammarChoice, GrammarTool, ToolGrammar};
+use crate::services::{CallContext, ServiceHost};
 use crate::types::ModelType;
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
@@ -62,6 +62,7 @@ pub async fn chat_completions(
 
     // Resolve the OpenAI `model` string to an AD4M model_id.
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
+    let ctx = ServiceHost::context_for_request(&auth.to_request_context());
 
     let tools: Vec<ToolDef> = req.tools.clone().unwrap_or_default();
     let has_tools = !tools.is_empty();
@@ -73,7 +74,7 @@ pub async fn chat_completions(
 
     // A provider that carries tools as data gets them that way, and answers
     // with structured calls instead of text to parse them out of.
-    if tools_active && AIService::model_supports_native_tools(&model_id) {
+    if tools_active && ai::supports_native_tools(&ctx, &model_id).await {
         return native_tools::chat_with_native_tools(
             auth,
             req.model.clone(),
@@ -100,29 +101,29 @@ pub async fn chat_completions(
 
     // Constrain decoding for required / named choices (guarantees a
     // well-formed call).  Auto/None return `None` and generate freely.
-    let constraint = if tools_active {
-        tool_grammar::build_tool_call_parser(&tools, &choice, parallel)
+    let grammar = if tools_active {
+        grammar_for(&tools, &choice, parallel)
     } else {
         None
     };
 
     if req.stream {
         chat_stream(
-            auth,
+            ctx,
             req.model.clone(),
             model_id,
             messages,
-            constraint,
+            grammar,
             tools_active,
         )
         .await
     } else {
         chat_oneshot(
-            auth,
+            ctx,
             req.model.clone(),
             model_id,
             messages,
-            constraint,
+            grammar,
             tools_active,
         )
         .await
@@ -152,17 +153,10 @@ pub async fn completions(
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
 
-    if let Some(email) = user_email(&auth) {
-        super::require_credits(&email).await?;
-    }
-
-    let service = AIService::global_instance()
+    let ctx = ServiceHost::context_for_request(&auth.to_request_context());
+    let result = ai::chat(&ctx, &model_id, messages, None)
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    let result = service
-        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()), None)
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+        .map_err(super::ai_error)?;
 
     // Billing is now inside AIService::prompt_messages via bill_ai_operation
     // (host_rates-based, shared with WS-RPC path). No handler-level bill_compute here.
@@ -186,34 +180,18 @@ pub async fn completions(
 }
 
 async fn chat_oneshot(
-    auth: AuthContext,
+    ctx: CallContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
-    constraint: Option<ArcParser<()>>,
+    grammar: Option<ToolGrammar>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
-    // /v1 billing is correct for the public API surface; the WS-RPC gap
-    // should be aligned in a separate PR against dev.
-    if let Some(email) = user_email(&auth) {
-        super::require_credits(&email).await?;
-    }
-
-    let service = AIService::global_instance()
+    // Credits are checked by the host (`chat` is metered) and charged inside
+    // the AI service once the token counts are known.
+    let result = ai::chat(&ctx, &model_id, messages, grammar)
         .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    let result = service
-        .prompt_messages(
-            model_id,
-            messages,
-            Some(auth.auth_token.clone()),
-            constraint,
-        )
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-
-    // Billing is now inside AIService::prompt_messages via bill_ai_operation.
+        .map_err(super::ai_error)?;
 
     let tool_calls = if tools_active {
         to_openai_tool_calls(tool_grammar::extract_tool_calls(&result.text))
@@ -261,29 +239,21 @@ async fn chat_oneshot(
 }
 
 async fn chat_stream(
-    auth: AuthContext,
+    ctx: CallContext,
     requested_model: String,
     model_id: String,
     messages: Vec<(String, String)>,
-    constraint: Option<ArcParser<()>>,
+    grammar: Option<ToolGrammar>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = user_email(&auth) {
-        super::require_credits(&email).await?;
+    // A refusal (no credits, no model) would only surface once the stream
+    // runs; ask the ledger first so the client gets a proper error status.
+    if !crate::services::builtins::billing::may_spend(&ctx) {
+        return Err(OpenAIError::insufficient_quota(
+            "Insufficient compute credits",
+        ));
     }
-
-    let service = AIService::global_instance()
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
-    let (token_rx, done_rx) = service
-        .prompt_messages_stream(
-            model_id,
-            messages,
-            Some(auth.auth_token.clone()),
-            constraint,
-        )
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
+    let (token_rx, done_rx) = ai::chat_stream(ctx, model_id, messages, grammar);
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();
@@ -429,10 +399,8 @@ async fn chat_stream(
                 emit_final(&event_tx, &id, &stream_model, created, "stop");
             }
 
-            // Billing lives in AIService::prompt_messages_stream now,
-            // charged when done_rx resolves with the final PromptResult
-            // (tokens known then). Handler used to double-bill here; that
-            // path is gone. Just wait for the LLM to signal completion.
+            // Billing happens inside the AI service once the final token
+            // counts are known; just wait for the stream to finish.
             let _ = done_rx.await;
 
             // OpenAI SSE terminator.
@@ -548,10 +516,28 @@ pub(super) fn epoch_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-pub(super) fn user_email(auth: &AuthContext) -> Option<String> {
-    crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-}
-
 // Re-export a Stream alias for documentation purposes.
 #[allow(dead_code)]
 type EventStream = dyn Stream<Item = Result<Event, Infallible>> + Send;
+
+/// The decoding constraint a tool choice asks for: `required` and a named
+/// function are grammar-constrained, `auto` and `none` generate freely.
+fn grammar_for(tools: &[ToolDef], choice: &ToolChoice, parallel: bool) -> Option<ToolGrammar> {
+    let choice = match choice {
+        ToolChoice::Required => GrammarChoice::Required,
+        ToolChoice::Named(name) => GrammarChoice::Named(name.clone()),
+        ToolChoice::Auto | ToolChoice::None => return None,
+    };
+    Some(ToolGrammar {
+        tools: tools
+            .iter()
+            .map(|t| GrammarTool {
+                name: t.function.name.clone(),
+                description: t.function.description.clone(),
+                parameters: t.function.parameters.clone(),
+            })
+            .collect(),
+        choice,
+        parallel,
+    })
+}

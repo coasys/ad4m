@@ -70,3 +70,14 @@ pub(crate) fn charge_error(e: crate::api::ws_handler::WsRpcError) -> errors::Ope
         errors::OpenAIError::internal("Billing operation failed")
     }
 }
+
+/// A failed `ai.inference` / `ai.models` call as the OpenAI error a client
+/// expects.
+pub(crate) fn ai_error(e: crate::api::ws_handler::WsRpcError) -> errors::OpenAIError {
+    match e.code {
+        402 => errors::OpenAIError::insufficient_quota("Insufficient compute credits"),
+        400 | 422 => errors::OpenAIError::invalid_request(e.message),
+        403 => errors::OpenAIError::forbidden(e.message),
+        _ => errors::OpenAIError::internal(e.message),
+    }
+}
