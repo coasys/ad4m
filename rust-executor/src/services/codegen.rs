@@ -195,10 +195,11 @@ pub fn typescript(doc: &InterfaceDocument) -> String {
     );
     let _ = writeln!(
         out,
-        "// {} {} — module {}. Do not edit.\n",
+        "// {} {} — module {} by {}. Do not edit.\n",
         d.name.replace(['\n', '\r'], " "),
         d.version,
-        doc.module_id()
+        doc.module_id(),
+        d.author
     );
     let _ = writeln!(
         out,
@@ -360,6 +361,7 @@ pub fn markdown(doc: &InterfaceDocument) -> String {
     let _ = writeln!(out, "| | |\n|---|---|");
     let _ = writeln!(out, "| Interface hash | `{}` |", doc.hash);
     let _ = writeln!(out, "| Module ID | `{}` |", doc.module_id());
+    let _ = writeln!(out, "| Author | `{}` |", d.author);
     let _ = writeln!(out, "| Compatibility line | `{}` |", doc.compat());
     let _ = writeln!(
         out,
