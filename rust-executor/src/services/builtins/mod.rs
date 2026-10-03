@@ -27,8 +27,8 @@ use super::registry::{BuiltinManifest, Instancing, Requirement};
 use crate::agent::capabilities::Capability;
 
 /// Author of every built-in interface and implementation. Built-ins are
-/// compiled in and trusted, so nothing is signed at run time; the DID only
-/// anchors the module IDs (`<author>/<moduleHash>`).
+/// compiled in and trusted, so nothing is signed at run time; the DID is part
+/// of each genesis document, so it is fixed by the module IDs.
 pub const AUTHOR: &str = "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix";
 
 /// The built-in interfaces, by the name their module goes under.
