@@ -1795,9 +1795,6 @@ impl AIService {
             return;
         };
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
-        // Ignore result: rate=0 no-ops, InsufficientCredits is logged
-        // inside bill_ai_operation. Prompt has already run so we don't
-        // want to fail the caller on a bookkeeping-only issue.
         // The prompt has run: a billing failure is logged, not returned.
         if let Err(e) = crate::services::builtins::billing::charge_usage(
             "ai",

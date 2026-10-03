@@ -132,12 +132,13 @@ impl ServiceImplementation for Echo {
         let owner = ctx
             .agent_did
             .clone()
-            .ok_or_else(|| ServiceError::Internal("no agent".into()))?;
+            .map(EventOwner::Agent)
+            .unwrap_or(EventOwner::Executor);
         let emit = |e: &'static str, p: Value| {
             let (events, owner) = (events.clone(), owner.clone());
             async move {
                 events
-                    .emit(e, EventOwner::Agent(owner.clone()), p)
+                    .emit(e, owner, p)
                     .await
                     .map_err(ServiceError::Internal)
             }
@@ -738,4 +739,63 @@ async fn missing_grant_over_the_socket_is_403_and_hides_events() {
         .await
         .unwrap();
     s.nothing_more().await;
+}
+
+// ── In-process watches ──────────────────────────────────────────────────────
+
+/// A watch lives as long as its reader: dropping the receiver ends it, even
+/// when no further event in its scope ever arrives.
+#[tokio::test]
+async fn watch_ends_when_its_reader_is_gone() {
+    let host = ServiceHost::new();
+    let (iface, _) = echo_on(&host, "did:key:z6MkWatchEnds").await;
+    let before = host.event_subscribers();
+    let rx = host.watch(format!("{}.said", iface), Some("room-1".into()));
+    let stream = host.watch_stream(format!("{}.count-tick", iface), "s-gone".into());
+    assert_eq!(host.event_subscribers(), before + 2);
+    drop(rx);
+    drop(stream);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while host.event_subscribers() != before {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("watch tasks end once their readers are dropped");
+}
+
+/// A stream's chunks reach an in-process `watch_stream` in order, and the
+/// stream end closes it. Without an agent, the end goes to the executor
+/// only, never to every socket.
+#[tokio::test]
+async fn stream_without_agent_ends_for_the_executor_only() {
+    let host = ServiceHost::new();
+    let (iface, _) = echo_on(&host, "did:key:z6MkStreamNoAgent").await;
+    let module = host.registry().interface(&iface).unwrap().module_id();
+    let mut all = host.subscribe_events();
+    let mut chunks = host.watch_stream(format!("{}.count-tick", iface), "s-x".into());
+    let mut call = ctx(
+        "unused",
+        vec![grant(format!("service:{}@1", module), &["SAY"])],
+    );
+    call.agent_did = None;
+    host.dispatch(
+        &format!("{}.count", iface),
+        json!({ "to": 3, "streamId": "s-x" }),
+        call,
+    )
+    .await
+    .unwrap();
+    let mut seen = vec![];
+    while let Some(c) = chunks.recv().await {
+        seen.push(c["n"].as_u64().unwrap());
+    }
+    assert_eq!(seen, vec![1, 2, 3]);
+    let end = loop {
+        let e = all.recv().await.unwrap();
+        if e.event_type == crate::api::events_ws::events::SERVICE_STREAM_END {
+            break e;
+        }
+    };
+    assert_eq!(end.owner, EventOwner::Executor);
 }

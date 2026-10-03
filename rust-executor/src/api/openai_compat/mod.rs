@@ -18,7 +18,7 @@
 //!                                     scoped to a follow-up)
 //! * `GET  /v1/realtime`             — WS, OpenAI Realtime-style streaming STT
 //!
-//! Auth + billing reuse the existing JWT extractor and `bill_compute`.
+//! Auth reuses the JWT extractor; billing goes through `billing.ledger`.
 //! Errors are wrapped in the canonical
 //! `{ "error": { message, type, param, code } }` envelope.
 
@@ -43,8 +43,11 @@ pub use router::router;
 mod tests;
 
 /// Refuse compute for an account without credits (through `billing.ledger`).
-pub(crate) async fn require_credits(email: &str) -> Result<(), errors::OpenAIError> {
-    if crate::services::builtins::billing::check_user("openai_compat", email).await {
+pub(crate) async fn require_credits(
+    email: &str,
+    operation: &str,
+) -> Result<(), errors::OpenAIError> {
+    if crate::services::builtins::billing::check_user("openai_compat", email, operation).await {
         Ok(())
     } else {
         Err(errors::OpenAIError::insufficient_quota(

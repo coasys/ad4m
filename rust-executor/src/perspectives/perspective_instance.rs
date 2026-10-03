@@ -9033,7 +9033,9 @@ mod tests {
 /// Refuse a link write when the account has no credits left.
 async fn check_link_credits(context: &AgentContext) -> Result<(), AnyError> {
     if let Some(email) = &context.user_email {
-        if !crate::services::builtins::billing::check_user("perspectives", email).await {
+        if !crate::services::builtins::billing::check_user("perspectives", email, "link_write")
+            .await
+        {
             return Err(deno_core::anyhow::anyhow!("Insufficient compute credits"));
         }
     }
@@ -9054,13 +9056,11 @@ async fn charge_link_writes(
     if count == 0 {
         return;
     }
-    let rate = crate::services::builtins::billing::rate("link write")
-        .await
-        .unwrap_or(0.0);
     if let Err(e) = crate::services::builtins::billing::charge_user(
         "perspectives",
         email,
-        count as f64 * rate,
+        count as f64,
+        Some("link write"),
         "link_write",
         Some(summary),
     )

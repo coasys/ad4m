@@ -74,7 +74,7 @@ pub async fn chat_completions(
 
     // A provider that carries tools as data gets them that way, and answers
     // with structured calls instead of text to parse them out of.
-    if tools_active && ai::supports_native_tools(&ctx, &model_id).await {
+    if tools_active && ai::supports_native_tools(&model_id).await {
         return native_tools::chat_with_native_tools(
             auth,
             req.model.clone(),
@@ -253,7 +253,22 @@ async fn chat_stream(
             "Insufficient compute credits",
         ));
     }
-    let (token_rx, done_rx) = ai::chat_stream(ctx, model_id, messages, grammar);
+    let (mut token_rx, mut done_rx) = ai::chat_stream(ctx, model_id, messages, grammar);
+    // Wait for the first piece or the result, so a call that fails to start
+    // (unknown model, provider down) answers with an HTTP error, not an
+    // empty stream.
+    let mut finished = false;
+    let first = tokio::select! {
+        biased;
+        t = token_rx.recv() => t,
+        r = &mut done_rx => {
+            if let Ok(Err(e)) = r {
+                return Err(super::ai_error(e));
+            }
+            finished = true;
+            None
+        }
+    };
 
     let id = format!("chatcmpl-{}", Uuid::new_v4());
     let created = epoch_seconds();
@@ -301,7 +316,7 @@ async fn chat_stream(
                 // whole; likewise auto-mode output must be inspected as a
                 // whole to avoid leaking raw `<tool_call>` tags as content.
                 // This trades token streaming for correct tool structuring.
-                let mut accumulated = String::new();
+                let mut accumulated = first.unwrap_or_default();
                 while let Some(token) = token_rx.recv().await {
                     accumulated.push_str(&token);
                 }
@@ -370,8 +385,12 @@ async fn chat_stream(
                     emit_final(&event_tx, &id, &stream_model, created, "stop");
                 }
             } else {
-                // Unchanged per-token streaming.
-                while let Some(token) = token_rx.recv().await {
+                // Per-token streaming.
+                let mut first = first;
+                while let Some(token) = match first.take() {
+                    Some(t) => Some(t),
+                    None => token_rx.recv().await,
+                } {
                     let chunk = ChatCompletionChunk {
                         id: id.clone(),
                         object: "chat.completion.chunk",
@@ -401,7 +420,9 @@ async fn chat_stream(
 
             // Billing happens inside the AI service once the final token
             // counts are known; just wait for the stream to finish.
-            let _ = done_rx.await;
+            if !finished {
+                let _ = done_rx.await;
+            }
 
             // OpenAI SSE terminator.
             let _ = event_tx.send(Ok(Event::default().data("[DONE]")));

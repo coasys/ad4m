@@ -134,14 +134,15 @@ pub fn conductor_interface() -> Value {
     .action("KEYS", "Use Holochain keys", "Create agent keys and sign with them.", Risk::Admin)
     .action("SIGNALS", "Receive Holochain signals", "Receive every app signal of every cell.", Risk::Admin)
     .action("ADMIN", "Operate Holochain", "Restart and stop the conductor.", Risk::Admin)
-    .method::<NoParams, Vec<String>>("agentInfos", "READ", "The conductor's agent infos (encoded).", opts(true, false))
-    .method::<AgentInfosParams, bool>("addAgentInfos", "PEERS", "Add other agents' infos to the conductor.", opts(false, false))
+    .method::<NoParams, bool>("running", "READ", "Is the conductor up? Answers at once.", opts(true, false))
+    .method::<NoParams, Vec<String>>("agentInfos", "READ", "The conductor's agent infos (encoded).", opts(true, true))
+    .method::<AgentInfosParams, bool>("addAgentInfos", "PEERS", "Add other agents' infos to the conductor.", opts(false, true))
     .method::<NoParams, String>("networkMetrics", "READ", "The conductor's network metrics (JSON text).", opts(true, false))
-    .method::<NoParams, bool>("logNetworkStatus", "READ", "Write the conductor's network metrics to the executor log.", opts(false, false))
+    .method::<NoParams, bool>("logNetworkStatus", "READ", "Write the conductor's network metrics to the executor log.", opts(false, true))
     .method::<InstallAppParams, Value>("installApp", "APPS", "Install an app; answers its `AppInfo`.", invalid_payload(opts(false, true)))
-    .method::<AppIdParams, Option<Value>>("appInfo", "APPS", "An installed app's `AppInfo`.", opts(true, false))
-    .method::<AppIdParams, bool>("enableApp", "APPS", "Enable an installed app.", opts(false, false))
-    .method::<AppIdParams, bool>("removeApp", "APPS", "Uninstall an app.", opts(false, false))
+    .method::<AppIdParams, Option<Value>>("appInfo", "APPS", "An installed app's `AppInfo`.", opts(true, true))
+    .method::<AppIdParams, bool>("enableApp", "APPS", "Enable an installed app.", opts(false, true))
+    .method::<AppIdParams, bool>("removeApp", "APPS", "Uninstall an app.", opts(false, true))
     .method::<PathParams, String>("packDna", "APPS", "Pack a DNA directory; answers the bundle path.", opts(false, true))
     .method::<PathParams, String>("unpackDna", "APPS", "Unpack a DNA bundle; answers the directory.", opts(false, true))
     .method::<PathParams, String>("packHapp", "APPS", "Pack an hApp directory; answers the bundle path.", opts(false, true))
@@ -153,9 +154,9 @@ pub fn conductor_interface() -> Value {
         opts(false, true),
     )
     .method::<CallZomeRawParams, RawZomeResponse>("callZomeRaw", "CALL", "Call a zome function with msgpack in and out.", invalid_payload(opts(false, true)))
-    .method::<NoParams, Vec<u8>>("agentKey", "KEYS", "The conductor's agent key.", opts(true, false))
-    .method::<NoParams, Vec<u8>>("newSignKeypair", "KEYS", "Create a random signing key pair; answers its agent key.", opts(false, false))
-    .method::<SignParams, Vec<u8>>("signWithKey", "KEYS", "Sign data with a conductor-held key; answers the 64-byte signature.", invalid_payload(opts(false, false)))
+    .method::<NoParams, Vec<u8>>("agentKey", "KEYS", "The conductor's agent key.", opts(true, true))
+    .method::<NoParams, Vec<u8>>("newSignKeypair", "KEYS", "Create a random signing key pair; answers its agent key.", opts(false, true))
+    .method::<SignParams, Vec<u8>>("signWithKey", "KEYS", "Sign data with a conductor-held key; answers the 64-byte signature.", invalid_payload(opts(false, true)))
     .method::<NoParams, bool>("restart", "ADMIN", "Wait until the conductor is up. Needs the admin credential.", opts(false, true))
     .method::<NoParams, bool>("restartService", "ADMIN", "Restart the conductor with its stored configuration.", opts(false, true))
     .method::<NoParams, bool>("shutdown", "ADMIN", "Stop the conductor.", opts(false, true))
@@ -182,12 +183,11 @@ fn enabled() -> Result<(), ServiceError> {
 }
 
 /// Conductor errors: not running → 503, everything else → 500.
-fn conductor_error(e: impl std::fmt::Display) -> ServiceError {
-    let message = e.to_string();
-    if message.contains("not available") {
-        ServiceError::Unavailable(message)
+fn conductor_error(e: deno_core::error::AnyError) -> ServiceError {
+    if e.downcast_ref::<direct::NotRunning>().is_some() {
+        ServiceError::Unavailable(e.to_string())
     } else {
-        ServiceError::Internal(message)
+        ServiceError::Internal(e.to_string())
     }
 }
 
@@ -231,9 +231,13 @@ async fn forward_signals(events: EventEmitter) {
             Ok(v) => {
                 crate::holochain_service::holochain_service_extension::msgpack_value_to_json(v)
             }
+            // Not msgpack: pass the bytes on the way the language host
+            // renders an `ExternIO`.
             Err(e) => {
                 log::warn!("Failed to decode signal payload from msgpack: {}", e);
-                Value::Null
+                let text = crate::js_core::ExternWrapper(holochain::prelude::ExternIO::from(bytes))
+                    .to_string();
+                serde_json::from_str(&text).unwrap_or(Value::String(text))
             }
         };
         let event = Signal {
@@ -287,29 +291,26 @@ impl ServiceImplementation for Holochain {
         // reads and peer exchange do not.
         if !matches!(
             method,
-            "agentInfos" | "addAgentInfos" | "networkMetrics" | "logNetworkStatus"
+            "running" | "agentInfos" | "addAgentInfos" | "networkMetrics" | "logNetworkStatus"
         ) {
             require_admin(&ctx)?;
         }
         match method {
+            "running" => to_value(maybe_get_holochain_service().await.is_some()),
             "agentInfos" => {
-                let hc = maybe_get_holochain_service()
-                    .await
-                    .ok_or_else(|| conductor_error("Holochain conductor not available"))?;
+                let hc = direct::conductor().await.map_err(conductor_error)?;
                 to_value(hc.agent_infos().await.map_err(internal)?)
             }
             "addAgentInfos" => {
                 let p: AgentInfosParams = params(p)?;
-                let hc = maybe_get_holochain_service()
-                    .await
-                    .ok_or_else(|| conductor_error("Holochain conductor not available"))?;
+                let hc = direct::conductor().await.map_err(conductor_error)?;
                 hc.add_agent_infos(p.agent_infos).await.map_err(internal)?;
                 to_value(true)
             }
             "networkMetrics" => {
                 let hc = maybe_get_holochain_service()
                     .await
-                    .ok_or_else(|| conductor_error("Holochain conductor not available"))?;
+                    .ok_or_else(|| conductor_error(direct::NotRunning.into()))?;
                 to_value(hc.get_network_metrics().await.map_err(internal)?)
             }
             "logNetworkStatus" => {

@@ -47,9 +47,13 @@ pub struct CheckParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChargeParams {
-    /// Credits to deduct.
+    /// Credits to deduct; with `rateKey`, units priced at that host rate.
     #[schemars(range(min = 0.0))]
     pub amount: f64,
+    /// A host-rate key, e.g. `link write`: `amount` counts units of it
+    /// (the executor's default rate applies when none is set).
+    #[serde(default)]
+    pub rate_key: Option<String>,
     /// What the charge is for, e.g. `link_write`; goes to the compute log.
     pub operation: String,
     #[serde(default)]
@@ -444,29 +448,31 @@ fn system_ctx(module: &str, email: &str) -> CallContext {
 }
 
 /// May `email` start compute now? Fails closed when the ledger is unreachable.
-pub async fn check_user(module: &str, email: &str) -> bool {
+pub async fn check_user(module: &str, email: &str, operation: &str) -> bool {
     super::call::<bool>(
         Builtin::BillingLedger,
         "check",
-        json!({ "operation": module }),
+        json!({ "operation": operation }),
         &system_ctx(module, email),
     )
     .await
     .unwrap_or(false)
 }
 
-/// Charge `email` for executor work. `Ok(false)` when nothing was charged.
+/// Charge `email` for executor work: `amount` credits, or `amount` units of
+/// the host rate `rate_key`. `Ok(false)` when nothing was charged.
 pub async fn charge_user(
     module: &str,
     email: &str,
     amount: f64,
+    rate_key: Option<&str>,
     operation: &str,
     summary: Option<String>,
 ) -> Result<bool, WsRpcError> {
     super::call(
         Builtin::BillingLedger,
         "charge",
-        json!({ "amount": amount, "operation": operation, "summary": summary }),
+        json!({ "amount": amount, "rateKey": rate_key, "operation": operation, "summary": summary }),
         &system_ctx(module, email),
     )
     .await
@@ -488,21 +494,6 @@ pub async fn charge_usage(
         &system_ctx(module, email),
     )
     .await
-}
-
-/// The host rate of `key`, with the executor's defaults.
-pub async fn rate(key: &str) -> Option<f64> {
-    let ctx = CallContext::system(
-        crate::services::Caller::Executor {
-            module: "billing".into(),
-        },
-        None,
-        None,
-    );
-    super::call::<Option<f64>>(Builtin::BillingLedger, "rate", json!({ "key": key }), &ctx)
-        .await
-        .ok()
-        .flatten()
 }
 
 #[derive(Default)]
@@ -554,7 +545,11 @@ impl ServiceImplementation for Billing {
                 let Some(email) = target_email(&ctx, p.user_email)? else {
                     return to_value(false);
                 };
-                crate::billing::bill_compute(&email, p.amount, &p.operation, p.summary.as_deref())
+                let amount = match &p.rate_key {
+                    Some(key) => p.amount * crate::billing::host_rate(key).unwrap_or(0.0),
+                    None => p.amount,
+                };
+                crate::billing::bill_compute(&email, amount, &p.operation, p.summary.as_deref())
                     .map_err(charge_error)?;
                 to_value(true)
             }

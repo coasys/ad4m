@@ -5,8 +5,13 @@ use serde_json::{json, Value};
 
 use crate::services::builtins::{event_type, Builtin};
 
-/// Start routing; runs for as long as the executor does.
+/// Start routing; runs for as long as the executor does. Later calls do
+/// nothing, so no signal is routed twice.
 pub fn start_router() {
+    static STARTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
     let mut signals =
         crate::services::host().watch(event_type(Builtin::HolochainConductor, "signal"), None);
     tokio::spawn(async move {

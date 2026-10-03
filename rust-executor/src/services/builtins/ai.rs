@@ -533,21 +533,28 @@ pub async fn ensure_task(
     .await
 }
 
-/// The context of an AI call made for the session behind `auth_token`
-/// (billed to it), outside a request the host dispatched.
+/// The context of an AI call made for the session behind `auth_token`,
+/// outside a request the host dispatched. It holds that token's grants and
+/// admin flag, never more; without a token it is the executor's own call.
 pub fn token_ctx(module: &str, auth_token: Option<String>) -> CallContext {
-    let user = auth_token
-        .clone()
-        .and_then(crate::agent::capabilities::user_email_from_token);
+    let Some(token) = auth_token else {
+        return executor_ctx(module);
+    };
+    let admin = crate::config::try_get_global_config().and_then(|c| c.admin_credential);
     CallContext {
-        auth_token,
-        ..CallContext::system(
-            crate::services::Caller::Executor {
-                module: module.into(),
-            },
-            user,
-            None,
-        )
+        caller: crate::services::Caller::Executor {
+            module: module.into(),
+        },
+        origin: Vec::new(),
+        agent_did: None,
+        user: crate::agent::capabilities::user_email_from_token(token.clone()),
+        is_admin: crate::agent::capabilities::is_admin_credential_token(&token, &admin),
+        grants: vec![
+            crate::agent::capabilities::capabilities_from_token(token.clone(), admin)
+                .unwrap_or_default(),
+        ],
+        auth_token: Some(token),
+        deadline: None,
     }
 }
 
@@ -618,17 +625,25 @@ pub async fn chat_with_tools(
     .await
 }
 
-/// `ai.models.supportsNativeTools` from executor code; `false` on any error.
-pub async fn supports_native_tools(ctx: &CallContext, model_id: &str) -> bool {
+/// `ai.models.supportsNativeTools` from executor code. A model capability,
+/// not user data, so the executor asks: a caller holding only
+/// `ai.inference` must not lose native tool calling. `false` on error.
+pub async fn supports_native_tools(model_id: &str) -> bool {
     super::call(
         super::Builtin::AiModels,
         "supportsNativeTools",
         serde_json::json!({ "modelId": model_id }),
-        ctx,
+        &executor_ctx("ai_tools"),
     )
     .await
-    .unwrap_or(false)
+    .unwrap_or_else(|e| {
+        log::warn!("supportsNativeTools({}) failed: {}", model_id, e.message);
+        false
+    })
 }
+
+/// How long a finished stream waits for its end marker.
+const STREAM_END_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// `ai.inference.chatStream` from executor code: the answer's pieces as they
 /// arrive (closed when the stream ends), and the final result.
@@ -657,25 +672,37 @@ pub fn chat_stream(
         let call =
             super::call::<ChatResult>(super::Builtin::AiInference, "chatStream", params, &ctx);
         tokio::pin!(call);
-        let mut result = None;
-        loop {
+        let forward = |c: Value| {
+            if let Some(delta) = c.get("delta").and_then(Value::as_str) {
+                let _ = token_tx.send(delta.to_string());
+            }
+        };
+        let result = loop {
             tokio::select! {
                 chunk = chunks.recv() => match chunk {
-                    Some(c) => {
-                        if let Some(delta) = c.get("delta").and_then(Value::as_str) {
-                            let _ = token_tx.send(delta.to_string());
-                        }
-                    }
+                    Some(c) => forward(c),
                     // The stream ended: every piece has arrived.
-                    None => break,
+                    None => break call.await,
                 },
-                r = &mut call, if result.is_none() => result = Some(r),
+                r = &mut call => break r,
+            }
+        };
+        // The reply can overtake the last pieces; wait for the stream end
+        // behind them, but not forever (a refused call has no stream).
+        if result.is_ok() {
+            let grace = tokio::time::sleep(STREAM_END_GRACE);
+            tokio::pin!(grace);
+            loop {
+                tokio::select! {
+                    chunk = chunks.recv() => match chunk {
+                        Some(c) => forward(c),
+                        None => break,
+                    },
+                    _ = &mut grace => break,
+                }
             }
         }
-        let result = match result {
-            Some(r) => r,
-            None => call.await,
-        };
+        drop(chunks);
         drop(token_tx);
         let _ = done_tx.send(result);
     });
@@ -844,7 +871,7 @@ pub struct Ai {
 }
 
 /// Forward a core pubsub topic to a service event.
-pub(crate) fn bridge(
+fn bridge(
     topic: &'static String,
     events: EventEmitter,
     event: &'static str,
@@ -1009,7 +1036,7 @@ impl ServiceImplementation for Ai {
                     .agent_did
                     .clone()
                     .map(EventOwner::Agent)
-                    .unwrap_or(EventOwner::All);
+                    .unwrap_or(EventOwner::Executor);
                 while let Some(delta) = tokens.recv().await {
                     let payload = serde_json::json!({ "streamId": p.stream_id, "delta": delta });
                     if let Err(e) = events.emit("chat-delta", owner.clone(), payload).await {

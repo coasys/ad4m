@@ -78,7 +78,7 @@ pub fn msgpack_value_to_json(val: rmpv::Value) -> serde_json::Value {
 /// Convert a serde_json::Value back to rmpv::Value for encoding to msgpack.
 /// Recognizes `{"__binary": [...]}` objects and converts them back to Binary.
 /// Also heuristically converts top-level or nested arrays of u8-range numbers to Binary.
-pub(crate) fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
+fn json_to_msgpack_value(val: &serde_json::Value) -> rmpv::Value {
     match val {
         serde_json::Value::Null => rmpv::Value::Nil,
         serde_json::Value::Bool(b) => rmpv::Value::Boolean(*b),
@@ -132,9 +132,7 @@ pub(crate) enum DecodedZomeCallResponse {
 }
 
 impl DecodedZomeCallResponse {
-    pub(crate) fn from_zome_call_response(
-        response: ZomeCallResponse,
-    ) -> Result<Self, AnyhowWrapperError> {
+    fn from_zome_call_response(response: ZomeCallResponse) -> Result<Self, AnyhowWrapperError> {
         match response {
             ZomeCallResponse::Ok(extern_io) => {
                 // Decode msgpack bytes using rmpv for full-fidelity type preservation.
@@ -234,10 +232,23 @@ pub(crate) async fn call_zome_within(
 pub(crate) mod direct {
     use super::*;
 
-    async fn conductor() -> Result<HolochainServiceInterface, AnyError> {
+    /// The conductor did not come up in time (or Holochain is off).
+    #[derive(Debug)]
+    pub struct NotRunning;
+
+    impl std::fmt::Display for NotRunning {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("Holochain conductor not available")
+        }
+    }
+
+    impl std::error::Error for NotRunning {}
+
+    /// The conductor, once started (waits for a start in progress).
+    pub async fn conductor() -> Result<HolochainServiceInterface, AnyError> {
         holochain_service_once_started()
             .await
-            .ok_or_else(|| anyhow!("Holochain conductor not available"))
+            .ok_or_else(|| NotRunning.into())
     }
 
     async fn within<T>(

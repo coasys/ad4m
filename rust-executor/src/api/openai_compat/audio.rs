@@ -126,12 +126,13 @@ pub async fn speech(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        super::require_credits(&email).await?;
+        super::require_credits(&email, "ai_tts").await?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
         crate::services::builtins::billing::charge_user(
             "openai_compat",
             &email,
             amount,
+            None,
             "ai_tts",
             Some("v1/audio/speech".into()),
         )

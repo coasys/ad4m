@@ -42,9 +42,15 @@ pub async fn embeddings(
     let model_id_response = req.model.clone();
     let inputs = req.input.into_vec();
 
-    // The host checks credits (`embedding` is metered); the AI service
-    // charges per input.
+    // The AI service charges per input, and the host checks credits before
+    // each one. Check once up front too, so a caller without credits gets
+    // 429 before any input is embedded and charged.
     let ctx = crate::services::ServiceHost::context_for_request(&auth.to_request_context());
+    if !crate::services::builtins::billing::may_spend(&ctx) {
+        return Err(OpenAIError::insufficient_quota(
+            "Insufficient compute credits",
+        ));
+    }
 
     let mut data: Vec<EmbeddingItem> = Vec::with_capacity(inputs.len());
     let mut total_tokens: u64 = 0;

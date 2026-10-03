@@ -5,6 +5,19 @@
   "description": "The executor's embedded Holochain conductor.",
   "selection": "executor",
   "methods": {
+    "running": {
+      "description": "Is the conductor up? Answers at once.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
+    },
     "agentInfos": {
       "description": "The conductor's agent infos (encoded).",
       "params": {
@@ -19,7 +32,8 @@
         }
       },
       "action": "READ",
-      "read": true
+      "read": true,
+      "long": true
     },
     "addAgentInfos": {
       "description": "Add other agents' infos to the conductor.",
@@ -41,7 +55,8 @@
       "result": {
         "type": "boolean"
       },
-      "action": "PEERS"
+      "action": "PEERS",
+      "long": true
     },
     "networkMetrics": {
       "description": "The conductor's network metrics (JSON text).",
@@ -66,7 +81,8 @@
       "result": {
         "type": "boolean"
       },
-      "action": "READ"
+      "action": "READ",
+      "long": true
     },
     "installApp": {
       "description": "Install an app; answers its `AppInfo`.",
@@ -107,7 +123,8 @@
       },
       "result": true,
       "action": "APPS",
-      "read": true
+      "read": true,
+      "long": true
     },
     "enableApp": {
       "description": "Enable an installed app.",
@@ -126,7 +143,8 @@
       "result": {
         "type": "boolean"
       },
-      "action": "APPS"
+      "action": "APPS",
+      "long": true
     },
     "removeApp": {
       "description": "Uninstall an app.",
@@ -145,7 +163,8 @@
       "result": {
         "type": "boolean"
       },
-      "action": "APPS"
+      "action": "APPS",
+      "long": true
     },
     "packDna": {
       "description": "Pack a DNA directory; answers the bundle path.",
@@ -324,7 +343,8 @@
         }
       },
       "action": "KEYS",
-      "read": true
+      "read": true,
+      "long": true
     },
     "newSignKeypair": {
       "description": "Create a random signing key pair; answers its agent key.",
@@ -342,7 +362,8 @@
           "maximum": 255
         }
       },
-      "action": "KEYS"
+      "action": "KEYS",
+      "long": true
     },
     "signWithKey": {
       "description": "Sign data with a conductor-held key; answers the 64-byte signature.",
@@ -381,6 +402,7 @@
         }
       },
       "action": "KEYS",
+      "long": true,
       "errors": {
         "InvalidPayload": {
           "code": 422

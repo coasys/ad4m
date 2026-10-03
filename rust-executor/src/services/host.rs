@@ -145,6 +145,12 @@ impl ServiceHost {
         self.events.subscribe()
     }
 
+    /// Live subscribers to the event bus (watches included).
+    #[cfg(test)]
+    pub fn event_subscribers(&self) -> usize {
+        self.events.receiver_count()
+    }
+
     /// In-process subscription to one stream: the payloads of `chunk_type`
     /// events of `stream_id`, in order, ending (channel closed) after the
     /// stream's `service-stream-end`. One subscriber serves both, so no
@@ -158,7 +164,11 @@ impl ServiceHost {
         let mut events = self.events.subscribe();
         tokio::spawn(async move {
             loop {
-                match events.recv().await {
+                let next = tokio::select! {
+                    e = events.recv() => e,
+                    _ = tx.closed() => break,
+                };
+                match next {
                     Ok(e) if e.event_type == chunk_type || e.event_type == SERVICE_STREAM_END => {
                         let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
                             continue;
@@ -173,8 +183,11 @@ impl ServiceHost {
                         }
                     }
                     Ok(_) => {}
+                    // A lost chunk or end marker would leave the stream
+                    // incomplete or open forever: end it here.
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log::warn!("stream watch {} lagged by {}", stream_id, n)
+                        log::warn!("stream watch {} lagged by {}; ending it", stream_id, n);
+                        break;
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
@@ -197,7 +210,11 @@ impl ServiceHost {
         let field = self.registry().event_scope(&event_type);
         tokio::spawn(async move {
             loop {
-                match events.recv().await {
+                let next = tokio::select! {
+                    e = events.recv() => e,
+                    _ = tx.closed() => break,
+                };
+                match next {
                     Ok(e) if e.event_type == event_type => {
                         let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
                             continue;
@@ -451,9 +468,14 @@ impl ServiceHost {
                 .agent_did
                 .clone()
                 .map(EventOwner::Agent)
-                .unwrap_or(EventOwner::All);
+                .unwrap_or(EventOwner::Executor);
             Some((id, owner))
         });
+        // The admin credential is the executor's to honour: only its own
+        // (builtin) services see it.
+        if !builtin {
+            ctx.is_admin = false;
+        }
         let outcome =
             tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
         // Sent after every chunk the service emitted, on the same path, so it

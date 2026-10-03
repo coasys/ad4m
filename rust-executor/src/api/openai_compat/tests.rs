@@ -449,10 +449,10 @@ fn speech_amount_per_thousand_chars() {
 // Billing: ledger failures as OpenAI errors (`charge_error`)
 // ---------------------------------------------------------------------------
 //
-// The whole handler stack relies on `bill_compute(...)?` for error
-// propagation via this conversion. If it drifts — wrong status, wrong
-// error code, wrong wire message shape — SDK clients that key their retry
-// logic off HTTP 429 / `insufficient_quota` silently break.
+// Every handler maps ledger failures through `charge_error`. If it drifts —
+// wrong status, wrong error code, wrong wire message shape — SDK clients
+// that key their retry logic off HTTP 429 / `insufficient_quota` silently
+// break.
 // ---------------------------------------------------------------------------
 
 fn ledger_error(
@@ -942,11 +942,10 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
         .unwrap();
 
     let _ = test_router().oneshot(req).await.unwrap();
-    // The stream setup path calls check_compute_credits (no seam
-    // record) and then attempts to open the stream — which fails at
-    // AIService::global_instance(). NO bill_compute call happens here;
-    // billing is deferred to end-of-stream. If setup starts calling
-    // bill_compute up front, this fails.
+    // The stream setup path checks credits (no seam record) and then
+    // attempts to open the stream, which fails. No charge happens here;
+    // billing is deferred to end-of-stream. If setup starts charging up
+    // front, this fails.
     let calls = test_seam::calls();
     assert!(
         calls.is_empty(),

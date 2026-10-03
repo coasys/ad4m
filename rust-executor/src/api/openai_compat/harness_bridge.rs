@@ -53,7 +53,7 @@ impl CompletionSource for OpenAiCompatBridge {
         // definitions, and answers with structured calls. Everything else
         // takes the prompt-injection path below, which works against any model
         // at all — including every local one, which is why it stays.
-        if !tools.is_empty() && ai::supports_native_tools(&self.ctx, model_id).await {
+        if !tools.is_empty() && ai::supports_native_tools(model_id).await {
             return self.complete_natively(model_id, messages, tools).await;
         }
 
@@ -165,7 +165,7 @@ impl OpenAiCompatBridge {
     ) -> Result<HarnessCompletion> {
         let turns = structured_turns(messages)?;
 
-        let specs = tools
+        let specs: Vec<ToolSpec> = tools
             .iter()
             .map(|schema| ToolSpec {
                 name: schema.name.clone(),
@@ -174,7 +174,6 @@ impl OpenAiCompatBridge {
             })
             .collect();
 
-        let specs: Vec<ToolSpec> = specs;
         let reply = ai::chat_with_tools(&self.ctx, model_id, &turns, &specs)
             .await
             .map_err(service_error)?;

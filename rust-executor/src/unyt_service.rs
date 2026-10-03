@@ -62,8 +62,8 @@ pub(crate) struct Conductor;
 impl Conductor {
     fn ctx() -> crate::services::CallContext {
         crate::services::CallContext::system(
-            crate::services::Caller::Service {
-                implementation: "unyt".into(),
+            crate::services::Caller::Executor {
+                module: "unyt".into(),
             },
             None,
             None,
@@ -86,10 +86,10 @@ impl Conductor {
 
     /// The conductor, when it runs now.
     pub(crate) async fn running() -> Option<Conductor> {
-        Self::call::<Vec<String>>("agentInfos", serde_json::json!({}))
+        Self::call::<bool>("running", serde_json::json!({}))
             .await
-            .ok()
-            .map(|_| Conductor)
+            .unwrap_or(false)
+            .then_some(Conductor)
     }
 
     /// The conductor, waiting up to `limit` for it to come up.

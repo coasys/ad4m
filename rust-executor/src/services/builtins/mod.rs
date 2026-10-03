@@ -199,10 +199,7 @@ pub async fn start_all(host: &Arc<ServiceHost>) -> Result<(), String> {
             .find(|i| i.manifest == m)
             .map(|i| (i.hash.clone(), i.is_running()));
         let hash = match existing {
-            Some((hash, true)) => {
-                let _ = hash;
-                continue;
-            }
+            Some((_, true)) => continue,
             Some((hash, false)) => hash,
             None => host.register_builtin(m, service)?,
         };

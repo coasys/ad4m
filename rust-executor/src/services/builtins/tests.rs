@@ -403,3 +403,57 @@ fn internal_callers_go_through_the_host() {
         offenders.join("\n")
     );
 }
+
+/// An in-memory database when no test installed one yet.
+fn ensure_db() {
+    let missing = crate::db::Ad4mDb::global_instance()
+        .lock()
+        .map(|g| g.is_none())
+        .unwrap_or(false);
+    if missing {
+        let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+    }
+}
+
+/// `billing.ledger.charge` with a `rateKey` prices `amount` as units of that
+/// host rate; without one, `amount` is credits.
+#[tokio::test]
+async fn charge_prices_units_at_a_host_rate() {
+    use crate::billing::test_seam;
+    ensure_db();
+    super::start_all(&crate::services::host()).await.unwrap();
+    let rate = crate::billing::host_rate("link write").expect("link write has a default rate");
+    let charge = |params: Value| async move {
+        test_seam::force_result(test_seam::ForcedResult::Success);
+        super::call::<bool>(
+            Builtin::BillingLedger,
+            "charge",
+            params,
+            &ctx(Some("u@ex.test")),
+        )
+        .await
+        .unwrap()
+    };
+    test_seam::reset();
+    assert!(
+        charge(json!({ "amount": 3.0, "rateKey": "link write", "operation": "link_write" })).await
+    );
+    assert!(charge(json!({ "amount": 2.0, "operation": "ai_tts" })).await);
+    let amounts: Vec<f64> = test_seam::calls().iter().map(|c| c.amount).collect();
+    assert_eq!(amounts, vec![3.0 * rate, 2.0]);
+    test_seam::reset();
+}
+
+/// Work done for a session's token holds that token's grants and admin
+/// flag, never the executor's; without a token it is the executor's call.
+#[test]
+fn token_context_holds_only_the_tokens_grants() {
+    ensure_db();
+    let session = super::ai::token_ctx("t", Some("not-a-valid-token".into()));
+    assert!(!session.is_admin);
+    assert!(session.grants.len() == 1 && session.grants[0].is_empty());
+    assert_eq!(session.auth_token.as_deref(), Some("not-a-valid-token"));
+    let executor = super::ai::token_ctx("t", None);
+    assert!(executor.is_admin);
+    assert!(executor.auth_token.is_none());
+}
