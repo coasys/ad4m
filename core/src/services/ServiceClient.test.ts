@@ -41,7 +41,7 @@ interface EchoEvents {
 
 const ECHO: ServiceDefinition<EchoMethods, EchoEvents> = {
     hash: "QmEchoInterface",
-    moduleId: "QmEchoInterface",
+    moduleId: "service://QmEchoInterface",
     name: "echo",
     version: "1.0.0",
     read: new Set(["say"]),
@@ -159,14 +159,14 @@ describe("ServicesClient", () => {
         const services = new ServicesClient(api)
         services.describe("QmEchoInterface").catch(() => {})
         services.interface("QmEchoInterface").catch(() => {})
-        services.setPreference("QmEchoInterface", "QmImpl").catch(() => {})
-        services.setPreference("QmEchoInterface", "QmImpl", true).catch(() => {})
+        services.setPreference("QmEchoInterface", "service://QmImpl").catch(() => {})
+        services.setPreference("QmEchoInterface", "service://QmImpl", true).catch(() => {})
         await flush()
         expect(calls().map((c) => [c.type, c.params])).toEqual([
             ["services.describe", { target: "QmEchoInterface" }],
             ["services.interface", { hash: "QmEchoInterface" }],
-            ["services.setPreference", { interface: "QmEchoInterface", module: "QmImpl" }],
-            ["services.setPreference", { interface: "QmEchoInterface", module: "QmImpl", forAllUsers: true }],
+            ["services.setPreference", { interface: "QmEchoInterface", module: "service://QmImpl" }],
+            ["services.setPreference", { interface: "QmEchoInterface", module: "service://QmImpl", forAllUsers: true }],
         ])
         expect(services.use(ECHO)).toBeInstanceOf(ServiceClient)
     })

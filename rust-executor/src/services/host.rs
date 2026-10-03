@@ -13,7 +13,7 @@ use super::builtin::{
     ServiceImplementation, StartContext,
 };
 use super::capability::{allowed, service_capability, service_domain};
-use super::interface::{is_hash, InterfaceDocument};
+use super::interface::{genesis_of, is_hash, InterfaceDocument};
 use super::registry::{BuiltinManifest, Registry, ResolveError};
 use crate::agent::capabilities::Capability;
 use crate::api::events_ws::events::SERVICE_STREAM_END;
@@ -98,7 +98,7 @@ impl ServiceHost {
         self.registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Where service data directories live (`<root>/<moduleId>/`).
+    /// Where service data directories live (`<root>/<genesis hash>/`).
     pub fn set_data_root(&self, root: std::path::PathBuf) {
         *self.data_root.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
     }
@@ -160,7 +160,7 @@ impl ServiceHost {
                 ));
             }
             let (service, grants) = (i.service.clone(), i.grants.clone());
-            let module = i.module_id.clone();
+            let module = genesis_of(&i.module_id).unwrap_or_default().to_string();
             let root = self
                 .data_root
                 .read()
@@ -295,11 +295,11 @@ impl ServiceHost {
             .expect("resolved method exists")
             .clone();
 
-        let needs = service_capability(doc.module_id(), &doc.compat(), &def.action);
+        let needs = service_capability(&doc.module_id(), &doc.compat(), &def.action);
         if !allowed(&ctx.grants, &needs) {
             return Err(WsRpcError::forbidden(format!(
                 "missing grant {}#{}",
-                service_domain(doc.module_id(), &doc.compat()),
+                service_domain(&doc.module_id(), &doc.compat()),
                 def.action
             )));
         }
@@ -466,7 +466,7 @@ impl ServiceHost {
             let _ = self.events.send(ServiceEvent {
                 event_type,
                 owner: owner.to_string(),
-                needs: service_capability(doc.module_id(), &doc.compat(), &def.action),
+                needs: service_capability(&doc.module_id(), &doc.compat(), &def.action),
                 wire: Value::Object(wire).to_string(),
             });
         }

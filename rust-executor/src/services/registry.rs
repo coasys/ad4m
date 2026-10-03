@@ -9,7 +9,7 @@ use ts_rs::TS;
 
 use super::builtin::{ServiceHealth, ServiceImplementation};
 use super::capability::service_capability;
-use super::interface::{content_hash, is_hash, InterfaceDocument, Selection};
+use super::interface::{content_hash, is_hash, module_uri, InterfaceDocument, Selection};
 use super::semver::check_successor;
 use crate::agent::capabilities::Capability;
 
@@ -114,7 +114,7 @@ impl Registry {
                 ));
             }
         }
-        let module_id = doc.module_id().to_string();
+        let module_id = doc.module_id();
         if let Some(prev_hash) = &doc.doc.previous {
             let prev = self
                 .interfaces
@@ -201,7 +201,7 @@ impl Registry {
                 .implementations
                 .get(prev_hash)
                 .ok_or_else(|| format!("previous version {} is not registered", prev_hash))?;
-            if &prev.module_id != module {
+            if prev.module_id != module_uri(module) {
                 return Err(format!(
                     "previous version {} belongs to another module",
                     prev_hash
@@ -234,10 +234,10 @@ impl Registry {
                 if !doc.doc.actions.contains_key(a) {
                     return Err(format!("{} has no action `{}`", r.interface, a));
                 }
-                grants.push(service_capability(doc.module_id(), &doc.compat(), a));
+                grants.push(service_capability(&doc.module_id(), &doc.compat(), a));
             }
         }
-        let module_id = manifest.module.clone().unwrap_or_else(|| hash.clone());
+        let module_id = module_uri(manifest.module.as_deref().unwrap_or(&hash));
         let order = self.next_order;
         self.next_order += 1;
         self.implementations.insert(
@@ -322,7 +322,7 @@ impl Registry {
             ));
         }
         self.preferences.insert(
-            (user, doc.module_id().to_string(), doc.compat()),
+            (user, doc.module_id(), doc.compat()),
             implementation_module.to_string(),
         );
         Ok(())
@@ -389,7 +389,7 @@ impl Registry {
                 .cmp(&self.served_version(a, doc))
                 .then(a.order.cmp(&b.order))
         });
-        let key = |u: Option<String>| (u, doc.module_id().to_string(), doc.compat());
+        let key = |u: Option<String>| (u, doc.module_id(), doc.compat());
         let mut preferred = Vec::new();
         if doc.doc.selection == Selection::PerUser {
             if let Some(u) = user {
@@ -492,7 +492,7 @@ pub(crate) mod tests {
     ) -> Value {
         let mut raw = prev.raw.clone();
         raw["version"] = json!(version);
-        raw["module"] = json!(prev.module_id());
+        raw["module"] = json!(prev.genesis_hash());
         raw["previous"] = json!(prev.hash);
         mutate(&mut raw);
         raw
@@ -583,7 +583,7 @@ pub(crate) mod tests {
         let g = reg
             .register_implementation(manifest("g", vec![d.hash.clone()]), Arc::new(Noop))
             .unwrap();
-        assert_eq!(reg.implementation(&g).unwrap().module_id, g);
+        assert_eq!(reg.implementation(&g).unwrap().module_id, module_uri(&g));
         let next = |author: &str, previous: &str| {
             let mut m = manifest("g", vec![d.hash.clone()]);
             m.author = author.into();
@@ -606,7 +606,7 @@ pub(crate) mod tests {
         let v2 = reg
             .register_implementation(next("did:key:z6Mkimpl", &g), Arc::new(Noop))
             .unwrap();
-        assert_eq!(reg.implementation(&v2).unwrap().module_id, g);
+        assert_eq!(reg.implementation(&v2).unwrap().module_id, module_uri(&g));
     }
 
     #[test]
@@ -714,6 +714,8 @@ pub(crate) mod tests {
             .set_preference(Some("alice".into()), &d.hash, &module)
             .is_err());
         assert!(reg.set_preference(None, &d.hash, &module).is_ok());
+        // A module is named by its `service://` ID, not a bare hash.
+        assert!(reg.set_preference(None, &d.hash, &a).is_err());
     }
 
     #[test]
@@ -732,10 +734,7 @@ pub(crate) mod tests {
             .register_implementation(m.clone(), Arc::new(Noop))
             .unwrap();
         let grants = reg.implementation(&h).unwrap().grants.clone();
-        assert_eq!(
-            grants[0].with.domain,
-            format!("service:{}@1", d.module_id())
-        );
+        assert_eq!(grants[0].with.domain, format!("{}@1", d.module_id()));
         m.name = "bad".into();
         m.requires[0].actions = vec!["NOPE".into()];
         assert!(reg

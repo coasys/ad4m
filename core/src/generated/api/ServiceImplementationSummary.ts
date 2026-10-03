@@ -3,7 +3,7 @@ import type { ServiceHealth } from "./ServiceHealth";
 
 export type ServiceImplementationSummary = { hash: string, 
 /**
- * The implementation module: its genesis hash.
+ * The implementation module: `service://<genesis hash>`.
  */
 moduleId: string, author: string, name: string, version: string, 
 /**

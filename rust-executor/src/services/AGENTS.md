@@ -8,12 +8,12 @@ through.
 
 | File | What it owns |
 |---|---|
-| `interface.rs` | Interface document types, structural rules, JCS hash (`content_hash`, the language hash function), module ID (the genesis hash; it covers `author`, so successors must keep the genesis author, checked in `registry.rs`), author signature check, `standalone_schema` (`#/types/X` → `$defs`) |
+| `interface.rs` | Interface document types, structural rules, JCS hash (`content_hash`, the language hash function), module ID `service://<genesis hash>` (`module_uri` / `genesis_of`; the hash covers `author`, so successors must keep the genesis author, checked in `registry.rs`). Document fields `module` / `previous` and wire method prefixes stay bare hashes, author signature check, `standalone_schema` (`#/types/X` → `$defs`) |
 | `semver.rs` | PATCH / MINOR / MAJOR checks of a version against its `previous`. MINOR uses a conservative subset checker: it proves additive edits and refuses the rest |
 | `registry.rs` | Interfaces, module chains, implementations, preferences, resolution (`resolve`), event fan-out (`event_targets`) |
 | `host.rs` | `ServiceHost`: dispatch (resolve → grant → params schema → call → result check), start/stop/health, event emit, `service-stream-end` |
 | `builtin.rs` | `ServiceImplementation` trait, `CallContext` (grant layers), `EventEmitter`, `ServiceCaller` |
-| `capability.rs` | Grants: `service:<moduleId>@<compat>` × action; `allowed` needs every grant layer |
+| `capability.rs` | Grants: `<moduleId>@<compat>` (`service://<hash>@<compat>`) × action; `allowed` needs every grant layer |
 | `ws.rs` | Core RPC methods `services.describe`, `services.interface`, `services.setPreference` |
 | `schema_export.rs` | `InterfaceBuilder`: builtin interface documents from Rust types (`schemars`) |
 | `codegen.rs` | TS client module, MCP tool descriptors, Markdown; used by `ad4m service-gen` (`cli/src/service_gen.rs`) |

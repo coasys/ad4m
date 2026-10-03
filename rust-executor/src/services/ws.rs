@@ -31,7 +31,7 @@ pub struct ServicesDescribeParams {
 #[ts(export)]
 pub struct ServiceInterfaceSummary {
     pub hash: String,
-    /// The module: its genesis hash.
+    /// The module: `service://<genesis hash>`.
     pub module_id: String,
     /// The DID that signs every version of the module.
     pub author: String,
@@ -50,7 +50,7 @@ pub struct ServiceInterfaceSummary {
 #[ts(export)]
 pub struct ServiceImplementationSummary {
     pub hash: String,
-    /// The implementation module: its genesis hash.
+    /// The implementation module: `service://<genesis hash>`.
     pub module_id: String,
     pub author: String,
     pub name: String,
@@ -81,7 +81,7 @@ pub struct ServicesInterfaceParams {
 pub struct ServicesSetPreferenceParams {
     /// An interface version hash: the preference covers its whole compatible line.
     pub interface: String,
-    /// The Service Language module ID to prefer.
+    /// The Service Language module ID to prefer (`service://<hash>`).
     pub module: String,
     /// Set the executor default instead of the caller's own preference (admin only).
     #[ts(optional)]
@@ -110,7 +110,7 @@ pub(crate) fn describe(
         })
         .map(|d| ServiceInterfaceSummary {
             hash: d.hash.clone(),
-            module_id: d.module_id().to_string(),
+            module_id: d.module_id(),
             author: d.doc.author.clone(),
             name: d.doc.name.clone(),
             version: d.doc.version.clone(),
@@ -121,7 +121,7 @@ pub(crate) fn describe(
                 .doc
                 .actions
                 .keys()
-                .filter(|a| allowed(grants, &service_capability(d.module_id(), &d.compat(), a)))
+                .filter(|a| allowed(grants, &service_capability(&d.module_id(), &d.compat(), a)))
                 .cloned()
                 .collect(),
         })

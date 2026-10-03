@@ -2,10 +2,10 @@
 //!
 //! An interface version is one JSON document. Its hash is the AD4M content
 //! address of its JCS canonical form. A module (all versions of one
-//! interface) is identified by the hash of its first version (its genesis).
-//! That hash covers the genesis `author`, so the module ID pins its author:
-//! resolve the genesis to learn it, as a neighbourhood URL resolves to its
-//! link language. Every later version must keep that author.
+//! interface) is identified by `service://<hash of its first version>` (its
+//! genesis). That hash covers the genesis `author`, so the module ID pins its
+//! author: resolve the genesis to learn it, as a `neighbourhood://` URL
+//! resolves to its link language. Every later version must keep that author.
 
 use std::collections::BTreeMap;
 
@@ -22,6 +22,19 @@ pub fn content_hash(data: &[u8]) -> String {
     let multihash = Code::Sha2_256.digest(data);
     let cid = Cid::new_v1(0x00, multihash);
     format!("Qm{}", multibase::encode(Base::Base58Btc, cid.to_bytes()))
+}
+
+/// The URI scheme of service module IDs.
+pub const SCHEME: &str = "service://";
+
+/// The module ID of the module whose genesis hash is `genesis`.
+pub fn module_uri(genesis: &str) -> String {
+    format!("{}{}", SCHEME, genesis)
+}
+
+/// The genesis hash of a `service://` module ID.
+pub fn genesis_of(module_id: &str) -> Option<&str> {
+    module_id.strip_prefix(SCHEME).filter(|h| is_hash(h))
 }
 
 /// `true` when `s` has the shape of a content address. Base58 holds no `.`,
@@ -184,9 +197,14 @@ impl InterfaceDocument {
         })
     }
 
-    /// The module ID: the genesis hash, which also fixes the author.
-    pub fn module_id(&self) -> &str {
+    /// The hash of the module's genesis version.
+    pub fn genesis_hash(&self) -> &str {
         self.doc.module.as_deref().unwrap_or(&self.hash)
+    }
+
+    /// The module ID, `service://<genesis hash>`; the hash fixes the author.
+    pub fn module_id(&self) -> String {
+        module_uri(self.genesis_hash())
     }
 
     pub fn is_genesis(&self) -> bool {
@@ -331,8 +349,8 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         }
     }
     if let Some(f) = &doc.fork_of {
-        if !is_hash(f) {
-            return Err("`forkOf` must be a module ID (a genesis hash)".into());
+        if genesis_of(f).is_none() {
+            return Err("`forkOf` must be a module ID `service://<hash>`".into());
         }
     }
     for name in doc.types.keys() {
@@ -545,7 +563,10 @@ pub(crate) mod tests {
         let b = InterfaceDocument::parse(reordered).unwrap();
         assert_eq!(a.hash, b.hash);
         assert!(is_hash(&a.hash));
-        assert_eq!(a.module_id(), a.hash);
+        assert_eq!(a.genesis_hash(), a.hash);
+        assert_eq!(a.module_id(), format!("service://{}", a.hash));
+        assert_eq!(genesis_of(&a.module_id()), Some(a.hash.as_str()));
+        assert_eq!(genesis_of(&a.hash), None);
         assert_eq!(a.compat(), "1");
     }
 

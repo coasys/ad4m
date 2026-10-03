@@ -418,7 +418,7 @@ mod tests {
     ) -> InterfaceDocument {
         let mut raw = prev.raw.clone();
         raw["version"] = json!(version);
-        raw["module"] = json!(prev.module_id());
+        raw["module"] = json!(prev.genesis_hash());
         raw["previous"] = json!(prev.hash);
         mutate(&mut raw);
         doc(raw)

@@ -1,11 +1,11 @@
-//! Service grants: `service:<moduleId>@<compat>` × action.
+//! Service grants: `<moduleId>@<compat>` (`service://<hash>@<compat>`) × action.
 
 use crate::agent::capabilities::types::Resource;
 use crate::agent::capabilities::{check_capability, Capability, WILD_CARD};
 
 /// The capability domain of an interface line.
 pub fn service_domain(module_id: &str, compat: &str) -> String {
-    format!("service:{}@{}", module_id, compat)
+    format!("{}@{}", module_id, compat)
 }
 
 /// The capability one action needs.
@@ -44,21 +44,24 @@ mod tests {
 
     #[test]
     fn grants_match_module_line_and_action() {
-        let need = service_capability("QmX", "1", "SAY");
-        assert!(allowed(&[vec![grant("service:QmX@1", &["SAY"])]], &need));
-        assert!(!allowed(&[vec![grant("service:QmX@2", &["SAY"])]], &need));
-        assert!(!allowed(&[vec![grant("service:QmX@1", &["OTHER"])]], &need));
+        let need = service_capability("service://QmX", "1", "SAY");
+        assert!(allowed(&[vec![grant("service://QmX@1", &["SAY"])]], &need));
+        assert!(!allowed(&[vec![grant("service://QmX@2", &["SAY"])]], &need));
+        assert!(!allowed(
+            &[vec![grant("service://QmX@1", &["OTHER"])]],
+            &need
+        ));
         assert!(allowed(&[vec![ALL_CAPABILITY.clone()]], &need));
         assert!(!allowed(&[], &need));
     }
 
     #[test]
     fn every_layer_must_allow() {
-        let need = service_capability("QmX", "1", "SAY");
+        let need = service_capability("service://QmX", "1", "SAY");
         let app = vec![ALL_CAPABILITY.clone()];
-        let service = vec![grant("service:QmX@1", &["READ"])];
+        let service = vec![grant("service://QmX@1", &["READ"])];
         assert!(!allowed(&[app.clone(), service], &need));
-        let service = vec![grant("service:QmX@1", &["SAY"])];
+        let service = vec![grant("service://QmX@1", &["SAY"])];
         assert!(allowed(&[app, service], &need));
     }
 }

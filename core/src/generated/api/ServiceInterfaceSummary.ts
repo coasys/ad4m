@@ -2,7 +2,7 @@
 
 export type ServiceInterfaceSummary = { hash: string, 
 /**
- * The module: its genesis hash.
+ * The module: `service://<genesis hash>`.
  */
 moduleId: string, 
 /**

@@ -6,7 +6,7 @@ export type ServicesSetPreferenceParams = {
  */
 interface: string, 
 /**
- * The Service Language module ID to prefer.
+ * The Service Language module ID to prefer (`service://<hash>`).
  */
 module: string, 
 /**

@@ -277,12 +277,7 @@ async fn dispatch_answers_with_protocol_codes() {
         .await
         .unwrap_err()
         .contains("already started"));
-    let module = host
-        .registry()
-        .interface(&iface)
-        .unwrap()
-        .module_id()
-        .to_string();
+    let module = host.registry().interface(&iface).unwrap().module_id();
     let all = vec![ALL_CAPABILITY.clone()];
     let say = format!("{}.say", iface);
 
@@ -297,7 +292,7 @@ async fn dispatch_answers_with_protocol_codes() {
     assert_eq!(ok, json!({ "text": "hi" }));
 
     // A grant on the module line works; a grant on another line or action does not.
-    let line = grant(format!("service:{}@1", module), &["SAY"]);
+    let line = grant(format!("{}@1", module), &["SAY"]);
     assert!(host
         .dispatch(
             &say,
@@ -306,7 +301,7 @@ async fn dispatch_answers_with_protocol_codes() {
         )
         .await
         .is_ok());
-    let other = grant(format!("service:{}@2", module), &["SAY"]);
+    let other = grant(format!("{}@2", module), &["SAY"]);
     let e = host
         .dispatch(
             &say,
@@ -411,12 +406,7 @@ async fn dispatch_answers_with_protocol_codes() {
 async fn nested_calls_need_every_layer() {
     let host = ServiceHost::new();
     let (iface, _) = echo_on(&host, "did:key:z6MkNested").await;
-    let module = host
-        .registry()
-        .interface(&iface)
-        .unwrap()
-        .module_id()
-        .to_string();
+    let module = host.registry().interface(&iface).unwrap().module_id();
     // A caller service that requires SAY on echo, and one that requires nothing.
     let with = host
         .register_builtin(
@@ -469,7 +459,7 @@ async fn nested_calls_need_every_layer() {
     // The app lacks it, even though the service has it: no confused deputy.
     let app_none = ctx(
         "did:key:a",
-        vec![grant(format!("service:{}@1", module), &["OTHER"])],
+        vec![grant(format!("{}@1", module), &["OTHER"])],
     );
     assert_eq!(
         caller(&with)
@@ -501,12 +491,7 @@ async fn result_outside_contract_is_logged_for_builtins() {
 async fn events_reach_only_their_owner_with_the_grant() {
     let host = ServiceHost::new();
     let (iface, implementation) = echo_on(&host, "did:key:z6MkEvents").await;
-    let module = host
-        .registry()
-        .interface(&iface)
-        .unwrap()
-        .module_id()
-        .to_string();
+    let module = host.registry().interface(&iface).unwrap().module_id();
     let mut rx = host.subscribe_events();
     host.emit_event(
         &implementation,
@@ -523,7 +508,7 @@ async fn events_reach_only_their_owner_with_the_grant() {
         wire,
         json!({ "type": format!("{}.said", iface), "room": "r", "text": "hi" })
     );
-    let yes = vec![grant(format!("service:{}@1", module), &["SAY"])];
+    let yes = vec![grant(format!("{}@1", module), &["SAY"])];
     assert!(ServiceHost::delivers(&e, Some("did:key:a"), false, &yes));
     assert!(!ServiceHost::delivers(&e, Some("did:key:b"), false, &yes));
     assert!(ServiceHost::delivers(&e, None, true, &yes));
@@ -615,14 +600,9 @@ impl Socket {
 #[tokio::test]
 async fn round_trip_over_the_rpc_socket() {
     let (iface, implementation) = echo_on(&host(), "did:key:z6MkSocket").await;
-    let module = host()
-        .registry()
-        .interface(&iface)
-        .unwrap()
-        .module_id()
-        .to_string();
+    let module = host().registry().interface(&iface).unwrap().module_id();
     let mut s = Socket::open(vec![
-        grant(format!("service:{}@1", module), &["SAY"]),
+        grant(format!("{}@1", module), &["SAY"]),
         crate::agent::capabilities::AGENT_READ_CAPABILITY.clone(),
     ])
     .await;

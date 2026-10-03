@@ -29,7 +29,7 @@ export class ServicesClient {
     }
 
     /**
-     * Prefer the Service Language `module` for `interface`'s compatible line:
+     * Prefer the Service Language `module` (`service://<hash>`) for `interface`'s compatible line:
      * for the caller, or as the executor default (`forAllUsers`, admin only).
      */
     setPreference(iface: string, module: string, forAllUsers?: boolean, options?: CallOptions): Promise<boolean> {

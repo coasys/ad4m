@@ -296,7 +296,7 @@ pub fn typescript(doc: &InterfaceDocument) -> String {
         id, id, id
     );
     let _ = writeln!(out, "  hash: {},", quote(&doc.hash));
-    let _ = writeln!(out, "  moduleId: {},", quote(doc.module_id()));
+    let _ = writeln!(out, "  moduleId: {},", quote(&doc.module_id()));
     let _ = writeln!(out, "  name: {},", quote(&d.name));
     let _ = writeln!(out, "  version: {},", quote(&d.version));
     let _ = writeln!(out, "  read: new Set([{}]),", reads);
