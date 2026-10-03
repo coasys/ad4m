@@ -3,7 +3,7 @@ import type { ServicesDescription } from '../generated/api/ServicesDescription'
 import { ServiceClient, type ServiceClientOptions, type ServiceDefinition, type ServiceEventTable, type ServiceMethodTable } from './ServiceClient'
 
 /**
- * The executor's service registry (SPEC_SERVICE_LANGUAGES §9.1): what is
+ * The executor's service registry: what is
  * installed, the interface documents, and which implementation to prefer.
  */
 export class ServicesClient {

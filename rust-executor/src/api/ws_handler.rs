@@ -367,7 +367,7 @@ impl HandlerMap {
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
         let Some(entry) = self.handlers.get(msg_type) else {
-            // `<hash>.<method>` addresses a service (SPEC_SERVICE_LANGUAGES §9.1).
+            // `<hash>.<method>` addresses a service method, not a core one.
             if crate::services::is_service_method(msg_type) {
                 let call = crate::services::ServiceHost::context_for_request(&ctx);
                 return crate::services::host()

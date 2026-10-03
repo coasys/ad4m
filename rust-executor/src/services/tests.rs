@@ -1,4 +1,4 @@
-//! End-to-end tests of Phase 0 (SPEC §15): a test-only built-in service
+//! End-to-end tests of the service host: a test-only built-in service
 //! with one method, one scoped event and one stream, reached through the
 //! RPC socket's `call` and `events.watch`.
 

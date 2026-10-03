@@ -1,4 +1,4 @@
-//! `services.*` core RPC methods (SPEC §9.1). Service methods themselves
+//! `services.*` core RPC methods. Service methods themselves
 //! (`<hash>.<method>`) route through `HandlerMap::dispatch` to the host.
 
 use std::sync::Arc;

@@ -49,8 +49,7 @@ function streamId(): string {
 }
 
 /**
- * A typed client for one service interface version (SPEC_SERVICE_LANGUAGES
- * §9). Methods go out as `<hash>.<method>`; events arrive as
+ * A typed client for one service interface version. Methods go out as `<hash>.<method>`; events arrive as
  * `<hash>.<event>` through the client's `events.watch`.
  */
 export class ServiceClient<M extends ServiceMethodTable, E extends ServiceEventTable> {

@@ -1,9 +1,10 @@
-//! Strict semver between consecutive interface versions (SPEC §6.3).
+//! Strict semver between consecutive interface versions.
 //!
 //! The host checks every new version against its `previous`:
 //! - PATCH: only annotations change (descriptions, titles, examples, labels).
 //! - MINOR: only additive edits. The checker is deliberately conservative
-//!   (SPEC §16 Q7): it proves a small set of edits safe and refuses the rest.
+//!   (full JSON Schema subset checking is undecidable in general): it proves a
+//!   small set of edits safe and refuses the rest.
 //! - MAJOR: anything; the host treats the new line as a separate interface.
 
 use std::collections::BTreeMap;

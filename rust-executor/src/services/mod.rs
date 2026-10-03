@@ -1,4 +1,4 @@
-//! Service Languages (SPEC_SERVICE_LANGUAGES): typed, content-addressed
+//! Service Languages: typed, content-addressed
 //! service interfaces, built-in implementations, and the host that every
 //! caller reaches them through.
 

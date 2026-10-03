@@ -1,4 +1,4 @@
-//! Generated surfaces from one interface document (SPEC §12): TypeScript
+//! Generated surfaces from one interface document: TypeScript
 //! client types, MCP tool descriptors and a Markdown reference page.
 
 use std::collections::BTreeMap;

@@ -1,4 +1,4 @@
-//! Service grants: `service:<moduleId>@<compat>` × action (SPEC §10.1).
+//! Service grants: `service:<moduleId>@<compat>` × action.
 
 use crate::agent::capabilities::types::Resource;
 use crate::agent::capabilities::{check_capability, Capability, WILD_CARD};

@@ -1,4 +1,4 @@
-//! The service host (SPEC §5, §9): resolve → authorise → validate → dispatch
+//! The service host: resolve → authorise → validate → dispatch
 //! → check result, and service events.
 
 use std::collections::HashMap;
@@ -207,7 +207,7 @@ impl ServiceHost {
         }
     }
 
-    /// Stop an implementation. Callers then get 503 (SPEC §14.2).
+    /// Stop an implementation. Callers then get 503.
     pub async fn stop(&self, implementation: &str) -> Result<(), String> {
         let service = self
             .registry()
@@ -271,7 +271,8 @@ impl ServiceHost {
         }
     }
 
-    /// Dispatch `<target>.<method>` (SPEC §9.1).
+    /// Dispatch `<target>.<method>`: an interface version hash, or an
+    /// implementation hash to pin one build.
     pub async fn dispatch(
         &self,
         full: &str,
@@ -336,7 +337,8 @@ impl ServiceHost {
         });
         let outcome =
             tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
-        // After every chunk the service emitted, on the same path (§9.2).
+        // Sent after every chunk the service emitted, on the same path, so it
+        // reaches the socket after them (the reply may not).
         if let Some((stream_id, owner)) = stream_end {
             let _ = self.events.send(ServiceEvent {
                 event_type: SERVICE_STREAM_END.to_string(),
@@ -429,7 +431,7 @@ impl ServiceHost {
         Ok(result)
     }
 
-    /// Emit an implementation's event (SPEC §9.2). The payload is checked
+    /// Emit an implementation's event. The payload is checked
     /// against the newest implemented version that declares the event, then
     /// goes out once per compatible version's event type.
     pub async fn emit_event(

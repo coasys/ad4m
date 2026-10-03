@@ -1,5 +1,4 @@
-//! Interfaces, module chains, implementations, preferences and resolution
-//! (SPEC §6.3, §7, §8).
+//! Interfaces, module chains, implementations, preferences and resolution.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -14,7 +13,7 @@ use super::interface::{content_hash, is_hash, InterfaceDocument, Selection};
 use super::semver::check_successor;
 use crate::agent::capabilities::Capability;
 
-/// What a Service Language needs from another interface (SPEC §7).
+/// What a Service Language needs from another interface.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Requirement {
@@ -31,7 +30,7 @@ pub enum Instancing {
     PerUser,
 }
 
-/// The manifest of a built-in Service Language (SPEC §7, `runtime: builtin`).
+/// The manifest of a built-in Service Language (`runtime: builtin`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuiltinManifest {
@@ -59,7 +58,7 @@ pub struct Implementation {
     pub version: semver::Version,
     pub service: Arc<dyn ServiceImplementation>,
     pub health: ServiceHealth,
-    /// The grants its `requires` give it (one layer of SPEC §9.3).
+    /// The grants its `requires` give it: one layer of [`super::builtin::CallContext::grants`].
     pub grants: Arc<Vec<Capability>>,
     order: u64,
 }
@@ -311,7 +310,7 @@ impl Registry {
         Ok(())
     }
 
-    /// Resolve `<target>.<method>` for `user` (SPEC §8). Returns the
+    /// Resolve `<target>.<method>` for `user`. Returns the
     /// interface version whose method definition applies, and the
     /// implementation hash.
     pub fn resolve(

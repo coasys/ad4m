@@ -1,6 +1,6 @@
-//! The contract every service implementation satisfies (SPEC §7, §9.3).
+//! The contract every service implementation satisfies.
 //!
-//! Phase 0 runs `builtin` implementations only: Rust types compiled into
+//! Only `builtin` implementations exist so far: Rust types compiled into
 //! the executor. The wasm / js / native runtimes (Phases 4–5) will adapt to
 //! the same trait.
 
@@ -29,7 +29,7 @@ pub enum Caller {
     Harness { thread: String },
 }
 
-/// The context of one dispatch (SPEC §9.3).
+/// The context of one dispatch.
 #[derive(Debug, Clone)]
 pub struct CallContext {
     pub caller: Caller,
@@ -100,7 +100,7 @@ impl EventEmitter {
 }
 
 /// Lets a service call other services through the host with the context
-/// rules of SPEC §9.3.
+/// grant-layer rule of [`CallContext::grants`].
 #[derive(Clone)]
 pub struct ServiceCaller {
     pub(crate) host: Arc<super::host::ServiceHost>,

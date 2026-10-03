@@ -1,4 +1,4 @@
-//! Service interface documents (SPEC_SERVICE_LANGUAGES §6).
+//! Service interface documents.
 //!
 //! An interface version is one JSON document. Its hash is the AD4M content
 //! address of its JCS canonical form. A module (all versions of one
@@ -120,7 +120,7 @@ fn empty_object_schema() -> Value {
     serde_json::json!({ "type": "object" })
 }
 
-/// One interface version (SPEC §6.2).
+/// One interface version.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ServiceInterface {
@@ -306,7 +306,7 @@ fn is_kebab(name: &str) -> bool {
         && !name.ends_with('-')
 }
 
-/// Codes the protocol itself answers with (SPEC §9.4). A method error must
+/// Codes the protocol itself answers with. A method error must
 /// use another code so callers can tell them apart.
 const RESERVED_CODES: &[u16] = &[400, 401, 402, 403, 404, 408, 500, 502, 503, 504];
 
@@ -373,7 +373,7 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         if !is_object_schema(&m.params) {
             return Err(format!("{}: params must be an object schema", owner));
         }
-        // Closed params let a MINOR add optional params safely (§6.3), and
+        // Closed params let a MINOR add optional params safely, and
         // make unknown params a 400 instead of silently ignored.
         if m.params.get("additionalProperties") != Some(&Value::Bool(false)) {
             return Err(format!(

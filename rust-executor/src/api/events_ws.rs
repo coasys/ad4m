@@ -138,7 +138,7 @@ pub mod events {
     pub const TRANSCRIPTION_TEXT: &str = "transcription-text";
     pub const MODEL_LOADING_STATUS: &str = "model-loading-status";
     pub const QUERY_SUBSCRIPTION_UPDATE: &str = "query-subscription-update";
-    /// A service stream finished (SPEC_SERVICE_LANGUAGES §9.2). It travels
+    /// A service stream finished. It travels
     /// the same path as the stream's chunks, so it arrives after all of them.
     pub const SERVICE_STREAM_END: &str = "service-stream-end";
     pub const AUTO_PROCESSOR_EVENT: &str = "auto-processor-event";
@@ -173,7 +173,7 @@ pub mod events {
 /// One emitted event: its name, the TypeScript type of its payload (the
 /// wire message without `type`) and its scope: the payload field
 /// `events.watch` narrows on. Core events are scoped by `perspectiveUuid`;
-/// service events name their own field (SPEC_SERVICE_LANGUAGES §9.2).
+/// service events name their own field.
 pub struct EventSpec {
     pub name: &'static str,
     pub payload: super::ws_handler::TsType,
@@ -684,7 +684,7 @@ pub(crate) async fn build_event_stream_for(
         stream::select(stream::select(links, s_signal), stream::select(runtime, ai)),
     );
 
-    // ── Service events (SPEC_SERVICE_LANGUAGES §9.2) ──
+    // ── Service events ──
     // Only to the owning agent's sockets (or an admin), and only when the
     // socket holds the event's action.
     let s_services = BroadcastStream::new(crate::services::host().subscribe_events())

@@ -1,8 +1,8 @@
-//! Built-in interfaces from Rust types (SPEC §6.1). For a builtin the Rust
+//! Built-in interfaces from Rust types. For a builtin the Rust
 //! `params` / `result` / payload types stay the source of truth; this
 //! builder turns them into an interface document with `schemars`. A unit
 //! test per builtin compares the result with the checked-in document, the
-//! way #1193's test guards `RpcMethods.ts`.
+//! way `handler_table_tests` guards `RpcMethods.ts`.
 
 use schemars::{generate::SchemaSettings, JsonSchema, SchemaGenerator};
 use serde_json::{json, Map, Value};

@@ -1,5 +1,5 @@
 //! `ad4m service-gen`: generated surfaces from one service interface
-//! document (SPEC_SERVICE_LANGUAGES §12).
+//! document: TypeScript client module, MCP tool descriptors, Markdown.
 
 use std::path::PathBuf;
 

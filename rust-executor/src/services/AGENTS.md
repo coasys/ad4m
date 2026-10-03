@@ -2,7 +2,7 @@
 
 Service Languages: typed, content-addressed service interfaces, the
 implementations that provide them, and the host every caller reaches them
-through. Design: `SPEC_SERVICE_LANGUAGES` (Phase 0 = this module).
+through.
 
 ## Files
 
@@ -33,8 +33,8 @@ through. Design: `SPEC_SERVICE_LANGUAGES` (Phase 0 = this module).
 - A streaming method needs a required `streamId` param and a stream event scoped by `streamId`.
 - The global host (`services::host()`) is shared by every test in the process. Tests that touch it register interfaces under a unique author DID so hashes never collide; host-only tests use `ServiceHost::new()`.
 - `serde_json` here preserves key order (feature unification), so generated TS lists properties in document order.
-- Builtin results are checked only in debug builds (as #1193 does for core methods); non-builtin results always (→ 502).
+- Builtin results are checked only in debug builds (as `HandlerMap::dispatch` does for core methods); non-builtin results always (→ 502).
 - A new version is checked against its `previous` and against its registered neighbours in the line: a chain may branch, and resolution lets any higher version serve a lower one.
 - The semver checker keeps annotation-named data (a property called `title`, `enum` / `const` values) and never sees through a `$ref` it cannot compare on both sides. Keep both rules when you extend it: MINOR must never accept a breaking change.
 - `services.setPreference` needs `agent:UPDATE`. The executor default of an `executor`-selection interface needs the admin credential, also in single-user mode.
-- Phase 0 has `builtin` runtimes only. `register_implementation` refuses other `runtime.kind`s.
+- Only `builtin` runtimes exist so far. `register_implementation` refuses other `runtime.kind`s.
