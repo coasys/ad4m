@@ -32,7 +32,6 @@ use super::types::{SpeechRequest, TranscriptionResponse};
 use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::{bill_compute, check_compute_credits};
 use crate::types::ModelType;
 
 pub async fn transcriptions(
@@ -102,8 +101,7 @@ pub async fn transcriptions(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     let service = AIService::global_instance()
@@ -135,10 +133,17 @@ pub async fn speech(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
         let amount = billing_amounts::speech_amount(req.input.chars().count());
-        bill_compute(&email, amount, "ai_tts", Some("v1/audio/speech"))?;
+        crate::services::builtins::billing::charge_user(
+            "openai_compat",
+            &email,
+            amount,
+            "ai_tts",
+            Some("v1/audio/speech".into()),
+        )
+        .await
+        .map_err(super::charge_error)?;
     }
 
     let response_format = req

@@ -1652,26 +1652,20 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
-        }
+        check_link_credits(context).await?;
         link.validate()?;
         let link_expr: LinkExpression = create_signed_expression(link.normalize(), context)?.into();
         let result = self
             .add_link_expression(link_expr, status, batch_id)
             .await?;
 
-        if let Some(ref email) = context.user_email {
-            let uuid = self.uuid.clone();
-            if let Err(e) = crate::billing::bill_compute(
-                email,
-                crate::billing::get_link_write_rate(),
-                "link_write",
-                Some(&format!("1 link in perspective {}", uuid)),
-            ) {
-                log::warn!("Call exceeded compute credits (add_link): {:?}", e);
-            }
-        }
+        charge_link_writes(
+            context,
+            1,
+            format!("1 link in perspective {}", self.uuid),
+            "add_link",
+        )
+        .await;
 
         Ok(result)
     }
@@ -1896,9 +1890,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
-        }
+        check_link_credits(context).await?;
         for link in &links {
             link.validate()?;
         }
@@ -1954,22 +1946,17 @@ impl PerspectiveInstance {
             }
 
             // Bill for link writes
-            if let Some(ref email) = context.user_email {
-                let uuid = self.uuid.clone();
-                let link_count = decorated_link_expressions.len();
-                if let Err(e) = crate::billing::bill_compute(
-                    email,
-                    link_count as f64 * crate::billing::get_link_write_rate(),
-                    "link_write",
-                    Some(&format!("{} links in perspective {}", link_count, uuid)),
-                ) {
-                    log::warn!(
-                        "Call exceeded compute credits (add_links, count={}): {:?}",
-                        link_count,
-                        e
-                    );
-                }
-            }
+            charge_link_writes(
+                context,
+                decorated_link_expressions.len(),
+                format!(
+                    "{} links in perspective {}",
+                    decorated_link_expressions.len(),
+                    self.uuid
+                ),
+                "add_links",
+            )
+            .await;
 
             Ok(decorated_link_expressions)
         }
@@ -1982,9 +1969,7 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<DecoratedPerspectiveDiff, AnyError> {
         if !mutations.additions.is_empty() {
-            if let Some(ref email) = context.user_email {
-                crate::billing::check_compute_credits(email)?;
-            }
+            check_link_credits(context).await?;
         }
         let addition_links: Vec<Link> = mutations.additions.into_iter().map(Link::from).collect();
         for link in &addition_links {
@@ -2046,24 +2031,13 @@ impl PerspectiveInstance {
         // Bill for additions only (removals are free)
         let additions_count = decorated_diff.additions.len();
         if additions_count > 0 {
-            if let Some(ref email) = context.user_email {
-                let uuid = self.uuid.clone();
-                if let Err(e) = crate::billing::bill_compute(
-                    email,
-                    additions_count as f64 * crate::billing::get_link_write_rate(),
-                    "link_write",
-                    Some(&format!(
-                        "{} additions in perspective {}",
-                        additions_count, uuid
-                    )),
-                ) {
-                    log::warn!(
-                        "Call exceeded compute credits (link_mutations, additions={}): {:?}",
-                        additions_count,
-                        e
-                    );
-                }
-            }
+            charge_link_writes(
+                context,
+                additions_count,
+                format!("{} additions in perspective {}", additions_count, self.uuid),
+                "link_mutations",
+            )
+            .await;
         }
 
         Ok(decorated_diff)
@@ -2076,9 +2050,7 @@ impl PerspectiveInstance {
         batch_id: Option<String>,
         context: &AgentContext,
     ) -> Result<DecoratedLinkExpression, AnyError> {
-        if let Some(ref email) = context.user_email {
-            crate::billing::check_compute_credits(email)?;
-        }
+        check_link_credits(context).await?;
         let handle = self.persisted.lock().await.clone();
 
         // Query SPARQL store
@@ -2187,16 +2159,13 @@ impl PerspectiveInstance {
             }
 
             // Bill for the replacement link (1 addition; removal is free)
-            if let Some(ref email) = context.user_email {
-                if let Err(e) = crate::billing::bill_compute(
-                    email,
-                    crate::billing::get_link_write_rate(),
-                    "link_write",
-                    Some(&format!("1 link update in perspective {}", handle.uuid)),
-                ) {
-                    log::warn!("Call exceeded compute credits (update_link): {:?}", e);
-                }
-            }
+            charge_link_writes(
+                context,
+                1,
+                format!("1 link update in perspective {}", handle.uuid),
+                "update_link",
+            )
+            .await;
 
             Ok(decorated_new_link_expression)
         }
@@ -9057,6 +9026,51 @@ mod tests {
             err.to_string().contains("query cancelled"),
             "expected cancellation marker in error, got: {}",
             err
+        );
+    }
+}
+
+/// Refuse a link write when the account has no credits left.
+async fn check_link_credits(context: &AgentContext) -> Result<(), AnyError> {
+    if let Some(email) = &context.user_email {
+        if !crate::services::builtins::billing::check_user("perspectives", email).await {
+            return Err(deno_core::anyhow::anyhow!("Insufficient compute credits"));
+        }
+    }
+    Ok(())
+}
+
+/// Charge `count` link writes at the `link write` host rate. The write has
+/// happened, so a billing failure is logged, not returned.
+async fn charge_link_writes(
+    context: &AgentContext,
+    count: usize,
+    summary: String,
+    operation: &str,
+) {
+    let Some(email) = &context.user_email else {
+        return;
+    };
+    if count == 0 {
+        return;
+    }
+    let rate = crate::services::builtins::billing::rate("link write")
+        .await
+        .unwrap_or(0.0);
+    if let Err(e) = crate::services::builtins::billing::charge_user(
+        "perspectives",
+        email,
+        count as f64 * rate,
+        "link_write",
+        Some(summary),
+    )
+    .await
+    {
+        log::warn!(
+            "Call exceeded compute credits ({}, count={}): {}",
+            operation,
+            count,
+            e.message
         );
     }
 }

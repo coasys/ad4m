@@ -17,7 +17,7 @@
 //!     test will fail — that's the guard.
 //!
 //! Chat/completions (streaming and non-streaming) and embeddings are billed
-//! by `AIService` via host_rates (`crate::billing::bill_ai_operation`), not
+//! by `AIService` via host_rates (`billing.ledger` `chargeUsage`), not
 //! here.
 
 /// TTS speech: characters synthesised / 1000, floored at 1.0 so any

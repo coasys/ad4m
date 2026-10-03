@@ -43,7 +43,6 @@ use super::types::{
 use crate::ai_service::providers::{ChatReply, ChatTurn, ChatUsage, ToolSpec};
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::check_compute_credits;
 
 /// Answer a tool-carrying chat request through the model's native tool calling.
 pub async fn chat_with_native_tools(
@@ -55,8 +54,7 @@ pub async fn chat_with_native_tools(
     stream: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
     if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     if let Some(name) = duplicate_tool_name(tools) {

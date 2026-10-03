@@ -6,7 +6,7 @@ pub const AI_INFERENCE: &str = "QmzSYwdqSUGL7CX8UvDsBq7KhSZmPQR6J5UTHgCTGfsjHpPw
 /// `ai.models` 1.0.0
 pub const AI_MODELS: &str = "QmzSYwdbMi5oLkCZzMmTwkyQxgwsKy32wL9v7SKLwjNVRfSmtMs";
 /// `billing.ledger` 1.0.0
-pub const BILLING_LEDGER: &str = "QmzSYwdjWEBUmS8ZgwnJV6CMpJGo7FwP66QoSxX1x9443TjyZ18";
+pub const BILLING_LEDGER: &str = "QmzSYwdmKJosawwEX9qLmSeigA1URfHprHeJTnx55S8iJWnXLF8";
 /// `billing.settlement` 1.0.0
 pub const BILLING_SETTLEMENT: &str = "QmzSYwdggq9mdxovvQvuZRDkhpyoYaXoUZfCHUPUwZUHmFMXvvh";
 /// `unyt.wallet` 1.0.0

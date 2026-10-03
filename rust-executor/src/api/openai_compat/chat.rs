@@ -43,7 +43,6 @@ use super::types::{
 use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::check_compute_credits;
 use crate::types::ModelType;
 
 /// `POST /v1/chat/completions` — handles both streaming (`stream: true`)
@@ -154,8 +153,7 @@ pub async fn completions(
     let messages = vec![("user".to_string(), prompt)];
 
     if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     let service = AIService::global_instance()
@@ -199,8 +197,7 @@ async fn chat_oneshot(
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
     if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     let service = AIService::global_instance()
@@ -272,8 +269,7 @@ async fn chat_stream(
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
     if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     let service = AIService::global_instance()

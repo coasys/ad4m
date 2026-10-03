@@ -16,7 +16,6 @@ use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, Embedding
 use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::check_compute_credits;
 use crate::types::ModelType;
 
 pub async fn embeddings(
@@ -46,8 +45,7 @@ pub async fn embeddings(
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+        super::require_credits(&email).await?;
     }
 
     let service = AIService::global_instance()

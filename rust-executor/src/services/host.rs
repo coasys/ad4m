@@ -145,6 +145,46 @@ impl ServiceHost {
         self.events.subscribe()
     }
 
+    /// In-process subscription to one service event type (`<hash>.<event>`),
+    /// optionally narrowed to one scope value. Yields the payloads; the
+    /// executor's own consumers hold no grants, so nothing is filtered by
+    /// owner.
+    pub fn watch(
+        &self,
+        event_type: String,
+        scope: Option<String>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut events = self.events.subscribe();
+        let field = self.registry().event_scope(&event_type);
+        tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(e) if e.event_type == event_type => {
+                        let Ok(payload) = serde_json::from_str::<Value>(&e.wire) else {
+                            continue;
+                        };
+                        let in_scope = match (&scope, &field) {
+                            (Some(want), Some(f)) => {
+                                payload.get(f).and_then(Value::as_str) == Some(want.as_str())
+                            }
+                            _ => true,
+                        };
+                        if in_scope && tx.send(payload).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        log::warn!("service event watch on {} lagged by {}", event_type, n)
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        rx
+    }
+
     /// Register an interface version (see [`Registry::register_interface`]).
     pub fn register_interface(
         &self,

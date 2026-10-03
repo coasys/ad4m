@@ -1451,7 +1451,8 @@ impl AIService {
             &resolved,
             prompt_tokens,
             completion_tokens,
-        );
+        )
+        .await;
 
         Ok(PromptResult {
             text,
@@ -1545,7 +1546,8 @@ impl AIService {
             &resolved,
             prompt_tokens,
             completion_tokens,
-        );
+        )
+        .await;
 
         Ok(reply)
     }
@@ -1737,7 +1739,8 @@ impl AIService {
             &model_id,
             prompt_tokens,
             completion_tokens,
-        );
+        )
+        .await;
 
         Ok(PromptResult {
             text,
@@ -1766,7 +1769,8 @@ impl AIService {
                 model_id,
                 pr.prompt_tokens,
                 pr.completion_tokens,
-            );
+            )
+            .await;
         }
         let _ = done_tx.send(result);
     }
@@ -1777,7 +1781,7 @@ impl AIService {
     /// length estimate that estimate_token_count() computes (chars/4).
     /// This mirrors what the transcription worker does with word_count,
     /// so every AI billing path routes through the same shape.
-    fn bill_prompt_if_authed(
+    async fn bill_prompt_if_authed(
         auth_token: Option<&str>,
         model_id: &str,
         prompt_tokens: usize,
@@ -1794,17 +1798,23 @@ impl AIService {
         // Ignore result: rate=0 no-ops, InsufficientCredits is logged
         // inside bill_ai_operation. Prompt has already run so we don't
         // want to fail the caller on a bookkeeping-only issue.
-        let _ = crate::billing::bill_ai_operation(
+        // The prompt has run: a billing failure is logged, not returned.
+        if let Err(e) = crate::services::builtins::billing::charge_usage(
+            "ai",
             &email,
             model_id,
             "ai_prompt",
-            total_tokens,
+            total_tokens as u64,
             "tokens",
-        );
+        )
+        .await
+        {
+            log::warn!("ai_prompt: charging {} failed: {}", email, e.message);
+        }
     }
 
     /// Shared post-compute billing hook for embed paths.
-    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
+    async fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
         let Some(token) = auth_token else {
             return;
         };
@@ -1812,13 +1822,18 @@ impl AIService {
         else {
             return;
         };
-        let _ = crate::billing::bill_ai_operation(
+        if let Err(e) = crate::services::builtins::billing::charge_usage(
+            "ai",
             &email,
             model_id,
             "ai_embedding",
-            token_count,
+            token_count as u64,
             "tokens",
-        );
+        )
+        .await
+        {
+            log::warn!("ai_embedding: charging {} failed: {}", email, e.message);
+        }
     }
 
     // -------------------------------------
@@ -1919,7 +1934,7 @@ impl AIService {
         );
 
         // Bill via the shared host_rates helper.
-        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count).await;
 
         Ok(EmbedResult {
             embeddings,
@@ -2160,44 +2175,21 @@ impl AIService {
                             let word_count = text.split_whitespace().count();
                             if word_count > 0 {
                                 if let Some(ref email) = billing_email {
-                                    let rate_key =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_model(billing_model_id.clone())
-                                        })
-                                        .ok()
-                                        .flatten()
-                                        .map(|m| m.name)
-                                        .unwrap_or_else(|| billing_model_id.clone());
-
-                                    let rate =
-                                        crate::db::Ad4mDb::with_global_instance(|db| {
-                                            db.get_host_rate(&rate_key)
-                                        })
-                                        .ok()
-                                        .flatten()
-                                        .unwrap_or(0.0);
-                                    let cost = word_count as f64 * rate;
-                                    match crate::billing::bill_compute(
+                                    match crate::services::builtins::billing::charge_usage(
+                                        "ai",
                                         email,
-                                        cost,
+                                        &billing_model_id,
                                         "ai_transcription",
-                                        Some(&format!(
-                                            "{} words (model: {})",
-                                            word_count, billing_model_id,
-                                        )),
-                                    ) {
-                                        Err(
-                                            crate::billing::BillingError::InsufficientCredits,
-                                        ) => {
+                                        word_count as u64,
+                                        "words",
+                                    )
+                                    .await
+                                    {
+                                        Ok(_) => {}
+                                        Err(e) if e.data.as_ref().and_then(|d| d.get("name")).and_then(|n| n.as_str()) == Some("InsufficientCredits") => {
                                             log::warn!("Transcription: insufficient credits for user {} — delivering already-computed text, future feeds will be rejected", email);
                                         }
-                                        Err(e) => {
-                                            log::warn!(
-                                                "Transcription billing failed: {:?}",
-                                                e
-                                            );
-                                        }
-                                        Ok(()) => {}
+                                        Err(e) => log::warn!("Transcription billing failed: {}", e.message),
                                     }
                                 }
                             }

@@ -131,20 +131,6 @@ impl IntoResponse for OpenAIError {
     }
 }
 
-impl From<crate::billing::BillingError> for OpenAIError {
-    fn from(e: crate::billing::BillingError) -> Self {
-        match e {
-            crate::billing::BillingError::InsufficientCredits => {
-                OpenAIError::insufficient_quota("Insufficient compute credits")
-            }
-            other => {
-                log::error!("Billing operation failed: {other}");
-                OpenAIError::internal("Billing operation failed")
-            }
-        }
-    }
-}
-
 impl From<JsonRejection> for OpenAIError {
     /// Map axum's Json extractor rejection to the OpenAI 400 envelope.
     /// Without this, malformed / missing-field JSON returns axum's

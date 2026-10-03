@@ -115,6 +115,36 @@ pub fn capability(builtin: Builtin, action: &str) -> Capability {
     service_capability(&doc.module_id(), &doc.compat(), action)
 }
 
+/// Call a built-in service method in-process, through the host (grants,
+/// validation and metering apply), and decode the result.
+pub async fn call<R: DeserializeOwned>(
+    builtin: Builtin,
+    method: &str,
+    params: Value,
+    ctx: &CallContext,
+) -> Result<R, crate::api::ws_handler::WsRpcError> {
+    let value = super::host::host()
+        .dispatch(
+            &format!("{}.{}", document(builtin).hash, method),
+            params,
+            ctx.clone(),
+        )
+        .await?;
+    serde_json::from_value(value).map_err(|e| {
+        crate::api::ws_handler::WsRpcError::internal(format!(
+            "{} {} answered outside its type: {}",
+            builtin.file_stem(),
+            method,
+            e
+        ))
+    })
+}
+
+/// The wire type of a built-in event (`<hash>.<event>`).
+pub fn event_type(builtin: Builtin, event: &str) -> String {
+    format!("{}.{}", document(builtin).hash, event)
+}
+
 fn manifest(name: &str, implements: &[Builtin], requires: Vec<Requirement>) -> BuiltinManifest {
     BuiltinManifest {
         name: name.into(),

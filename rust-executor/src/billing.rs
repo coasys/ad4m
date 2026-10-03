@@ -100,12 +100,26 @@ pub mod test_seam {
 
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
-/// Look up the link write rate from the host_rates DB table, falling back to the default.
-pub fn get_link_write_rate() -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate("link write"))
+/// Host rates with an executor default when the operator set none.
+const DEFAULT_RATES: &[(&str, f64)] = &[("link write", DEFAULT_LINK_WRITE_RATE)];
+
+/// The rate of `key` from the host_rates table, else its default; `None`
+/// when neither exists.
+pub fn host_rate(key: &str) -> Option<f64> {
+    Ad4mDb::with_global_instance(|db| db.get_host_rate(key))
         .ok()
         .flatten()
-        .unwrap_or(DEFAULT_LINK_WRITE_RATE)
+        .or_else(|| {
+            DEFAULT_RATES
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, r)| *r)
+        })
+}
+
+/// Look up the link write rate from the host_rates DB table, falling back to the default.
+pub fn get_link_write_rate() -> f64 {
+    host_rate("link write").unwrap_or(DEFAULT_LINK_WRITE_RATE)
 }
 
 /// Bill a single AI compute operation using the shared `host_rates` table.
