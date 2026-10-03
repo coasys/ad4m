@@ -112,7 +112,7 @@ pub fn capability(builtin: Builtin, action: &str) -> Capability {
         doc.doc.name,
         action
     );
-    service_capability(doc.module_id(), &doc.compat(), action)
+    service_capability(&doc.module_id(), &doc.compat(), action)
 }
 
 fn manifest(name: &str, implements: &[Builtin], requires: Vec<Requirement>) -> BuiltinManifest {
