@@ -2,9 +2,13 @@
 
 export type ServiceInterfaceSummary = { hash: string, 
 /**
- * `<authorDID>/<moduleHash>`
+ * The module: its genesis hash.
  */
-moduleId: string, name: string, version: string, 
+moduleId: string, 
+/**
+ * The DID that signs every version of the module.
+ */
+author: string, name: string, version: string, 
 /**
  * The compatibility line: the major, or `0.<minor>`.
  */

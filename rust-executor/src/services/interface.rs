@@ -2,8 +2,10 @@
 //!
 //! An interface version is one JSON document. Its hash is the AD4M content
 //! address of its JCS canonical form. A module (all versions of one
-//! interface) is identified by `<authorDID>/<moduleHash>`, where the
-//! moduleHash is the hash of the module's first version (its genesis).
+//! interface) is identified by the hash of its first version (its genesis).
+//! That hash covers the genesis `author`, so the module ID pins its author:
+//! resolve the genesis to learn it, as a neighbourhood URL resolves to its
+//! link language. Every later version must keep that author.
 
 use std::collections::BTreeMap;
 
@@ -182,14 +184,9 @@ impl InterfaceDocument {
         })
     }
 
-    /// The hash of the module's genesis version.
-    pub fn module_hash(&self) -> &str {
+    /// The module ID: the genesis hash, which also fixes the author.
+    pub fn module_id(&self) -> &str {
         self.doc.module.as_deref().unwrap_or(&self.hash)
-    }
-
-    /// `<authorDID>/<moduleHash>`.
-    pub fn module_id(&self) -> String {
-        format!("{}/{}", self.doc.author, self.module_hash())
     }
 
     pub fn is_genesis(&self) -> bool {
@@ -334,8 +331,8 @@ fn validate_structure(doc: &ServiceInterface) -> Result<(), String> {
         }
     }
     if let Some(f) = &doc.fork_of {
-        if !f.starts_with("did:") || !f.contains('/') {
-            return Err("`forkOf` must be a module ID `<authorDID>/<moduleHash>`".into());
+        if !is_hash(f) {
+            return Err("`forkOf` must be a module ID (a genesis hash)".into());
         }
     }
     for name in doc.types.keys() {
@@ -548,8 +545,7 @@ pub(crate) mod tests {
         let b = InterfaceDocument::parse(reordered).unwrap();
         assert_eq!(a.hash, b.hash);
         assert!(is_hash(&a.hash));
-        assert_eq!(a.module_hash(), a.hash);
-        assert_eq!(a.module_id(), format!("did:key:z6Mkx/{}", a.hash));
+        assert_eq!(a.module_id(), a.hash);
         assert_eq!(a.compat(), "1");
     }
 

@@ -98,7 +98,7 @@ impl ServiceHost {
         self.registry.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Where service data directories live (`<root>/<authorDID>/<moduleHash>/`).
+    /// Where service data directories live (`<root>/<moduleId>/`).
     pub fn set_data_root(&self, root: std::path::PathBuf) {
         *self.data_root.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
     }
@@ -160,11 +160,7 @@ impl ServiceHost {
                 ));
             }
             let (service, grants) = (i.service.clone(), i.grants.clone());
-            let (author, module) = i
-                .module_id
-                .split_once('/')
-                .map(|(a, m)| (a.to_string(), m.to_string()))
-                .unwrap_or_default();
+            let module = i.module_id.clone();
             let root = self
                 .data_root
                 .read()
@@ -172,11 +168,7 @@ impl ServiceHost {
                 .clone()
                 .unwrap_or_else(default_data_root);
             reg.set_health(implementation, ServiceHealth::Starting);
-            (
-                service,
-                grants,
-                root.join(author.replace(':', "_")).join(module),
-            )
+            (service, grants, root.join(module))
         };
         std::fs::create_dir_all(&data_dir)
             .map_err(|e| format!("cannot create {}: {}", data_dir.display(), e))?;
@@ -303,11 +295,11 @@ impl ServiceHost {
             .expect("resolved method exists")
             .clone();
 
-        let needs = service_capability(&doc.module_id(), &doc.compat(), &def.action);
+        let needs = service_capability(doc.module_id(), &doc.compat(), &def.action);
         if !allowed(&ctx.grants, &needs) {
             return Err(WsRpcError::forbidden(format!(
                 "missing grant {}#{}",
-                service_domain(&doc.module_id(), &doc.compat()),
+                service_domain(doc.module_id(), &doc.compat()),
                 def.action
             )));
         }
@@ -474,7 +466,7 @@ impl ServiceHost {
             let _ = self.events.send(ServiceEvent {
                 event_type,
                 owner: owner.to_string(),
-                needs: service_capability(&doc.module_id(), &doc.compat(), &def.action),
+                needs: service_capability(doc.module_id(), &doc.compat(), &def.action),
                 wire: Value::Object(wire).to_string(),
             });
         }

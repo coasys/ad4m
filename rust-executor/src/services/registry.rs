@@ -114,7 +114,7 @@ impl Registry {
                 ));
             }
         }
-        let module_id = doc.module_id();
+        let module_id = doc.module_id().to_string();
         if let Some(prev_hash) = &doc.doc.previous {
             let prev = self
                 .interfaces
@@ -125,6 +125,11 @@ impl Registry {
                     "previous version {} belongs to another module",
                     prev_hash
                 ));
+            }
+            // The module ID is the genesis hash alone, so only this keeps a
+            // module in its author's hands.
+            if prev.doc.author != doc.doc.author {
+                return Err(format!("previous version {} has another author", prev_hash));
             }
             check_successor(prev, &doc)?;
         }
@@ -189,6 +194,23 @@ impl Registry {
         {
             return Err("`module` and `previous` must both be hashes, or both absent".into());
         }
+        // As for interfaces: a later version continues a registered one of
+        // the same module and author.
+        if let (Some(module), Some(prev_hash)) = (&manifest.module, &manifest.previous) {
+            let prev = self
+                .implementations
+                .get(prev_hash)
+                .ok_or_else(|| format!("previous version {} is not registered", prev_hash))?;
+            if &prev.module_id != module {
+                return Err(format!(
+                    "previous version {} belongs to another module",
+                    prev_hash
+                ));
+            }
+            if prev.manifest.author != manifest.author {
+                return Err(format!("previous version {} has another author", prev_hash));
+            }
+        }
         if manifest.implements.is_empty() {
             return Err("an implementation must implement at least one interface".into());
         }
@@ -212,14 +234,10 @@ impl Registry {
                 if !doc.doc.actions.contains_key(a) {
                     return Err(format!("{} has no action `{}`", r.interface, a));
                 }
-                grants.push(service_capability(&doc.module_id(), &doc.compat(), a));
+                grants.push(service_capability(doc.module_id(), &doc.compat(), a));
             }
         }
-        let module_id = format!(
-            "{}/{}",
-            manifest.author,
-            manifest.module.clone().unwrap_or_else(|| hash.clone())
-        );
+        let module_id = manifest.module.clone().unwrap_or_else(|| hash.clone());
         let order = self.next_order;
         self.next_order += 1;
         self.implementations.insert(
@@ -304,7 +322,7 @@ impl Registry {
             ));
         }
         self.preferences.insert(
-            (user, doc.module_id(), doc.compat()),
+            (user, doc.module_id().to_string(), doc.compat()),
             implementation_module.to_string(),
         );
         Ok(())
@@ -371,7 +389,7 @@ impl Registry {
                 .cmp(&self.served_version(a, doc))
                 .then(a.order.cmp(&b.order))
         });
-        let key = |u: Option<String>| (u, doc.module_id(), doc.compat());
+        let key = |u: Option<String>| (u, doc.module_id().to_string(), doc.compat());
         let mut preferred = Vec::new();
         if doc.doc.selection == Selection::PerUser {
             if let Some(u) = user {
@@ -474,7 +492,7 @@ pub(crate) mod tests {
     ) -> Value {
         let mut raw = prev.raw.clone();
         raw["version"] = json!(version);
-        raw["module"] = json!(prev.module_hash());
+        raw["module"] = json!(prev.module_id());
         raw["previous"] = json!(prev.hash);
         mutate(&mut raw);
         raw
@@ -553,7 +571,42 @@ pub(crate) mod tests {
         assert!(reg
             .register_interface(foreign, None, true)
             .unwrap_err()
-            .contains("another module"));
+            .contains("another author"));
+    }
+
+    #[test]
+    fn implementation_chains_keep_module_and_author() {
+        let mut reg = Registry::default();
+        let d = reg
+            .register_interface(genesis("did:key:z6Mkx"), None, true)
+            .unwrap();
+        let g = reg
+            .register_implementation(manifest("g", vec![d.hash.clone()]), Arc::new(Noop))
+            .unwrap();
+        assert_eq!(reg.implementation(&g).unwrap().module_id, g);
+        let next = |author: &str, previous: &str| {
+            let mut m = manifest("g", vec![d.hash.clone()]);
+            m.author = author.into();
+            m.version = "1.1.0".into();
+            m.module = Some(g.clone());
+            m.previous = Some(previous.into());
+            m
+        };
+        let err = reg
+            .register_implementation(
+                next("did:key:z6Mkimpl", "QmUnknownUnknownUnknown"),
+                Arc::new(Noop),
+            )
+            .unwrap_err();
+        assert!(err.contains("not registered"), "{}", err);
+        let err = reg
+            .register_implementation(next("did:key:z6Mkother", &g), Arc::new(Noop))
+            .unwrap_err();
+        assert!(err.contains("another author"), "{}", err);
+        let v2 = reg
+            .register_implementation(next("did:key:z6Mkimpl", &g), Arc::new(Noop))
+            .unwrap();
+        assert_eq!(reg.implementation(&v2).unwrap().module_id, g);
     }
 
     #[test]

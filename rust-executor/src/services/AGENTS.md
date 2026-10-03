@@ -8,7 +8,7 @@ through.
 
 | File | What it owns |
 |---|---|
-| `interface.rs` | Interface document types, structural rules, JCS hash (`content_hash`, the language hash function), module ID `<authorDID>/<moduleHash>`, author signature check, `standalone_schema` (`#/types/X` → `$defs`) |
+| `interface.rs` | Interface document types, structural rules, JCS hash (`content_hash`, the language hash function), module ID (the genesis hash; it covers `author`, so successors must keep the genesis author, checked in `registry.rs`), author signature check, `standalone_schema` (`#/types/X` → `$defs`) |
 | `semver.rs` | PATCH / MINOR / MAJOR checks of a version against its `previous`. MINOR uses a conservative subset checker: it proves additive edits and refuses the rest |
 | `registry.rs` | Interfaces, module chains, implementations, preferences, resolution (`resolve`), event fan-out (`event_targets`) |
 | `host.rs` | `ServiceHost`: dispatch (resolve → grant → params schema → call → result check), start/stop/health, event emit, `service-stream-end` |

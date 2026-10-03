@@ -13,7 +13,7 @@ export type ServiceEventTable = Record<string, unknown>
 export interface ServiceDefinition<M extends ServiceMethodTable = ServiceMethodTable, E extends ServiceEventTable = ServiceEventTable> {
     /** Interface version hash: the wire prefix `<hash>.<method>`. */
     hash: string
-    /** `<authorDID>/<moduleHash>` */
+    /** The module ID: its genesis hash (which fixes the author). */
     moduleId: string
     name: string
     version: string

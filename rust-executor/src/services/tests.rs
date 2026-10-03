@@ -277,7 +277,12 @@ async fn dispatch_answers_with_protocol_codes() {
         .await
         .unwrap_err()
         .contains("already started"));
-    let module = host.registry().interface(&iface).unwrap().module_id();
+    let module = host
+        .registry()
+        .interface(&iface)
+        .unwrap()
+        .module_id()
+        .to_string();
     let all = vec![ALL_CAPABILITY.clone()];
     let say = format!("{}.say", iface);
 
@@ -406,7 +411,12 @@ async fn dispatch_answers_with_protocol_codes() {
 async fn nested_calls_need_every_layer() {
     let host = ServiceHost::new();
     let (iface, _) = echo_on(&host, "did:key:z6MkNested").await;
-    let module = host.registry().interface(&iface).unwrap().module_id();
+    let module = host
+        .registry()
+        .interface(&iface)
+        .unwrap()
+        .module_id()
+        .to_string();
     // A caller service that requires SAY on echo, and one that requires nothing.
     let with = host
         .register_builtin(
@@ -491,7 +501,12 @@ async fn result_outside_contract_is_logged_for_builtins() {
 async fn events_reach_only_their_owner_with_the_grant() {
     let host = ServiceHost::new();
     let (iface, implementation) = echo_on(&host, "did:key:z6MkEvents").await;
-    let module = host.registry().interface(&iface).unwrap().module_id();
+    let module = host
+        .registry()
+        .interface(&iface)
+        .unwrap()
+        .module_id()
+        .to_string();
     let mut rx = host.subscribe_events();
     host.emit_event(
         &implementation,
@@ -600,7 +615,12 @@ impl Socket {
 #[tokio::test]
 async fn round_trip_over_the_rpc_socket() {
     let (iface, implementation) = echo_on(&host(), "did:key:z6MkSocket").await;
-    let module = host().registry().interface(&iface).unwrap().module_id();
+    let module = host()
+        .registry()
+        .interface(&iface)
+        .unwrap()
+        .module_id()
+        .to_string();
     let mut s = Socket::open(vec![
         grant(format!("service:{}@1", module), &["SAY"]),
         crate::agent::capabilities::AGENT_READ_CAPABILITY.clone(),

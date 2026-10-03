@@ -31,8 +31,10 @@ pub struct ServicesDescribeParams {
 #[ts(export)]
 pub struct ServiceInterfaceSummary {
     pub hash: String,
-    /// `<authorDID>/<moduleHash>`
+    /// The module: its genesis hash.
     pub module_id: String,
+    /// The DID that signs every version of the module.
+    pub author: String,
     pub name: String,
     pub version: String,
     /// The compatibility line: the major, or `0.<minor>`.
@@ -48,7 +50,9 @@ pub struct ServiceInterfaceSummary {
 #[ts(export)]
 pub struct ServiceImplementationSummary {
     pub hash: String,
+    /// The implementation module: its genesis hash.
     pub module_id: String,
+    pub author: String,
     pub name: String,
     pub version: String,
     /// Interface version hashes.
@@ -106,7 +110,8 @@ pub(crate) fn describe(
         })
         .map(|d| ServiceInterfaceSummary {
             hash: d.hash.clone(),
-            module_id: d.module_id(),
+            module_id: d.module_id().to_string(),
+            author: d.doc.author.clone(),
             name: d.doc.name.clone(),
             version: d.doc.version.clone(),
             compat: d.compat(),
@@ -116,7 +121,7 @@ pub(crate) fn describe(
                 .doc
                 .actions
                 .keys()
-                .filter(|a| allowed(grants, &service_capability(&d.module_id(), &d.compat(), a)))
+                .filter(|a| allowed(grants, &service_capability(d.module_id(), &d.compat(), a)))
                 .cloned()
                 .collect(),
         })
@@ -130,6 +135,7 @@ pub(crate) fn describe(
         .map(|i| ServiceImplementationSummary {
             hash: i.hash.clone(),
             module_id: i.module_id.clone(),
+            author: i.manifest.author.clone(),
             name: i.manifest.name.clone(),
             version: i.manifest.version.clone(),
             implements: i.manifest.implements.clone(),
