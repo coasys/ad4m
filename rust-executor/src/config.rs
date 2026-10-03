@@ -32,7 +32,10 @@ pub fn get_global_config() -> Ad4mConfig {
 
 /// The global Ad4mConfig, or `None` before the executor set one (tests).
 pub fn try_get_global_config() -> Option<Ad4mConfig> {
-    GLOBAL_AD4M_CONFIG.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    GLOBAL_AD4M_CONFIG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Set the global SMTP config (called during server initialization)

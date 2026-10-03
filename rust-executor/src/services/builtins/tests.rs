@@ -142,7 +142,7 @@ async fn builtins_register_and_start_once() {
     assert!(reg.implementations().all(|i| i.is_running()));
     for (_, doc) in documents() {
         assert!(reg.interface(&doc.hash).is_some());
-        assert!(doc.module_id().starts_with(super::AUTHOR));
+        assert_eq!(doc.doc.author, super::AUTHOR);
     }
 }
 
