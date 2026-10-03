@@ -771,7 +771,12 @@ async fn watch_ends_when_its_reader_is_gone() {
 async fn stream_without_agent_ends_for_the_executor_only() {
     let host = ServiceHost::new();
     let (iface, _) = echo_on(&host, "did:key:z6MkStreamNoAgent").await;
-    let module = host.registry().interface(&iface).unwrap().module_id();
+    let module = host
+        .registry()
+        .interface(&iface)
+        .unwrap()
+        .module_id()
+        .to_string();
     let mut all = host.subscribe_events();
     let mut chunks = host.watch_stream(format!("{}.count-tick", iface), "s-x".into());
     let mut call = ctx(
