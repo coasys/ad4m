@@ -133,6 +133,10 @@ import type { RuntimeUnytSendHotParams } from "./RuntimeUnytSendHotParams";
 import type { RuntimeUnytWalletHistoryParams } from "./RuntimeUnytWalletHistoryParams";
 import type { RuntimeUpdateNotificationParams } from "./RuntimeUpdateNotificationParams";
 import type { SentMessage } from "./SentMessage";
+import type { ServicesDescribeParams } from "./ServicesDescribeParams";
+import type { ServicesDescription } from "./ServicesDescription";
+import type { ServicesInterfaceParams } from "./ServicesInterfaceParams";
+import type { ServicesSetPreferenceParams } from "./ServicesSetPreferenceParams";
 import type { SetHostRatesRequest } from "./SetHostRatesRequest";
 import type { SetHotWalletAddressRequest } from "./SetHotWalletAddressRequest";
 import type { SetMultiUserRequest } from "./SetMultiUserRequest";
@@ -317,6 +321,9 @@ export interface RpcMethods {
   "runtime.unytWalletHistory": { params: RuntimeUnytWalletHistoryParams; result: null };
   "runtime.updateNotification": { params: RuntimeUpdateNotificationParams; result: boolean };
   "runtime.verifySignature": { params: VerifySignatureRequest; result: boolean };
+  "services.describe": { params: ServicesDescribeParams; result: ServicesDescription };
+  "services.interface": { params: ServicesInterfaceParams; result: JsonValue };
+  "services.setPreference": { params: ServicesSetPreferenceParams; result: boolean };
   "user.create": { params: CreateUserRequest; result: UserCreationResult };
   "user.credits": { params: UsersSetCreditsParams; result: boolean };
   "user.emailTest": { params: UsersEmailTestParams; result: UsersEmailTestResult };
@@ -397,6 +404,8 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "runtime.unytWalletBalance",
   "runtime.unytWalletHistory",
   "runtime.verifySignature",
+  "services.describe",
+  "services.interface",
   "user.list",
   "user.multiUserEnabled",
   "user.wallet",

@@ -134,6 +134,12 @@ impl TestSigner {
         }
     }
 
+    /// Sign a string the way `agent.signStringHex` does; verifies with
+    /// [`verify_string_signed_by_did`].
+    pub fn sign_string_hex(&self, data: &str) -> String {
+        hex::encode(self.keypair.sign(&hash_message(&data.to_string())))
+    }
+
     /// Sign `data` now, producing the same `Expression` shape the wallet path
     /// produces.
     pub fn sign<T: Serialize>(&self, data: T) -> Expression<T> {

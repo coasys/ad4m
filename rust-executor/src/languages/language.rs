@@ -22,7 +22,7 @@
 //! so callers can call freely without per-call guards.
 
 use super::byte_array::ByteArray;
-use super::capability::{get_capabilities, Capability};
+use super::feature::{get_features, LanguageFeature};
 use super::LanguageController;
 use crate::{
     types::{OnlineAgent, PerspectiveExpression},
@@ -36,7 +36,7 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Language {
     address: String,
-    capabilities: Arc<HashSet<Capability>>,
+    capabilities: Arc<HashSet<LanguageFeature>>,
 }
 
 fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
@@ -55,7 +55,7 @@ fn parse_revision(js_result: String) -> Result<Option<String>, AnyError> {
 // ---------------------------------------------------------------------------
 impl Language {
     pub fn new(address: String) -> Self {
-        let capabilities = get_capabilities(&address);
+        let capabilities = get_features(&address);
         Self {
             address,
             capabilities,
@@ -72,7 +72,7 @@ impl Language {
     /// stored in the global capability registry; `Language::new` reads from
     /// that registry, so a language whose `register_callbacks` has not yet
     /// run will report an empty capability set.
-    pub fn has(&self, cap: Capability) -> bool {
+    pub fn has(&self, cap: LanguageFeature) -> bool {
         self.capabilities.contains(&cap)
     }
 }
@@ -84,7 +84,7 @@ impl Language {
 // ---------------------------------------------------------------------------
 impl Language {
     pub async fn commit(&mut self, diff: PerspectiveDiff) -> Result<Option<String>, AnyError> {
-        if !self.has(Capability::PerspectiveCommit) {
+        if !self.has(LanguageFeature::PerspectiveCommit) {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
@@ -113,7 +113,7 @@ impl Language {
 // ---------------------------------------------------------------------------
 impl Language {
     pub async fn sync(&mut self) -> Result<(), AnyError> {
-        if !self.has(Capability::PerspectiveSync) {
+        if !self.has(LanguageFeature::PerspectiveSync) {
             return Ok(());
         }
         let controller = LanguageController::global_instance();
@@ -127,7 +127,7 @@ impl Language {
     }
 
     pub async fn current_revision(&mut self) -> Result<Option<String>, AnyError> {
-        if !self.has(Capability::PerspectiveCurrentRevision) {
+        if !self.has(LanguageFeature::PerspectiveCurrentRevision) {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
@@ -141,7 +141,7 @@ impl Language {
     }
 
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
-        if !self.has(Capability::PerspectiveRender) {
+        if !self.has(LanguageFeature::PerspectiveRender) {
             return Ok(None);
         }
         let controller = LanguageController::global_instance();
@@ -163,7 +163,7 @@ impl Language {
 // ---------------------------------------------------------------------------
 impl Language {
     pub async fn set_local_agents(&mut self, agents: Vec<String>) -> Result<(), AnyError> {
-        if !self.has(Capability::PeersLocal) {
+        if !self.has(LanguageFeature::PeersLocal) {
             return Ok(());
         }
         log::debug!("set_local_agents: agents: {:?}", agents);
@@ -181,7 +181,7 @@ impl Language {
     }
 
     pub async fn others(&mut self) -> Result<Vec<String>, AnyError> {
-        if !self.has(Capability::PeersRemote) {
+        if !self.has(LanguageFeature::PeersRemote) {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
@@ -206,17 +206,17 @@ impl Language {
         // A language has a "telepresence adapter" iff it advertises any
         // telepresence-* capability. Consult the cached set rather than
         // round-tripping through v8 on every call.
-        Ok(self.has(Capability::TelepresenceSetStatus)
-            || self.has(Capability::TelepresenceGetAgents)
-            || self.has(Capability::TelepresenceSendSignal)
-            || self.has(Capability::TelepresenceSendBroadcast))
+        Ok(self.has(LanguageFeature::TelepresenceSetStatus)
+            || self.has(LanguageFeature::TelepresenceGetAgents)
+            || self.has(LanguageFeature::TelepresenceSendSignal)
+            || self.has(LanguageFeature::TelepresenceSendBroadcast))
     }
 
     pub async fn set_online_status(
         &mut self,
         status: PerspectiveExpression,
     ) -> Result<(), AnyError> {
-        if !self.has(Capability::TelepresenceSetStatus) {
+        if !self.has(LanguageFeature::TelepresenceSetStatus) {
             return Ok(());
         }
         let controller = LanguageController::global_instance();
@@ -234,7 +234,7 @@ impl Language {
     }
 
     pub async fn get_online_agents(&mut self) -> Result<Vec<OnlineAgent>, AnyError> {
-        if !self.has(Capability::TelepresenceGetAgents) {
+        if !self.has(LanguageFeature::TelepresenceGetAgents) {
             return Ok(Vec::new());
         }
         let controller = LanguageController::global_instance();
@@ -253,7 +253,7 @@ impl Language {
         remote_agent_did: String,
         payload: PerspectiveExpression,
     ) -> Result<(), AnyError> {
-        if !self.has(Capability::TelepresenceSendSignal) {
+        if !self.has(LanguageFeature::TelepresenceSendSignal) {
             return Ok(());
         }
         let controller = LanguageController::global_instance();
@@ -274,7 +274,7 @@ impl Language {
     }
 
     pub async fn send_broadcast(&mut self, payload: PerspectiveExpression) -> Result<(), AnyError> {
-        if !self.has(Capability::TelepresenceSendBroadcast) {
+        if !self.has(LanguageFeature::TelepresenceSendBroadcast) {
             return Ok(());
         }
         let controller = LanguageController::global_instance();

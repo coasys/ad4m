@@ -1,0 +1,486 @@
+//! The service host: resolve → authorise → validate → dispatch
+//! → check result, and service events.
+
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::time::{Duration, Instant};
+
+use serde_json::{Map, Value};
+use tokio::sync::broadcast;
+
+use super::builtin::{
+    CallContext, Caller, EventEmitter, ServiceCaller, ServiceError, ServiceHealth,
+    ServiceImplementation, StartContext,
+};
+use super::capability::{allowed, service_capability, service_domain};
+use super::interface::{genesis_of, is_hash, InterfaceDocument};
+use super::registry::{BuiltinManifest, Registry, ResolveError};
+use crate::agent::capabilities::Capability;
+use crate::api::events_ws::events::SERVICE_STREAM_END;
+use crate::api::ws_handler::WsRpcError;
+use crate::types::RequestContext;
+
+/// Default deadline of a method call, and of a method marked `long`.
+const CALL_TIMEOUT: Duration = Duration::from_secs(60);
+const LONG_CALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// One service event on its way to the event sockets.
+#[derive(Debug, Clone)]
+pub struct ServiceEvent {
+    /// `<interface hash>.<event>`
+    pub event_type: String,
+    /// The agent DID the event belongs to.
+    pub owner: String,
+    /// The capability a socket needs to receive it.
+    pub needs: Capability,
+    /// The wire message: the payload plus `type`.
+    pub wire: String,
+}
+
+pub struct ServiceHost {
+    registry: RwLock<Registry>,
+    validators: Mutex<HashMap<String, Arc<jsonschema::Validator>>>,
+    events: broadcast::Sender<ServiceEvent>,
+    data_root: RwLock<Option<std::path::PathBuf>>,
+}
+
+static HOST: LazyLock<Arc<ServiceHost>> = LazyLock::new(ServiceHost::new);
+
+/// The executor's service host.
+pub fn host() -> Arc<ServiceHost> {
+    HOST.clone()
+}
+
+/// Dispatch `<hash>.<method>` on the executor's host.
+pub async fn dispatch(method: &str, params: Value, ctx: CallContext) -> Result<Value, WsRpcError> {
+    host().dispatch(method, params, ctx).await
+}
+
+/// `true` for a WS method name that addresses a service (`<hash>.<method>`).
+pub fn is_service_method(name: &str) -> bool {
+    name.split_once('.')
+        .is_some_and(|(h, m)| is_hash(h) && !m.is_empty())
+}
+
+/// `<app data>/ad4m/services`, next to the languages directory.
+fn default_data_root() -> std::path::PathBuf {
+    let languages = crate::utils::languages_directory();
+    match languages.parent() {
+        Some(ad4m) => ad4m.join("services"),
+        None => languages.join("services"),
+    }
+}
+
+fn not_found(msg: String) -> WsRpcError {
+    WsRpcError::not_found(msg)
+}
+
+fn unavailable(msg: String) -> WsRpcError {
+    WsRpcError::new(503, msg)
+}
+
+impl ServiceHost {
+    pub fn new() -> Arc<Self> {
+        let (events, _) = broadcast::channel(1024);
+        Arc::new(Self {
+            registry: RwLock::new(Registry::default()),
+            validators: Mutex::new(HashMap::new()),
+            events,
+            data_root: RwLock::new(None),
+        })
+    }
+
+    pub fn registry(&self) -> std::sync::RwLockReadGuard<'_, Registry> {
+        self.registry.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn registry_mut(&self) -> std::sync::RwLockWriteGuard<'_, Registry> {
+        self.registry.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Where service data directories live (`<root>/<genesis hash>/`).
+    pub fn set_data_root(&self, root: std::path::PathBuf) {
+        *self.data_root.write().unwrap_or_else(|e| e.into_inner()) = Some(root);
+    }
+
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ServiceEvent> {
+        self.events.subscribe()
+    }
+
+    /// Register an interface version (see [`Registry::register_interface`]).
+    pub fn register_interface(
+        &self,
+        raw: Value,
+        signature: Option<&str>,
+        trusted: bool,
+    ) -> Result<Arc<InterfaceDocument>, String> {
+        self.registry_mut()
+            .register_interface(raw, signature, trusted)
+    }
+
+    /// Register a built-in implementation. It stays stopped until [`Self::start`].
+    pub fn register_builtin(
+        &self,
+        manifest: BuiltinManifest,
+        service: Arc<dyn ServiceImplementation>,
+    ) -> Result<String, String> {
+        self.registry_mut()
+            .register_implementation(manifest, service)
+    }
+
+    /// Prefer the Service Language `module` for `interface`'s line, for
+    /// `user` or (None) as the executor default.
+    pub fn set_preference(
+        &self,
+        user: Option<String>,
+        interface: &str,
+        module: &str,
+    ) -> Result<(), String> {
+        self.registry_mut().set_preference(user, interface, module)
+    }
+
+    /// Start an implementation with `config`.
+    pub async fn start(
+        self: &Arc<Self>,
+        implementation: &str,
+        config: Value,
+    ) -> Result<(), String> {
+        let (service, grants, data_dir) = {
+            let mut reg = self.registry_mut();
+            let i = reg
+                .implementation(implementation)
+                .ok_or_else(|| format!("unknown implementation {}", implementation))?;
+            if matches!(
+                i.health,
+                ServiceHealth::Starting | ServiceHealth::Running | ServiceHealth::Degraded(_)
+            ) {
+                return Err(format!(
+                    "implementation {} is already started",
+                    implementation
+                ));
+            }
+            let (service, grants) = (i.service.clone(), i.grants.clone());
+            let module = genesis_of(&i.module_id).unwrap_or_default().to_string();
+            let root = self
+                .data_root
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .unwrap_or_else(default_data_root);
+            reg.set_health(implementation, ServiceHealth::Starting);
+            (service, grants, root.join(module))
+        };
+        std::fs::create_dir_all(&data_dir)
+            .map_err(|e| format!("cannot create {}: {}", data_dir.display(), e))?;
+        let ctx = StartContext {
+            config,
+            data_dir,
+            events: EventEmitter {
+                host: self.clone(),
+                implementation: implementation.to_string(),
+            },
+            services: ServiceCaller {
+                host: self.clone(),
+                implementation: implementation.to_string(),
+                grants,
+            },
+        };
+        match service.start(ctx).await {
+            Ok(()) => {
+                let health = service.health().await;
+                self.registry_mut().set_health(implementation, health);
+                Ok(())
+            }
+            Err(e) => {
+                self.registry_mut()
+                    .set_health(implementation, ServiceHealth::Failed(e.clone()));
+                Err(e)
+            }
+        }
+    }
+
+    /// Stop an implementation. Callers then get 503.
+    pub async fn stop(&self, implementation: &str) -> Result<(), String> {
+        let service = self
+            .registry()
+            .implementation(implementation)
+            .map(|i| i.service.clone())
+            .ok_or_else(|| format!("unknown implementation {}", implementation))?;
+        let result = service.stop().await;
+        self.registry_mut()
+            .set_health(implementation, ServiceHealth::Stopped);
+        result
+    }
+
+    /// Ask every running implementation for its health.
+    pub async fn refresh_health(&self) {
+        let services: Vec<(String, Arc<dyn ServiceImplementation>)> = self
+            .registry()
+            .implementations()
+            .filter(|i| i.is_running())
+            .map(|i| (i.hash.clone(), i.service.clone()))
+            .collect();
+        for (hash, service) in services {
+            let health = service.health().await;
+            self.registry_mut().set_health(&hash, health);
+        }
+    }
+
+    fn validator(
+        &self,
+        key: String,
+        doc: &InterfaceDocument,
+        schema: &Value,
+    ) -> Result<Arc<jsonschema::Validator>, WsRpcError> {
+        let mut cache = self.validators.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(v) = cache.get(&key) {
+            return Ok(v.clone());
+        }
+        let v = jsonschema::draft202012::new(&doc.standalone_schema(schema))
+            .map(Arc::new)
+            .map_err(|e| {
+                WsRpcError::internal(format!("schema of {} does not compile: {}", key, e))
+            })?;
+        cache.insert(key, v.clone());
+        Ok(v)
+    }
+
+    /// Build the context of a WS RPC call.
+    pub fn context_for_request(req: &RequestContext) -> CallContext {
+        let agent_did = req.user_did.clone().or_else(|| {
+            crate::agent::did_for_context(&crate::agent::AgentContext::from_auth_token(
+                req.auth_token.clone(),
+            ))
+            .ok()
+        });
+        CallContext {
+            caller: Caller::App,
+            origin: Vec::new(),
+            agent_did,
+            user: req.user_email.clone(),
+            grants: vec![req.capabilities.clone().unwrap_or_default()],
+            deadline: None,
+        }
+    }
+
+    /// Dispatch `<target>.<method>`: an interface version hash, or an
+    /// implementation hash to pin one build.
+    pub async fn dispatch(
+        &self,
+        full: &str,
+        params: Value,
+        mut ctx: CallContext,
+    ) -> Result<Value, WsRpcError> {
+        let (target, method) = full
+            .split_once('.')
+            .ok_or_else(|| not_found(format!("`{}` is not `<hash>.<method>`", full)))?;
+        let (doc, implementation, service, builtin) = {
+            let reg = self.registry();
+            let (doc, implementation) =
+                reg.resolve(target, method, ctx.user.as_deref())
+                    .map_err(|e| match e {
+                        ResolveError::NotFound(m) => not_found(m),
+                        ResolveError::Unavailable(m) => unavailable(m),
+                    })?;
+            let i = reg
+                .implementation(&implementation)
+                .expect("resolved implementation exists");
+            let builtin = i.manifest.runtime.get("kind").and_then(Value::as_str) == Some("builtin");
+            (doc, implementation, i.service.clone(), builtin)
+        };
+        let def = doc
+            .doc
+            .methods
+            .get(method)
+            .expect("resolved method exists")
+            .clone();
+
+        let needs = service_capability(&doc.module_id(), &doc.compat(), &def.action);
+        if !allowed(&ctx.grants, &needs) {
+            return Err(WsRpcError::forbidden(format!(
+                "missing grant {}#{}",
+                service_domain(&doc.module_id(), &doc.compat()),
+                def.action
+            )));
+        }
+
+        let params_validator =
+            self.validator(format!("{}.{}#params", doc.hash, method), &doc, &def.params)?;
+        if let Some(e) = params_validator.iter_errors(&params).next() {
+            return Err(WsRpcError::bad_request(format!(
+                "Invalid params for {}: {} at `{}`",
+                full,
+                e,
+                e.instance_path()
+            )));
+        }
+
+        let timeout = if def.long {
+            LONG_CALL_TIMEOUT
+        } else {
+            CALL_TIMEOUT
+        };
+        let deadline = Instant::now() + timeout;
+        let deadline = ctx.deadline.map_or(deadline, |d| d.min(deadline));
+        ctx.deadline = Some(deadline);
+        let stream_end = def.stream.as_ref().and_then(|_| {
+            let id = params.get("streamId").and_then(Value::as_str)?.to_string();
+            Some((id, ctx.agent_did.clone()?))
+        });
+        let outcome =
+            tokio::time::timeout_at(deadline.into(), service.call(method, params, ctx)).await;
+        // Sent after every chunk the service emitted, on the same path, so it
+        // reaches the socket after them (the reply may not).
+        if let Some((stream_id, owner)) = stream_end {
+            let _ = self.events.send(ServiceEvent {
+                event_type: SERVICE_STREAM_END.to_string(),
+                owner,
+                needs: needs.clone(),
+                wire: serde_json::json!({
+                    "type": SERVICE_STREAM_END,
+                    "streamId": stream_id,
+                    "method": full,
+                    "ok": matches!(outcome, Ok(Ok(_))),
+                })
+                .to_string(),
+            });
+        }
+        let result = match outcome {
+            Err(_) => {
+                return Err(WsRpcError::new(
+                    504,
+                    format!("{} passed its deadline", full),
+                ))
+            }
+            Ok(Err(ServiceError::Unavailable(m))) => return Err(unavailable(m)),
+            Ok(Err(ServiceError::Internal(m))) => return Err(WsRpcError::internal(m)),
+            Ok(Err(ServiceError::Method {
+                name,
+                data,
+                message,
+            })) => {
+                return Err(match def.errors.get(&name) {
+                    Some(e) => {
+                        if let (Some(schema), Some(value)) = (&e.data, &data) {
+                            let validator = self.validator(
+                                format!("{}.{}#error.{}", doc.hash, method, name),
+                                &doc,
+                                schema,
+                            )?;
+                            let violation = validator.iter_errors(value).next().map(|v| {
+                                format!(
+                                    "{} error `{}` data outside its contract: {}",
+                                    full, name, v
+                                )
+                            });
+                            if let Some(msg) = violation {
+                                if !builtin {
+                                    return Err(WsRpcError::new(502, msg));
+                                }
+                                log::error!("{}", msg);
+                            }
+                        }
+                        let mut d = match data {
+                            Some(Value::Object(m)) => m,
+                            Some(other) => Map::from_iter([("value".to_string(), other)]),
+                            None => Map::new(),
+                        };
+                        d.insert("name".into(), Value::String(name));
+                        WsRpcError::new(e.code, message).with_data(Value::Object(d))
+                    }
+                    None => {
+                        log::error!(
+                            "{} ({}) returned undeclared error `{}`",
+                            full,
+                            implementation,
+                            name
+                        );
+                        WsRpcError::internal(message)
+                    }
+                })
+            }
+            Ok(Ok(v)) => v,
+        };
+        if cfg!(debug_assertions) || !builtin {
+            let result_validator =
+                self.validator(format!("{}.{}#result", doc.hash, method), &doc, &def.result)?;
+            let violation = result_validator.iter_errors(&result).next().map(|e| {
+                format!(
+                    "{} returned a result outside its contract: {} at `{}`",
+                    full,
+                    e,
+                    e.instance_path()
+                )
+            });
+            if let Some(msg) = violation {
+                if builtin {
+                    log::error!("{}", msg);
+                } else {
+                    return Err(WsRpcError::new(502, msg));
+                }
+            }
+        }
+        Ok(result)
+    }
+
+    /// Emit an implementation's event. The payload is checked
+    /// against the newest implemented version that declares the event, then
+    /// goes out once per compatible version's event type.
+    pub async fn emit_event(
+        &self,
+        implementation: &str,
+        event: &str,
+        owner: &str,
+        payload: Value,
+    ) -> Result<(), String> {
+        let targets = self.registry().event_targets(implementation, event);
+        let newest = targets
+            .iter()
+            .max_by(|a, b| a.version.cmp(&b.version))
+            .ok_or_else(|| format!("{} declares no event `{}`", implementation, event))?
+            .clone();
+        let def = &newest.doc.events[event];
+        let validator = self
+            .validator(
+                format!("{}.{}#event", newest.hash, event),
+                &newest,
+                &def.payload,
+            )
+            .map_err(|e| e.message)?;
+        if let Some(e) = validator.iter_errors(&payload).next() {
+            return Err(format!(
+                "event `{}` payload outside its contract: {} at `{}`",
+                event,
+                e,
+                e.instance_path()
+            ));
+        }
+        let Value::Object(fields) = payload else {
+            return Err("event payload must be an object".into());
+        };
+        for doc in targets {
+            let def = &doc.doc.events[event];
+            let event_type = format!("{}.{}", doc.hash, event);
+            let mut wire = fields.clone();
+            wire.insert("type".into(), Value::String(event_type.clone()));
+            let _ = self.events.send(ServiceEvent {
+                event_type,
+                owner: owner.to_string(),
+                needs: service_capability(&doc.module_id(), &doc.compat(), &def.action),
+                wire: Value::Object(wire).to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Should a socket of `did` holding `capabilities` (or an admin) get `event`?
+    pub fn delivers(
+        event: &ServiceEvent,
+        did: Option<&str>,
+        is_admin: bool,
+        capabilities: &[Capability],
+    ) -> bool {
+        (is_admin || did == Some(event.owner.as_str()))
+            && allowed(&[capabilities.to_vec()], &event.needs)
+    }
+}

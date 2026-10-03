@@ -1068,7 +1068,7 @@ impl PerspectiveInstance {
                 // perspective-sync capability, the sync loop has nothing
                 // to do — mark the perspective synced and stop polling
                 // so we don't burn a task slot on a no-op tick forever.
-                if !link_language.has(crate::languages::capability::Capability::PerspectiveSync) {
+                if !link_language.has(crate::languages::feature::LanguageFeature::PerspectiveSync) {
                     let _ = self
                         .update_perspective_state(PerspectiveState::Synced)
                         .await;
@@ -1299,7 +1299,7 @@ impl PerspectiveInstance {
             // (SDNA included) as a fresh batch of creates. Bail out and let the caller's
             // backoff loop retry once the link language is actually reachable again.
             let has_revision_capability = link_language
-                .has(crate::languages::capability::Capability::PerspectiveCurrentRevision);
+                .has(crate::languages::feature::LanguageFeature::PerspectiveCurrentRevision);
 
             // `Ok(Some(_))` here just means "we're clear to call render()" — it's reached
             // both when a revision genuinely exists and when we skip the check entirely

@@ -61,9 +61,11 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
         out.push_str(&format!("  \"{}\": {};\n", s.name, s.payload.name));
     }
     out.push_str("}\n\nexport type EventName = keyof EventMap;\n\n");
+    let perspective_scoped =
+        |s: &&EventSpec| s.scope == Some(crate::api::events_ws::PERSPECTIVE_SCOPE);
     let scoped: Vec<String> = specs
         .iter()
-        .filter(|s| s.scoped)
+        .filter(perspective_scoped)
         .map(|s| format!("\"{}\"", s.name))
         .collect();
     out.push_str("/** Events about one perspective: they carry `perspectiveUuid`. */\n");
@@ -76,10 +78,21 @@ pub(crate) fn render_events(specs: &[EventSpec]) -> String {
     out.push_str(&quoted(
         specs
             .iter()
-            .filter(|s| s.scoped)
+            .filter(perspective_scoped)
             .map(|s| s.name.to_string()),
     ));
-    out.push_str("]);\n");
+    out.push_str("]);\n\n");
+    out.push_str("/** Events scoped by another payload field: event → that field. */\n");
+    out.push_str("export const EVENT_SCOPE_FIELDS: Partial<Record<EventName, string>> = {\n");
+    for s in specs {
+        if let Some(field) = s
+            .scope
+            .filter(|f| *f != crate::api::events_ws::PERSPECTIVE_SCOPE)
+        {
+            out.push_str(&format!("  \"{}\": \"{}\",\n", s.name, field));
+        }
+    }
+    out.push_str("};\n");
     out
 }
 

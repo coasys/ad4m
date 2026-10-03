@@ -22,6 +22,7 @@ mod neighbourhoods;
 mod perspectives;
 mod repl;
 mod runtime;
+mod service_gen;
 
 use crate::{
     agent::*, expression::*, languages::*, neighbourhoods::*, perspectives::*, runtime::*,
@@ -111,6 +112,8 @@ enum Domain {
     },
     /// Print the executor log
     Log,
+    /// Generate the TypeScript client, MCP tools and docs of a service interface
+    ServiceGen(service_gen::ServiceGenArgs),
 }
 
 async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
@@ -146,6 +149,10 @@ async fn get_ad4m_client(args: &ClapApp) -> Result<Ad4mClient> {
 async fn main() -> Result<()> {
     let args = ClapApp::parse();
 
+    if let Domain::ServiceGen(gen_args) = args.domain {
+        return service_gen::run(gen_args);
+    }
+
     let ad4m_client = get_ad4m_client(&args).await?;
 
     match args.domain {
@@ -155,6 +162,8 @@ async fn main() -> Result<()> {
         Domain::Neighbourhoods { command } => neighbourhoods::run(ad4m_client, command).await?,
         Domain::Runtime { command } => runtime::run(ad4m_client, command).await?,
         Domain::Expression { command } => expression::run(ad4m_client, command).await?,
+        // Handled above, before connecting.
+        Domain::ServiceGen(_) => {}
         Domain::Log => {
             let file = executor_data_path().join("ad4m.log");
             let log = std::fs::read_to_string(file.clone()).with_context(|| {

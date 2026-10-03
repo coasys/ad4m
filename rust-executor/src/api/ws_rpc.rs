@@ -111,6 +111,7 @@ async fn handle_ws(
         token.clone(),
         ctx.user_email.clone(),
         ctx.is_admin_credential,
+        ctx.capabilities.clone().unwrap_or_default(),
     )
     .await;
     // Text frames until the socket closes or errors; pings and binary
@@ -313,7 +314,7 @@ impl Connection {
                 result = handler_map.dispatch(&msg_type, params, req_ctx) => {
                     match result {
                         Ok(val) => json!({"id": id, "result": val}),
-                        Err(e) => json!({"id": id, "error": {"code": e.code, "message": e.message}}),
+                        Err(e) => json!({"id": id, "error": e.to_json()}),
                     }
                 }
             };

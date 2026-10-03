@@ -33,7 +33,8 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 | `perspectives/` | Perspective registry, `PerspectiveInstance`, SPARQL store, SHACL/model queries, flows, interpretation, auto-processor | `src/perspectives/AGENTS.md` |
 | `ai_service/` | Local (candle) + remote LLM/embedding/whisper models, AI tasks; `harness/` = tool-calling loop for interpretation | `src/ai_service/AGENTS.md` |
 | `prolog_service/` | Scryer Prolog engine pools. **Disabled by default** (`PROLOG_MODE`), kept as an option | `src/prolog_service/AGENTS.md` |
-| `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
+| `languages/` + `js_core/` | Language runtime: one Deno isolate per Language on its own thread; install, templates, expressions. `languages/feature.rs` = per-language `LanguageFeature` detection (not auth "capabilities") | `src/languages/AGENTS.md`, `src/js_core/AGENTS.md` |
+| `services/` | Service Languages: typed content-addressed interfaces, the service host (`<hash>.<method>` dispatch, grants, events), `ad4m service-gen` codegen | `src/services/AGENTS.md` |
 | `holochain_service/` | Embedded Holochain conductor behind an actor channel; signal fan-in | `src/holochain_service/AGENTS.md` |
 | `agent/` | Agent keys/DID, signing, multi-user (managed users by email), `capabilities/` (auth tokens, capability defs) | — |
 | `db.rs` | All SQLite access (`rusqlite`), single `impl Ad4mDb`, accessed via `Ad4mDb::with_global_instance(closure)`. Perspective **links** are not here (they are in `perspectives/sparql_store.rs`); `db` holds handles, diffs, agent data, AI models/tasks, users, billing, notifications. | — |
