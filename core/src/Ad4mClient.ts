@@ -6,7 +6,7 @@ import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
 import { ApiClient, EventFilter } from './apiClient'
-import type { EventMap, EventName } from './generated/api/Events'
+import type { ClientEventMap, ClientEventName } from './apiClient'
 import { Ad4mModel } from './model/Ad4mModel'
 import { ServicesClient } from './services/ServicesClient'
 import type { ServiceClient, ServiceClientOptions, ServiceDefinition, ServiceEventTable, ServiceMethodTable } from './services/ServiceClient'
@@ -112,7 +112,7 @@ export class Ad4mClient {
      * table (`generated/api/Events.ts`). Returns a function that removes the
      * handler.
      */
-    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+    on<K extends ClientEventName>(type: K, handler: (event: ClientEventMap[K]) => void, filter?: EventFilter): () => void {
         return this.#apiClient.on(type, handler, filter)
     }
 

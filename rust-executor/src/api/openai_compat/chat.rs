@@ -40,7 +40,7 @@ use super::types::{
     CompletionRequest, CompletionResponse, FunctionCall, FunctionCallDelta, Role, ToolCall,
     ToolCallDelta, ToolDef, Usage,
 };
-use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
+use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
@@ -52,7 +52,14 @@ pub async fn chat_completions(
     auth: AuthContext,
     OpenAIJson(req): OpenAIJson<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "PROMPT",
+        ),
+    )
+    .map_err(OpenAIError::forbidden)?;
 
     // Resolve the OpenAI `model` string to an AD4M model_id.
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
@@ -130,7 +137,14 @@ pub async fn completions(
     auth: AuthContext,
     OpenAIJson(req): OpenAIJson<CompletionRequest>,
 ) -> OpenAIResult<Json<CompletionResponse>> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "PROMPT",
+        ),
+    )
+    .map_err(OpenAIError::forbidden)?;
 
     let model_id = resolve_model(&req.model, ModelType::Llm).await?;
     let prompt = req

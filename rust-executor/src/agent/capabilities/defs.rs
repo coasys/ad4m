@@ -23,8 +23,6 @@ pub const RUNTIME_KNOWN_LINK_LANGUAGES: &str = "runtime.known_link_languages";
 pub const RUNTIME_FRIENDS: &str = "runtime.friends";
 pub const RUNTIME_MESSAGES: &str = "runtime.messages";
 pub const RUNTIME_USER_MANAGEMENT: &str = "runtime.user_management";
-pub const RUNTIME_HOSTING: &str = "runtime.hosting";
-pub const AI: &str = "artificial intelligence";
 
 // admin capabilities
 lazy_static! {
@@ -162,83 +160,9 @@ lazy_static! {
         can: vec![CREATE.to_string()],
     };
 
-    // AI related capabilities
-    pub static ref AI_CREATE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![CREATE.to_string()],
-    };
-
-    pub static ref AI_READ_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![READ.to_string()],
-    };
-
-    pub static ref AI_UPDATE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![UPDATE.to_string()],
-    };
-
-    pub static ref AI_DELETE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![DELETE.to_string()],
-    };
-
-    pub static ref AI_PROMPT_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![PROMPT.to_string()],
-    };
-
-    pub static ref AI_TRANSCRIBE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![TRANSCRIBE.to_string()],
-    };
-
-    pub static ref AI_ALL_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: AI.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![WILD_CARD.to_string()],
-    };
-
 }
 
-lazy_static! {
-    // Hosting capabilities for wallet, credits, and payment operations
-    pub static ref RUNTIME_HOSTING_READ_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: RUNTIME_HOSTING.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![READ.to_string()],
-    };
-
-    pub static ref RUNTIME_HOSTING_UPDATE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: RUNTIME_HOSTING.to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![UPDATE.to_string()],
-    };
-}
+lazy_static! {}
 
 #[allow(dead_code)]
 pub fn perspective_query_capability(pointers: Vec<String>) -> Capability {
@@ -396,22 +320,6 @@ lazy_static! {
         can: vec![UPDATE.to_string()],
     };
 
-    pub static ref RUNTIME_HC_AGENT_INFO_READ_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: "runtime.hc_agent_info".to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![READ.to_string()],
-    };
-
-    pub static ref RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY: Capability = Capability {
-        with: Resource {
-            domain: "runtime.hc_agent_info".to_string(),
-            pointers: vec![WILD_CARD.to_string()],
-        },
-        can: vec![CREATE.to_string()],
-    };
-
     pub static ref RUNTIME_MESSAGES_READ_CAPABILITY: Capability = Capability {
         with: Resource {
             domain: RUNTIME_MESSAGES.to_string(),
@@ -503,7 +411,8 @@ lazy_static! {
 /// This includes all capabilities needed for normal app usage (perspectives, languages, expressions, etc.)
 /// but excludes admin capabilities like AI model management (CREATE/UPDATE/DELETE) and runtime config changes.
 pub fn get_user_default_capabilities() -> Vec<Capability> {
-    vec![
+    use crate::services::builtins::{capability, Builtin};
+    let mut caps = vec![
         // Agent capabilities - allow users to manage their own agent
         AGENT_AUTH_CAPABILITY.clone(),
         AGENT_READ_CAPABILITY.clone(),
@@ -544,26 +453,33 @@ pub fn get_user_default_capabilities() -> Vec<Capability> {
         RUNTIME_FRIENDS_DELETE_CAPABILITY.clone(),
         RUNTIME_FRIEND_STATUS_READ_CAPABILITY.clone(),
         RUNTIME_MY_STATUS_UPDATE_CAPABILITY.clone(),
-        RUNTIME_HC_AGENT_INFO_READ_CAPABILITY.clone(),
-        RUNTIME_HC_AGENT_INFO_CREATE_CAPABILITY.clone(),
         RUNTIME_MESSAGES_READ_CAPABILITY.clone(),
         RUNTIME_MESSAGES_CREATE_CAPABILITY.clone(),
         RUNTIME_MESSAGES_SUBSCRIBE_CAPABILITY.clone(),
         RUNTIME_EXCEPTION_SUBSCRIBE_CAPABILITY.clone(),
         // Note: Excluding RUNTIME_QUIT_CAPABILITY as this is an admin operation
 
-        // Hosting capabilities - allow users to view and manage their hosting info
-        RUNTIME_HOSTING_READ_CAPABILITY.clone(),
-        RUNTIME_HOSTING_UPDATE_CAPABILITY.clone(),
-        // AI capabilities - allow users to use AI features including task management
-        AI_READ_CAPABILITY.clone(),
-        AI_CREATE_CAPABILITY.clone(),
-        AI_PROMPT_CAPABILITY.clone(),
-        AI_TRANSCRIBE_CAPABILITY.clone(),
-        // Note: Excluding AI_UPDATE_CAPABILITY, AI_DELETE_CAPABILITY
-        // as these are admin operations for managing AI models
-
         // Note: Excluding RUNTIME_USER_MANAGEMENT_READ_CAPABILITY as it allows listing all users,
         // which is an admin operation. Regular users should not be able to enumerate other users.
-    ]
+    ];
+    // Built-in services. Model management (`ai.models` MANAGE) is open to
+    // every user; the operator-only parts (host rates, Unyt DNA, Holochain
+    // restart) need the admin credential inside the services.
+    for (builtin, action) in [
+        (Builtin::AiInference, "PROMPT"),
+        (Builtin::AiInference, "TRANSCRIBE"),
+        (Builtin::AiInference, "TASKS"),
+        (Builtin::AiModels, "READ"),
+        (Builtin::AiModels, "MANAGE"),
+        (Builtin::BillingLedger, "READ"),
+        (Builtin::BillingSettlement, "READ"),
+        (Builtin::BillingSettlement, "LINK"),
+        (Builtin::BillingSettlement, "PAY"),
+        (Builtin::UnytWallet, "READ"),
+        (Builtin::HolochainConductor, "READ"),
+        (Builtin::HolochainConductor, "PEERS"),
+    ] {
+        caps.push(capability(builtin, action));
+    }
+    caps
 }

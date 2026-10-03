@@ -2,12 +2,25 @@ import {ApiClient, CallOptions } from '../apiClient'
 import { Perspective, PerspectiveExpression } from "../perspectives/Perspective"
 import { RuntimeInfo, SentMessage, NotificationInput, Notification, ImportResult, UserStatistics } from "./RuntimeTypes"
 import type { HostRate, UnytVersionInfo } from "../generated/api"
+import { ServiceClient } from '../services/ServiceClient'
+import { BillingLedger_1_0_0 } from '../generated/services/billing.ledger'
+import type { BillingLedger_1_0_0_Events, BillingLedger_1_0_0_Methods } from '../generated/services/billing.ledger'
+import { HolochainConductor_1_0_0 } from '../generated/services/holochain.conductor'
+import type { HolochainConductor_1_0_0_Events, HolochainConductor_1_0_0_Methods } from '../generated/services/holochain.conductor'
+import { UnytWallet_1_0_0 } from '../generated/services/unyt.wallet'
+import type { UnytWallet_1_0_0_Events, UnytWallet_1_0_0_Methods } from '../generated/services/unyt.wallet'
 
 export class RuntimeClient {
     #apiClient: ApiClient
+    #ledger: ServiceClient<BillingLedger_1_0_0_Methods, BillingLedger_1_0_0_Events>
+    #holochain: ServiceClient<HolochainConductor_1_0_0_Methods, HolochainConductor_1_0_0_Events>
+    #unyt: ServiceClient<UnytWallet_1_0_0_Methods, UnytWallet_1_0_0_Events>
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
+        this.#ledger = new ServiceClient(this.#apiClient, BillingLedger_1_0_0)
+        this.#holochain = new ServiceClient(this.#apiClient, HolochainConductor_1_0_0)
+        this.#unyt = new ServiceClient(this.#apiClient, UnytWallet_1_0_0)
     }
 
     async info(): Promise<RuntimeInfo> {
@@ -63,19 +76,19 @@ export class RuntimeClient {
     }
 
     async hcAgentInfos(): Promise<string[]> {
-        return this.#apiClient.call('runtime.hcAgentInfos', {})
+        return this.#holochain.call('agentInfos', {})
     }
 
     async getNetworkMetrics(): Promise<string> {
-        return this.#apiClient.call('runtime.networkMetrics', {})
+        return this.#holochain.call('networkMetrics', {})
     }
 
     async restartHolochain(options?: CallOptions): Promise<boolean> {
-        return this.#apiClient.call('runtime.restartHolochain', {}, options)
+        return this.#holochain.call('restart', {}, options)
     }
 
     async hcAddAgentInfos(agentInfos: string[]): Promise<boolean> {
-        return this.#apiClient.call('runtime.addHcAgentInfos', { agentInfos })
+        return this.#holochain.call('addAgentInfos', { agentInfos })
     }
 
     async verifyStringSignedByDid(did: string, didSigningKeyId: string, data: string, signedData: string): Promise<boolean> {
@@ -153,11 +166,11 @@ export class RuntimeClient {
     }
 
     async freeHostingEnabled(): Promise<boolean> {
-        return this.#apiClient.call('runtime.freeHostingEnabled', {})
+        return this.#ledger.call('freeHostingEnabled', {})
     }
 
     async setFreeHostingEnabled(enabled: boolean): Promise<boolean> {
-        return this.#apiClient.call('runtime.setFreeHostingEnabled', { enabled })
+        return this.#ledger.call('setFreeHostingEnabled', { enabled })
     }
 
     async listUsers(): Promise<UserStatistics[]> {
@@ -192,38 +205,40 @@ export class RuntimeClient {
     // ---- Unyt / mHOT methods ----
 
     async unytAgentKey(): Promise<string> {
-        return this.#apiClient.call('runtime.unytAgentKey', {})
+        return this.#unyt.call('agentKey', {})
     }
 
     async unytHotAgentPubkey(): Promise<string> {
-        return this.#apiClient.call('runtime.unytHotAgentPubkey', {})
+        return this.#unyt.call('hotAgentPubkey', {})
     }
 
+    /** The wallet's ledger, as JSON text. */
     async unytWalletBalance(): Promise<string> {
-        return this.#apiClient.call('runtime.unytWalletBalance', {})
+        return JSON.stringify(await this.#unyt.call('balance', {}))
     }
 
+    /** One page of wallet transactions, as JSON text. */
     async unytWalletHistory(page?: number, perPage?: number): Promise<string> {
-        return this.#apiClient.call('runtime.unytWalletHistory', { page, perPage })
+        return JSON.stringify(await this.#unyt.call('history', { page, perPage }))
     }
 
     /** Installed and bundled DNA versions, and why the last install failed (`installError`). */
     async unytVersionInfo(): Promise<UnytVersionInfo> {
-        return this.#apiClient.call('runtime.unytVersionInfo', {})
+        return this.#unyt.call('versionInfo', {}) as Promise<UnytVersionInfo>
     }
 
     /** Stores the membrane proof (base64); the executor then installs the Unyt DNA in the
      *  background. Poll {@link unytVersionInfo} for the outcome. */
     async setUnytMembraneProof(proof: string): Promise<boolean> {
-        return this.#apiClient.call('runtime.setUnytMembraneProof', { proof })
+        return this.#unyt.call('setMembraneProof', { proof })
     }
 
     async unytReinstallDna(): Promise<{ success: boolean; message: string }> {
-        return this.#apiClient.call('runtime.unytReinstallDna', {})
+        return this.#unyt.call('reinstallDna', {})
     }
 
     async unytSendHot(recipient: string, amount: string): Promise<{ success: boolean; message: string }> {
-        return this.#apiClient.call('runtime.unytSendHot', { recipient, amount })
+        return this.#unyt.call('sendHot', { recipient, amount })
     }
 
     async setUserCredits(email: string, amount: number): Promise<boolean> {
@@ -235,11 +250,11 @@ export class RuntimeClient {
     }
 
     async setHostRates(rates: HostRate[]): Promise<boolean> {
-        return this.#apiClient.call('runtime.setHostRates', { rates })
+        return this.#ledger.call('setRates', { rates })
     }
 
     async hostRates(): Promise<HostRate[]> {
-        return this.#apiClient.call('runtime.hostRates', {})
+        return this.#ledger.call('rates', {})
     }
 
 }

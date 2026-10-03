@@ -18,6 +18,8 @@ pub struct MethodOptions {
     pub tool: Option<bool>,
     /// `(name, code)` of declared method errors.
     pub errors: Vec<(&'static str, u16)>,
+    /// Billing operation the host meters the method under.
+    pub meter: Option<&'static str>,
 }
 
 pub struct InterfaceBuilder {
@@ -88,6 +90,9 @@ impl InterfaceBuilder {
         if let Some(t) = options.tool {
             m["tool"] = json!(t);
         }
+        if let Some(op) = options.meter {
+            m["meter"] = json!({ "operation": op });
+        }
         if !options.errors.is_empty() {
             m["errors"] = Value::Object(
                 options
@@ -120,8 +125,24 @@ impl InterfaceBuilder {
     /// The finished document: shared definitions become `types`, and every
     /// `#/$defs/X` ref becomes `#/types/X`.
     pub fn build(mut self) -> Value {
-        let defs = self.generator.take_definitions(true);
+        let mut defs = self.generator.take_definitions(true);
         let mut doc = Value::Object(self.doc);
+        // Keep only the definitions the methods and events reach.
+        let mut reached: Vec<String> = Vec::new();
+        let mut queue = vec![doc.clone()];
+        while let Some(v) = queue.pop() {
+            let mut found = Vec::new();
+            refs(&v, &mut found);
+            for name in found {
+                if !reached.contains(&name) {
+                    if let Some(d) = defs.get(&name) {
+                        queue.push(d.clone());
+                    }
+                    reached.push(name);
+                }
+            }
+        }
+        defs.retain(|k, _| reached.contains(k));
         if !defs.is_empty() {
             doc["types"] = Value::Object(defs);
         }
@@ -147,9 +168,13 @@ impl InterfaceBuilder {
         else {
             return s;
         };
-        // A params / payload struct is not a shared type: move it inline.
+        // Inline a copy; `build` drops the definition if nothing else uses it.
         let name = name.to_string();
-        self.generator.definitions_mut().remove(&name).unwrap_or(s)
+        self.generator
+            .definitions()
+            .get(&name)
+            .cloned()
+            .unwrap_or(s)
     }
 }
 
@@ -169,6 +194,26 @@ fn clean(v: &mut Value) {
             }
         }
         Value::Array(items) => items.iter_mut().for_each(clean),
+        _ => {}
+    }
+}
+
+/// The names of every `#/$defs/X` ref in `v`.
+fn refs(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(map) => {
+            for (k, v) in map {
+                match (k.as_str(), v.as_str()) {
+                    ("$ref", Some(r)) => {
+                        if let Some(name) = r.strip_prefix("#/$defs/") {
+                            out.push(name.to_string());
+                        }
+                    }
+                    _ => refs(v, out),
+                }
+            }
+        }
+        Value::Array(items) => items.iter().for_each(|v| refs(v, out)),
         _ => {}
     }
 }

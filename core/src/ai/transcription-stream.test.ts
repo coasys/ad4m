@@ -1,5 +1,8 @@
 import { ApiClient } from '../apiClient';
 import { AIClient } from './AIClient';
+import { AiInference_1_0_0 } from '../generated/services/ai.inference';
+
+const method = (name: string) => `${AiInference_1_0_0.hash}.${name}`;
 
 /**
  * Transcription-stream listener lifecycle, driven through a real ApiClient
@@ -40,14 +43,14 @@ function setup(replies: Record<string, Reply>) {
 describe('AIClient transcription streams (L7)', () => {
   it('a stream whose close call fails leaves no listener', async () => {
     const { api, ai } = setup({
-      'ai.transcriptionOpen': { result: 'stream-1' },
-      'ai.transcriptionClose': { error: 'close failed' },
+      [method('transcriptionOpen')]: { result: 'stream-1' },
+      [method('transcriptionClose')]: { error: 'close failed' },
     });
     const received: string[] = [];
     await ai.openTranscriptionStream('model', text => received.push(text));
 
     await expect(ai.closeTranscriptionStream('stream-1')).rejects.toThrow('close failed');
-    FakeWebSocket.last?.push({ type: 'transcription-text', streamId: 'stream-1', text: 'after close', userDid: null });
+    FakeWebSocket.last?.push({ type: method('transcription-text'), streamId: 'stream-1', text: 'after close' });
     expect(received).toEqual([]);
     api.closeAll();
   });

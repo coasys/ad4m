@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
 use super::model_selector::resolve_model;
-use crate::agent::capabilities::{check_capability, AI_TRANSCRIBE_CAPABILITY};
+use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::types::ModelType;
@@ -46,7 +46,13 @@ pub async fn realtime_ws(auth: AuthContext, ws: WebSocketUpgrade) -> Response {
 }
 
 async fn handle_socket(auth: AuthContext, mut socket: WebSocket) {
-    if let Err(e) = check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY) {
+    if let Err(e) = check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "TRANSCRIBE",
+        ),
+    ) {
         let _ = send_error(&mut socket, "forbidden", &e).await;
         let _ = socket.close().await;
         return;

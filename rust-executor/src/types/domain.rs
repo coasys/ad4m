@@ -747,7 +747,7 @@ pub struct VerificationRequestResult {
     pub is_existing_user: bool,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HostingUserInfo {
     pub email: String,
@@ -763,7 +763,7 @@ pub struct PaymentRequestResult {
     pub message: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ComputeLogEntry {
     pub id: i32,
@@ -818,7 +818,7 @@ pub struct PerspectiveStateFilter {
     pub perspective: PerspectiveHandle,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct ModelApiInput {
@@ -831,7 +831,7 @@ pub struct ModelApiInput {
     pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamplesInput {
     pub input: String,
@@ -856,7 +856,7 @@ impl From<AIPromptExamples> for AIPromptExamplesInput {
     }
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct LocalModelInput {
@@ -866,7 +866,7 @@ pub struct LocalModelInput {
     pub revision: Option<String>,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSourceInput {
     pub repo: String,
@@ -874,7 +874,7 @@ pub struct TokenizerSourceInput {
     pub file_name: String,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct ModelInput {
@@ -885,7 +885,7 @@ pub struct ModelInput {
     pub model_type: ModelType,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct AITaskInput {
@@ -1238,7 +1238,7 @@ impl GetFilter for TriggeredNotification {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct AIModelLoadingStatus {
     pub model: String,
@@ -1292,7 +1292,7 @@ impl GetFilter for ComputeLogEntry {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Clone, TS)]
+#[derive(Serialize, Deserialize, Default, Debug, Clone, TS, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
 pub struct VoiceActivityParamsInput {

@@ -1232,14 +1232,19 @@ fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
 #[test]
 fn a_saved_model_may_not_send_its_key_over_plain_http() {
     // Discovery sends a key once; a saved model sends it on every completion.
-    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    use crate::services::builtins::ai::refuse_cleartext_credential as refuse;
+    use crate::services::ServiceError;
     let error = refuse(&model_at("http://api.anthropic.com", "sk-ant")).expect_err("refused");
-    assert!(error.message.contains("plain HTTP"), "{}", error.message);
+    let ServiceError::Method { name, message, .. } = error else {
+        panic!("a method error")
+    };
+    assert_eq!(name, "CleartextCredential");
+    assert!(message.contains("plain HTTP"), "{}", message);
 }
 
 #[test]
 fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
-    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    use crate::services::builtins::ai::refuse_cleartext_credential as refuse;
     assert!(refuse(&model_at("https://api.anthropic.com", "sk-ant")).is_ok());
     assert!(refuse(&model_at("http://localhost:11434/v1", "ollama")).is_ok());
     // Keyless over plain HTTP carries nothing to leak.

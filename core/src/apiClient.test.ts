@@ -7,6 +7,9 @@ import { PerspectiveClient } from "./perspectives/PerspectiveClient"
 import { PerspectiveHandle } from "./perspectives/PerspectiveHandle"
 import { PerspectiveProxy } from "./perspectives/PerspectiveProxy"
 import { RuntimeClient } from "./runtime/RuntimeClient"
+import { AiInference_1_0_0 } from "./generated/services/ai.inference"
+import { AiModels_1_0_0 } from "./generated/services/ai.models"
+import { HolochainConductor_1_0_0 } from "./generated/services/holochain.conductor"
 
 type AnyMsg = Record<string, any>
 
@@ -347,16 +350,16 @@ describe('long calls', () => {
     afterEach(() => jest.useRealTimers())
 
     const calls: [string, (o?: object) => Promise<unknown>][] = [
-        ['ai.prompt', (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
-        ['ai.embed', (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
-        ['ai.addModel', (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
+        [`${AiInference_1_0_0.hash}.prompt`, (o) => new AIClient(url, undefined, client).prompt('t', 'p', o)],
+        [`${AiInference_1_0_0.hash}.embed`, (o) => new AIClient(url, undefined, client).embed('m', 'x', o)],
+        [`${AiModels_1_0_0.hash}.addModel`, (o) => new AIClient(url, undefined, client).addModel({ name: 'm', modelType: 'LLM' } as any, o)],
         ['agent.generate', (o) => new AgentClient(url, undefined, client).generate('pw', o)],
         ['agent.unlock', (o) => new AgentClient(url, undefined, client).unlock('pw', true, o)],
         ['language.publish', (o) => new LanguageClient(url, undefined, client).publish('/p', { name: 'l' } as any, o)],
         ['language.applyTemplate', (o) => new LanguageClient(url, undefined, client).applyTemplateAndPublish('h', '{}', o)],
         ['neighbourhood.publish', (o) => new NeighbourhoodClient(url, undefined, client).publishFromPerspective('u', 'l', { links: [] } as any, o)],
         ['neighbourhood.join', (o) => new NeighbourhoodClient(url, undefined, client).joinFromUrl('n://x', o)],
-        ['runtime.restartHolochain', (o) => new RuntimeClient(url, undefined, client).restartHolochain(o)],
+        [`${HolochainConductor_1_0_0.hash}.restart`, (o) => new RuntimeClient(url, undefined, client).restartHolochain(o)],
         ['perspective.runInterpretation', (o) => new PerspectiveClient(url, undefined, client).runInterpretation('u', [], 'b', undefined, undefined, undefined, undefined, o)],
         ['perspective.runInterpretationWithHarness', (o) => new PerspectiveClient(url, undefined, client).runInterpretationWithHarness('u', [], 'b', 1, undefined, undefined, undefined, undefined, undefined, o)],
     ]

@@ -14,6 +14,11 @@ import { LinkMutations, LinkExpression, LinkInput, linkEqual } from "../links/Li
 import { VerificationRequestResult } from "../runtime/RuntimeTypes";
 import { PersistentCache, createPersistentCache } from "../cache/PersistentCache";
 import type { Agent as AgentData } from "../generated/api/Agent";
+import { ServiceClient } from "../services/ServiceClient";
+import { BillingLedger_1_0_0 } from "../generated/services/billing.ledger";
+import type { BillingLedger_1_0_0_Events, BillingLedger_1_0_0_Methods } from "../generated/services/billing.ledger";
+import { BillingSettlement_1_0_0 } from "../generated/services/billing.settlement";
+import type { BillingSettlement_1_0_0_Events, BillingSettlement_1_0_0_Methods } from "../generated/services/billing.settlement";
 import type { AgentSignature } from "../generated/api/AgentSignature";
 
 export interface InitializeArgs {
@@ -29,6 +34,8 @@ function toAgent(data: AgentData | null): Agent | null {
 
 export class AgentClient {
   #apiClient: ApiClient;
+  #ledger: ServiceClient<BillingLedger_1_0_0_Methods, BillingLedger_1_0_0_Events>;
+  #settlement: ServiceClient<BillingSettlement_1_0_0_Methods, BillingSettlement_1_0_0_Events>;
 
   // ── byDID cache ────────────────────────────────────────────────────
   // L1: in-memory promise cache with timestamps for TTL
@@ -46,6 +53,8 @@ export class AgentClient {
 
   constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
     this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
+    this.#ledger = new ServiceClient(this.#apiClient, BillingLedger_1_0_0);
+    this.#settlement = new ServiceClient(this.#apiClient, BillingSettlement_1_0_0);
     this.#persistent = createPersistentCache<{ agent: Agent; ts: number }>('ad4m-agent-cache', 'agents');
   }
 
@@ -281,26 +290,28 @@ export class AgentClient {
 
   // Hosting methods
   async hostingUserInfo(): Promise<HostingUserInfo> {
-    const info = (await this.#apiClient.call('hosting.info', {})).userInfo ?? {
-      email: '', credits: null, hotWalletAddress: null, freeAccess: false,
-    };
+    const [account, wallet] = await Promise.all([
+      this.#ledger.call('account', {}),
+      this.#settlement.call('linkedWallet', {}),
+    ]);
+    const info = account ?? { email: '', credits: null, freeAccess: false };
     return new HostingUserInfo(
       info.email,
       info.freeAccess ? 'unlimited' : String(info.credits ?? 0),
-      info.hotWalletAddress || undefined,
+      wallet || undefined,
       !!info.freeAccess,
     );
   }
 
   async computeLog(since?: string, limit?: number, userEmail?: string): Promise<ComputeLogEntry[]> {
-    return this.#apiClient.call('runtime.computeLog', { since, limit, userEmail });
+    return this.#ledger.call('computeLog', { since, limit, userEmail });
   }
 
   async setHotWalletAddress(address: string): Promise<boolean> {
-    return this.#apiClient.call('hosting.setHotWallet', { address });
+    return this.#settlement.call('linkWallet', { address });
   }
 
   async requestPayment(amountHOT: string): Promise<PaymentRequestResult> {
-    return this.#apiClient.call('hosting.requestPayment', { amountHOT });
+    return this.#settlement.call('requestPayment', { amountHOT });
   }
 }

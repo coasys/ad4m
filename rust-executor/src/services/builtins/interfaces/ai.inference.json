@@ -1,0 +1,377 @@
+{
+  "name": "ai.inference",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "Prompts, embeddings and speech transcription on the executor's AI models.",
+  "selection": "per-user",
+  "methods": {
+    "prompt": {
+      "description": "Run `prompt` under a task; answers the completion text.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "taskId": {
+            "type": "string",
+            "description": "The task whose model, system prompt and examples frame the prompt."
+          },
+          "prompt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "taskId",
+          "prompt"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "meter": {
+        "operation": "ai.prompt"
+      }
+    },
+    "embed": {
+      "description": "Embed `text` with an embedding model. Answers the vector as JSON, zlib-deflated, base64-encoded.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "modelId",
+          "text"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "PROMPT",
+      "long": true,
+      "meter": {
+        "operation": "ai.embed"
+      }
+    },
+    "transcriptionOpen": {
+      "description": "Open a transcription stream; answers its id. Audio goes to `POST /api/v1/ai/transcription/feed`; text arrives as `transcription-text`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "$ref": "#/types/VoiceActivityParamsInput"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "modelId"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "TRANSCRIBE",
+      "meter": {
+        "operation": "ai.transcription"
+      }
+    },
+    "transcriptionClose": {
+      "description": "Close a transcription stream.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "streamId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "streamId"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "TRANSCRIBE"
+    },
+    "tasks": {
+      "description": "Every AI task.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "$ref": "#/types/AITask"
+        }
+      },
+      "action": "PROMPT",
+      "read": true
+    },
+    "addTask": {
+      "description": "Create a task.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task": {
+            "$ref": "#/types/AITaskInput"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/AITask"
+      },
+      "action": "TASKS"
+    },
+    "updateTask": {
+      "description": "Change a task.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task": {
+            "$ref": "#/types/AITask"
+          }
+        },
+        "required": [
+          "task"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/AITask"
+      },
+      "action": "TASKS"
+    },
+    "removeTask": {
+      "description": "Delete a task.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "TASKS"
+    }
+  },
+  "events": {
+    "transcription-text": {
+      "description": "Text recognised in an open transcription stream.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "streamId": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "streamId",
+          "text"
+        ],
+        "description": "`transcription-text`: one recognised utterance of an open stream."
+      },
+      "action": "TRANSCRIBE",
+      "scope": "streamId"
+    }
+  },
+  "actions": {
+    "PROMPT": {
+      "label": "Use AI models",
+      "description": "Send text to an AI model and read the answer.",
+      "risk": "safe"
+    },
+    "TRANSCRIBE": {
+      "label": "Transcribe audio",
+      "description": "Turn spoken audio into text.",
+      "risk": "safe"
+    },
+    "TASKS": {
+      "label": "Manage AI tasks",
+      "description": "Create, change and delete the tasks prompts run under.",
+      "risk": "write"
+    }
+  },
+  "types": {
+    "VoiceActivityParamsInput": {
+      "type": "object",
+      "properties": {
+        "startThreshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "startWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "endThreshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "endWindow": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        },
+        "timeBeforeSpeech": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int32"
+        }
+      }
+    },
+    "AITask": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "taskId": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "promptExamples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/AIPromptExamples"
+          }
+        },
+        "metaData": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "taskId",
+        "modelId",
+        "systemPrompt",
+        "promptExamples",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AIPromptExamples": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ]
+    },
+    "AITaskInput": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "modelId": {
+          "type": "string"
+        },
+        "systemPrompt": {
+          "type": "string"
+        },
+        "promptExamples": {
+          "type": "array",
+          "items": {
+            "$ref": "#/types/AIPromptExamplesInput"
+          }
+        },
+        "metaData": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "modelId",
+        "systemPrompt",
+        "promptExamples"
+      ]
+    },
+    "AIPromptExamplesInput": {
+      "type": "object",
+      "properties": {
+        "input": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ]
+    }
+  }
+}

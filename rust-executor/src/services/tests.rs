@@ -13,7 +13,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 use super::builtin::{
-    CallContext, EventEmitter, ServiceError, ServiceHealth, ServiceImplementation, StartContext,
+    CallContext, EventEmitter, EventOwner, ServiceError, ServiceHealth, ServiceImplementation,
+    StartContext,
 };
 use super::host::{host, ServiceHost};
 use super::interface::{Risk, Selection};
@@ -136,7 +137,7 @@ impl ServiceImplementation for Echo {
             let (events, owner) = (events.clone(), owner.clone());
             async move {
                 events
-                    .emit(e, &owner, p)
+                    .emit(e, EventOwner::Agent(owner.clone()), p)
                     .await
                     .map_err(ServiceError::Internal)
             }
@@ -237,6 +238,8 @@ fn ctx(did: &str, grants: Vec<Capability>) -> CallContext {
         origin: vec![],
         agent_did: Some(did.into()),
         user: None,
+        auth_token: None,
+        is_admin: false,
         grants: vec![grants],
         deadline: None,
     }
@@ -496,7 +499,7 @@ async fn events_reach_only_their_owner_with_the_grant() {
     host.emit_event(
         &implementation,
         "said",
-        "did:key:a",
+        EventOwner::Agent("did:key:a".into()),
         json!({ "room": "r", "text": "hi" }),
     )
     .await
@@ -509,17 +512,45 @@ async fn events_reach_only_their_owner_with_the_grant() {
         json!({ "type": format!("{}.said", iface), "room": "r", "text": "hi" })
     );
     let yes = vec![grant(format!("{}@1", module), &["SAY"])];
-    assert!(ServiceHost::delivers(&e, Some("did:key:a"), false, &yes));
-    assert!(!ServiceHost::delivers(&e, Some("did:key:b"), false, &yes));
-    assert!(ServiceHost::delivers(&e, None, true, &yes));
-    assert!(!ServiceHost::delivers(&e, Some("did:key:a"), false, &[]));
+    assert!(ServiceHost::delivers(
+        &e,
+        Some("did:key:a"),
+        None,
+        false,
+        &yes
+    ));
+    assert!(!ServiceHost::delivers(
+        &e,
+        Some("did:key:b"),
+        None,
+        false,
+        &yes
+    ));
+    assert!(ServiceHost::delivers(&e, None, None, true, &yes));
+    assert!(!ServiceHost::delivers(
+        &e,
+        Some("did:key:a"),
+        None,
+        false,
+        &[]
+    ));
     // A payload outside the contract never goes out.
     assert!(host
-        .emit_event(&implementation, "said", "did:key:a", json!({ "room": 1 }))
+        .emit_event(
+            &implementation,
+            "said",
+            EventOwner::Agent("did:key:a".into()),
+            json!({ "room": 1 })
+        )
         .await
         .is_err());
     assert!(host
-        .emit_event(&implementation, "nope", "did:key:a", json!({}))
+        .emit_event(
+            &implementation,
+            "nope",
+            EventOwner::Agent("did:key:a".into()),
+            json!({})
+        )
         .await
         .is_err());
 }
@@ -701,7 +732,7 @@ async fn missing_grant_over_the_socket_is_403_and_hides_events() {
         .emit_event(
             &implementation,
             "said",
-            ALICE,
+            EventOwner::Agent(ALICE.into()),
             json!({ "room": "r", "text": "x" }),
         )
         .await

@@ -405,10 +405,8 @@ pub fn build_handler_map() -> HandlerMap {
     super::runtime_ws::register_ws_handlers(&mut map);
     super::languages_ws::register_ws_handlers(&mut map);
     super::expressions_ws::register_ws_handlers(&mut map);
-    super::ai_ws::register_ws_handlers(&mut map);
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
-    super::hosting_ws::register_ws_handlers(&mut map);
     crate::services::ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
