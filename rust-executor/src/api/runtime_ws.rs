@@ -168,6 +168,16 @@ async fn import_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    // An import writes rows as they are in the file: notifications with their `granted` flag
+    // and `owner_did`, and users with their password hashes. With AGENT_UPDATE alone, an app
+    // token or a managed user could import a granted notification on someone else's
+    // perspectives. Only the operator imports, as only the operator grants notifications.
+    if !ctx.is_admin_credential {
+        return Err(WsRpcError::forbidden(
+            "Permission denied: only the node operator (admin credential) can import data",
+        ));
+    }
+
     let body: ImportRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
