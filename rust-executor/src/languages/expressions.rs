@@ -1,27 +1,31 @@
 //! Expression reads and local-first writes.
 //!
-//! Reads check the expression cache first and fetch every miss for one
-//! language in a single call into its runtime. A runtime serves one request
-//! at a time, so fetching misses one call each made N network round trips
-//! strictly sequential; inside one call they run concurrently.
+//! Reads check the expression cache first and fetch the misses for one
+//! language in calls of up to `FETCH_CHUNK` addresses into its runtime. A
+//! runtime serves one request at a time, so fetching misses one call each
+//! made N network round trips strictly sequential; inside one call they run
+//! concurrently.
 //!
 //! The cache only ever holds expressions their language reported immutable,
 //! so a hit needs no `isImmutableExpression` call: only misses ask, in the
-//! same call that fetches them.
+//! same call that fetches them. A fetched expression is cached only if its
+//! proof is valid.
 //!
 //! Writes to a language that exports `expressionPrepare` / `expressionPublish`
 //! cache the prepared expression before publishing it, and queue the publish
 //! if it fails; `run_publish_worker` retries the queue with backoff. The
 //! expression is readable locally at once and `create` succeeds offline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::capability::{self, Capability};
 use super::error::LanguageError;
 use super::LanguageController;
 use crate::agent::AgentContext;
@@ -30,15 +34,24 @@ use crate::types::Expression;
 
 /// Concurrent fetches inside one runtime call.
 const FETCH_CONCURRENCY: usize = 8;
-/// Addresses per prefetch call. Small, so a large sync interleaves with the
-/// reads someone is waiting on instead of holding the runtime for minutes.
-const PREFETCH_CHUNK: usize = 8;
+/// Addresses per fetch call, for reads and prefetches alike. Small, so a
+/// large sync or `getMany` interleaves with the reads someone is waiting on
+/// instead of holding the runtime for minutes.
+const FETCH_CHUNK: usize = 8;
+/// Held for a whole prefetch. Every received diff starts one, and its
+/// chunks run one after another, so with one permit at most one prefetch
+/// chunk is in any runtime's queue: a read waits behind one chunk, not one
+/// per diff in flight.
+static PREFETCH_PERMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 const PUBLISH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_BATCH: u32 = 32;
 const PUBLISH_BACKOFF_BASE_MS: i64 = 10_000;
 const PUBLISH_BACKOFF_MAX_MS: i64 = 15 * 60 * 1000;
 
 static PUBLISH_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+/// Queue rows already logged as waiting for their language, so each is
+/// logged once, not every poll.
+static WAITING_FOR_LANGUAGE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// The cache and publish-queue key: the language's hash, never an alias.
 fn expression_url(resolved_language: &str, expression_address: &str) -> String {
@@ -56,6 +69,18 @@ fn now_ms() -> i64 {
 fn publish_backoff_ms(attempts: u32) -> i64 {
     let factor = 1i64 << attempts.min(16);
     (PUBLISH_BACKOFF_BASE_MS.saturating_mul(factor)).min(PUBLISH_BACKOFF_MAX_MS)
+}
+
+/// Check a fetched expression's proof, which annotates `json` with the
+/// result, and return what to cache: the expression as fetched, but only
+/// when it is immutable and its proof is valid. The cache keeps the first
+/// entry for a URL forever, so one that fails its proof would shadow the
+/// real expression for good.
+fn verified_for_cache(json: &mut JsonValue, immutable: bool) -> Option<Expression<JsonValue>> {
+    // Parsed before the check adds `valid` / `invalid` to the proof.
+    let expr = serde_json::from_value::<Expression<JsonValue>>(json.clone()).ok();
+    let valid = LanguageController::verify_expression_proof(json);
+    expr.filter(|_| immutable && valid)
 }
 
 #[derive(Deserialize)]
@@ -150,11 +175,10 @@ impl LanguageController {
             }
         }
 
-        if !misses.is_empty() {
-            let miss_addresses: Vec<String> =
-                misses.iter().map(|&i| addresses[i].clone()).collect();
+        for chunk in misses.chunks(FETCH_CHUNK) {
+            let miss_addresses: Vec<String> = chunk.iter().map(|&i| addresses[i].clone()).collect();
             let fetched = self.fetch_uncached(&lang, &miss_addresses, false).await;
-            for (&i, outcome) in misses.iter().zip(fetched) {
+            for (&i, outcome) in chunk.iter().zip(fetched) {
                 results[i] = Some(outcome);
             }
         }
@@ -196,6 +220,9 @@ impl LanguageController {
     /// cached yet, so they are readable offline later. Mutable expressions
     /// and languages that are not loaded are skipped; failures are dropped.
     pub async fn prefetch_expressions(&self, urls: &[String]) {
+        let Ok(_permit) = PREFETCH_PERMIT.acquire().await else {
+            return;
+        };
         let mut by_language: HashMap<String, Vec<String>> = HashMap::new();
         for url in urls {
             if let Ok((lang, address)) = Self::parse_expr_url(url) {
@@ -221,13 +248,14 @@ impl LanguageController {
                 .zip(cached)
                 .filter_map(|(a, hit)| hit.is_none().then_some(a))
                 .collect();
-            for chunk in missing.chunks(PREFETCH_CHUNK) {
+            for chunk in missing.chunks(FETCH_CHUNK) {
                 self.fetch_uncached(&lang, chunk, true).await;
             }
         }
     }
 
-    /// One runtime call fetching `addresses`; caches every immutable result.
+    /// One runtime call fetching `addresses`; caches every immutable result
+    /// whose proof is valid.
     async fn fetch_uncached(
         &self,
         lang: &str,
@@ -262,26 +290,23 @@ impl LanguageController {
                 if json.is_null() {
                     return Ok(None);
                 }
-                if outcome.immutable {
-                    if let Ok(expr) = serde_json::from_value::<Expression<JsonValue>>(json.clone())
+                if let Some(expr) = verified_for_cache(&mut json, outcome.immutable) {
+                    let url = expression_url(lang, address);
+                    if let Err(e) =
+                        Ad4mDb::with_global_instance(|db| db.cache_expression(&url, &expr))
                     {
-                        let url = expression_url(lang, address);
-                        if let Err(e) =
-                            Ad4mDb::with_global_instance(|db| db.cache_expression(&url, &expr))
-                        {
-                            warn!("Failed to cache expression {}: {}", url, e);
-                        }
+                        warn!("Failed to cache expression {}: {}", url, e);
                     }
                 }
-                Self::verify_expression_proof(&mut json);
                 Ok(Some(json))
             })
             .collect()
     }
 
     /// Create through `expressionPrepare` / `expressionPublish` when the
-    /// language exports both; `Ok(None)` when it does not, and the caller
-    /// falls back to `expressionCreate`. Returns the expression address.
+    /// language exports both (`Capability::ExpressionPrepare`, detected at
+    /// load); `Ok(None)` when it does not, and the caller falls back to
+    /// `expressionCreate`. Returns the expression address.
     ///
     /// An immutable expression is cached before it is published, and a
     /// failed publish is queued rather than returned: the expression is
@@ -294,12 +319,11 @@ impl LanguageController {
         content_json: &str,
         agent_context: &AgentContext,
     ) -> Result<Option<String>, LanguageError> {
+        if !capability::get_capabilities(lang).contains(&Capability::ExpressionPrepare) {
+            return Ok(None);
+        }
         let script = format!(
             r#"JSON.stringify(await (async () => {{
-                if (typeof language.expressionPrepare !== "function"
-                    || typeof language.expressionPublish !== "function") {{
-                    return null;
-                }}
                 const prepared = await language.expressionPrepare({content_json});
                 if (!prepared || typeof prepared.address !== "string") {{
                     throw new Error("expressionPrepare returned no address");
@@ -314,13 +338,10 @@ impl LanguageController {
         let raw = self
             .execute_on_language_with_context(lang, &script, agent_context)
             .await?;
-        let prepared: Option<Prepared> =
+        let prepared: Prepared =
             serde_json::from_str(raw.trim()).map_err(|e| LanguageError::SerializationError {
                 message: format!("expressionPrepare returned an unexpected result: {}", e),
             })?;
-        let Some(prepared) = prepared else {
-            return Ok(None);
-        };
 
         let cacheable = prepared.immutable
             && serde_json::from_value::<Expression<JsonValue>>(prepared.expression.clone()).is_ok();
@@ -398,6 +419,18 @@ impl LanguageController {
             // Installed languages load after the agent unlocks; until then
             // the row waits without counting as a failed attempt.
             if !self.is_language_loaded(&pending.language_address).await {
+                // A language that never loads again (uninstalled, or replaced
+                // by a new bundle) keeps its rows waiting forever, so say so.
+                let first = WAITING_FOR_LANGUAGE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(pending.url.clone());
+                if first {
+                    info!(
+                        "Queued publish of {} waits for language {}, which is not loaded",
+                        pending.url, pending.language_address
+                    );
+                }
                 let deferred = Ad4mDb::with_global_instance(|db| {
                     db.reschedule_expression_publish(
                         &pending.url,
@@ -425,6 +458,10 @@ impl LanguageController {
             let outcome = match result {
                 Ok(()) => {
                     info!("Published queued expression {}", pending.url);
+                    WAITING_FOR_LANGUAGE
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&pending.url);
                     Ad4mDb::with_global_instance(|db| db.complete_expression_publish(&pending.url))
                 }
                 Err(e) => {
@@ -477,10 +514,35 @@ mod tests {
     }
 
     #[test]
-    fn fetch_script_is_ascii_and_escapes_addresses() {
-        let script = fetch_script(&["a\"b".to_string()], true);
-        assert!(script.is_ascii());
-        assert!(script.contains(r#"["a\"b"]"#));
+    fn only_an_immutable_expression_with_a_valid_proof_is_cached() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let signed = crate::agent::create_signed_expression(
+            serde_json::json!({ "n": 1 }),
+            &AgentContext::main_agent(),
+        )
+        .unwrap();
+        let fetched = serde_json::to_value(&signed).unwrap();
+
+        let mut json = fetched.clone();
+        let cached = verified_for_cache(&mut json, true).expect("valid and immutable");
+        assert_eq!(serde_json::to_value(&cached).unwrap(), fetched);
+        assert_eq!(json["proof"]["valid"], JsonValue::Bool(true));
+
+        assert!(verified_for_cache(&mut fetched.clone(), false).is_none());
+
+        let mut tampered = fetched.clone();
+        tampered["data"] = serde_json::json!({ "n": 2 });
+        assert!(verified_for_cache(&mut tampered, true).is_none());
+        assert_eq!(tampered["proof"]["valid"], JsonValue::Bool(false));
+    }
+
+    #[test]
+    fn fetch_script_escapes_addresses() {
+        // serde_json escapes quotes but leaves non-ASCII as it is, which is
+        // still a valid JS string literal.
+        let script = fetch_script(&["a\"b".to_string(), "ü".to_string()], true);
+        assert!(script.contains(r#"["a\"b","ü"]"#));
         assert!(script.contains("const onlyImmutable = true;"));
     }
 }

@@ -2055,6 +2055,13 @@ impl Ad4mDb {
             serde_json::to_value(expressions)?,
         );
 
+        // Export the expression publish queue: a row may hold the only copy
+        // of an expression outside this node.
+        export_data.insert(
+            "expression_publish_queue".to_string(),
+            serde_json::to_value(self.export_expression_publish_queue()?)?,
+        );
+
         // Export perspective_diffs
         let diffs: Vec<serde_json::Value> = self.conn.prepare(
             "SELECT perspective, additions, removals, is_pending FROM perspective_diff"
@@ -2435,6 +2442,33 @@ impl Ad4mDb {
                         .errors
                         .push(format!("Failed to parse expressions: {}", e));
                     log::warn!("Failed to parse expressions: {}", e)
+                }
+            }
+        }
+
+        // Import the expression publish queue. Failures go to the
+        // expressions' errors: a lost row may be a lost expression.
+        if let Some(queue) = data.get("expression_publish_queue") {
+            match serde_json::from_value::<Vec<expression_store::QueuedPublishSchema>>(
+                queue.clone(),
+            ) {
+                Ok(rows) => {
+                    log::debug!("Importing {} queued expression publishes", rows.len());
+                    for row in rows {
+                        if let Err(e) = self.import_queued_publish(&row) {
+                            let error = format!(
+                                "Failed to import queued expression publish {}: {}",
+                                row.url, e
+                            );
+                            log::warn!("{}", error);
+                            result.expressions.errors.push(error);
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error = format!("Failed to parse expression publish queue: {}", e);
+                    log::warn!("{}", error);
+                    result.expressions.errors.push(error);
                 }
             }
         }

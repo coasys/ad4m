@@ -2359,7 +2359,8 @@ impl LanguageController {
     }
 
     /// Verify an expression's proof and set the `valid` field.
-    fn verify_expression_proof(expr_json: &mut JsonValue) {
+    /// Annotates `proof.valid` / `proof.invalid` and returns `valid`.
+    fn verify_expression_proof(expr_json: &mut JsonValue) -> bool {
         match serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone()) {
             Ok(mut expr) => {
                 // Sort the data keys to match the canonical order used during signing.
@@ -2389,6 +2390,7 @@ impl LanguageController {
                             proof["valid"] = JsonValue::Bool(valid);
                             proof["invalid"] = JsonValue::Bool(!valid);
                         }
+                        valid
                     }
                     Err(e) => {
                         log::warn!(
@@ -2400,6 +2402,7 @@ impl LanguageController {
                             proof["valid"] = JsonValue::Bool(false);
                             proof["invalid"] = JsonValue::Bool(true);
                         }
+                        false
                     }
                 }
             }
@@ -2414,6 +2417,7 @@ impl LanguageController {
                     proof["valid"] = JsonValue::Bool(false);
                     proof["invalid"] = JsonValue::Bool(true);
                 }
+                false
             }
         }
     }

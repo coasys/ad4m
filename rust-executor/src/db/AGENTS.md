@@ -14,4 +14,4 @@ Child modules of `../db.rs`. Each adds an `impl Ad4mDb` block for one area so
 - Key by the language's hash, never an alias: two content-addressed languages can
   mint the same address for different data.
 - Publish-queue rows are never dropped: a row may hold the only copy of an
-  expression outside this node.
+  expression outside this node. `export_all_to_json` / `import_from_json` carry them too.

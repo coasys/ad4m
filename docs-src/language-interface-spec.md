@@ -186,8 +186,10 @@ encode content hashes.
 `expressionPrepare` and `expressionPublish` split `expressionCreate` in two,
 so the runtime can hold an Expression before the Language has stored it:
 `prepare` signs the content and computes its address without touching the
-network; `publish` stores what `prepare` returned and MUST be idempotent. A
-Language exports both or neither. When both are present and the prepared
+network; `publish` stores what `prepare` returned and MUST be idempotent. The
+runtime may call `publish` later, outside the agent context `prepare` ran in,
+so `publish` MUST NOT depend on the agent context. A Language exports both or
+neither. When both are present and the prepared
 address is immutable, the runtime caches the Expression, publishes it, and
 if publishing fails queues it and retries until it succeeds, so `create`
 succeeds offline and the Expression is readable locally at once. Languages
