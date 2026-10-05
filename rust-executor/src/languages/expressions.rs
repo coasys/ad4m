@@ -16,8 +16,9 @@
 //! if it fails; `run_publish_worker` retries the queue with backoff. The
 //! expression is readable locally at once and `create` succeeds offline.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use log::{info, warn};
@@ -47,6 +48,9 @@ const PUBLISH_BACKOFF_BASE_MS: i64 = 10_000;
 const PUBLISH_BACKOFF_MAX_MS: i64 = 15 * 60 * 1000;
 
 static PUBLISH_WORKER_STARTED: AtomicBool = AtomicBool::new(false);
+/// Queue rows already logged as waiting for their language, so each is
+/// logged once, not every poll.
+static WAITING_FOR_LANGUAGE: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
 
 /// The cache and publish-queue key: the language's hash, never an alias.
 fn expression_url(resolved_language: &str, expression_address: &str) -> String {
@@ -417,6 +421,18 @@ impl LanguageController {
             // Installed languages load after the agent unlocks; until then
             // the row waits without counting as a failed attempt.
             if !self.is_language_loaded(&pending.language_address).await {
+                // A language that never loads again (uninstalled, or replaced
+                // by a new bundle) keeps its rows waiting forever, so say so.
+                let first = WAITING_FOR_LANGUAGE
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(pending.url.clone());
+                if first {
+                    info!(
+                        "Queued publish of {} waits for language {}, which is not loaded",
+                        pending.url, pending.language_address
+                    );
+                }
                 let deferred = Ad4mDb::with_global_instance(|db| {
                     db.reschedule_expression_publish(
                         &pending.url,
@@ -444,6 +460,10 @@ impl LanguageController {
             let outcome = match result {
                 Ok(()) => {
                     info!("Published queued expression {}", pending.url);
+                    WAITING_FOR_LANGUAGE
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&pending.url);
                     Ad4mDb::with_global_instance(|db| db.complete_expression_publish(&pending.url))
                 }
                 Err(e) => {
