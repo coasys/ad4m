@@ -4867,6 +4867,58 @@ mod tests {
             "Querying a non-existent named graph should not return default graph data"
         );
     }
+
+    #[test]
+    fn test_reinsert_in_named_graph_replaces_annotations() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut link = make_link(&signer, "ad4m://src", "ad4m://pred", "ad4m://tgt");
+        link.graph = Some("ad4m://graph/reinsert".to_string());
+        svc.add_link(&link).unwrap();
+
+        // Same reifier, new status: the old status quad in the named graph has
+        // to go, or the link reads back twice with both statuses.
+        link.status = Some(LinkStatus::Local);
+        svc.add_link(&link).unwrap();
+
+        let results = svc.query_links(None, None, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1, "re-insert must not duplicate the link");
+        assert_eq!(results[0].status, Some(LinkStatus::Local));
+        assert_eq!(results[0].graph.as_deref(), Some("ad4m://graph/reinsert"));
+    }
+
+    #[test]
+    fn test_query_arbitrary_with_graphs_scopes_without_hydrating() {
+        let svc = new_service();
+        let signer = TestSigner::generate();
+
+        let mut in_a = make_link(
+            &signer,
+            "ad4m://src_a",
+            "ad4m://pred",
+            "literal:string:hello",
+        );
+        in_a.graph = Some("ad4m://graph/a".to_string());
+        svc.add_link(&in_a).unwrap();
+        let mut in_b = make_link(&signer, "ad4m://src_b", "ad4m://pred", "literal:string:bye");
+        in_b.graph = Some("ad4m://graph/b".to_string());
+        svc.add_link(&in_b).unwrap();
+
+        let rows: Vec<Value> = serde_json::from_str(
+            &svc.query_arbitrary_with_graphs(
+                "SELECT ?s ?target WHERE { ?s <ad4m://pred> ?target }",
+                Some(&["ad4m://graph/a".to_string()]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1, "scoped to graph a: {rows:?}");
+        assert_eq!(rows[0]["s"], "ad4m://src_a");
+        // Caller-supplied SPARQL gets the stored value, not the wire form
+        // `query_with_graphs` would re-encode `?target` into.
+        assert_eq!(rows[0]["target"], "hello");
+    }
 }
 
 #[cfg(test)]
