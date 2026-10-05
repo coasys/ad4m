@@ -39,6 +39,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
   private currentSubscription?: { dispose: () => Promise<void> };
+  /** Tail of the subscribe/dispose chain; see `serialize()`. */
+  private subscriptionChain: Promise<void> = Promise.resolve();
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -69,6 +71,20 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     const current = this.currentSubscription;
     this.currentSubscription = undefined;
     return current ? current.dispose() : Promise.resolve();
+  }
+
+  /**
+   * Runs one subscribe variant after every earlier one on this builder has
+   * finished. Each variant disposes the previous subscription (awaiting the
+   * executor) and then registers its own; two overlapping calls would both
+   * find no current subscription, both register, and the builder could only
+   * ever dispose the last one. Serializing keeps exactly one subscription
+   * per builder.
+   */
+  private serialize<R>(run: () => Promise<R>): Promise<R> {
+    const result = this.subscriptionChain.then(run, run);
+    this.subscriptionChain = result.then(() => {}, () => {});
+    return result;
   }
 
   /**
@@ -426,7 +442,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
+  subscribe(callback: (results: T[]) => void): Promise<T[]> {
+    return this.serialize(() => this.subscribeNow(callback));
+  }
+
+  private async subscribeNow(callback: (results: T[]) => void): Promise<T[]> {
     // Clean up any existing subscription. Awaited so the executor has
     // released the previous hold before the new registration arrives: the
     // executor hands out one shared id per query, and a dispose landing after
@@ -598,7 +618,11 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async countSubscribe(callback: (count: number) => void): Promise<number> {
+  countSubscribe(callback: (count: number) => void): Promise<number> {
+    return this.serialize(() => this.countSubscribeNow(callback));
+  }
+
+  private async countSubscribeNow(callback: (count: number) => void): Promise<number> {
     // Clean up any existing subscription. Awaited so the executor has
     // released the previous hold before the new registration arrives: the
     // executor hands out one shared id per query, and a dispose landing after
@@ -744,9 +768,17 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async paginateSubscribe(
+  paginateSubscribe(
     pageSize: number, 
     pageNumber: number, 
+    callback: (results: PaginationResult<T>) => void
+  ): Promise<PaginationResult<T>> {
+    return this.serialize(() => this.paginateSubscribeNow(pageSize, pageNumber, callback));
+  }
+
+  private async paginateSubscribeNow(
+    pageSize: number,
+    pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
     // Clean up any existing subscription. Awaited so the executor has

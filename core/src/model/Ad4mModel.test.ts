@@ -3640,6 +3640,38 @@ describe("ModelQueryBuilder subscribe ordering", () => {
     expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
   });
 
+  it("overlapping subscribe() calls leave exactly one live subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribes: jest.Mock[] = [];
+    let n = 0;
+    mockClient.modelSubscribe.mockImplementation(async () => ({
+      subscriptionId: `sub-${++n}`,
+      result: { instances: [], totalCount: 0 },
+    }));
+    mockClient.subscribeToQueryUpdates.mockImplementation(() => {
+      const u = jest.fn();
+      unsubscribes.push(u);
+      return u;
+    });
+    mockClient.disposeQuerySubscription.mockResolvedValue(true);
+    disposeGate.resolve(true);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
+
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    // The second call ran after the first and disposed its subscription.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+    expect(unsubscribes).toHaveLength(2);
+    expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+    expect(unsubscribes[1]).not.toHaveBeenCalled();
+    // And the builder can still release the survivor.
+    await builder.dispose();
+    expect(unsubscribes[1]).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
+
   it("dispose() cleans up locally at once and resolves without a subscription", async () => {
     const { mockPerspective, mockClient, disposeGate } = makePerspective();
     const unsubscribe = jest.fn();
