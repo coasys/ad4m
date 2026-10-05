@@ -47,6 +47,68 @@ describe('QuerySubscriptionProxy', () => {
     expect(unsubscribe).toHaveBeenCalled();
   });
 
+  // Subscribers of the same query share one executor subscription id, and each
+  // disposeQuerySubscription releases one hold on it. Every hold this proxy
+  // acquires must be released exactly once.
+  describe('executor hold', () => {
+    function holdClient(ids: string[]) {
+      let next = 0;
+      return {
+        subscribeQuery: jest.fn(async () => ({ subscriptionId: ids[next++], result: [] })),
+        subscribeToQueryUpdates: jest.fn(() => jest.fn()),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      } as any;
+    }
+
+    it('dispose() releases the hold once, even when called twice', async () => {
+      const mockClient = holdClient(['shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      subscription.dispose();
+      subscription.dispose();
+
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'shared-sub');
+    });
+
+    it('a retried subscribe() releases the hold it replaces', async () => {
+      // The executor returns the same id while the entry is alive, so the
+      // retry adds a second hold on it; the first must be released.
+      const mockClient = holdClient(['shared-sub', 'shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+      await subscription.subscribe();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'shared-sub');
+    });
+
+    it('a reconnect swap releases the hold it replaces', async () => {
+      let reconnectCallback: (() => Promise<void>) | undefined;
+      const mockClient = holdClient(['sub-1', 'sub-2']);
+      mockClient.onReconnect = jest.fn((cb: () => Promise<void>) => {
+        reconnectCallback = cb;
+        return jest.fn();
+      });
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      await reconnectCallback!();
+      expect(subscription.id).toBe('sub-2');
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'sub-1');
+
+      subscription.dispose();
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'sub-2');
+    });
+  });
+
   it('re-subscribes immediately when onReconnect fires', async () => {
     let reconnectCallback: (() => void) | undefined;
     const initialUnsubscribe = jest.fn();
