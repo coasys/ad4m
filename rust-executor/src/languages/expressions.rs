@@ -34,6 +34,11 @@ const FETCH_CONCURRENCY: usize = 8;
 /// Addresses per prefetch call. Small, so a large sync interleaves with the
 /// reads someone is waiting on instead of holding the runtime for minutes.
 const PREFETCH_CHUNK: usize = 8;
+/// Held for a whole prefetch. Every received diff starts one, and its
+/// chunks run one after another, so with one permit at most one prefetch
+/// chunk is in any runtime's queue: a read waits behind one chunk, not one
+/// per diff in flight.
+static PREFETCH_PERMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 const PUBLISH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const PUBLISH_BATCH: u32 = 32;
 const PUBLISH_BACKOFF_BASE_MS: i64 = 10_000;
@@ -209,6 +214,9 @@ impl LanguageController {
     /// cached yet, so they are readable offline later. Mutable expressions
     /// and languages that are not loaded are skipped; failures are dropped.
     pub async fn prefetch_expressions(&self, urls: &[String]) {
+        let Ok(_permit) = PREFETCH_PERMIT.acquire().await else {
+            return;
+        };
         let mut by_language: HashMap<String, Vec<String>> = HashMap::new();
         for url in urls {
             if let Ok((lang, address)) = Self::parse_expr_url(url) {
