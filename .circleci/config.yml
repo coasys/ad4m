@@ -347,6 +347,12 @@ jobs:
           name: cli tests
           command: cd cli && cargo test --release
           no_output_timeout: 30m
+      - run:
+          # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
+          # rather than in a separate job because rust-tests is a required check.
+          name: ad4m-ldk (Rust) tests
+          command: cd ad4m-ldk/rust && cargo test
+          no_output_timeout: 30m
 
   js-unit-tests:
     machine: true
