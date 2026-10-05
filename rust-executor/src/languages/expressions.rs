@@ -7,7 +7,8 @@
 //!
 //! The cache only ever holds expressions their language reported immutable,
 //! so a hit needs no `isImmutableExpression` call: only misses ask, in the
-//! same call that fetches them.
+//! same call that fetches them. A fetched expression is cached only if its
+//! proof is valid.
 //!
 //! Writes to a language that exports `expressionPrepare` / `expressionPublish`
 //! cache the prepared expression before publishing it, and queue the publish
@@ -56,6 +57,18 @@ fn now_ms() -> i64 {
 fn publish_backoff_ms(attempts: u32) -> i64 {
     let factor = 1i64 << attempts.min(16);
     (PUBLISH_BACKOFF_BASE_MS.saturating_mul(factor)).min(PUBLISH_BACKOFF_MAX_MS)
+}
+
+/// Check a fetched expression's proof, which annotates `json` with the
+/// result, and return what to cache: the expression as fetched, but only
+/// when it is immutable and its proof is valid. The cache keeps the first
+/// entry for a URL forever, so one that fails its proof would shadow the
+/// real expression for good.
+fn verified_for_cache(json: &mut JsonValue, immutable: bool) -> Option<Expression<JsonValue>> {
+    // Parsed before the check adds `valid` / `invalid` to the proof.
+    let expr = serde_json::from_value::<Expression<JsonValue>>(json.clone()).ok();
+    let valid = LanguageController::verify_expression_proof(json);
+    expr.filter(|_| immutable && valid)
 }
 
 #[derive(Deserialize)]
@@ -227,7 +240,8 @@ impl LanguageController {
         }
     }
 
-    /// One runtime call fetching `addresses`; caches every immutable result.
+    /// One runtime call fetching `addresses`; caches every immutable result
+    /// whose proof is valid.
     async fn fetch_uncached(
         &self,
         lang: &str,
@@ -262,18 +276,14 @@ impl LanguageController {
                 if json.is_null() {
                     return Ok(None);
                 }
-                if outcome.immutable {
-                    if let Ok(expr) = serde_json::from_value::<Expression<JsonValue>>(json.clone())
+                if let Some(expr) = verified_for_cache(&mut json, outcome.immutable) {
+                    let url = expression_url(lang, address);
+                    if let Err(e) =
+                        Ad4mDb::with_global_instance(|db| db.cache_expression(&url, &expr))
                     {
-                        let url = expression_url(lang, address);
-                        if let Err(e) =
-                            Ad4mDb::with_global_instance(|db| db.cache_expression(&url, &expr))
-                        {
-                            warn!("Failed to cache expression {}: {}", url, e);
-                        }
+                        warn!("Failed to cache expression {}: {}", url, e);
                     }
                 }
-                Self::verify_expression_proof(&mut json);
                 Ok(Some(json))
             })
             .collect()
@@ -474,6 +484,30 @@ mod tests {
         assert_eq!(publish_backoff_ms(3), 80_000);
         assert_eq!(publish_backoff_ms(7), PUBLISH_BACKOFF_MAX_MS);
         assert_eq!(publish_backoff_ms(u32::MAX), PUBLISH_BACKOFF_MAX_MS);
+    }
+
+    #[test]
+    fn only_an_immutable_expression_with_a_valid_proof_is_cached() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let signed = crate::agent::create_signed_expression(
+            serde_json::json!({ "n": 1 }),
+            &AgentContext::main_agent(),
+        )
+        .unwrap();
+        let fetched = serde_json::to_value(&signed).unwrap();
+
+        let mut json = fetched.clone();
+        let cached = verified_for_cache(&mut json, true).expect("valid and immutable");
+        assert_eq!(serde_json::to_value(&cached).unwrap(), fetched);
+        assert_eq!(json["proof"]["valid"], JsonValue::Bool(true));
+
+        assert!(verified_for_cache(&mut fetched.clone(), false).is_none());
+
+        let mut tampered = fetched.clone();
+        tampered["data"] = serde_json::json!({ "n": 2 });
+        assert!(verified_for_cache(&mut tampered, true).is_none());
+        assert_eq!(tampered["proof"]["valid"], JsonValue::Bool(false));
     }
 
     #[test]
