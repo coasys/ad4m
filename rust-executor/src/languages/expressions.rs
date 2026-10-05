@@ -538,10 +538,11 @@ mod tests {
     }
 
     #[test]
-    fn fetch_script_is_ascii_and_escapes_addresses() {
-        let script = fetch_script(&["a\"b".to_string()], true);
-        assert!(script.is_ascii());
-        assert!(script.contains(r#"["a\"b"]"#));
+    fn fetch_script_escapes_addresses() {
+        // serde_json escapes quotes but leaves non-ASCII as it is, which is
+        // still a valid JS string literal.
+        let script = fetch_script(&["a\"b".to_string(), "ü".to_string()], true);
+        assert!(script.contains(r#"["a\"b","ü"]"#));
         assert!(script.contains("const onlyImmutable = true;"));
     }
 }
