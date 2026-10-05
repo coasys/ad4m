@@ -1,9 +1,10 @@
 //! Expression reads and local-first writes.
 //!
-//! Reads check the expression cache first and fetch every miss for one
-//! language in a single call into its runtime. A runtime serves one request
-//! at a time, so fetching misses one call each made N network round trips
-//! strictly sequential; inside one call they run concurrently.
+//! Reads check the expression cache first and fetch the misses for one
+//! language in calls of up to `FETCH_CHUNK` addresses into its runtime. A
+//! runtime serves one request at a time, so fetching misses one call each
+//! made N network round trips strictly sequential; inside one call they run
+//! concurrently.
 //!
 //! The cache only ever holds expressions their language reported immutable,
 //! so a hit needs no `isImmutableExpression` call: only misses ask, in the
@@ -31,9 +32,10 @@ use crate::types::Expression;
 
 /// Concurrent fetches inside one runtime call.
 const FETCH_CONCURRENCY: usize = 8;
-/// Addresses per prefetch call. Small, so a large sync interleaves with the
-/// reads someone is waiting on instead of holding the runtime for minutes.
-const PREFETCH_CHUNK: usize = 8;
+/// Addresses per fetch call, for reads and prefetches alike. Small, so a
+/// large sync or `getMany` interleaves with the reads someone is waiting on
+/// instead of holding the runtime for minutes.
+const FETCH_CHUNK: usize = 8;
 /// Held for a whole prefetch. Every received diff starts one, and its
 /// chunks run one after another, so with one permit at most one prefetch
 /// chunk is in any runtime's queue: a read waits behind one chunk, not one
@@ -168,11 +170,10 @@ impl LanguageController {
             }
         }
 
-        if !misses.is_empty() {
-            let miss_addresses: Vec<String> =
-                misses.iter().map(|&i| addresses[i].clone()).collect();
+        for chunk in misses.chunks(FETCH_CHUNK) {
+            let miss_addresses: Vec<String> = chunk.iter().map(|&i| addresses[i].clone()).collect();
             let fetched = self.fetch_uncached(&lang, &miss_addresses, false).await;
-            for (&i, outcome) in misses.iter().zip(fetched) {
+            for (&i, outcome) in chunk.iter().zip(fetched) {
                 results[i] = Some(outcome);
             }
         }
@@ -242,7 +243,7 @@ impl LanguageController {
                 .zip(cached)
                 .filter_map(|(a, hit)| hit.is_none().then_some(a))
                 .collect();
-            for chunk in missing.chunks(PREFETCH_CHUNK) {
+            for chunk in missing.chunks(FETCH_CHUNK) {
                 self.fetch_uncached(&lang, chunk, true).await;
             }
         }
