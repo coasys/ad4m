@@ -172,6 +172,8 @@ distinguishes the two — no separate flag.
 | `expressionCreate(content)` | `object` | `Promise<string>` (address) |
 | `expressionAddressOf(content)` | `object` | `Promise<string>` |
 | `isImmutableExpression(address)` | `string` | `boolean` (per-expression cache hint) |
+| `expressionPrepare(content)` | `object` | `Promise<{ address, expression }>` |
+| `expressionPublish(address, expression)` | `string`, `Expression` | `Promise<void>` |
 
 `isImmutableExpression` is a **per-expression cache hint**: if a Language
 returns `true` for an address, the runtime caches that Expression
@@ -180,6 +182,16 @@ omit this export entirely (the host treats it as always-`false` and never
 caches), MAY return `true` only for addresses it can prove immutable, or
 MAY blanket-return `true` for content-addressed Languages where addresses
 encode content hashes.
+
+`expressionPrepare` and `expressionPublish` split `expressionCreate` in two,
+so the runtime can hold an Expression before the Language has stored it:
+`prepare` signs the content and computes its address without touching the
+network; `publish` stores what `prepare` returned and MUST be idempotent. A
+Language exports both or neither. When both are present and the prepared
+address is immutable, the runtime caches the Expression, publishes it, and
+if publishing fails queues it and retries until it succeeds, so `create`
+succeeds offline and the Expression is readable locally at once. Languages
+with both still export `expressionCreate` for runtimes that predate them.
 
 ### 5.2 Perspective capabilities (commit / query / sync)
 
