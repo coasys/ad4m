@@ -184,9 +184,7 @@ impl Ad4mDb {
     }
 
     /// Every publish-queue row, for `export_all_to_json`.
-    pub(super) fn export_expression_publish_queue(
-        &self,
-    ) -> Ad4mDbResult<Vec<QueuedPublishSchema>> {
+    pub(super) fn export_expression_publish_queue(&self) -> Ad4mDbResult<Vec<QueuedPublishSchema>> {
         let mut stmt = self.conn.prepare(
             "SELECT url, language_address, expression_address, expression, attempts,
                     next_attempt_at, last_error
