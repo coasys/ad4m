@@ -19,6 +19,9 @@ use std::sync::{Arc, RwLock};
 pub enum Capability {
     ExpressionCreate,
     ExpressionGet,
+    /// Both `expressionPrepare` and `expressionPublish`: creates go through
+    /// them, cached and queued, instead of `expressionCreate`.
+    ExpressionPrepare,
     PerspectiveCommit,
     PerspectiveSync,
     PerspectiveRender,
@@ -40,6 +43,7 @@ impl Capability {
         match name {
             "expression-create" => Some(Capability::ExpressionCreate),
             "expression-get" => Some(Capability::ExpressionGet),
+            "expression-prepare" => Some(Capability::ExpressionPrepare),
             "perspective-commit" => Some(Capability::PerspectiveCommit),
             "perspective-sync" => Some(Capability::PerspectiveSync),
             "perspective-render" => Some(Capability::PerspectiveRender),

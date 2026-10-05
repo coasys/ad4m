@@ -317,6 +317,10 @@ impl LanguageRuntime {
                     caps.push("expression-create");
                 }
                 if (typeof language.expressionGet === "function") caps.push("expression-get");
+                const prepare = typeof language.expressionPrepare === "function";
+                const publish = typeof language.expressionPublish === "function";
+                if (prepare && publish) caps.push("expression-prepare");
+                else if (prepare || publish) caps.push("expression-prepare-incomplete");
                 if (typeof language.perspectiveCommit === "function") caps.push("perspective-commit");
                 if (typeof language.perspectiveSyncSync === "function") caps.push("perspective-sync");
                 if (typeof language.perspectiveSyncRender === "function") caps.push("perspective-render");
@@ -336,6 +340,15 @@ impl LanguageRuntime {
 
         let raw = self.execute(detect_script).await?;
         let caps = parse_capability_list(raw.trim());
+        // Not a capability, so the parse drops it. The spec asks for both or
+        // neither; with one, creates fall back to `expressionCreate`.
+        if raw.contains("\"expression-prepare-incomplete\"") {
+            warn!(
+                "Language {} exports only one of expressionPrepare / expressionPublish; \
+                 creates use expressionCreate",
+                self.language_address
+            );
+        }
 
         info!(
             "Detected capabilities for language {}: {:?}",
@@ -437,6 +450,7 @@ impl LanguageRuntime {
                                             let names: Vec<&'static str> = caps.iter().map(|c| match c {
                                                 Capability::ExpressionCreate => "expression-create",
                                                 Capability::ExpressionGet => "expression-get",
+                                                Capability::ExpressionPrepare => "expression-prepare",
                                                 Capability::PerspectiveCommit => "perspective-commit",
                                                 Capability::PerspectiveSync => "perspective-sync",
                                                 Capability::PerspectiveRender => "perspective-render",

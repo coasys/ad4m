@@ -25,6 +25,7 @@ use log::{info, warn};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
+use super::capability::{self, Capability};
 use super::error::LanguageError;
 use super::LanguageController;
 use crate::agent::AgentContext;
@@ -303,8 +304,9 @@ impl LanguageController {
     }
 
     /// Create through `expressionPrepare` / `expressionPublish` when the
-    /// language exports both; `Ok(None)` when it does not, and the caller
-    /// falls back to `expressionCreate`. Returns the expression address.
+    /// language exports both (`Capability::ExpressionPrepare`, detected at
+    /// load); `Ok(None)` when it does not, and the caller falls back to
+    /// `expressionCreate`. Returns the expression address.
     ///
     /// An immutable expression is cached before it is published, and a
     /// failed publish is queued rather than returned: the expression is
@@ -317,12 +319,11 @@ impl LanguageController {
         content_json: &str,
         agent_context: &AgentContext,
     ) -> Result<Option<String>, LanguageError> {
+        if !capability::get_capabilities(lang).contains(&Capability::ExpressionPrepare) {
+            return Ok(None);
+        }
         let script = format!(
             r#"JSON.stringify(await (async () => {{
-                if (typeof language.expressionPrepare !== "function"
-                    || typeof language.expressionPublish !== "function") {{
-                    return null;
-                }}
                 const prepared = await language.expressionPrepare({content_json});
                 if (!prepared || typeof prepared.address !== "string") {{
                     throw new Error("expressionPrepare returned no address");
@@ -337,13 +338,10 @@ impl LanguageController {
         let raw = self
             .execute_on_language_with_context(lang, &script, agent_context)
             .await?;
-        let prepared: Option<Prepared> =
+        let prepared: Prepared =
             serde_json::from_str(raw.trim()).map_err(|e| LanguageError::SerializationError {
                 message: format!("expressionPrepare returned an unexpected result: {}", e),
             })?;
-        let Some(prepared) = prepared else {
-            return Ok(None);
-        };
 
         let cacheable = prepared.immutable
             && serde_json::from_value::<Expression<JsonValue>>(prepared.expression.clone()).is_ok();
