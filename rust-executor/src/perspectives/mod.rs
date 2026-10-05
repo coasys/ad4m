@@ -543,11 +543,13 @@ pub async fn handle_perspective_diff_from_link_language_impl(
             .iter()
             .flat_map(|l| [l.data.source.clone(), l.data.target.clone()])
             .collect();
-        tokio::spawn(async move {
-            crate::languages::LanguageController::global_instance()
-                .prefetch_expressions(&urls)
-                .await;
-        });
+        if !urls.is_empty() {
+            tokio::spawn(async move {
+                crate::languages::LanguageController::global_instance()
+                    .prefetch_expressions(&urls)
+                    .await;
+            });
+        }
 
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
