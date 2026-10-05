@@ -3566,3 +3566,96 @@ describe("includeUnverified — wire format", () => {
     expect((builder as any).queryParams.includeUnverified).toBe(true);
   });
 });
+
+// ── Subscribe awaits the previous executor dispose ────────────────────
+describe("ModelQueryBuilder subscribe ordering", () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  function makePerspective() {
+    const disposeGate = deferred<boolean>();
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "shared-sub",
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(() => {}),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockReturnValue(disposeGate.promise),
+    };
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+    return { mockPerspective, mockClient, disposeGate };
+  }
+
+  const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+  @Model({ name: "OrderingTest" })
+  class OrderingTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ordering" })
+    type: string = "test://ordering";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("re-subscribe waits for the executor to release the previous subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    const second = builder.subscribe(() => {});
+    await flush();
+    // The executor has not acknowledged the dispose yet: no new registration.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "shared-sub");
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    disposeGate.resolve(true);
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-subscribe proceeds when the executor dispose fails", async () => {
+    const { mockPerspective, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    const second = builder.subscribe(() => {});
+    disposeGate.reject(new Error("Subscription not found"));
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("dispose() cleans up locally at once and resolves without a subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribe = jest.fn();
+    mockClient.subscribeToQueryUpdates.mockReturnValue(unsubscribe);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await expect(builder.dispose()).resolves.toBeUndefined();
+
+    await builder.subscribe(() => {});
+    const done = builder.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    disposeGate.resolve(true);
+    await expect(done).resolves.toBeUndefined();
+    // Idempotent: a second dispose does not call the executor again.
+    await builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+  });
+});
