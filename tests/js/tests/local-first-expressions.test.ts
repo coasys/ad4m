@@ -22,7 +22,9 @@ export default function localFirstExpressionTests(testContext: TestContext) {
             const control = () => `${lang}://control`
             const setOnline = (online: boolean) =>
                 ad4mClient.expression.interact(control(), new InteractionCall('setOnline', { online }))
-            const stats = async (): Promise<{ getCalls: number, remote: string[] }> =>
+            const setImmutable = (immutable: boolean) =>
+                ad4mClient.expression.interact(control(), new InteractionCall('setImmutable', { immutable }))
+            const stats = async (): Promise<{ getCalls: number, peakGets: number, remote: string[] }> =>
                 JSON.parse(await ad4mClient.expression.interact(control(), new InteractionCall('stats', {})) as string)
 
             before(async () => {
@@ -35,6 +37,7 @@ export default function localFirstExpressionTests(testContext: TestContext) {
 
             afterEach(async () => {
                 await setOnline(true)
+                await setImmutable(true)
             })
 
             it('create succeeds offline, reads back without the language, and publishes once online', async () => {
@@ -69,13 +72,32 @@ export default function localFirstExpressionTests(testContext: TestContext) {
 
                 const first = await ad4mClient.expression.getMany(urls)
                 expect(first.map(e => JSON.parse(e.data))).to.deep.equal(contents)
-                expect((await stats()).getCalls).to.equal(before + 3)
+                const s = await stats()
+                expect(s.getCalls).to.equal(before + 3)
+                // One call per URL would run them one at a time.
+                expect(s.peakGets).to.equal(3)
 
                 // Offline, so a read that reached the language would fail.
                 await setOnline(false)
                 const second = await ad4mClient.expression.getMany(urls)
                 expect(second.map(e => JSON.parse(e.data))).to.deep.equal(contents)
                 expect((await stats()).getCalls).to.equal(before + 3)
+            })
+
+            it('a mutable create publishes at once, is not cached, and fails offline', async () => {
+                await setImmutable(false)
+                const url = await ad4mClient.expression.create({ note: "mutable" }, lang)
+                expect((await stats()).remote).to.include(url.split("://")[1])
+
+                // Not cached, so offline the read reaches the language and fails.
+                await setOnline(false)
+                const read = await ad4mClient.expression.get(url).catch(() => null)
+                expect(read).to.be.null
+
+                // Not queued either: the create itself fails.
+                const created = await ad4mClient.expression.create({ note: "mutable offline" }, lang)
+                    .then(() => true, () => false)
+                expect(created).to.be.false
             })
 
             it('an expression never fetched is not served while offline', async () => {
