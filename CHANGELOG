@@ -38,6 +38,7 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- `ai.feedTranscriptionStream` rejects when any stream did not take the audio, not only when all of them failed [#1248](https://github.com/coasys/ad4m/pull/1248)
 - An auto-processor's `batchReady` event names the agent that emitted it [#1242](https://github.com/coasys/ad4m/pull/1242)
   - Every later step of a pass carried `agentDid`, but `batchReady` was emitted from the tick without it. The WS layer delivers an event with no `agentDid` to admin sessions only, so a non-admin session never saw a pass start.
 - `interpretationOverlays()` returns `kind` as `"create"` or `"update"` for overlays the interpretation engine writes [#1240](https://github.com/coasys/ad4m/pull/1240)
