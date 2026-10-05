@@ -2419,10 +2419,13 @@ impl Ad4mDb {
                     result.expressions.total = expressions.len() as i32;
                     log::debug!("Importing {} expressions", expressions.len());
                     for expr in expressions {
+                        // A URL names one expression forever, so one already
+                        // cached is the same expression: omitted, not failed.
                         match self.conn.execute(
-                            "INSERT INTO expression (url, data) VALUES (?1, ?2)",
+                            "INSERT OR IGNORE INTO expression (url, data) VALUES (?1, ?2)",
                             params![expr.url, expr.data.to_string()],
                         ) {
+                            Ok(0) => result.expressions.omitted += 1,
                             Ok(_) => result.expressions.imported += 1,
                             Err(e) => {
                                 result.expressions.failed += 1;

@@ -44,6 +44,9 @@ pub(super) fn create_tables(conn: &Connection) -> Ad4mDbResult<()> {
          )",
         [],
     )?;
+    // Rows from before the cache was keyed by URL are keyed by the bare
+    // address, and nothing reads them any more.
+    conn.execute("DELETE FROM expression WHERE url NOT LIKE '%://%'", [])?;
     conn.execute(
         "CREATE TABLE IF NOT EXISTS expression_publish_queue (
             url TEXT PRIMARY KEY,
@@ -295,6 +298,42 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].url, "a://1");
         assert_eq!(due[0].attempts, 1);
+    }
+
+    #[test]
+    fn rows_keyed_by_bare_address_are_dropped_on_open() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.cache_expression("a://x", &expression(json!(1))).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO expression (url, data) VALUES ('x', ?1)",
+                params![serde_json::to_string(&expression(json!(2))).unwrap()],
+            )
+            .unwrap();
+
+        create_tables(&db.conn).unwrap();
+
+        let urls: Vec<String> = db
+            .conn
+            .prepare("SELECT url FROM expression")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(urls, vec!["a://x".to_string()]);
+    }
+
+    #[test]
+    fn importing_a_cached_expression_is_omitted_not_failed() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.cache_expression("a://x", &expression(json!(1))).unwrap();
+
+        let result = db
+            .import_from_json(db.export_all_to_json().unwrap())
+            .unwrap();
+        assert_eq!(result.expressions.failed, 0);
+        assert_eq!(result.expressions.omitted, 1);
     }
 
     #[test]
