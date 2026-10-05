@@ -69,7 +69,7 @@ async fn get_many_expressions(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
-    let expressions = controller.get_expressions_by_url(&body.urls, false).await;
+    let expressions = controller.get_expressions_by_url(&body.urls).await;
     let results: Vec<Option<ExpressionRendered>> = body
         .urls
         .iter()

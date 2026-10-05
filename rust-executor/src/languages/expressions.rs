@@ -164,13 +164,8 @@ impl LanguageController {
 
     /// Get expressions by URL across languages, one result per URL, in
     /// order. A URL that does not parse, names a language that is not
-    /// loaded (and `load_missing` is false or loading fails), or fails to
-    /// fetch reads as `None`.
-    pub async fn get_expressions_by_url(
-        &self,
-        urls: &[String],
-        load_missing: bool,
-    ) -> Vec<Option<JsonValue>> {
+    /// loaded, or fails to fetch reads as `None`.
+    pub async fn get_expressions_by_url(&self, urls: &[String]) -> Vec<Option<JsonValue>> {
         let mut results: Vec<Option<JsonValue>> = vec![None; urls.len()];
         let mut by_language: HashMap<String, Vec<(usize, String)>> = HashMap::new();
         for (i, url) in urls.iter().enumerate() {
@@ -186,16 +181,7 @@ impl LanguageController {
 
         for (lang, entries) in by_language {
             if !self.is_language_loaded(&lang).await {
-                if !load_missing {
-                    continue;
-                }
-                if let Err(e) = self.language_by_ref(&lang).await {
-                    warn!(
-                        "Could not load language {} to resolve expressions: {}",
-                        lang, e
-                    );
-                    continue;
-                }
+                continue;
             }
             let addresses: Vec<String> = entries.iter().map(|(_, a)| a.clone()).collect();
             let fetched = self.get_expressions(&lang, &addresses).await;
