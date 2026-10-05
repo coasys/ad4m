@@ -93,11 +93,16 @@ const language = defineLanguage({
         async get(address: string): Promise<any> {
             const cid = address.toString();
 
+            // `inline=1` asks the gateway for the expression itself, one round
+            // trip. A gateway that ignores it answers with a pre-signed URL
+            // instead, and the object is a second request.
             let presignedUrl;
             try {
-                const response = await request(PROXY_URL + `?key=${cid}`);
+                const response = await request(PROXY_URL + `?key=${cid}&inline=1`);
                 if (!response.ok) return null;
-                presignedUrl = (await response.json()).url;
+                const body = await response.json();
+                if (typeof body?.url !== "string") return body;
+                presignedUrl = body.url;
             } catch (e) {
                 console.error("Get File failed at getting presigned url", e);
                 return null;
