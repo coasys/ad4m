@@ -2293,6 +2293,39 @@ describe("Prolog + Literals", () => {
 
                         queryBuilder.dispose();
                     });
+
+                    // Two subscribeQuery() callers on the same query share one
+                    // executor subscription, and each dispose() releases one hold.
+                    // A second dispose() of the same proxy must not release the
+                    // other proxy's hold.
+                    it("keeps a shared subscribeQuery subscription alive when one proxy is disposed twice", async () => {
+                        const query = "SELECT ?source ?predicate ?target WHERE { ?source ?predicate ?target . FILTER(?predicate = <test://shared-proxy>) }";
+                        const subA = await perspective.subscribeQuery(query);
+                        const subB = await perspective.subscribeQuery(query);
+                        expect(subB.id).to.equal(subA.id);
+                        const callbackA = sinon.fake();
+                        const callbackB = sinon.fake();
+                        subA.onResult(callbackA);
+                        subB.onResult(callbackB);
+
+                        subA.dispose();
+                        subA.dispose();
+
+                        await perspective.add(new Link({
+                            source: "test://shared-proxy-source",
+                            predicate: "test://shared-proxy",
+                            target: "test://shared-proxy-target",
+                        }));
+
+                        await pollUntil(() => callbackB.callCount >= 1, {
+                            timeoutMs: 20000, intervalMs: 50,
+                            label: "remaining subscribeQuery proxy still receives updates after the other was disposed twice"
+                        });
+                        expect(JSON.stringify(callbackB.lastCall.args[0])).to.include("test://shared-proxy-target");
+                        expect(callbackA.callCount).to.equal(0);
+
+                        subB.dispose();
+                    });
                 });
 
                 describe('ModelQueryBuilder', () => {
