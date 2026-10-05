@@ -143,13 +143,18 @@ impl Ad4mDb {
         let mut pending = Vec::new();
         for row in rows {
             let (url, language_address, expression_address, expression, attempts) = row?;
-            pending.push(PendingPublish {
-                url,
-                language_address,
-                expression_address,
-                expression: serde_json::from_str(&expression)?,
-                attempts,
-            });
+            // Skipped, not dropped: with `?` one corrupt row, always due
+            // first, would fail every poll and stop the whole queue.
+            match serde_json::from_str(&expression) {
+                Ok(expression) => pending.push(PendingPublish {
+                    url,
+                    language_address,
+                    expression_address,
+                    expression,
+                    attempts,
+                }),
+                Err(e) => log::warn!("Skipping unparseable publish-queue row {}: {}", url, e),
+            }
         }
         Ok(pending)
     }
@@ -292,6 +297,28 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].url, "a://1");
         assert_eq!(due[0].attempts, 1);
+    }
+
+    #[test]
+    fn an_unparseable_queue_row_is_skipped_not_fatal() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.queue_expression_publish("a://2", "a", "2", &json!({ "data": "x" }), 200)
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO expression_publish_queue
+                    (url, language_address, expression_address, expression, next_attempt_at)
+                 VALUES ('a://1', 'a', '1', '{not json', 100)",
+                [],
+            )
+            .unwrap();
+
+        let due = db.due_expression_publishes(1000, 10).unwrap();
+        assert_eq!(
+            due.iter().map(|p| p.url.as_str()).collect::<Vec<_>>(),
+            vec!["a://2"]
+        );
+        assert_eq!(db.export_expression_publish_queue().unwrap().len(), 2);
     }
 
     #[test]
