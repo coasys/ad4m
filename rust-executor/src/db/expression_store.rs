@@ -5,6 +5,7 @@
 //! data, so the address alone does not identify an expression.
 
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use super::{Ad4mDb, Ad4mDbResult};
@@ -18,6 +19,20 @@ pub struct PendingPublish {
     pub expression_address: String,
     pub expression: JsonValue,
     pub attempts: u32,
+}
+
+/// A publish-queue row as `export_all_to_json` writes it. `expression` is
+/// the stored text verbatim, so a round trip restores even a row that no
+/// longer parses.
+#[derive(Serialize, Deserialize)]
+pub(super) struct QueuedPublishSchema {
+    pub(super) url: String,
+    language_address: String,
+    expression_address: String,
+    expression: String,
+    attempts: u32,
+    next_attempt_at: i64,
+    last_error: Option<String>,
 }
 
 pub(super) fn create_tables(conn: &Connection) -> Ad4mDbResult<()> {
@@ -162,6 +177,52 @@ impl Ad4mDb {
         )?;
         Ok(())
     }
+
+    /// Every publish-queue row, for `export_all_to_json`.
+    pub(super) fn export_expression_publish_queue(
+        &self,
+    ) -> Ad4mDbResult<Vec<QueuedPublishSchema>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT url, language_address, expression_address, expression, attempts,
+                    next_attempt_at, last_error
+             FROM expression_publish_queue",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(QueuedPublishSchema {
+                    url: row.get(0)?,
+                    language_address: row.get(1)?,
+                    expression_address: row.get(2)?,
+                    expression: row.get(3)?,
+                    attempts: row.get(4)?,
+                    next_attempt_at: row.get(5)?,
+                    last_error: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Restore one exported publish-queue row, for `import_from_json`. A row
+    /// already queued keeps its own state, as in `queue_expression_publish`.
+    pub(super) fn import_queued_publish(&self, row: &QueuedPublishSchema) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO expression_publish_queue
+                (url, language_address, expression_address, expression, attempts,
+                 next_attempt_at, last_error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                row.url,
+                row.language_address,
+                row.expression_address,
+                row.expression,
+                row.attempts,
+                row.next_attempt_at,
+                row.last_error
+            ],
+        )?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -231,5 +292,27 @@ mod tests {
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].url, "a://1");
         assert_eq!(due[0].attempts, 1);
+    }
+
+    #[test]
+    fn export_and_import_carry_the_publish_queue() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.queue_expression_publish("a://1", "a", "1", &json!({ "data": "x" }), 100)
+            .unwrap();
+        db.reschedule_expression_publish("a://1", 2, 300, "offline")
+            .unwrap();
+
+        let imported = Ad4mDb::new(":memory:").unwrap();
+        imported
+            .import_from_json(db.export_all_to_json().unwrap())
+            .unwrap();
+
+        let due = imported.due_expression_publishes(300, 10).unwrap();
+        assert_eq!(due, db.due_expression_publishes(300, 10).unwrap());
+        assert_eq!(due.len(), 1);
+        let rows = |db: &Ad4mDb| {
+            serde_json::to_value(db.export_expression_publish_queue().unwrap()).unwrap()
+        };
+        assert_eq!(rows(&imported), rows(&db));
     }
 }
