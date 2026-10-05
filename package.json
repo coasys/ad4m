@@ -59,7 +59,7 @@
     "turbo": "latest"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=22"
   },
   "nohoist": [
     "core"
@@ -80,6 +80,6 @@
       "pako": "2.1.0"
     }
   },
-  "version": "0.13.0-test-interpretation-1",
+  "version": "0.13.0-test-interpretation-2",
   "packageManager": "pnpm@9.15.0"
 }

@@ -1,3 +1,4 @@
+use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use holochain::conductor::api::AppInfo;
 use holochain::prelude::hash_type::Agent;
@@ -5,14 +6,33 @@ use holochain::prelude::{
     ExternIO, HoloHash, InstallAppPayload, Signal, Signature, ZomeCallResponse,
 };
 use lazy_static::lazy_static;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{oneshot, Mutex, RwLock};
 
 #[derive(Clone)]
 pub struct HolochainServiceInterface {
-    pub sender: UnboundedSender<HolochainServiceRequest>,
+    pub sender: UnboundedSender<Envelope>,
     pub stream_receiver: Arc<Mutex<UnboundedReceiver<Signal>>>,
+}
+
+/// One queued request plus the two instants the dispatch loop reads when it admits the
+/// request (`dispatch::admit`, once the request has its permit, the write lock or the drain).
+///
+/// `queued_at` feeds the time-in-queue log line, the "five-minute diagnosis" #1133 asked
+/// for. `deadline` is the instant after which the caller has already given up (its own
+/// `timeout` fired); a request still waiting past it when it is admitted is answered with
+/// an error instead of run, so a stale presence broadcast never reaches the conductor.
+/// `None` never expires.
+///
+/// Built only by `HolochainServiceInterface::send`, so every request carries both.
+#[derive(Debug)]
+pub struct Envelope {
+    pub request: HolochainServiceRequest,
+    pub queued_at: Instant,
+    pub deadline: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -48,6 +68,91 @@ pub enum HolochainServiceRequest {
     EnableApp(String, oneshot::Sender<HolochainServiceResponse>),
 }
 
+impl HolochainServiceRequest {
+    /// Variant name for log lines.
+    pub fn name(&self) -> &'static str {
+        use HolochainServiceRequest::*;
+        match self {
+            InstallApp(..) => "InstallApp",
+            CallZomeFunction { .. } => "CallZomeFunction",
+            RemoveApp(..) => "RemoveApp",
+            AgentInfos(..) => "AgentInfos",
+            AddAgentInfos(..) => "AddAgentInfos",
+            Sign(..) => "Sign",
+            Shutdown(..) => "Shutdown",
+            GetAgentKey(..) => "GetAgentKey",
+            GetAppInfo(..) => "GetAppInfo",
+            LogNetworkMetrics(..) => "LogNetworkMetrics",
+            GetNetworkMetrics(..) => "GetNetworkMetrics",
+            PackDna(..) => "PackDna",
+            UnPackDna(..) => "UnPackDna",
+            PackHapp(..) => "PackHapp",
+            UnPackHapp(..) => "UnPackHapp",
+            NewSignKeypair(..) => "NewSignKeypair",
+            SignWithKey(..) => "SignWithKey",
+            EnableApp(..) => "EnableApp",
+        }
+    }
+
+    /// Requests that change the conductor's app set. The dispatch loop runs these one at a
+    /// time, after every in-flight request has finished and before any new one starts;
+    /// every other variant is `&self` over the `Arc`-shared conductor and runs concurrently.
+    pub fn is_lifecycle(&self) -> bool {
+        use HolochainServiceRequest::*;
+        matches!(
+            self,
+            InstallApp(..) | RemoveApp(..) | EnableApp(..) | Shutdown(..)
+        )
+    }
+
+    /// Answered from the conductor's keystore or its local app state, in milliseconds,
+    /// never through a zome or the network. `run_dispatch_loop` runs these in their own lane
+    /// so a full zome call pool never delays them:
+    ///
+    /// - `Sign`, `SignWithKey`: one keystore signature.
+    /// - `GetAgentKey`: lists the keystore's public keys.
+    /// - `NewSignKeypair`: one keystore key generation.
+    /// - `GetAppInfo`: one read of the conductor's app state; no cell, no network.
+    ///
+    /// Not local: zome calls, `AgentInfos`/`AddAgentInfos` and the network metrics go
+    /// through kitsune2, and pack/unpack read and write bundles on disk with no bound on
+    /// their size.
+    pub fn is_local(&self) -> bool {
+        use HolochainServiceRequest::*;
+        matches!(
+            self,
+            Sign(..) | SignWithKey(..) | GetAgentKey(..) | NewSignKeypair(..) | GetAppInfo(..)
+        )
+    }
+
+    /// Answer the request with `err` without running it. The caller's `await` on the
+    /// matching interface method returns `Err(err)`.
+    pub fn refuse(self, err: AnyError) {
+        use HolochainServiceRequest::*;
+        use HolochainServiceResponse as R;
+        let _ = match self {
+            InstallApp(_, tx) => tx.send(R::InstallApp(Err(err))),
+            CallZomeFunction { response, .. } => response.send(R::CallZomeFunction(Err(err))),
+            RemoveApp(_, tx) => tx.send(R::RemoveApp(Err(err))),
+            AgentInfos(tx) => tx.send(R::AgentInfos(Err(err))),
+            AddAgentInfos(_, tx) => tx.send(R::AddAgentInfos(Err(err))),
+            Sign(_, tx) => tx.send(R::Sign(Err(err))),
+            Shutdown(tx) => tx.send(R::Shutdown(Err(err))),
+            GetAgentKey(tx) => tx.send(R::GetAgentKey(Err(err))),
+            GetAppInfo(_, tx) => tx.send(R::GetAppInfo(Err(err))),
+            LogNetworkMetrics(tx) => tx.send(R::LogNetworkMetrics(Err(err))),
+            GetNetworkMetrics(tx) => tx.send(R::GetNetworkMetrics(Err(err))),
+            PackDna(_, tx) => tx.send(R::PackDna(Err(err))),
+            UnPackDna(_, tx) => tx.send(R::UnPackDna(Err(err))),
+            PackHapp(_, tx) => tx.send(R::PackHapp(Err(err))),
+            UnPackHapp(_, tx) => tx.send(R::UnPackHapp(Err(err))),
+            NewSignKeypair(tx) => tx.send(R::NewSignKeypair(Err(err))),
+            SignWithKey(_, _, tx) => tx.send(R::SignWithKey(Err(err))),
+            EnableApp(_, tx) => tx.send(R::EnableApp(Err(err))),
+        };
+    }
+}
+
 #[derive(Debug)]
 pub enum HolochainServiceResponse {
     InstallApp(Result<AppInfo, AnyError>),
@@ -72,12 +177,28 @@ pub enum HolochainServiceResponse {
 }
 
 impl HolochainServiceInterface {
+    /// The one place an `Envelope` is built: stamps `queued_at` and hands the request to
+    /// the dispatch loop. `deadline` is the caller's own give-up instant, or `None`.
+    fn send(
+        &self,
+        request: HolochainServiceRequest,
+        deadline: Option<Instant>,
+    ) -> Result<(), AnyError> {
+        self.sender
+            .send(Envelope {
+                request,
+                queued_at: Instant::now(),
+                deadline,
+            })
+            .map_err(|e| anyhow!("Holochain service channel closed: {}", e.0.request.name()))
+    }
+
     pub async fn install_app(&self, payload: InstallAppPayload) -> Result<AppInfo, AnyError> {
         let (response_sender, response_receiver) = oneshot::channel();
-        self.sender.send(HolochainServiceRequest::InstallApp(
-            payload,
-            response_sender,
-        ))?;
+        self.send(
+            HolochainServiceRequest::InstallApp(payload, response_sender),
+            None,
+        )?;
 
         match response_receiver.await.unwrap() {
             HolochainServiceResponse::InstallApp(result) => {
@@ -97,17 +218,20 @@ impl HolochainServiceInterface {
         zome_name: String,
         fn_name: String,
         payload: Option<ExternIO>,
+        deadline: Option<Instant>,
     ) -> Result<ZomeCallResponse, AnyError> {
         let (response_sender, response_receiver) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::CallZomeFunction {
+        self.send(
+            HolochainServiceRequest::CallZomeFunction {
                 app_id,
                 cell_name,
                 zome_name,
                 fn_name,
                 payload,
                 response: response_sender,
-            })?;
+            },
+            deadline,
+        )?;
         match response_receiver.await? {
             HolochainServiceResponse::CallZomeFunction(result) => result,
             _ => unreachable!(),
@@ -116,8 +240,10 @@ impl HolochainServiceInterface {
 
     pub async fn remove_app(&self, app_id: String) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::RemoveApp(app_id, response_tx))?;
+        self.send(
+            HolochainServiceRequest::RemoveApp(app_id, response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::RemoveApp(result) => result,
             _ => unreachable!(),
@@ -126,8 +252,10 @@ impl HolochainServiceInterface {
 
     pub async fn enable_app(&self, app_id: String) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::EnableApp(app_id, response_tx))?;
+        self.send(
+            HolochainServiceRequest::EnableApp(app_id, response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::EnableApp(result) => result,
             _ => unreachable!(),
@@ -136,8 +264,7 @@ impl HolochainServiceInterface {
 
     pub async fn agent_infos(&self) -> Result<Vec<String>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::AgentInfos(response_tx))?;
+        self.send(HolochainServiceRequest::AgentInfos(response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::AgentInfos(result) => result,
             _ => unreachable!(),
@@ -146,10 +273,10 @@ impl HolochainServiceInterface {
 
     pub async fn add_agent_infos(&self, agent_infos: Vec<String>) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender.send(HolochainServiceRequest::AddAgentInfos(
-            agent_infos,
-            response_tx,
-        ))?;
+        self.send(
+            HolochainServiceRequest::AddAgentInfos(agent_infos, response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::AddAgentInfos(result) => result,
             _ => unreachable!(),
@@ -158,8 +285,7 @@ impl HolochainServiceInterface {
 
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::Sign(data, response_tx))?;
+        self.send(HolochainServiceRequest::Sign(data, response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::Sign(result) => result,
             _ => unreachable!(),
@@ -168,8 +294,7 @@ impl HolochainServiceInterface {
 
     pub async fn shutdown(&self) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::Shutdown(response_tx))?;
+        self.send(HolochainServiceRequest::Shutdown(response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::Shutdown(result) => result,
             _ => unreachable!(),
@@ -178,8 +303,7 @@ impl HolochainServiceInterface {
 
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::GetAgentKey(response_tx))?;
+        self.send(HolochainServiceRequest::GetAgentKey(response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::GetAgentKey(result) => result,
             _ => unreachable!(),
@@ -192,11 +316,10 @@ impl HolochainServiceInterface {
         data: Vec<u8>,
     ) -> Result<Signature, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender.send(HolochainServiceRequest::SignWithKey(
-            agent_key,
-            data,
-            response_tx,
-        ))?;
+        self.send(
+            HolochainServiceRequest::SignWithKey(agent_key, data, response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::SignWithKey(result) => result,
             _ => unreachable!(),
@@ -205,8 +328,7 @@ impl HolochainServiceInterface {
 
     pub async fn new_sign_keypair_random(&self) -> Result<HoloHash<Agent>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::NewSignKeypair(response_tx))?;
+        self.send(HolochainServiceRequest::NewSignKeypair(response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::NewSignKeypair(result) => result,
             _ => unreachable!(),
@@ -215,8 +337,10 @@ impl HolochainServiceInterface {
 
     pub async fn get_app_info(&self, app_id: String) -> Result<Option<AppInfo>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::GetAppInfo(app_id, response_tx))?;
+        self.send(
+            HolochainServiceRequest::GetAppInfo(app_id, response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::GetAppInfo(result) => result,
             _ => unreachable!(),
@@ -225,8 +349,10 @@ impl HolochainServiceInterface {
 
     pub async fn log_network_metrics(&self) -> Result<(), AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::LogNetworkMetrics(response_tx))?;
+        self.send(
+            HolochainServiceRequest::LogNetworkMetrics(response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::LogNetworkMetrics(result) => result,
             _ => unreachable!(),
@@ -235,8 +361,10 @@ impl HolochainServiceInterface {
 
     pub async fn get_network_metrics(&self) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::GetNetworkMetrics(response_tx))?;
+        self.send(
+            HolochainServiceRequest::GetNetworkMetrics(response_tx),
+            None,
+        )?;
         match response_rx.await? {
             HolochainServiceResponse::GetNetworkMetrics(result) => result,
             _ => unreachable!(),
@@ -245,8 +373,7 @@ impl HolochainServiceInterface {
 
     pub async fn pack_dna(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::PackDna(path, response_tx))?;
+        self.send(HolochainServiceRequest::PackDna(path, response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::PackDna(result) => result,
             _ => unreachable!(),
@@ -255,8 +382,7 @@ impl HolochainServiceInterface {
 
     pub async fn unpack_dna(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::UnPackDna(path, response_tx))?;
+        self.send(HolochainServiceRequest::UnPackDna(path, response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::UnPackDna(result) => result,
             _ => unreachable!(),
@@ -265,8 +391,7 @@ impl HolochainServiceInterface {
 
     pub async fn pack_happ(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::PackHapp(path, response_tx))?;
+        self.send(HolochainServiceRequest::PackHapp(path, response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::PackHapp(result) => result,
             _ => unreachable!(),
@@ -275,8 +400,7 @@ impl HolochainServiceInterface {
 
     pub async fn unpack_happ(&self, path: String) -> Result<String, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
-        self.sender
-            .send(HolochainServiceRequest::UnPackHapp(path, response_tx))?;
+        self.send(HolochainServiceRequest::UnPackHapp(path, response_tx), None)?;
         match response_rx.await? {
             HolochainServiceResponse::UnPackHapp(result) => result,
             _ => unreachable!(),
@@ -289,24 +413,84 @@ lazy_static! {
         Arc::new(RwLock::new(None));
 }
 
+/// Set while `HolochainService::init` is running. What `holochain_service_once_started`
+/// waits on. Set and cleared only through `ConductorStarting`.
+static CONDUCTOR_STARTING: AtomicBool = AtomicBool::new(false);
+
+/// How long any accessor waits for the conductor before giving up. Also bounds a
+/// generate/unlock waiting on another's startup (`agent::conductor_startup`).
+pub(crate) const SERVICE_WAIT: Duration = Duration::from_secs(120);
+
+/// Marks a conductor start in progress for as long as it is held. Clearing on drop means an
+/// error, a panic or a cancelled task can't leave the flag set.
+pub struct ConductorStarting(());
+
+impl ConductorStarting {
+    pub fn begin() -> Self {
+        CONDUCTOR_STARTING.store(true, Ordering::SeqCst);
+        Self(())
+    }
+}
+
+impl Drop for ConductorStarting {
+    fn drop(&mut self) {
+        CONDUCTOR_STARTING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// Polls `get` until it returns something, `keep_waiting` turns false, or `timeout` passes.
+/// Generic over `get` only so the tests needn't touch the global service.
+async fn wait_for<T, Fut>(
+    timeout: Duration,
+    keep_waiting: impl Fn() -> bool,
+    get: impl Fn() -> Fut,
+) -> Option<T>
+where
+    Fut: std::future::Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(value) = get().await {
+            return Some(value);
+        }
+        if !keep_waiting() {
+            // Checked again: the start may have set the service just before it stopped waiting.
+            return get().await;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 pub async fn get_holochain_service() -> HolochainServiceInterface {
-    // Poll for the conductor to become available, with a timeout.
     // Language threads may call this before HolochainService::init() has
     // finished setting the global — instead of panicking immediately we
     // give the conductor up to 120 seconds to start.
-    let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
-    loop {
-        {
-            let lock = HOLOCHAIN_SERVICE.read().await;
-            if let Some(svc) = lock.clone() {
-                return svc;
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("Holochain Conductor not started after 120s timeout");
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    wait_for(SERVICE_WAIT, || true, maybe_get_holochain_service)
+        .await
+        .unwrap_or_else(|| panic!("Holochain Conductor not started after 120s timeout"))
+}
+
+/// The Holochain service, waiting for it while a conductor start is in progress.
+///
+/// For callers that took `maybe_get_holochain_service()` to mean "not running" because the
+/// conductor used to be up by the time unlock replied (see `agent::conductor_startup`). They
+/// wait out a start instead of failing in the seconds after unlock. They still get `None` at
+/// once when nothing is starting it (a locked agent, or a start that failed), and after 120s
+/// if a start never finishes.
+pub async fn holochain_service_once_started() -> Option<HolochainServiceInterface> {
+    let service = wait_for(
+        SERVICE_WAIT,
+        || CONDUCTOR_STARTING.load(Ordering::SeqCst),
+        maybe_get_holochain_service,
+    )
+    .await;
+    if service.is_none() && CONDUCTOR_STARTING.load(Ordering::SeqCst) {
+        log::warn!("Holochain conductor still starting after 120s; giving up waiting");
     }
+    service
 }
 
 pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> {
@@ -317,4 +501,66 @@ pub async fn maybe_get_holochain_service() -> Option<HolochainServiceInterface> 
 pub async fn set_holochain_service(service: HolochainServiceInterface) {
     let mut lock = HOLOCHAIN_SERVICE.write().await;
     *lock = Some(service);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn wait_returns_none_at_once_when_nothing_is_starting() {
+        let started = Instant::now();
+        let found = wait_for(SERVICE_WAIT, || false, || async { None::<()> }).await;
+        assert!(found.is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn wait_returns_the_value_once_a_start_provides_it() {
+        let polls = AtomicUsize::new(0);
+        let found = wait_for(
+            SERVICE_WAIT,
+            || true,
+            || {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                async move { (n >= 2).then_some(()) }
+            },
+        )
+        .await;
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn wait_gives_up_when_a_start_never_finishes() {
+        let found = wait_for(Duration::from_millis(300), || true, || async { None::<()> }).await;
+        assert!(found.is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_rechecks_after_the_start_stops() {
+        let polls = AtomicUsize::new(0);
+        let found = wait_for(
+            SERVICE_WAIT,
+            || false,
+            || {
+                let n = polls.fetch_add(1, Ordering::SeqCst);
+                async move { (n >= 1).then_some(()) }
+            },
+        )
+        .await;
+        assert!(found.is_some());
+    }
+
+    #[tokio::test]
+    async fn conductor_starting_clears_even_if_the_start_panics() {
+        let task = tokio::spawn(async {
+            let _starting = ConductorStarting::begin();
+            assert!(CONDUCTOR_STARTING.load(Ordering::SeqCst));
+            panic!("start failed");
+        });
+        assert!(task.await.is_err());
+        assert!(!CONDUCTOR_STARTING.load(Ordering::SeqCst));
+    }
 }

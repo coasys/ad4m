@@ -134,6 +134,8 @@ mod tests {
             model: "m".into(),
             prompt_version: "p".into(),
             ran_at: "1000".into(),
+            debug_prompt: None,
+            debug_response: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -153,6 +155,8 @@ mod tests {
             model: "m".into(),
             prompt_version: "p".into(),
             ran_at: "1000".into(),
+            debug_prompt: None,
+            debug_response: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -172,6 +176,8 @@ mod tests {
             model: "m".into(),
             prompt_version: "p".into(),
             ran_at: "1".into(),
+            debug_prompt: None,
+            debug_response: None,
         };
         mint_interpretation_run(
             &mut p,
@@ -282,6 +288,8 @@ mod tests {
             model: "m".into(),
             prompt_version: "p".into(),
             ran_at: "1000".into(),
+            debug_prompt: None,
+            debug_response: None,
         };
         mint_interpretation_run(&mut p, &meta, None, None, &ctx)
             .await
@@ -317,19 +325,14 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "cursor-skip".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -349,6 +352,8 @@ mod tests {
                 model: "m".into(),
                 prompt_version: "p".into(),
                 ran_at: now_ms.to_string(),
+                debug_prompt: None,
+                debug_response: None,
             },
             Some(&InterpretationRunCursor {
                 processor: processor_node("cursor-skip"),
@@ -392,19 +397,14 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "incremental".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -424,6 +424,8 @@ mod tests {
                 model: "m".into(),
                 prompt_version: "p".into(),
                 ran_at: now_ms.to_string(),
+                debug_prompt: None,
+                debug_response: None,
             },
             Some(&InterpretationRunCursor {
                 processor: processor_node("incremental"),
@@ -479,19 +481,14 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "repeated-text".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -536,19 +533,14 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "capped".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 2,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 
@@ -608,19 +600,15 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "window-drop".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
             source_window_ms: Some(1), // 1ms — anything not stamped this millisecond is old
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
         let loaded = load_processors(&p).await.expect("load");
@@ -664,19 +652,14 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "no-window".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         };
-        write_processor(&mut p, &cfg, &ctx)
+        write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
             .expect("write_processor");
 

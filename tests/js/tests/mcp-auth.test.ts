@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { callMcpTool, initializeMcp } from './mcp-utils';
@@ -77,25 +77,25 @@ describe("MCP Authentication HTTP Tests", function() {
             MCP_PORT,           // mcpPort
         );
 
-        await sleep(3000);
-
-        // Generate agent via REST (no MCP equivalent)
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        // Poll until the server answers, then generate once: generate() is
+        // not idempotent, so retrying it could only fail with "already exists".
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
+        await pollUntil(async () => {
+            await adminClient.agent.status();
+            return true;
+        }, { timeoutMs: 15000, label: "executor API ready" });
         await adminClient.agent.generate("test-passphrase");
         console.log("Agent generated via REST");
     });
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await sleep(1000);
-            if (!executorProcess.killed) {
-                executorProcess.kill('SIGKILL');
-            }
+            await stopChildProcess(executorProcess);
         }
-        // Port-based kill as safety net — catches the executor even if the
-        // ChildProcess handle is stale or kill() missed a grandchild process.
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
@@ -137,6 +137,21 @@ describe("MCP Authentication HTTP Tests", function() {
                 console.log("Unauthenticated list_perspectives (thrown):", e.message);
             }
         });
+
+        // #851 sub-problem 3: the request is still created (Launcher pairing
+        // flow) but the mint code is withheld from a caller with no
+        // credentials on this admin-credentialed executor. Fresh session so
+        // the pin cannot inherit adopted credentials from any neighbouring
+        // test, whatever the ordering.
+        it("should withhold the request_capability mint code without auth", async function() {
+            const fresh = await initializeMcp(MCP_BASE_URL);
+            const gated = await callMcpTool(MCP_BASE_URL, 'request_capability', {
+                app_name: "auth-test-unauth",
+                app_desc: "MCP Auth Test (no credentials)"
+            }, fresh.sessionId);
+            expect(gated.request_id).to.be.a('string');
+            expect(gated.code, "mint code must not be returned inline").to.be.undefined;
+        });
     });
 
     // ========================================================================
@@ -145,10 +160,12 @@ describe("MCP Authentication HTTP Tests", function() {
 
     describe("3. request_capability + generate_jwt", function() {
         it("should get request_id and code from request_capability", async function() {
+            // Admin credential in the Authorization header: since #851-3 the
+            // inline code is only auto-permitted for authenticated callers.
             const result = await callMcpTool(MCP_BASE_URL, 'request_capability', {
                 app_name: "auth-test",
                 app_desc: "MCP Auth Test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${adminCredential}` });
             expect(result.request_id).to.be.a('string');
             expect(result.code).to.be.a('string');
             console.log("request_capability result:", JSON.stringify(result));
@@ -158,7 +175,7 @@ describe("MCP Authentication HTTP Tests", function() {
             const capResult = await callMcpTool(MCP_BASE_URL, 'request_capability', {
                 app_name: "auth-test",
                 app_desc: "MCP Auth Test"
-            }, mcpSessionId);
+            }, mcpSessionId, { Authorization: `Bearer ${adminCredential}` });
             expect(capResult.request_id).to.be.a('string');
             expect(capResult.code).to.be.a('string');
 
@@ -231,7 +248,7 @@ describe("MCP Authentication HTTP Tests", function() {
 
         before(async function() {
             // Enable multi-user mode via REST so email tools work
-            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+            adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
             await adminClient.runtime.setMultiUserEnabled(true);
             console.log("Multi-user mode enabled");
         });
@@ -323,42 +340,42 @@ describe("MCP Authentication HTTP Tests", function() {
             }
         });
 
-        it("get_models must reject unauthenticated access even with a known perspective UUID", async function() {
+        it("describe_perspective must reject unauthenticated access even with a known perspective UUID", async function() {
             expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
             try {
-                const result = await callMcpTool(MCP_BASE_URL, 'get_models', {
+                const result = await callMcpTool(MCP_BASE_URL, 'describe_perspective', {
                     perspective_id: authedPerspectiveUuid,
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
                 expect(msg).to.include("Authentication required");
-                console.log("Unauthenticated get_models response:", msg.substring(0, 120));
+                console.log("Unauthenticated describe_perspective response:", msg.substring(0, 120));
             } catch (e: any) {
                 expect(e.message).to.include("Authentication required");
-                console.log("Unauthenticated get_models (thrown):", e.message.substring(0, 120));
+                console.log("Unauthenticated describe_perspective (thrown):", e.message.substring(0, 120));
             }
         });
 
-        it("query_subjects must reject unauthenticated access even with a known perspective UUID", async function() {
+        it("instance_query must reject unauthenticated access even with a known perspective UUID", async function() {
             expect(authedPerspectiveUuid).to.be.a('string').with.length.greaterThan(0);
 
             const unauthSession = (await initializeMcp(MCP_BASE_URL)).sessionId;
 
             try {
-                const result = await callMcpTool(MCP_BASE_URL, 'query_subjects', {
+                const result = await callMcpTool(MCP_BASE_URL, 'instance_query', {
                     perspective_id: authedPerspectiveUuid,
                     class_name: "Message",
                 }, unauthSession);
 
                 const msg = typeof result === 'string' ? result : JSON.stringify(result);
                 expect(msg).to.include("Authentication required");
-                console.log("Unauthenticated query_subjects response:", msg.substring(0, 120));
+                console.log("Unauthenticated instance_query response:", msg.substring(0, 120));
             } catch (e: any) {
                 expect(e.message).to.include("Authentication required");
-                console.log("Unauthenticated query_subjects (thrown):", e.message.substring(0, 120));
+                console.log("Unauthenticated instance_query (thrown):", e.message.substring(0, 120));
             }
         });
     });

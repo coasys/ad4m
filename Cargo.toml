@@ -6,34 +6,83 @@ members = [
     "rust-executor",
     "ui/src-tauri"
 ]
+# scripts/install-hc-toolchain.sh clones coasys/holochain at the rev pinned in
+# our Cargo.lock into .hc-toolchain/src/ and builds `hc` from THERE, but that
+# tree's own dep graph has an unresolvable libsqlite3-sys links="sqlite3"
+# conflict that our workspace-level [patch.crates-io] entries below resolve.
+# The clone lives outside `members` so it is only compiled when the toolchain
+# script explicitly asks for it (never as part of the normal workspace build).
+exclude = [
+    ".hc-toolchain",
+]
 
 [patch.crates-io]
-# DEBUG: Using forked kitsune2 with debugging instrumentation and fixed default behavior
-# These patches ensure ad4m uses the fixed kitsune2 that doesn't default to blocking
-#kitsune2_api = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_core = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_api = { path = "../../kitsune2/crates/api" }
-#kitsune2_core = { path = "../../kitsune2/crates/core" }
-#kitsune2 = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_dht = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_gossip = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_bootstrap_srv = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "fix/unexpected-blocked-messages" }
-#kitsune2_transport_iroh = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_transport_iroh = { path = "../../kitsune2/crates/transport_iroh" }
-#kitsune2_bootstrap_client = { git = "https://github.com/lucksus/kitsune2.git", branch = "debug-logs" }
-#kitsune2_bootstrap_client = { path = "../../kitsune2/crates/bootstrap_client" }
+# coasys/lair 0.7.1-coasys-rusqlite-0.40 fork: upstream lair 0.7.1 with
+# rusqlite bumped from ^0.37 to ^0.40. Needed because upstream lair 0.7.1's
+# rusqlite ^0.37 uses libsqlite3-sys ^0.35, which conflicts with coasys/deno
+# v2.9.5's deno_cache (rusqlite ^0.40 → libsqlite3-sys ^0.38) via the
+# Cargo links="sqlite3" single-owner constraint. Bumping lair's rusqlite pin
+# up aligns the whole chain.
+#
+# The identical [patch] lives in coasys/holochain 0.7.0-space-override-coasys
+# so HC itself resolves; but cargo [patch.crates-io] does NOT propagate through
+# git deps into the consuming workspace, so AD4M must redeclare it here.
+lair_keystore = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
+lair_keystore_api = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
+hc_seed_bundle = { git = "https://github.com/coasys/lair.git", branch = "0.7.1-coasys-rusqlite-0.40" }
 
-kitsune2 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_api = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_client = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_bootstrap_srv = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_core = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_dht = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_gossip = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-#kitsune2_test_utils = { git = "https://github.com/holochain/kitsune2.git", rev = "26159cb9bac7cc845fff57a1630aa9d7112c37d5" }
-kitsune2_transport_iroh = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
-kitsune2_transport_tx5 = { git = "https://github.com/holochain/kitsune2.git", rev = "320a4d9e622c5f1a6f22d29c8beeb0cb5c333cc3" }
+# coasys/sqlx fork: upstream sqlx 0.9.0 with sqlx-sqlite's libsqlite3-sys
+# upper bound loosened from <0.38 to <0.39. Needed because coasys/holochain
+# 0.7.0's holochain_state uses sqlx 0.9.0, but coasys/deno v2.9.5's
+# deno_cache uses rusqlite 0.40 (which needs libsqlite3-sys ^0.38). Only
+# one crate can own links="sqlite3", so the whole chain must converge on
+# libsqlite3-sys 0.38.
+#
+# Patching the WHOLE sqlx family (not just sqlx-sqlite) so that Describe<DB>,
+# QueryDriver, and other cross-crate types have consistent identity. Mixing
+# a fork sqlx-sqlite with crates.io sqlx-core / sqlx-macros-core produces
+# E0277 trait-bound errors (Describe<Sqlite> not Serialize) because the
+# two crates see two different `sqlx_core::database::Database` traits.
+sqlx = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-core = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-macros = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-macros-core = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-mysql = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-postgres = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+sqlx-sqlite = { git = "https://github.com/coasys/sqlx.git", branch = "sqlite-libsqlite3-sys-0.38-compat" }
+
+# kitsune2 patches deliberately removed 2026-08-25 (Nico approved plan A).
+#
+# Historical context: these patches used to pin kitsune2 to a lucksus fork
+# (fix/unexpected-blocked-messages, debug-logs) and later to a specific
+# holochain/kitsune2 rev (320a4d9e...) at version 0.4.0-dev.5. That was the
+# other half of a two-repo fork pair with coasys/holochain: our fork carried
+# the space-override changes, kitsune2 carried the blocked-message fix and
+# the debug instrumentation. The kitsune2 changes have since been merged
+# upstream; only the space-override half still lives on coasys/holochain.
+#
+# Meanwhile coasys/holochain 0.7.0 stable now depends on kitsune2 = "0.5.0"
+# from crates.io. Our stale patches pointed at 0.4.0-dev.5 (an incompatible
+# version) AND were declared in rust-executor/Cargo.toml, not this workspace
+# root, which cargo silently ignored anyway:
+#
+#   warning: patch for the non root package will be ignored
+#   warning: patch `kitsune2 v0.4.0-dev.5` was not used in the crate graph
+#
+# The net effect: the executor was already linking crates.io kitsune2 0.5.0
+# regardless of these lines, while my host was running an out-of-date
+# kitsune2-bootstrap-srv 0.4.0-dev.3 CLI, causing wire-protocol drift between
+# the standalone bootstrap-srv started by integration tests and the transport
+# crate the executor is linked to. Symptoms: multi-user signal-routing tests
+# time out; send_signal returns "no AgentPubKey found for DID" not because
+# the DID lookup fails but because the transport can't deliver.
+#
+# Fix: drop the patches (they were dead weight and version-mismatched); the
+# workspace now transparently uses crates.io kitsune2 0.5.0 everywhere, and
+# scripts/install-hc-toolchain.sh installs a matching kitsune2-bootstrap-srv
+# 0.5.0 from crates.io into .hc-toolchain/bin/ so the CLI matches the linked
+# library. Nothing to see here.
+
 # Optimization for test builds to keep binary under ARM64 ±128MB branch limit.
 # Without this, the test binary is too large for the linker on Apple Silicon.
 [profile.test]

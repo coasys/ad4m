@@ -6,7 +6,7 @@ use crate::{
         create_signed_expression, did, did_document, did_for_context, sign_for_context,
         sign_string_hex_for_context, signing_key_id_for_context, AgentContext, AgentService,
     },
-    types::{Agent, AgentStatus},
+    types::Agent,
 };
 use deno_core::anyhow;
 use deno_core::op2;
@@ -61,11 +61,24 @@ fn agent_create_signed_expression_for_user(
     #[string] user_email: String,
     #[serde] data: serde_json::Value,
 ) -> Result<serde_json::Value, AnyhowWrapperError> {
-    let sorted_json = sort_json_value(&data);
-    let agent_context = AgentContext::for_user_email(user_email);
-    let signed_expression =
-        create_signed_expression(sorted_json, &agent_context).map_err(AnyhowWrapperError::from)?;
-    serde_json::to_value(signed_expression).map_err(AnyhowWrapperError::from)
+    create_signed_expression_for_user(&user_email, &data).map_err(AnyhowWrapperError::from)
+}
+
+/// Signs `data` as `user_email`, but only while the language runs for that user. Language
+/// code comes from third parties: without this check, any language on a multi-user node
+/// signs anything as any managed user.
+fn create_signed_expression_for_user(
+    user_email: &str,
+    data: &serde_json::Value,
+) -> Result<serde_json::Value, anyhow::Error> {
+    let ctx = get_runtime_agent_context();
+    if ctx.user_email.as_deref() != Some(user_email) {
+        return Err(anyhow::anyhow!(
+            "A language signs only as the user it runs for"
+        ));
+    }
+    let signed_expression = create_signed_expression(sort_json_value(data), &ctx)?;
+    Ok(serde_json::to_value(signed_expression)?)
 }
 
 #[op2]
@@ -159,46 +172,48 @@ fn agent() -> Result<Agent, AnyhowWrapperError> {
     })
 }
 
-#[op2]
-#[serde]
-fn agent_load() -> Result<AgentStatus, AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        // Only load if the agent is initialized (agent file exists)
-        if agent_service.is_initialized() {
-            agent_service.load();
-        }
-        Ok(agent_service.dump())
-    })
-}
-
-#[op2(async)]
-#[serde]
-async fn agent_unlock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| agent_service.unlock(passphrase))
-        .map_err(AnyhowWrapperError::from)
-}
-
-#[op2(async)]
-#[serde]
-async fn agent_lock(#[string] passphrase: String) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service.lock(passphrase);
-        Ok(())
-    })
-}
-
-#[op2]
-fn save_agent_profile(#[serde] agent: Agent) -> Result<(), AnyhowWrapperError> {
-    AgentService::with_mutable_global_instance(|agent_service| {
-        agent_service.save_agent_profile(agent);
-
-        Ok(())
-    })
-}
-
+// Languages sign and read through these ops. Unlocking, locking, reloading the keystore
+// and overwriting the node's profile stay out: any language could otherwise probe the
+// passphrase, lock the node under a passphrase of its own, or rewrite the node's profile.
 deno_core::extension!(
     agent_service,
-    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent, agent_load, agent_unlock, agent_lock, save_agent_profile],
+    ops = [agent_did_document, agent_signing_key_id, agent_did, agent_create_signed_expression, agent_create_signed_expression_stringified, agent_create_signed_expression_for_user, agent_did_for_user, agent_list_user_emails, agent_get_all_local_user_dids, agent_agent_for_user, agent_sign, agent_sign_string_hex, agent_is_initialized, agent_is_unlocked, agent],
     esm_entry_point = "ext:agent_service/agent_extension.js",
     esm = [dir "src/js_core", "agent_extension.js"]
 );
+
+#[cfg(test)]
+mod tests {
+    use super::create_signed_expression_for_user;
+    use crate::agent::{AgentContext, AgentService};
+    use crate::languages::language_runtime::set_runtime_agent_context;
+    use serde_json::json;
+
+    #[test]
+    fn a_language_signs_only_as_the_user_it_runs_for() {
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+        let alice = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+        let bob = format!("bob.{}@example.org", uuid::Uuid::new_v4());
+        AgentService::ensure_user_key_exists(&alice).unwrap();
+        AgentService::ensure_user_key_exists(&bob).unwrap();
+        let data = json!({ "claim": "x" });
+
+        set_runtime_agent_context(&AgentContext::for_user_email(alice.clone()));
+        let own = create_signed_expression_for_user(&alice, &data);
+        let other = create_signed_expression_for_user(&bob, &data);
+        set_runtime_agent_context(&AgentContext::main_agent());
+        let from_the_node = create_signed_expression_for_user(&alice, &data);
+
+        let own = own.expect("a language signs as the user it runs for");
+        assert_eq!(
+            own["author"],
+            json!(AgentService::get_user_did_by_email(&alice).unwrap())
+        );
+        assert!(other.is_err(), "a language signed as another user");
+        assert!(
+            from_the_node.is_err(),
+            "a language that runs for the node signed as a user"
+        );
+    }
+}

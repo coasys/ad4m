@@ -388,3 +388,38 @@ Transcription streams are automatically cleaned up after 30 seconds of inactivit
 - No need to manually close streams if the client disconnects
 - Resources are freed automatically when streams are abandoned
 - Streams remain active as long as they receive audio data regularly
+
+### Pending Interpretation Overlays
+
+When the interpretation engine would overwrite a value a human wrote, it stages
+the model's value as an *interpretation overlay* instead of applying it. The
+overlay waits until a human accepts or rejects it:
+
+```typescript
+const overlays = await perspective.interpretationOverlays();
+for (const o of overlays) {
+  // o.base: the instance, o.kind: whether the model created the instance
+  // or proposed changes to an existing one (see the note below),
+  // o.inferred: [realPredicate, stagedValue] pairs
+  console.log(o.base, o.kind, o.inferred);
+}
+
+await perspective.acceptInterpretation(base);          // the whole overlay
+await perspective.rejectInterpretation(base, "soa://title"); // one property
+```
+
+`o.kind` is `"create"` or `"update"` for overlays written through the class
+constructor. Overlays the interpretation engine writes currently come back
+literal-encoded (`"literal:string:create"`); strip the prefix with
+`o.kind.replace(/^literal:string:/, "")`
+until [#1136](https://github.com/coasys/ad4m/issues/1136) is fixed.
+
+`interpretationOverlays()` always reads from the executor: the list reflects the
+executor's state at the time of the request, and nothing is cached after it
+returns. When several callers ask at the same time (for example, many components
+rendering after a sync burst), they share one request, and each caller gets its
+own copy of the array. A call made after that request has finished sends a new
+one. `acceptInterpretation()` and `rejectInterpretation()` detach a request
+that is still running, so a call made after they resolve sends a new request
+rather than joining one that started before the write. Nothing is cached, so
+there is no cache to invalidate.

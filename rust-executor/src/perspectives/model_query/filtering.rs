@@ -16,9 +16,16 @@ use std::collections::BTreeMap;
 
 /// Test whether an instance passes all conditions in a where clause.
 ///
-/// Conditions that are known to have been pushed to SPARQL (e.g. simple
-/// string equality on `id`, or string/array conditions on collection
-/// relations) are skipped here to avoid redundant work.
+/// `id` and `base` conditions are evaluated here unconditionally, even the
+/// shapes the compiler normally pushes to SPARQL: re-testing one that was
+/// pushed is cheap and cannot reject a row wrongly, whereas assuming it was
+/// pushed is wrong inside any combinator the compiler declined.
+///
+/// String/array conditions on collection properties are evaluated here as well,
+/// with contains-semantics ([`collection_contains`]). They used to be skipped,
+/// on the assumption that SPARQL had applied them. Inside a declined
+/// combinator that assumption let a role gate's DID condition pass for every
+/// candidate.
 pub(super) fn matches_where(
     instance: &Value,
     where_clause: &BTreeMap<String, WhereCondition>,
@@ -62,49 +69,75 @@ pub(super) fn matches_where(
 
         // NOT: instance must NOT match the branch. Fails closed on malformed input.
         if prop_name == "NOT" {
-            let WhereCondition::SubClause(branch) = condition else {
+            let Some(branch) = condition.as_not_clause() else {
                 return false;
             };
-            if matches_where(instance, branch, shape) {
+            if matches_where(instance, &branch, shape) {
                 return false;
             }
             continue;
         }
 
         if prop_name == "base" || prop_name == "id" {
-            // String and StringArray id conditions are pushed to SPARQL.
-            // Complex ops (Ops, NumberArray, etc.) still need post-hydration.
+            // Total over every condition shape, including the String and
+            // StringArray ones the compiler usually does push to SPARQL.
+            //
+            // Skipping those used to be the fast path, on the assumption that
+            // reaching here at all meant SPARQL had already applied them. That
+            // assumption does not survive a combinator. When one branch of an
+            // `OR` cannot be compiled the whole disjunction is declined and
+            // left to this filter; a branch whose only clause was an id
+            // equality then passed vacuously, `any` was trivially satisfied,
+            // and the id constraint was applied in neither layer.
+            //
+            // Re-testing a condition SPARQL did push is redundant but never
+            // wrong: a hydrated instance's `id` is its own source URI, the
+            // same string the compiler matched on. One string comparison buys
+            // the removal of the coordination.
+            //
             // Hydrated instances use "id" (not "base"), so map "base" → "id".
             let lookup_key = if prop_name == "base" {
                 "id"
             } else {
                 prop_name.as_str()
             };
-            match condition {
-                WhereCondition::String(_) | WhereCondition::StringArray(_) => continue,
-                _ => {
-                    let val = &instance[lookup_key];
-                    if !matches_condition(val, condition) {
-                        return false;
-                    }
-                    continue;
-                }
+            if !matches_condition(&instance[lookup_key], condition) {
+                return false;
             }
+            continue;
         }
 
-        // Relation-based where conditions (String/StringArray on collection props)
-        // are already pushed to SPARQL — skip them here.
+        // String/StringArray on a collection: contains-semantics, the same
+        // question the SPARQL relation arm asks. `String` holds when some
+        // value in the collection equals it. `StringArray` holds when some
+        // value is in the set. That is "any", because
+        // `VALUES ?v { … } ?source <p> ?v` matches an instance linked to any
+        // one of them.
+        //
+        // This arm used to `continue`, on the assumption that SPARQL had
+        // already applied the condition. At the top level of a clause it had,
+        // because pushable leaves are emitted beside unpushable ones. Inside a
+        // combinator the compiler declined, it had not: the branch re-runs
+        // here, and a skipped leaf passes vacuously. For a role gate whose
+        // `didProperty` names a collection, that leaf is the DID condition.
+        // One unpushable sibling in an `or` branch was enough to make every
+        // role instance match every candidate (#1129 review).
+        //
+        // Re-testing a condition SPARQL did push is redundant but never wrong,
+        // the same trade the `id` arm makes. See `collection_contains` for how
+        // the hydrated values are compared.
         if matches!(
-            condition,
+            condition.eq_normalized(),
             WhereCondition::String(_) | WhereCondition::StringArray(_)
-        ) {
-            if shape
-                .properties
-                .iter()
-                .any(|p| p.name == *prop_name && p.is_collection)
-            {
-                continue;
+        ) && shape
+            .properties
+            .iter()
+            .any(|p| p.name == *prop_name && p.is_collection)
+        {
+            if !collection_contains(&instance[prop_name], condition) {
+                return false;
             }
+            continue;
         }
 
         let val = &instance[prop_name];
@@ -120,8 +153,8 @@ pub(super) fn matches_where(
 /// Handles all [`WhereCondition`] variants: exact match (string, number,
 /// bool), set membership (string/number arrays), and operator-based
 /// comparisons ([`WhereOps`]).
-pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
-    match condition {
+pub(crate) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool {
+    match condition.eq_normalized() {
         WhereCondition::String(expected) => match val {
             Value::String(s) => s == expected,
             Value::Null => false,
@@ -155,6 +188,29 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
     }
 }
 
+/// Contains-semantics for a String/StringArray condition on a collection
+/// property: does any hydrated value satisfy it?
+///
+/// - An array holds when any element matches ([`matches_condition`] per
+///   element). An empty array holds nothing.
+/// - A single value is a to-one relation that hydration unwrapped
+///   (`is_scalar_relation`). It is tested as itself.
+/// - Absent or `null` holds nothing. That includes a getter-backed collection:
+///   getters run after this filter, so its value is not there yet. The
+///   condition then rejects the row, the same answer the scalar arm gives a
+///   getter property. Rejecting is the safe failure. Passing would repeat the
+///   fail-open this replaced.
+///
+/// Values are compared as hydrated. A collection with a `datatype` holds
+/// decoded literals, so the condition must name the decoded value.
+fn collection_contains(val: &Value, condition: &WhereCondition) -> bool {
+    match val {
+        Value::Array(items) => items.iter().any(|item| matches_condition(item, condition)),
+        Value::Null => false,
+        single => matches_condition(single, condition),
+    }
+}
+
 /// Evaluate a value against operator-based conditions (`not`, `gt`, `lt`,
 /// `gte`, `lte`, `between`, `contains`).
 ///
@@ -163,6 +219,36 @@ pub(super) fn matches_condition(val: &Value, condition: &WhereCondition) -> bool
 /// does case-insensitive substring matching on strings and element-in-array
 /// matching on arrays.
 pub(super) fn matches_ops(val: &Value, ops: &WhereOps) -> bool {
+    // Relation quantifiers are answerable only against the store — they ask
+    // about linked *records*, not about a value already on this instance — so
+    // they are compiled to `FILTER [NOT] EXISTS` and never evaluated here.
+    //
+    // Reaching this point means the compiler declined to push one down and the
+    // clause fell back to post-hydration filtering. Fail closed: ignoring the
+    // condition would return rows that do not satisfy the query, which is the
+    // failure mode this whole path exists to avoid.
+    //
+    // Deliberately silent. This runs once per hydrated instance, from the
+    // `retain` closure in `execute_model_query`, so a warning here is one line
+    // per row of a result set that is about to be emptied — and it could only
+    // ever say *that* a quantifier was declined, never why. The reasons are
+    // logged once, at each decline site in `compile_relation_quantifier` and
+    // its caller, where they are known.
+    if ops.some.is_some() || ops.none.is_some() {
+        return false;
+    }
+
+    // A nested `author` is a condition on the link that carries the value, and
+    // after hydration the links are gone: the instance has one `author`, its
+    // earliest link's. `refuse_unanswerable_link_author` refuses any query
+    // that would bring one here, so this is the second line, and it fails
+    // closed for the same reason as the quantifier arm above. `eq` reaches
+    // here only beside `author` or beside another operator, which is refused
+    // as malformed; alone it was unwrapped by `matches_condition`.
+    if ops.author.is_some() || ops.eq.is_some() {
+        return false;
+    }
+
     // NOT
     if let Some(ref not_val) = ops.not {
         match not_val {
@@ -798,16 +884,67 @@ mod tests {
     }
 
     #[test]
-    fn test_matches_where_skips_id_string() {
+    fn test_matches_where_filters_id_string() {
+        // This used to assert the opposite — that a *wrong* id still matched,
+        // because the arm skipped String conditions as "already pushed".
         let instance = json!({"id": "test://1", "name": "X"});
         let s = shape("Test", vec![prop("name", "test://name")]);
 
-        let mut where_clause_wrong = BTreeMap::new();
-        where_clause_wrong.insert(
+        let mut wrong = BTreeMap::new();
+        wrong.insert(
             "id".to_string(),
             WhereCondition::String("test://wrong".to_string()),
         );
-        assert!(matches_where(&instance, &where_clause_wrong, &s));
+        assert!(!matches_where(&instance, &wrong, &s));
+
+        let mut right = BTreeMap::new();
+        right.insert(
+            "id".to_string(),
+            WhereCondition::String("test://1".to_string()),
+        );
+        assert!(matches_where(&instance, &right, &s));
+    }
+
+    #[test]
+    fn test_matches_where_filters_id_string_array() {
+        let instance = json!({"id": "test://1"});
+        let s = shape("Test", vec![]);
+
+        let mut excluded = BTreeMap::new();
+        excluded.insert(
+            "id".to_string(),
+            WhereCondition::StringArray(vec!["test://2".to_string(), "test://3".to_string()]),
+        );
+        assert!(!matches_where(&instance, &excluded, &s));
+
+        let mut included = BTreeMap::new();
+        included.insert(
+            "id".to_string(),
+            WhereCondition::StringArray(vec!["test://1".to_string(), "test://2".to_string()]),
+        );
+        assert!(matches_where(&instance, &included, &s));
+    }
+
+    #[test]
+    fn test_matches_where_filters_base_string() {
+        // "base" is the same constraint under its wire name, and maps to the
+        // hydrated "id" key.
+        let instance = json!({"id": "test://1"});
+        let s = shape("Test", vec![]);
+
+        let mut wrong = BTreeMap::new();
+        wrong.insert(
+            "base".to_string(),
+            WhereCondition::String("test://wrong".to_string()),
+        );
+        assert!(!matches_where(&instance, &wrong, &s));
+
+        let mut right = BTreeMap::new();
+        right.insert(
+            "base".to_string(),
+            WhereCondition::String("test://1".to_string()),
+        );
+        assert!(matches_where(&instance, &right, &s));
     }
 
     #[test]
@@ -826,17 +963,46 @@ mod tests {
         assert!(matches_where(&instance, &where_clause, &s));
     }
 
+    /// String/StringArray on a collection is contains-semantics, not a skip.
+    ///
+    /// This test used to assert the skip: `tags: "nonexistent"` matched
+    /// `["a", "b"]`. Every row where the condition is false is the row a
+    /// skip admits. `members` in the last rows is a role's DID collection, the
+    /// case the #1129 review found failing open.
     #[test]
-    fn test_matches_where_skips_collection_string() {
-        let instance = json!({"id": "test://1", "tags": ["a", "b"]});
-        let s = shape("Test", vec![relation("tags", "test://tag")]);
-
-        let mut where_clause = BTreeMap::new();
-        where_clause.insert(
-            "tags".to_string(),
-            WhereCondition::String("nonexistent".to_string()),
-        );
-        assert!(matches_where(&instance, &where_clause, &s));
+    #[rustfmt::skip]
+    fn test_matches_where_collection_string_is_contains() {
+        let s = shape("Test", vec![
+            relation("tags", "test://tag"),
+            scalar_relation("owner", "test://owner"),
+            relation("members", "test://member"),
+        ]);
+        let strs = |v: &[&str]| WhereCondition::StringArray(v.iter().map(|s| s.to_string()).collect());
+        let one = |v: &str| WhereCondition::String(v.to_string());
+        let cases: Vec<(&str, Value, &str, WhereCondition, bool)> = vec![
+            ("String: an element equals it",        json!({"tags": ["a", "b"]}), "tags", one("b"), true),
+            ("String: no element equals it",        json!({"tags": ["a", "b"]}), "tags", one("nonexistent"), false),
+            ("String: empty collection",            json!({"tags": []}),         "tags", one("a"), false),
+            ("String: absent collection",           json!({}),                   "tags", one("a"), false),
+            ("String: null collection",             json!({"tags": null}),       "tags", one("a"), false),
+            ("StringArray: any element in the set", json!({"tags": ["a", "b"]}), "tags", strs(&["x", "b"]), true),
+            ("StringArray: no element in the set",  json!({"tags": ["a", "b"]}), "tags", strs(&["x", "y"]), false),
+            // `matches_condition(null, StringArray)` stringifies to "null", so
+            // this row is what the explicit `Null` arm exists for.
+            ("StringArray: null is not \"null\"",   json!({"tags": null}),       "tags", strs(&["null"]), false),
+            ("unwrapped to-one relation: equal",    json!({"owner": "did:a"}),   "owner", one("did:a"), true),
+            ("unwrapped to-one relation: unequal",  json!({"owner": "did:a"}),   "owner", one("did:b"), false),
+            ("role gate: the member",               json!({"members": ["did:a"]}), "members", one("did:a"), true),
+            ("role gate: a non-member",             json!({"members": ["did:a"]}), "members", one("did:m"), false),
+        ];
+        for (name, instance, prop, condition, expected) in cases {
+            let wc = make_where(vec![(prop, condition)]);
+            assert_eq!(matches_where(&instance, &wc, &s), expected, "{name}");
+            // Inside an `OR` the compiler declined, the same answer. This is
+            // the route the role gate reached the skip by.
+            let or = make_where(vec![("OR", WhereCondition::SubClauses(vec![wc]))]);
+            assert_eq!(matches_where(&instance, &or, &s), expected, "{name} (inside OR)");
+        }
     }
 
     #[test]
@@ -1267,5 +1433,107 @@ mod tests {
         assert!(matches_where(&json!({ "a": "2" }), &wc, &shape));
         assert!(matches_where(&json!({ "b": "x" }), &wc, &shape));
         assert!(!matches_where(&json!({ "a": "3", "b": "y" }), &wc, &shape));
+    }
+
+    /// The reproducer for the leak the `id` arm used to have.
+    ///
+    /// Reaching this filter at all means the compiler declined the `OR` — here,
+    /// because the second branch's id is not IRI-valid, so it would emit a
+    /// `FILTER` that tests `?source` rather than a `VALUES` that binds it, and
+    /// a `UNION` branch that does not bind `?source` is not sound to push.
+    ///
+    /// With the arm skipping String conditions, each branch's only clause was
+    /// skipped, every branch returned true vacuously, `any` was satisfied, and
+    /// the whole disjunction admitted every hydrated row.
+    #[test]
+    fn test_or_of_ids_filters_after_the_compiler_declines() {
+        let shape = empty_shape();
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "id",
+                    WhereCondition::String("test://post/1".to_string()),
+                )]),
+                make_where(vec![(
+                    "id",
+                    WhereCondition::String("draft-note".to_string()),
+                )]),
+            ]),
+        )]);
+
+        assert!(matches_where(
+            &json!({ "id": "test://post/1" }),
+            &wc,
+            &shape
+        ));
+        assert!(matches_where(&json!({ "id": "draft-note" }), &wc, &shape));
+        // The one that used to be admitted along with everything else.
+        assert!(!matches_where(
+            &json!({ "id": "test://post/2" }),
+            &wc,
+            &shape
+        ));
+    }
+
+    /// The likelier route to the same place: an `OR` declined not because of
+    /// the id branch but because a *sibling* branch could not compile — a
+    /// getter-computed property has no predicate to emit. The id branch is
+    /// perfectly pushable on its own and still ends up here.
+    #[test]
+    fn test_or_of_id_and_getter_prop_filters_both_branches() {
+        let shape = empty_shape();
+        let wc = make_where(vec![(
+            "OR",
+            WhereCondition::SubClauses(vec![
+                make_where(vec![(
+                    "id",
+                    WhereCondition::String("test://post/1".to_string()),
+                )]),
+                make_where(vec![("computed", WhereCondition::String("x".to_string()))]),
+            ]),
+        )]);
+
+        assert!(matches_where(
+            &json!({ "id": "test://post/1" }),
+            &wc,
+            &shape
+        ));
+        assert!(matches_where(
+            &json!({ "id": "test://post/9", "computed": "x" }),
+            &wc,
+            &shape
+        ));
+        assert!(!matches_where(
+            &json!({ "id": "test://post/9", "computed": "y" }),
+            &wc,
+            &shape
+        ));
+    }
+
+    /// `NOT` over an id inverts properly now that the inner clause is tested
+    /// rather than skipped. Skipping made the inner branch match everything,
+    /// so `NOT` rejected everything.
+    #[test]
+    fn test_not_over_id_excludes_only_that_id() {
+        let shape = empty_shape();
+        let wc = make_where(vec![(
+            "NOT",
+            WhereCondition::SubClause(make_where(vec![(
+                "id",
+                WhereCondition::String("test://post/1".to_string()),
+            )])),
+        )]);
+
+        assert!(!matches_where(
+            &json!({ "id": "test://post/1" }),
+            &wc,
+            &shape
+        ));
+        assert!(matches_where(
+            &json!({ "id": "test://post/2" }),
+            &wc,
+            &shape
+        ));
     }
 }

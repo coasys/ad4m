@@ -45,7 +45,7 @@ import {
 } from "@coasys/ad4m";
 import { startAgent, waitUntil } from "../../helpers/index.js";
 import { getSharedAgent } from "./hooks.js";
-import { wipePerspective, sleep } from "../../utils/utils.js";
+import { wipePerspective } from "../../utils/utils.js";
 import { TestComment, TestPost, TestTag, TestReaction, TestChannel } from "./models.js";
 
 describe("Ad4mModel — Query API", function () {

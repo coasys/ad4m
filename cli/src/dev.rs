@@ -48,6 +48,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
+                    run_holochain: None,
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
@@ -61,6 +62,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
@@ -203,6 +205,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
+                    run_holochain: None,
                     admin_credential: None,
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
@@ -216,6 +219,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()

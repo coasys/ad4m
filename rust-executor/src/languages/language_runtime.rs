@@ -7,6 +7,7 @@ use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc::UnboundedReceiver, oneshot};
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,8 @@ pub fn get_runtime_agent_context() -> AgentContext {
 pub(crate) struct LanguageRuntimeRequest {
     pub operation: LanguageOperation,
     pub response_tx: oneshot::Sender<Result<String, String>>,
+    /// When the handle sent it; the runtime logs the time in queue on dequeue (#1133).
+    pub queued_at: Instant,
 }
 
 /// Operations that can be sent to a LanguageRuntime
@@ -75,6 +78,19 @@ pub(crate) enum LanguageOperation {
     LoadLanguage(JsonValue),
     RegisterCallbacks,
     Teardown,
+}
+
+impl LanguageOperation {
+    /// Variant name for log lines (`{:?}` would print the whole script).
+    pub fn name(&self) -> &'static str {
+        match self {
+            LanguageOperation::Execute(..) => "Execute",
+            LanguageOperation::LoadModule(..) => "LoadModule",
+            LanguageOperation::LoadLanguage(..) => "LoadLanguage",
+            LanguageOperation::RegisterCallbacks => "RegisterCallbacks",
+            LanguageOperation::Teardown => "Teardown",
+        }
+    }
 }
 
 /// Per-language Deno runtime that encapsulates a single language instance.
@@ -391,6 +407,14 @@ impl LanguageRuntime {
                             Some(request) => {
                                 let is_teardown = matches!(request.operation, LanguageOperation::Teardown);
                                 debug!("[lang:{}] Processing operation: {:?}", addr, request.operation);
+                                // Time in this runtime's queue (#1133 symptom ①): the
+                                // counterpart of the `[hc-actor] … waited` line.
+                                let waited = request.queued_at.elapsed();
+                                if waited > Duration::from_secs(1) {
+                                    warn!("⚠️ 📚 [lang:{}] {} waited {} ms in queue", addr, request.operation.name(), waited.as_millis());
+                                } else {
+                                    debug!("📚 [lang:{}] {} waited {} ms in queue", addr, request.operation.name(), waited.as_millis());
+                                }
 
                                 let result = match request.operation {
                                     LanguageOperation::Execute(script, ref agent_ctx) => {

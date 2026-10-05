@@ -16,22 +16,121 @@
 //! events + telepresence presence — it will still delegate the actual pass
 //! to [`run_one_pass`], so the coordination contract stays in one place.
 
+use crate::agent::capabilities::LAST_SEEN_WRITE_THROTTLE_S;
 use crate::agent::{did_for_context, AgentContext};
 use crate::perspectives::interpretation::{
-    run_interpretation_with_strategy_and_model, DedupStrategy, InterpretationRunCursor,
-    TranscriptTurn,
+    run_interpretation_with_harness_and_model, run_interpretation_with_strategy_and_model,
+    DedupStrategy, InterpretationRunCursor, TranscriptTurn,
 };
 use crate::perspectives::model_query::load_shape_from_store;
 use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkStatus};
 
-use super::claim::{try_claim, ClaimOutcome};
+use super::claim::{batch_key, renew_claim, try_claim, ClaimOutcome};
 use super::config::AutoProcessorConfig;
-use super::events::{emit, AutoProcessorEvent, AutoProcessorStep};
+use super::events::{
+    emit, emit_neighbourhood_state, AutoProcessorEvent, AutoProcessorNeighbourhoodState,
+    AutoProcessorStep, NeighbourhoodPhase,
+};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+/// RAII guard that keeps a processing claim alive for the full duration of a
+/// pass, turning the claim TTL into a **liveness** parameter (crash-detection
+/// speed) rather than a **capacity** parameter (max pass duration).
+///
+/// A background task fires every `ttl_ms / 3` ms, rewrites the claim's expiry
+/// to `now + ttl_ms`, and — for managed users — also touches `last_seen` in the
+/// database so a long interpretation pass never makes a user look offline to the
+/// `managed_user_auto_processor_supervisor`. When the guard is dropped (on any
+/// exit: normal completion, error, or early return), `Drop` aborts the task, and
+/// the claim will expire naturally after one more `ttl_ms` window — exactly the
+/// crash-detection window the module doc intends.
+struct LeaseGuard {
+    abort_handle: tokio::task::AbortHandle,
+    /// Set to `true` if a renewal write fails. Callers can check this before
+    /// committing expensive results to detect the rare case where the claim
+    /// expired mid-pass and may have been re-taken by another peer.
+    renewal_failed: Arc<AtomicBool>,
+}
+
+impl LeaseGuard {
+    fn spawn(
+        mut perspective: PerspectiveInstance,
+        processor: String,
+        key: String,
+        claimant: String,
+        ttl_ms: i64,
+        context: AgentContext,
+    ) -> Self {
+        let renewal_failed = Arc::new(AtomicBool::new(false));
+        let rf = renewal_failed.clone();
+        // Renew at ttl_ms/3 so three missed beats still leave at least one TTL
+        // window before expiry — same safety margin as the lease-heartbeat
+        // pattern used in distributed systems.
+        let interval_ms = (ttl_ms / 3).max(1_000) as u64;
+        let handle = tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+            ticker.tick().await; // skip the immediate first tick; pass just started
+            loop {
+                ticker.tick().await;
+                match renew_claim(
+                    &mut perspective,
+                    &processor,
+                    &key,
+                    &claimant,
+                    ttl_ms,
+                    &context,
+                )
+                .await
+                {
+                    Ok(()) => {
+                        // Also refresh last_seen so the supervisor sees this
+                        // user as still active during a long interpretation
+                        // pass (fix for #1010: processing counts as liveness).
+                        if let Some(email) = &context.user_email {
+                            let email = email.clone();
+                            if let Err(e) = crate::db::Ad4mDb::with_global_instance(|db| {
+                                db.update_user_last_seen(&email)
+                            }) {
+                                log::debug!(
+                                    "lease heartbeat: update_user_last_seen({email}) failed: {e:#}"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "claim renewal failed for {processor}/{key}: {e:#}; \
+                             pass may be overtaken before it finishes"
+                        );
+                        rf.store(true, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        Self {
+            abort_handle: handle.abort_handle(),
+            renewal_failed,
+        }
+    }
+
+    /// `true` while every renewal has succeeded. A `false` here means the
+    /// claim may have expired; another peer could have re-claimed the batch.
+    fn is_healthy(&self) -> bool {
+        !self.renewal_failed.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for LeaseGuard {
+    fn drop(&mut self) {
+        self.abort_handle.abort();
+    }
+}
 
 /// Stable id for a `(speaker, text, timestamp)` transcript turn — the atom the
 /// polling watch loop feeds to [`WatcherState::record_item`] and (indirectly)
@@ -334,10 +433,11 @@ pub fn elect_author(authors: &[String], online_dids: &[String], self_did: &str) 
 }
 
 /// Threshold (seconds) after which a managed user is treated as offline for
-/// auto-processor loop supervision purposes. Mirrors the freshness window used
-/// by `capabilities::track_last_seen_from_token` for last-seen tracking, so a
-/// user active by that surface is also considered active here.
-pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 300;
+/// auto-processor loop supervision purposes. `last_seen` is written at most
+/// once per [`LAST_SEEN_WRITE_THROTTLE_S`], so this must exceed that throttle
+/// by a margin for the gap between requests; otherwise an active user ages out
+/// right before their `last_seen` is refreshed and their loop flaps (#1070).
+pub const MANAGED_USER_ONLINE_WINDOW_S: i64 = 2 * LAST_SEEN_WRITE_THROTTLE_S;
 
 /// Pure filter: from a list of `(user_email, last_seen_seconds)` tuples, return
 /// the emails of users whose `last_seen` is within `threshold_s` of `now_s`.
@@ -474,12 +574,23 @@ pub async fn run_one_pass(
         .map_err(|e| anyhow::anyhow!("run_one_pass: did_for_context: {e:#}"))?;
     let item_ids: Vec<String> = turns.iter().map(|t| t.id.clone()).collect();
     let batch_authors: Vec<String> = turns.iter().map(|t| t.speaker.clone()).collect();
+    let pass_started = std::time::Instant::now();
+    /*
+       Derived once, up here, rather than at the claim below where it used to be.
+
+       Every signal this pass emits carries it, including the ones emitted *before* a claim is
+       attempted (`BatchReady`, `NotCandidate`, `AwaitingAuthor`, `BackedOff`). Computing it at
+       the claim would have left exactly the stand-down signals — the ones a consumer most wants
+       to attribute to a batch — as the only ones it could not join to a row.
+    */
+    let batch_key_hex = batch_key(&item_ids);
     macro_rules! signal {
         ($step:expr) => {
             emit(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
-                    .with_items(&item_ids),
+                    .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex),
             )
             .await
         };
@@ -488,6 +599,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_detail($d),
             )
             .await
@@ -497,6 +609,7 @@ pub async fn run_one_pass(
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, $step)
                     .with_agent_did(&me)
                     .with_items(&item_ids)
+                    .with_batch_key(&batch_key_hex)
                     .with_bases($b),
             )
             .await
@@ -517,7 +630,7 @@ pub async fn run_one_pass(
     //    author that is online but never actually claims.
     if escalate_past_election {
         log::info!(
-            "auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
+            "⚙️ auto_processor `{}`: escalating past election (elected author stalled > claim_ttl_ms); claiming anyway",
             cfg.processor_id
         );
     } else {
@@ -543,18 +656,19 @@ pub async fn run_one_pass(
                     match elect_author(&authors, &online, &me) {
                         AuthorElection::Me => { /* elected — fall through to claim */ }
                         AuthorElection::Other(winner) => {
-                            log::info!(
-                                "auto_processor `{}`: standing down — online author `{winner}` \
-                             precedes us in message order",
+                            // Steady-state passive branch — debug per Nico's
+                            // level policy (fires every tick while another
+                            // peer is elected).
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: standing down — online author `{winner}` precedes us in message order",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::NotCandidate, detail = winner.clone());
                             return Ok(PassOutcome::NotCandidate { winner });
                         }
                         AuthorElection::NoneOnline => {
-                            log::info!(
-                                "auto_processor `{}`: no batch author online — waiting for a \
-                             participant to return before processing",
+                            log::debug!(
+                                "⚙️ auto_processor `{}`: no batch author online — waiting for a participant to return before processing",
                                 cfg.processor_id
                             );
                             signal!(AutoProcessorStep::AwaitingAuthor);
@@ -586,14 +700,64 @@ pub async fn run_one_pass(
     )
     .await?;
     if let ClaimOutcome::BackedOff { holder } = claim {
-        log::info!(
-            "auto_processor `{}`: backed off — holder `{holder}` has the claim",
+        // Steady-state passive branch — debug per Nico's level policy
+        // (fires every tick while another peer holds the claim).
+        log::debug!(
+            "⚙️ auto_processor `{}`: backed off — holder `{holder}` has the claim",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
         return Ok(PassOutcome::BackedOff { holder });
     }
+    // Signal-based Claimed (and the neighbourhood-state Claimed row below)
+    // are DID- / perspective-scoped events with their own Abandoned /
+    // Finished companions on every exit path, so they can fire here right
+    // after `try_claim` succeeds. The lifecycle **info log** (`picked task`
+    // ↔ `completed`) is deliberately deferred until after the no-op guards
+    // (ShapesMissing / EmptyTranscript) so every emitted `picked task` has
+    // a matching `✅ completed` or `❌ abandoned` companion — see the
+    // one-to-one pairing note in rust-executor/LOGGING.md and CodeRabbit
+    // review on PR #942 (round 2, watcher.rs claimed-pass lifecycle).
     signal!(AutoProcessorStep::Claimed);
+    // Neighbourhood-state (Nico 2026-08-19): a small perspective-scoped
+    // event so a UI can render "someone is auto-processing here". Distinct
+    // from `AutoProcessorStep::Claimed` above (which is DID-scoped and
+    // carries the batch payload) — this one is delivered to every reader
+    // of the perspective, and carries only the claimant + batch key.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Claimed,
+    ))
+    .await;
+
+    // Touch last_seen immediately so the supervisor sees activity before the
+    // first heartbeat fires — a managed user running a long pass must not look
+    // offline while doing the most active work it ever does (fix for #1010).
+    if let Some(email) = &context.user_email {
+        let email = email.clone();
+        if let Err(e) =
+            crate::db::Ad4mDb::with_global_instance(|db| db.update_user_last_seen(&email))
+        {
+            log::debug!("run_one_pass: initial update_user_last_seen({email}) failed: {e:#}");
+        }
+    }
+
+    // Spawn the lease-renewal heartbeat. Fires every `claim_ttl_ms / 3` ms,
+    // rewriting the expiry so the TTL acts as a crash-detection window rather
+    // than a capacity limit. Dropped at every exit path (RAII) — the Drop impl
+    // cancels the task so the claim expires naturally after one more TTL window
+    // once the pass ends (fix for #1009).
+    let _lease = LeaseGuard::spawn(
+        perspective.clone(),
+        cfg.processor_id.clone(),
+        batch_key_hex.clone(),
+        me.clone(),
+        cfg.claim_ttl_ms,
+        context.clone(),
+    );
 
     // 2. Resolve shapes.
     let store = &*perspective.sparql_store;
@@ -616,20 +780,93 @@ pub async fn run_one_pass(
             AutoProcessorStep::ShapesMissing,
             detail = missing.join(", ")
         );
+        // Close the neighbourhood-state Claimed row: this pass claimed the
+        // batch but is walking away without processing it. Without this,
+        // an observer's UI would keep showing "in progress" for a batch
+        // that will only clear when the claim TTL-expires.
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::ShapesMissing { missing });
     }
 
     // 3. Interpret the drained batch — no second SPARQL.
     signal!(AutoProcessorStep::GatheringTranscript);
     if turns.is_empty() {
-        log::info!(
-            "auto_processor `{}`: drained batch is empty; nothing to interpret",
+        // Steady-state passive branch — debug per Nico's level policy.
+        log::debug!(
+            "⚙️ auto_processor `{}`: drained batch is empty; nothing to interpret",
             cfg.processor_id
         );
         signal!(AutoProcessorStep::EmptyTranscript);
+        emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+            &uuid,
+            &cfg.processor_id,
+            &me,
+            &batch_key_hex,
+            NeighbourhoodPhase::Abandoned,
+        ))
+        .await;
         return Ok(PassOutcome::EmptyTranscript);
     }
+
+    // Past both no-op guards: from here on the pass is committed to a
+    // real interpretation attempt, so emit the lifecycle `picked task`
+    // info line. Every path out from here MUST emit a terminal companion:
+    // `✅ … completed` on the happy path (below) or `❌ … abandoned` on
+    // any fallible-op failure between here and the completion line
+    // (wrapped via `abandon_on_err!` so `?` still bubbles the error up).
+    log::info!(
+        "⚙️ auto-processor picked task processor={} items={} perspective={}",
+        cfg.processor_id,
+        item_ids.len(),
+        uuid
+    );
+
+    // Companion log for post-claim failures — pairs every `picked task`
+    // with an `❌ abandoned` when a fallible operation returns Err.
+    // Matches the AI/interpretation failure-companion pattern established
+    // in the round-2 refactor.
+    macro_rules! abandon_on_err {
+        ($expr:expr) => {
+            match $expr {
+                Ok(v) => v,
+                Err(e) => {
+                    log::error!(
+                        "❌ ⚙️ auto-processor task abandoned processor={} items={} perspective={} reason={:#}",
+                        cfg.processor_id,
+                        item_ids.len(),
+                        uuid,
+                        e
+                    );
+                    return Err(e.into());
+                }
+            }
+        };
+    }
+
     let transcript: Vec<TranscriptTurn> = turns.iter().map(|t| t.as_transcript()).collect();
+
+    // Guard: abort before calling the LLM if the renewal heartbeat already
+    // failed. Without renewal the claim would have expired and another peer may
+    // have re-taken it; writing our output would produce duplicates (#1009).
+    if !_lease.is_healthy() {
+        let holder = String::from("(claim expired mid-pass)");
+        log::warn!(
+            "❌ ⚙️ auto-processor claim lost (renewal failed) before interpretation — \
+             abandoning processor={} items={} perspective={}",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
 
     // 4. Interpret.
     signal!(AutoProcessorStep::RunningInterpretation);
@@ -651,34 +888,144 @@ pub async fn run_one_pass(
     // into our scope. Skipped entirely when mint_scope is absent — nothing
     // consumes the snapshot in that path.
     let pre_existing_uris: HashSet<String> = if cfg.mint_scope.is_some() {
-        crate::perspectives::interpretation::existing_instance_context(perspective, &shapes, None)
-            .await?
-            .into_values()
-            .flat_map(|instances| instances.into_iter().map(|i| i.id))
-            .collect()
+        abandon_on_err!(
+            crate::perspectives::interpretation::existing_instance_context(
+                perspective,
+                &shapes,
+                None,
+            )
+            .await
+        )
+        .into_values()
+        .flat_map(|instances| instances.into_iter().map(|i| i.id))
+        .collect()
     } else {
         HashSet::new()
     };
 
-    let bases = run_interpretation_with_strategy_and_model(
-        perspective,
-        &shapes,
-        &transcript,
-        &base_prefix,
-        context,
-        &dedup,
-        None,
-        // Existing-instance scope: constrains dedup to a subtree when the
-        // processor config specifies one, e.g. "existing Task instances that
-        // live under project X." `None` keeps the whole-perspective existing
-        // set — the pre-scope-config behaviour.
-        cfg.existing_scope.as_ref(),
-        Some(&InterpretationRunCursor {
-            processor: super::config::processor_node(&cfg.processor_id),
-            sources: item_ids.clone(),
-        }),
-    )
-    .await?;
+    let cursor = InterpretationRunCursor {
+        processor: super::config::processor_node(&cfg.processor_id),
+        sources: item_ids.clone(),
+    };
+    // Build the emit context once so both fork branches can share it.
+    // `cfg.emit_debug_events == true` enables the mid-pass `LlmRequestSent`
+    // / `LlmResponseReceived` events (dev PR #903) — for the classic path
+    // via `run_interpretation_with_strategy_and_model`, for the harness
+    // path we pass this into `run_with_tools` for per-tool-call events
+    // in a follow-up commit on this branch (Nico 2026-08-25).
+    let emit_ctx = cfg
+        .emit_debug_events
+        .then(|| super::events::InterpretationEmitContext {
+            perspective_uuid: uuid.clone(),
+            processor_id: cfg.processor_id.clone(),
+            agent_did: me.clone(),
+            item_ids: item_ids.clone(),
+            batch_key: batch_key_hex.clone(),
+        });
+
+    // Fork: harness-dispatched pass when the operator opted in via
+    // `AutoProcessorConfig.max_tool_calls > 0`; otherwise the classic
+    // single-shot LLM+parse+plan pipeline. The two paths converge on the
+    // same overlay-writing gate (`apply_with_overlay`), so downstream
+    // provenance + processed signalling is identical.
+    //
+    // Both paths return `InterpretationOutcome`; the harness one carries
+    // `debug: None` (multi-turn loop — no single prompt/response to
+    // snapshot; per-tool-call events cover it instead).
+    let (bases, debug) = match cfg.max_tool_calls {
+        Some(n) if n > 0 => {
+            let outcome = abandon_on_err!(
+                run_interpretation_with_harness_and_model(
+                    perspective,
+                    &shapes,
+                    &transcript,
+                    &base_prefix,
+                    context,
+                    None,
+                    cfg.existing_scope.as_ref(),
+                    Some(&cursor),
+                    n,
+                    // Auto-processor is an internal caller — no per-pass user
+                    // token to bill. MCP admin credential (if configured) is
+                    // read from env inside the harness path.
+                    None,
+                    // `emit_debug_events` gates the same event stream the
+                    // classic path uses; `None` when disabled means the
+                    // per-tool-call events also stay silent.
+                    emit_ctx.as_ref(),
+                    // Dedup on drain: the auto-processor runs indefinitely, so
+                    // re-proposed instances must collapse to updates (not
+                    // unbounded duplicate creates). James Weir PR #911 review.
+                    true,
+                    // No per-pass credit gate on the auto-processor path:
+                    // the watcher runs as an internal service (no user
+                    // session to bill against) and each completion still
+                    // fire-and-forgets bill_prompt_if_authed via AIService.
+                    None,
+                    // Flow targeting (Nico 2026-09-04): flow features run
+                    // only on the flows this processor selected. An empty
+                    // selection = flow-blind pass.
+                    Some(&cfg.flows),
+                )
+                .await
+            );
+            (outcome.bases, outcome.debug)
+        }
+        _ => {
+            let outcome = abandon_on_err!(
+                run_interpretation_with_strategy_and_model(
+                    perspective,
+                    &shapes,
+                    &transcript,
+                    &base_prefix,
+                    context,
+                    &dedup,
+                    None,
+                    // Existing-instance scope: constrains dedup to a subtree
+                    // when the processor config specifies one, e.g. "existing
+                    // Task instances that live under project X." `None` keeps
+                    // the whole-perspective existing set — the pre-scope-config
+                    // behaviour.
+                    cfg.existing_scope.as_ref(),
+                    Some(&cursor),
+                    cfg.emit_debug_events,
+                    emit_ctx.as_ref(),
+                    // Same flow targeting as the harness branch above.
+                    Some(&cfg.flows),
+                )
+                .await
+            );
+            (outcome.bases, outcome.debug)
+        }
+    };
+
+    // Second lease check, after the expensive part. The pre-LLM check above
+    // catches a claim already lost when the pass started; this one catches the
+    // case #1009 was actually filed for — renewal failing *during* a
+    // multi-minute inference.
+    //
+    // KNOWN GAP, stated rather than papered over: by the time control reaches
+    // here the interpretation has already written its bases — that write
+    // happens inside `run_interpretation_*`, not out here. So this cannot
+    // prevent the duplicate, only refuse to compound it (no mint-scope
+    // re-parenting, no `Processed` event asserting a clean pass) and leave a
+    // findable line in the log. Refusing the write itself needs a cancellation
+    // check threaded into the interpretation engine; that is a larger change,
+    // tracked on #1009 rather than bolted on here.
+    if !_lease.is_healthy() {
+        log::warn!(
+            "❌ ⚙️ auto-processor claim renewal failed DURING interpretation — \
+             processor={} items={} perspective={}: bases may already be written, \
+             and another peer may have re-processed this batch. Not emitting \
+             Processed. See #1009.",
+            cfg.processor_id,
+            item_ids.len(),
+            uuid
+        );
+        let holder = String::from("(claim lost during interpretation)");
+        signal!(AutoProcessorStep::BackedOff, detail = holder.clone());
+        return Ok(PassOutcome::BackedOff { holder });
+    }
 
     // Mint-scope child links: if the processor declares a `mint_scope`, wire
     // every **freshly created** base as a child under the target node via the
@@ -693,17 +1040,50 @@ pub async fn run_one_pass(
     // mint-scope write succeeds, so observers never see a false "done" state.
     if let Some(mint_scope) = &cfg.mint_scope {
         let created = partition_created(&bases, &pre_existing_uris);
-        write_mint_scope_links(
-            perspective,
-            mint_scope,
-            &created,
-            context,
-            &cfg.processor_id,
-        )
-        .await?;
+        abandon_on_err!(
+            write_mint_scope_links(
+                perspective,
+                mint_scope,
+                &created,
+                context,
+                &cfg.processor_id,
+            )
+            .await
+        );
     }
-    signal!(AutoProcessorStep::Processed, bases = &bases);
+    // Emit the `Processed` event. Carries the final `bases` list — the
+    // LLM prompt + response now travel via the mid-pass `LlmRequestSent`
+    // and `LlmResponseReceived` events (Nico 2026-08-20), so a subscribing
+    // UI can render "waiting on LLM" between them instead of only seeing
+    // one lump payload here at the end. `_debug` is intentionally not
+    // attached to `Processed` any more — the persistent `InterpretationRun`
+    // (`debug_prompt` / `debug_response`) is the post-hoc lookup channel.
+    let _ = debug; // consumed by the interpretation engine → InterpretationRun
+    let ev = AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::Processed)
+        .with_agent_did(&me)
+        .with_items(&item_ids)
+        .with_batch_key(&batch_key_hex)
+        .with_bases(&bases);
+    emit(ev).await;
+    // Neighbourhood-state: pass complete on this executor. Consumers use
+    // this to close out the `Claimed` row they showed for the same
+    // `batch_key`.
+    emit_neighbourhood_state(AutoProcessorNeighbourhoodState::new(
+        &uuid,
+        &cfg.processor_id,
+        &me,
+        &batch_key_hex,
+        NeighbourhoodPhase::Finished,
+    ))
+    .await;
 
+    log::info!(
+        "✅ ⚙️ auto-processor task completed processor={} items={} bases={} latency={}ms",
+        cfg.processor_id,
+        item_ids.len(),
+        bases.len(),
+        pass_started.elapsed().as_millis()
+    );
     Ok(PassOutcome::Won { bases })
 }
 
@@ -743,6 +1123,15 @@ pub(crate) async fn write_mint_scope_links(
                  (id + predicate); `Model` scopes carry no linking predicate"
             );
         }
+        Scope::Traverse { .. } => {
+            // A traversal describes how to *read* outward from anchors. Minting
+            // against it would have to pick one of them to hang the new link
+            // under, and nothing in the scope says which.
+            anyhow::bail!(
+                "auto_processor `{processor_id}`: mint_scope must be a `Raw` scope \
+                 (id + predicate); `Traverse` scopes describe a read and name no single parent"
+            );
+        }
     };
     for base in bases {
         perspective
@@ -780,17 +1169,12 @@ mod tests {
             source_scope_query: format!(
                 "SELECT ?speaker ?text WHERE {{ ?s <ns://{id}/turn> ?t . }}"
             ),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms,
             batch_min: 1,
             batch_max,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
+            ..Default::default()
         }
     }
 
@@ -949,6 +1333,27 @@ mod tests {
         let selected =
             select_online_managed_users(Vec::<(String, Option<i64>)>::new(), 1_000_000, 300);
         assert!(selected.is_empty());
+    }
+
+    /// The online window must leave room for the `last_seen` write-throttle
+    /// plus the gap between requests (#1070).
+    #[test]
+    fn online_window_exceeds_last_seen_write_throttle() {
+        assert!(
+            MANAGED_USER_ONLINE_WINDOW_S >= 2 * LAST_SEEN_WRITE_THROTTLE_S,
+            "`last_seen` is only rewritten once it is {LAST_SEEN_WRITE_THROTTLE_S}s old, so a \
+             {MANAGED_USER_ONLINE_WINDOW_S}s window without margin reaps every active user just \
+             before their `last_seen` is refreshed and respawns their loop (#1070)"
+        );
+        let now = 1_000_000_i64;
+        let stale_but_active = (
+            "u@x".to_string(),
+            Some(now - LAST_SEEN_WRITE_THROTTLE_S - 1),
+        );
+        assert_eq!(
+            select_online_managed_users(vec![stale_but_active], now, MANAGED_USER_ONLINE_WINDOW_S),
+            vec!["u@x"]
+        );
     }
 
     // ---- WatcherState -------------------------------------------------------
@@ -1399,6 +1804,35 @@ mod tests {
         assert!(
             created.is_empty(),
             "when every base pre-existed, no new links are written"
+        );
+    }
+
+    // ---- liveness-touch: idle reap is preserved, active pass is kept --------
+
+    /// The LeaseGuard heartbeat refreshes `last_seen` during a long pass, which
+    /// keeps the user in the online window. Simulated here via
+    /// `select_online_managed_users`: a user freshly touched at `now - 10s` is
+    /// still online, while one untouched at `now - 700s` is reaped. This
+    /// documents the invariant that idle-loop reaping is NOT disabled — only
+    /// passes that actually refresh `last_seen` stay alive (#1010).
+    #[test]
+    fn liveness_touch_keeps_active_user_and_reaps_idle_user() {
+        let now = 2_000_000_i64;
+        let window = MANAGED_USER_ONLINE_WINDOW_S;
+        // `active` had last_seen refreshed 10s ago (simulates lease heartbeat).
+        // `idle` had last_seen 700s ago (no heartbeat — idle loop).
+        let online = select_online_managed_users(
+            vec![
+                ("active@x".into(), Some(now - 10)), // heartbeat touched last_seen
+                ("idle@x".into(), Some(now - 700)),  // no activity — should be reaped
+            ],
+            now,
+            window,
+        );
+        assert_eq!(
+            online,
+            vec!["active@x"],
+            "idle user must be reaped; active must remain"
         );
     }
 

@@ -1,0 +1,550 @@
+/**
+ * `FlowInstance` — object-oriented wrapper for a running flow.
+ *
+ * Design authority: `docs/flow-interpretation-hints-design.md` §4.3.
+ *
+ * Wraps two on-graph objects:
+ *
+ *   - `FlowInstanceRecord` — the raw @Model row minted by
+ *     {@link FlowInstance.start}; carries `flow`, `subject`, `currentState`,
+ *     and Ad4mModel's synthesised `createdAt`.
+ *   - `SHACLFlow` — the flow definition the record is bound to. Held so
+ *     `availableTransitions` / `currentState` object lookups don't require
+ *     a per-call round-trip.
+ *
+ * Construct via the class factories — {@link FlowInstance.start} for the
+ * mint path and {@link FlowInstance.findAll} for the read path — rather
+ * than the `wrap` escape hatch, which exists for tests that already own
+ * a matched (record, shape) pair.
+ *
+ * # What's here, and what is still absent
+ *
+ * Read surface (implemented today, PR #929):
+ * - `uri`, `subject`, `flowName`, `currentStateName`, `startedAtMillis`
+ *   accessors.
+ * - `currentState` — resolves the `FlowState` on the shape whose name
+ *   matches `record.currentState`.
+ * - `availableTransitions` — filters `shape.transitions` by `fromState`.
+ * - `proposals()` — queries `FlowTransitionProposal` records that
+ *   target this instance's URI.
+ *
+ * - `acceptProposal()` / `rejectProposal()` — the consensus write API:
+ *   accept counts your DID toward the flow's consensusRule and fires the
+ *   transition at quorum; reject withdraws only the links you signed and
+ *   resolves to how many went. Reject is not a cancel — another agent's
+ *   proposal is theirs, and because state is recomputed from the links
+ *   present now, withdrawing a vote that had settled an edge moves the
+ *   flow back to where it stood before it.
+ *
+ * - `proposeTransition()` — the manual write path: propose an edge as this
+ *   agent, or co-sign the equivalent proposal another agent already opened.
+ *   Its `FlowProposeResult` is what tells queued from no-op from stalled.
+ *
+ * Still absent (rather than shipped as `throw new Error("not yet")`
+ * stubs): `fireAction`, and the subscriptions (`onStateChange`,
+ * `onProposalAdded`, `onProposalResolved`) — they land with the
+ * subscription-topic slice.
+ *
+ * ## The guard-free rule
+ *
+ * A state with no `requires` guard is **never** proposed by the engine, on
+ * any replica, ever — `flow_evaluator`'s auto-proposal composer skips it by
+ * design. Nothing in the graph implies a human started work; they said so.
+ * So states like "in progress" and "in review" only ever advance through
+ * `proposeTransition`. This is a permanent contract, not a gap: wire the
+ * button, or the instance sits there.
+ */
+
+import { PerspectiveProxy } from "./PerspectiveProxy";
+import { Ad4mModel } from "../model/Ad4mModel";
+import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
+import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
+
+/** One fired flow transition, as returned by {@link FlowInstance.acceptProposal}
+ *  (and, engine-side, by every consensus pass). */
+export interface FlowFireOutcome {
+  instanceUri: string;
+  fromState: string;
+  toState: string;
+  voters: string[];
+  contributingProposalUris: string[];
+}
+
+/** What one {@link FlowInstance.proposeTransition} call did, and where the
+ *  flow stands after it.
+ *
+ *  A bare `FlowFireOutcome[]` could not distinguish "queued, waiting for other
+ *  voters" from "you had already voted on this" from "the instance is stalled":
+ *  all three are the empty array, and all three want different UI.
+ *
+ *  Read the result like this:
+ *
+ *  | `outcomes` | `recordedVote` | `contested` | meaning |
+ *  |---|---|---|---|
+ *  | non-empty | — | — | the transition fired |
+ *  | `[]` | `true` | `false` | your vote landed; waiting for other voters |
+ *  | `[]` | `false` | `false` | you had already voted; nothing was written |
+ *  | `[]` | — | `true` | the flow is stalled — do not show "awaiting votes" |
+ */
+/**
+ *  One output of a run, named when proposing a transition into a terminal
+ *  state: an instance, and the class it is an instance of. Every co-signer
+ *  loads it through that class and hashes its content, so the proposal
+ *  commits to the instance as it is now, not just to its id.
+ */
+export interface FlowOutputRef {
+  className: string;
+  id: string;
+}
+
+export interface FlowProposeResult {
+  /** The live proposal this call minted or joined — always the one for the
+   *  edge, whether this call wrote it or found it open. Hand it to another
+   *  agent's `acceptProposal`, offer `rejectProposal` on it, or render it as
+   *  "pending — withdraw?". */
+  proposalUri: string;
+  /** `true` when this call wrote the proposal; `false` when an equivalent
+   *  one was already open and this call joined it. */
+  minted: boolean;
+  /** `true` when this call recorded a vote for the calling agent — its own
+   *  vote on a mint, an `acceptedBy` on a join. `false` means the agent had
+   *  already voted and nothing was written. */
+  recordedVote: boolean;
+  /** Consensus events this call recorded for the first time. Empty while
+   *  the edge is short of quorum. */
+  outcomes: FlowFireOutcome[];
+  /** The instance's derived state after the call. */
+  derivedState: string;
+  /** `true` when two edges out of `derivedState` both carry quorum: the flow
+   *  is irreversibly stalled and must not be shown as "awaiting votes". */
+  contested: boolean;
+}
+
+/**
+ * One instance a verified flow receipt speaks for — an entry of
+ * `PerspectiveProxy.flowValidOutputs(flow, state?)`.
+ *
+ * Every entry has already passed the whole verification chain executor-side:
+ * the receipt's signatures and quorum re-checked, its outputs bound to the
+ * quorum-signed commitment (#1104), and the instance's *live* content still
+ * equal to what the quorum committed to. An output edited since the run
+ * completed is not listed, although the receipt itself stays verifiable.
+ */
+export interface FlowValidOutput {
+  /** The instance, as the `(className, id)` pair the quorum committed to. */
+  output: FlowOutputRef;
+  /** The instance's content as committed at completion (its `modelQuery`
+   *  hydration, JSON-encoded). */
+  content: string;
+  /** The terminal state the granting run settled into, re-derived by the
+   *  verifier. */
+  terminalState: string;
+  /** Content-derived URI of the receipt that proves this output. */
+  receiptUri: string;
+}
+
+/**
+ * What `PerspectiveProxy.verifyFlowReceipt` learned — a THREE-way answer,
+ * not a boolean, and collapsing it to one is the classic mistake:
+ *
+ * - `"verified"`   — the carried material re-derives the claim;
+ * - `"rejected"`   — the material was checked and does not hold up;
+ * - `"undecidable"`— this replica cannot decide (it lacks the flow
+ *   definition, or holds a different one). Refuse to act on it exactly as
+ *   on `"rejected"`, but do NOT treat it as evidence against the receipt
+ *   or its minter — sync the definition and ask again.
+ */
+export interface FlowReceiptVerdict {
+  outcome: "verified" | "rejected" | "undecidable";
+  /** Human-readable reason, phrased for the outcome it accompanies. */
+  detail: string;
+  /** Only on `"verified"`: the terminal state the reader's own fold reached. */
+  terminalState?: string;
+  /** Only on `"verified"`: the outputs the receipt speaks for. */
+  outputs?: FlowOutputRef[];
+  /** Only on `"verified"`: the distinct eligible DIDs that made the quorum. */
+  voters?: string[];
+}
+
+/** What `PerspectiveProxy.mintFlowReceipt` wrote: the receipt's
+ *  content-derived node URI and its body (opaque to clients — verify it with
+ *  `verifyFlowReceipt`, never by inspection). */
+export interface FlowMintedReceipt {
+  receiptUri: string;
+  receipt: object;
+}
+
+/**
+ * Extract the flow's human-readable name from its canonical URI.
+ *
+ * `SHACLFlow.flowUri` is `${namespace}${name}Flow` (e.g.
+ * `coasys://DeliveryFlow`). This function strips the `Flow` suffix and
+ * everything before the last URI-segment separator (`/` or `#`), leaving
+ * the bare name. Returns `undefined` for URIs that don't match the
+ * `…{name}Flow` shape — a stale FlowInstanceRecord whose flow URI came
+ * from an older writer, for instance.
+ */
+function flowNameFromUri(flowUri: string): string | undefined {
+  if (!flowUri.endsWith("Flow")) return undefined;
+  const withoutSuffix = flowUri.slice(0, -"Flow".length);
+  const sepIdx = Math.max(
+    withoutSuffix.lastIndexOf("/"),
+    withoutSuffix.lastIndexOf("#"),
+  );
+  if (sepIdx < 0) return withoutSuffix || undefined;
+  const name = withoutSuffix.slice(sepIdx + 1);
+  return name || undefined;
+}
+
+export class FlowInstance {
+  /**
+   * Private constructor — construct via {@link FlowInstance.start} or
+   * {@link FlowInstance.findAll}. {@link FlowInstance.wrap} is the
+   * escape hatch for tests / direct construction cases.
+   */
+  private constructor(
+    private readonly perspective: PerspectiveProxy,
+    /** The flow definition this instance was minted against. */
+    public readonly shape: SHACLFlow,
+    /**
+     * The on-graph record — carries `flow`, `subject`, `currentState`
+     * and Ad4mModel's synthesised `createdAt`. Callers can reach into it
+     * for anything the wrapper doesn't expose directly, but should prefer
+     * the wrapper accessors so future refactors of the underlying shape
+     * don't ripple through their code.
+     */
+    public readonly record: FlowInstanceRecord,
+  ) {}
+
+  /**
+   * Escape hatch used by {@link FlowInstance.start} and
+   * {@link FlowInstance.findAll} — not meant for general use, but public
+   * so tests that already own a `FlowInstanceRecord + SHACLFlow` pair
+   * (e.g. from pre-populated fixtures) can build a wrapper without
+   * going through the mint path.
+   */
+  static wrap(
+    perspective: PerspectiveProxy,
+    shape: SHACLFlow,
+    record: FlowInstanceRecord,
+  ): FlowInstance {
+    return new FlowInstance(perspective, shape, record);
+  }
+
+  /**
+   * Mint a new `FlowInstance` on the given perspective (design doc §4.3).
+   *
+   * Idempotently registers the hardwired `FlowInstanceRecord` +
+   * `FlowTransitionProposal` @Model classes on first call — the on-graph
+   * shape matches the Rust-side hardwired SDNA (parity-locked in
+   * `flow-instance.test.ts` / `flow-transition-proposal.test.ts`).
+   *
+   * The returned wrapper carries the parsed `SHACLFlow` alongside the
+   * on-graph record, so `currentState` / `availableTransitions` /
+   * `proposals` accessors work without further round-trips.
+   *
+   * The record's `currentState` is a per-replica cache the consensus engine
+   * writes as a local link. It is read back only for display — the cache-first
+   * path in `gather_active_flow_contexts` fills the state rendered into LLM
+   * context — and **never as authority**: anything that decides something
+   * (the fold, the mint pass) derives state from the signed links present now
+   * and does not consult the cache. Treat it as a display hint, not as the
+   * flow's state.
+   *
+   * @param perspective - The perspective the flow instance lives on
+   * @param flowName - Name of a `SHACLFlow` already registered on the perspective
+   * @param baseExpression - URI of the subject expression the flow runs on
+   * @throws When the flow is unknown or has zero declared states (zero-state
+   *   flows fire via the forthcoming atomic-action path, §6.3).
+   */
+  static async start(
+    perspective: PerspectiveProxy,
+    flowName: string,
+    baseExpression: string,
+  ): Promise<FlowInstance> {
+    const flow = await perspective.getFlow(flowName);
+    if (!flow) throw `Flow "${flowName}" not found`;
+    if (flow.states.length === 0) {
+      throw `Flow "${flowName}" has no states — FlowInstance.start is for stateful flows only; zero-state flows fire via the forthcoming atomic-action path (§6.3)`;
+    }
+    // Register the hardwired runtime classes if this is the first flow
+    // instance on the perspective. registerAll is a single batched RPC and
+    // no-ops when both classes are already present.
+    await Ad4mModel.registerAll(perspective, [FlowInstanceRecord, FlowTransitionProposal]);
+    // Property keys must be the FlowInstanceRecord @Model field names —
+    // `subject` (not `baseExpression`, which collides with Ad4mModel's
+    // synthetic hydration field and would be silently shadowed on read).
+    // No explicit start-time field: Ad4mModel synthesises `createdAt` on
+    // hydration from the earliest link timestamp on the instance's URI.
+    // Convention: `SHACLFlow.states` is stored sorted ascending by `value`
+    // (enforced by `fromLinks`), so `states[0]` is the initial state. A
+    // flow author who wants a specific state as the entry point must give
+    // it the lowest `value` in the set.
+    //
+    // Store the flow's URI, not the bare name — see FlowInstanceRecord's
+    // docstring for the collision-across-modules argument (James PR #929 R5).
+    const record = await FlowInstanceRecord.create(perspective, {
+      flowUri: flow.flowUri,
+      subject: baseExpression,
+      currentState: flow.states[0].name,
+    });
+    return FlowInstance.wrap(perspective, flow, record);
+  }
+
+  /**
+   * Return every live `FlowInstance` on the perspective (design doc §4.3).
+   *
+   * Read-only path: never registers classes. On a perspective that has
+   * never minted a flow instance, the `FlowInstanceRecord` SHACL shape
+   * isn't installed yet — this returns `[]` in that case rather than
+   * mutating the perspective. Registration is the responsibility of
+   * {@link FlowInstance.start}, which is the write path. (Registering on
+   * a read would sync a write to every peer in the neighbourhood —
+   * exactly what a query must not do — James PR #929 R7.)
+   *
+   * Filter surface (all optional, all combinable):
+   * - **`flowName`** — narrows by flow-name discriminator (e.g. "Delivery")
+   * - **`subject`** — narrows by base-expression URI, i.e. "give me every
+   *   flow running on THIS expression"
+   *
+   * Both filters translate to a single SHACL `where`-filter round-trip
+   * (no client-side filtering); combining them AND-joins server-side.
+   * The string-arg shape (`FlowInstance.findAll(p, "Delivery")`) is
+   * shorthand for `{ flowName: "Delivery" }`.
+   *
+   * Records whose `flow` value has no matching `SHACLFlow` on the
+   * perspective (e.g. the flow was unregistered) are silently skipped —
+   * the wrapper can't answer `currentState` / `availableTransitions`
+   * without the shape, and callers routinely iterate the returned array
+   * without null-checks.
+   *
+   * @example
+   * ```typescript
+   * const all = await FlowInstance.findAll(perspective);
+   * const deliveries = await FlowInstance.findAll(perspective, "Delivery");
+   * const onThisTask = await FlowInstance.findAll(perspective, {
+   *   subject: "ad4m://task/1",
+   * });
+   * const deliveriesOnTask = await FlowInstance.findAll(perspective, {
+   *   flowName: "Delivery",
+   *   subject: "ad4m://task/1",
+   * });
+   * ```
+   */
+  static async findAll(
+    perspective: PerspectiveProxy,
+    filter?: string | { flowName?: string; subject?: string },
+  ): Promise<FlowInstance[]> {
+    const { flowName, subject } =
+      typeof filter === "string"
+        ? { flowName: filter, subject: undefined }
+        : { flowName: filter?.flowName, subject: filter?.subject };
+
+    // Filter surface accepts a flow *name* for ergonomics — resolve it to
+    // the canonical URI before the SHACL query, since the record stores
+    // the URI (James PR #929 R5). Unknown name → no matches (short-circuit
+    // with an empty result rather than issuing a bare-name query that
+    // would silently return nothing anyway).
+    const where: Record<string, string> = {};
+    if (flowName !== undefined) {
+      const flow = await perspective.getFlow(flowName);
+      if (!flow) return [];
+      where.flowUri = flow.flowUri;
+    }
+    if (subject !== undefined) where.subject = subject;
+
+    // "Shape not found" on a perspective that has never minted a flow
+    // instance is a no-op read, not an error — the executor throws for a
+    // missing SHACL shape and there is no side-effect-free way to ask
+    // "does this class exist". Return `[]` on that specific case; rethrow
+    // anything else so real infra failures don't get swallowed.
+    //
+    // Regex covers every message the executor + client stack raises for
+    // an unregistered class:
+    //   "No SHACL shape stored for class 'FlowInstance'." (executor RPC)
+    //   "Shape not found" (older Rust path)
+    //   "class not registered" / "not registered" (TS Ad4mModel guard)
+    let records: FlowInstanceRecord[];
+    try {
+      records =
+        Object.keys(where).length > 0
+          ? await FlowInstanceRecord.findAll(perspective, { where })
+          : await FlowInstanceRecord.findAll(perspective);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (
+        /no shacl shape stored|shape not found|class not registered|not registered/i.test(
+          msg,
+        )
+      ) {
+        return [];
+      }
+      throw e;
+    }
+
+    // Pair each record with its parsed SHACLFlow. Cache lookups by
+    // flow-URI so `getFlow` fires at most once per distinct flow —
+    // matters when a perspective has hundreds of instances against
+    // one shape.
+    //
+    // The URI stored on the record is `${namespace}${name}Flow`
+    // (see SHACLFlow.flowUri) — recovering the name for `getFlow`
+    // means stripping the namespace + the `Flow` suffix. Records that
+    // don't parse this way are treated as stale and skipped.
+    const shapesByUri = new Map<string, SHACLFlow>();
+    const wrappers: FlowInstance[] = [];
+    for (const record of records) {
+      let shape = shapesByUri.get(record.flowUri);
+      if (!shape) {
+        const name = flowNameFromUri(record.flowUri);
+        if (!name) continue;
+        const loaded = await perspective.getFlow(name);
+        if (!loaded || loaded.flowUri !== record.flowUri) {
+          // Stale record — the flow it references was unregistered,
+          // or a different flow now owns that name.
+          continue;
+        }
+        shape = loaded;
+        shapesByUri.set(record.flowUri, shape);
+      }
+      wrappers.push(FlowInstance.wrap(perspective, shape, record));
+    }
+    return wrappers;
+  }
+
+  // ── Read accessors ────────────────────────────────────────────────────
+
+  /**
+   * URI of the on-graph `FlowInstance` node — `ad4m://flow/instance/{id}`.
+   *
+   * Sourced from `Ad4mModel`'s synthesised `baseExpression`, which for
+   * `FlowInstanceRecord` *is* the instance's own URI (the value
+   * `FlowTransitionProposal.flowInstance` references).
+   */
+  get uri(): string {
+    return this.record.id;
+  }
+
+  /**
+   * URI of the base expression this flow runs on — matches the
+   * `SHACLFlow.inputTypes` that {@link PerspectiveProxy.availableFlows}
+   * would greenlight for this expression.
+   */
+  get subject(): string {
+    return this.record.subject;
+  }
+
+  /**
+   * Human-readable flow name — the display label. Sourced from the paired
+   * `SHACLFlow.name`, not from the record (which stores the URI as its
+   * canonical identity — see FlowInstanceRecord's docstring for why).
+   */
+  get flowName(): string {
+    return this.shape.name;
+  }
+
+  /** Flow URI — the on-graph discriminator, collision-free across modules. */
+  get flowUri(): string {
+    return this.record.flowUri;
+  }
+
+  /** Name of the state this instance is currently in. */
+  get currentStateName(): string {
+    return this.record.currentState;
+  }
+
+  /**
+   * ISO-8601 (epoch millis after Ad4mModel hydration) start time.
+   * Returns `undefined` when hydration didn't produce a `createdAt`
+   * — rare, but not fatal.
+   */
+  get startedAtMillis(): number | undefined {
+    const v = (this.record as any).createdAt;
+    return typeof v === "number" ? v : undefined;
+  }
+
+  /**
+   * The `FlowState` object on the shape matching `currentStateName`.
+   * Throws when the record's state name is not declared on the flow —
+   * that's a "stale FlowInstance whose flow was edited under it" bug,
+   * not a silent-fail case.
+   */
+  get currentState(): FlowState {
+    const s = this.shape.states.find((x) => x.name === this.currentStateName);
+    if (!s) {
+      throw new Error(
+        `FlowInstance ${this.uri}: currentState "${this.currentStateName}" is not declared on flow "${this.flowName}". ` +
+          `Known states: ${this.shape.states.map((x) => x.name).join(", ") || "(none)"}`,
+      );
+    }
+    return s;
+  }
+
+  /**
+   * Every `FlowTransition` on the shape whose `fromState` matches
+   * `currentStateName`. Order preserved from the shape.
+   *
+   * Empty when the current state is terminal (no outgoing transitions).
+   */
+  get availableTransitions(): FlowTransition[] {
+    return this.shape.transitions.filter((t) => t.fromState === this.currentStateName);
+  }
+
+  /**
+   * All `FlowTransitionProposal` records targeting this instance's URI.
+   *
+   * Uses the SDNA identity discriminator (`ad4m://flow/instance` predicate)
+   * for the where-filter — one SPARQL round-trip, no client-side
+   * filtering.
+   *
+   * These are written by the executor's consensus pass when it mints a
+   * transition, and by clients proposing directly. Superseded proposals are
+   * not swept here — a stale one is simply never counted by the fold, and
+   * accepting it fails with a stale-state error.
+   */
+  async proposals(): Promise<FlowTransitionProposal[]> {
+    return FlowTransitionProposal.findAll(this.perspective, {
+      where: { flowInstance: this.uri },
+    });
+  }
+
+  /**
+   * Propose a flow transition for this instance, as the calling agent.
+   *
+   * The executor evaluates the guard on its own replica, seals the evidence,
+   * and either writes a new proposal or — when an equivalent one is already
+   * open, i.e. another agent pressed the same button first — co-signs that
+   * one. When the resulting vote reaches the target state's
+   * `consensusRule.n`, the transition fires in the same call.
+   *
+   * How to read the result — fired vs. queued vs. no-op vs. stalled — is
+   * documented on {@link FlowProposeResult} itself.
+   *
+   * `outputs` names the instances the run produces, as `{ className, id }`
+   * pairs, for a transition into a terminal state. The proposal signs a hash
+   * over their content, every co-signer recomputes it on its own replica,
+   * and a receipt for the run speaks for exactly these instances as they
+   * stood at completion.
+   *
+   * Throws when `toState` is not reachable from the derived state, when the
+   * target state carries a `requires` guard that is not currently satisfied
+   * on this replica, when the instance is already contested, when `outputs`
+   * is given for a non-terminal state or names something that is not an
+   * instance of its class, or
+   * when an open proposal on the same edge names different outputs.
+   */
+  async proposeTransition(toState: string, rationale?: string, outputs?: FlowOutputRef[]): Promise<FlowProposeResult> {
+    return this.perspective.proposeFlowTransition(this.uri, toState, rationale, outputs);
+  }
+
+  async acceptProposal(proposal: FlowTransitionProposal | string): Promise<FlowFireOutcome[]> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.acceptFlowProposal(uri);
+  }
+
+  /** Withdraw our own links from a proposal; resolves to how many went. */
+  async rejectProposal(proposal: FlowTransitionProposal | string): Promise<number> {
+    const uri = typeof proposal === "string" ? proposal : proposal.id;
+    return this.perspective.rejectFlowProposal(uri);
+  }
+}

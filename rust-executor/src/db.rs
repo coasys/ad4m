@@ -250,7 +250,8 @@ impl Ad4mDb {
                 local_tokenizer_file_name TEXT,
                 local_huggingface_repo TEXT,
                 local_revision TEXT,
-                type TEXT NOT NULL
+                type TEXT NOT NULL,
+                api_max_num_ctx INTEGER
             )",
             [],
         )?;
@@ -374,6 +375,11 @@ impl Ad4mDb {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_hot_wallet_address ON users(hot_wallet_address) WHERE hot_wallet_address IS NOT NULL",
         )?;
         alter_add_column("ALTER TABLE users ADD COLUMN free_access BOOLEAN DEFAULT 0")?;
+
+        // Optional per-model context-window ceiling for API models (see
+        // ModelApi::max_num_ctx). Appended last so its SELECT * position is
+        // the same on a fresh table and on one migrated via ALTER.
+        alter_add_column("ALTER TABLE models ADD COLUMN api_max_num_ctx INTEGER")?;
 
         // Host rates table — stores per-item pricing used for credit deduction
         conn.execute_batch(
@@ -1778,8 +1784,8 @@ impl Ad4mDb {
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {
         let id = uuid::Uuid::new_v4().to_string();
         self.conn.execute(
-            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO models (id, name, api_base_url, api_key, model, api_type, local_file_name, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, local_huggingface_repo, local_revision, type, api_max_num_ctx)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 id,
                 model.name,
@@ -1794,6 +1800,7 @@ impl Ad4mDb {
                 model.local.as_ref().and_then(|local| local.huggingface_repo.clone()),
                 model.local.as_ref().and_then(|local| local.revision.clone()),
                 serde_json::to_string(&model.model_type).unwrap(),
+                model.api.as_ref().and_then(|api| api.max_num_ctx),
             ],
         )?;
         Ok(id)
@@ -1814,6 +1821,7 @@ impl Ad4mDb {
                         api_key,
                         model,
                         api_type: ModelApiType::from_str(&api_type).unwrap(),
+                        max_num_ctx: row.get::<_, Option<u32>>(13)?,
                     })
                 } else {
                     None
@@ -1872,6 +1880,7 @@ impl Ad4mDb {
                     api_key,
                     model,
                     api_type: ModelApiType::from_str(&api_type).unwrap(),
+                    max_num_ctx: row.get::<_, Option<u32>>(13)?,
                 })
             } else {
                 None
@@ -1924,6 +1933,7 @@ impl Ad4mDb {
         let api_key = model.api.as_ref().map(|api| api.api_key.clone());
         let api_model = model.api.as_ref().map(|api| api.model.clone());
         let api_type = model.api.as_ref().map(|api| api.api_type.to_string());
+        let api_max_num_ctx = model.api.as_ref().and_then(|api| api.max_num_ctx);
         let local_file_name = model.local.as_ref().map(|local| local.file_name.clone());
         let local_tokenizer = model
             .local
@@ -1951,8 +1961,9 @@ impl Ad4mDb {
                 local_tokenizer_file_name = ?9,
                 local_huggingface_repo = ?10,
                 local_revision = ?11,
-                type = ?12
-             WHERE id = ?13",
+                type = ?12,
+                api_max_num_ctx = ?13
+             WHERE id = ?14",
             params![
                 model.name,
                 api_base_url,
@@ -1966,6 +1977,7 @@ impl Ad4mDb {
                 local_huggingface_repo,
                 local_revision,
                 serde_json::to_string(&model.model_type).unwrap(),
+                api_max_num_ctx,
                 id
             ],
         )?;
@@ -2137,7 +2149,7 @@ impl Ad4mDb {
 
         // Export models
         let models: Vec<serde_json::Value> = self.conn.prepare(
-            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name FROM models"
+            "SELECT id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx FROM models"
         )?.query_map([], |row| {
             Ok(serde_json::json!({
                 "id": row.get::<_, String>(0)?,
@@ -2152,7 +2164,8 @@ impl Ad4mDb {
                 "local_revision": row.get::<_, Option<String>>(9)?,
                 "local_tokenizer_repo": row.get::<_, Option<String>>(10)?,
                 "local_tokenizer_revision": row.get::<_, Option<String>>(11)?,
-                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?
+                "local_tokenizer_file_name": row.get::<_, Option<String>>(12)?,
+                "api_max_num_ctx": row.get::<_, Option<u32>>(13)?
             }))
         })?.collect::<Result<Vec<_>, _>>()?;
         export_data.insert("models".to_string(), serde_json::to_value(models)?);
@@ -2577,9 +2590,30 @@ impl Ad4mDb {
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("<unknown>");
+                        // Missing or null in exports that predate the column;
+                        // a present value must be a usable num_ctx ceiling.
+                        let max_num_ctx = match &model["api_max_num_ctx"] {
+                            serde_json::Value::Null => None,
+                            v => match v.as_u64().and_then(|v| u32::try_from(v).ok()) {
+                                Some(ctx) if ctx > 0 => Some(ctx),
+                                _ => {
+                                    result.models.failed += 1;
+                                    result.models.errors.push(format!(
+                                        "Failed to import model {}: invalid api_max_num_ctx {}",
+                                        name, v
+                                    ));
+                                    log::warn!(
+                                        "Failed to import model {}: invalid api_max_num_ctx {}",
+                                        name,
+                                        v
+                                    );
+                                    continue;
+                                }
+                            },
+                        };
                         match self.conn.execute(
-                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name) 
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                            "INSERT INTO models (id, name, type, api_type, api_key, api_base_url, model, local_file_name, local_huggingface_repo, local_revision, local_tokenizer_repo, local_tokenizer_revision, local_tokenizer_file_name, api_max_num_ctx) 
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                             params![
                                 model["id"].as_str().unwrap_or(""),
                                 model["name"].as_str().unwrap_or(""),
@@ -2593,7 +2627,8 @@ impl Ad4mDb {
                                 model["local_revision"].as_str(),
                                 model["local_tokenizer_repo"].as_str(),
                                 model["local_tokenizer_revision"].as_str(),
-                                model["local_tokenizer_file_name"].as_str()
+                                model["local_tokenizer_file_name"].as_str(),
+                                max_num_ctx
                             ],
                         ) {
                             Ok(_) => result.models.imported += 1,
@@ -2944,7 +2979,7 @@ impl Ad4mDb {
     }
 
     // Password hashing and verification helpers
-    fn hash_password(password: &str) -> Ad4mDbResult<String> {
+    pub(crate) fn hash_password(password: &str) -> Ad4mDbResult<String> {
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
         let password_hash = argon2
@@ -2954,7 +2989,7 @@ impl Ad4mDb {
         Ok(password_hash)
     }
 
-    fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
+    pub(crate) fn verify_password(password: &str, password_hash: &str) -> Ad4mDbResult<bool> {
         let parsed_hash = PasswordHash::new(password_hash)
             .map_err(|e| anyhow!("Failed to parse password hash: {}", e))?;
         let argon2 = Argon2::default();
@@ -2968,6 +3003,20 @@ impl Ad4mDb {
         let password_hash = Self::hash_password(password)?;
         self.conn.execute(
             "INSERT INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
+            params![username, did, password_hash],
+        )?;
+        Ok(())
+    }
+
+    /// Add a user with a pre-computed password hash (for shared DB sync).
+    pub fn add_user_prehashed(
+        &self,
+        username: &str,
+        did: &str,
+        password_hash: &str,
+    ) -> Ad4mDbResult<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO users (username, did, password_hash) VALUES (?1, ?2, ?3)",
             params![username, did, password_hash],
         )?;
         Ok(())
@@ -3002,6 +3051,17 @@ impl Ad4mDb {
             })
         })?;
         Ok(user)
+    }
+
+    pub fn get_username_by_did(&self, did: &str) -> Ad4mDbResult<Option<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT username FROM users WHERE did = ?1")?;
+        match stmt.query_row([did], |row| row.get::<_, String>(0)) {
+            Ok(username) => Ok(Some(username)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub fn update_user_last_seen(&self, email: &str) -> Ad4mDbResult<()> {
@@ -4054,15 +4114,17 @@ mod tests {
             )
             .unwrap();
 
-        // Add models
+        // Add models — Ollama with a non-default ceiling, so the export
+        // must carry api_max_num_ctx for it to survive the round trip.
         let model_input = ModelInput {
             name: "Test Model".to_string(),
             model_type: ModelType::Llm,
             api: Some(ModelApiInput {
-                base_url: "https://api.example.com".to_string(),
+                base_url: "http://localhost:11434".to_string(),
                 api_key: "test-key".to_string(),
-                model: "gpt-4".to_string(),
-                api_type: ModelApiType::OpenAi.to_string(),
+                model: "qwen3:32b".to_string(),
+                api_type: ModelApiType::Ollama.to_string(),
+                max_num_ctx: Some(16_384),
             }),
             local: None,
         };
@@ -4115,6 +4177,9 @@ mod tests {
         let imported_model = models.first().unwrap();
         assert_eq!(imported_model.id, model_id);
         assert_eq!(imported_model.name, "Test Model");
+        let imported_api = imported_model.api.as_ref().unwrap();
+        assert_eq!(imported_api.api_type, ModelApiType::Ollama);
+        assert_eq!(imported_api.max_num_ctx, Some(16_384));
 
         // Verify default model mapping was imported
         let imported_default_model = import_db.get_default_model(ModelType::Llm).unwrap();
@@ -4162,6 +4227,64 @@ mod tests {
         let imported_links2 = import_db.get_all_links(&perspective2.uuid).unwrap();
         assert_eq!(imported_links2.len(), 1);
         assert_eq!(imported_links2[0], (link2, LinkStatus::Local));
+    }
+
+    #[test]
+    fn import_rejects_invalid_max_num_ctx() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+        db.add_model(&ModelInput {
+            name: "Ollama".to_string(),
+            model_type: ModelType::Llm,
+            api: Some(ModelApiInput {
+                base_url: "http://localhost:11434".to_string(),
+                api_key: String::new(),
+                model: "qwen3:32b".to_string(),
+                api_type: ModelApiType::Ollama.to_string(),
+                max_num_ctx: None,
+            }),
+            local: None,
+        })
+        .unwrap();
+        let exported = db.export_all_to_json().unwrap();
+
+        // Import the exported model with api_max_num_ctx replaced by `ctx`
+        // (None = field removed, as in exports that predate the column).
+        let import_with = |ctx: Option<serde_json::Value>| {
+            let mut data = exported.clone();
+            let model = data["models"][0].as_object_mut().unwrap();
+            match ctx {
+                Some(v) => model.insert("api_max_num_ctx".to_string(), v),
+                None => model.remove("api_max_num_ctx"),
+            };
+            let import_db = Ad4mDb::new(":memory:").unwrap();
+            let result = import_db.import_from_json(data).unwrap();
+            let models = import_db.get_models().unwrap();
+            (result.models, models)
+        };
+
+        for invalid in [
+            serde_json::json!(0),
+            serde_json::json!(1u64 << 32),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("8192"),
+        ] {
+            let (stats, models) = import_with(Some(invalid.clone()));
+            assert_eq!((stats.imported, stats.failed), (0, 1), "{}", invalid);
+            assert!(stats.errors[0].contains("api_max_num_ctx"), "{}", invalid);
+            assert!(models.is_empty(), "{}", invalid);
+        }
+
+        for (ctx, expected) in [
+            (None, None),
+            (Some(serde_json::Value::Null), None),
+            (Some(serde_json::json!(8192)), Some(8192)),
+            (Some(serde_json::json!(u32::MAX)), Some(u32::MAX)),
+        ] {
+            let (stats, models) = import_with(ctx);
+            assert_eq!((stats.imported, stats.failed), (1, 0));
+            assert_eq!(models[0].api.as_ref().unwrap().max_num_ctx, expected);
+        }
     }
 
     #[test]
@@ -4560,6 +4683,7 @@ mod tests {
                 api_key: "test_api_key".to_string(),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -4664,6 +4788,7 @@ mod tests {
                 api_key: "test_key".to_string(),
                 model: "llama3".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -4680,6 +4805,7 @@ mod tests {
                 api_key: "test_key".to_string(),
                 model: "llama4".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Embedding,
@@ -4706,6 +4832,49 @@ mod tests {
     }
 
     #[test]
+    fn max_num_ctx_survives_the_model_roundtrip() {
+        let db = Ad4mDb::new(":memory:").unwrap();
+
+        let mut model = ModelInput {
+            name: "Capped Ollama".to_string(),
+            api: Some(ModelApiInput {
+                base_url: "http://localhost:11434".to_string(),
+                api_key: "".to_string(),
+                model: "qwen3:32b".to_string(),
+                api_type: ModelApiType::Ollama.to_string(),
+                max_num_ctx: Some(32_768),
+            }),
+            local: None,
+            model_type: ModelType::Llm,
+        };
+
+        // A set cap comes back from both read paths.
+        let id = db.add_model(&model).unwrap();
+        let loaded = db.get_model(id.clone()).unwrap().unwrap();
+        assert_eq!(loaded.api.unwrap().max_num_ctx, Some(32_768));
+        let listed = db
+            .get_models()
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == id)
+            .unwrap();
+        assert_eq!(listed.api.unwrap().max_num_ctx, Some(32_768));
+
+        // Updating with the cap cleared clears it in the store.
+        model.api.as_mut().unwrap().max_num_ctx = None;
+        db.update_model(&id, &model).unwrap();
+        let reloaded = db.get_model(id.clone()).unwrap().unwrap();
+        assert_eq!(reloaded.api.unwrap().max_num_ctx, None);
+
+        // An unset cap stays unset.
+        let id_unset = db.add_model(&model).unwrap();
+        let unset = db.get_model(id_unset).unwrap().unwrap();
+        assert_eq!(unset.api.unwrap().max_num_ctx, None);
+
+        db.remove_model(&id).unwrap();
+    }
+
+    #[test]
     fn test_model_status() {
         let db = Ad4mDb::new(":memory:").unwrap();
 
@@ -4717,6 +4886,7 @@ mod tests {
                 api_key: "llm_key".to_string(),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Llm,
@@ -4745,6 +4915,7 @@ mod tests {
                 api_key: "transcribe_key".to_string(),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Transcription,
@@ -4844,6 +5015,7 @@ mod tests {
                 api_key: "test-key".to_string(),
                 model: "llama".to_string(),
                 api_type: ModelApiType::OpenAi.to_string(),
+                max_num_ctx: None,
             }),
             local: None,
             model_type: ModelType::Llm,

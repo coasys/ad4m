@@ -8,8 +8,6 @@ use super::pubsub_extension::pubsub_service;
 use super::signature_extension::signature_service;
 use super::string_module_loader::StringModuleLoader;
 use super::utils_extension::utils_service;
-use super::wallet_extension::wallet_service;
-use crate::entanglement_service::entanglement_service_extension::entanglement_service;
 use crate::holochain_service::holochain_service_extension::holochain_service;
 use crate::runtime_service::runtime_service_extension::runtime_service;
 
@@ -39,6 +37,27 @@ pub fn language_main_module_url() -> Url {
     Url::parse("https://ad4m.language/bootstrap").unwrap()
 }
 
+/// The AD4M service extensions available to the language runtime, in the order the
+/// runtime and the snapshot builder both register them. One list keeps the two in step:
+/// an extension present at snapshot build time but absent at runtime (or the reverse)
+/// misaligns the op registry.
+///
+/// The wallet extension no longer appears here. It exposed `globalThis.WALLET` — the
+/// node's main private key, keystore export and lock — to every language, which no
+/// language uses. Languages sign through `signature_service` / `agent_service` instead,
+/// and `agent_service` carries no unlock, lock, reload or profile-write op.
+pub fn ad4m_language_extensions() -> Vec<deno_core::Extension> {
+    vec![
+        utils_service::init(),
+        pubsub_service::init(),
+        holochain_service::init(),
+        signature_service::init(),
+        agent_service::init(),
+        runtime_service::init(),
+        language_service::init(),
+    ]
+}
+
 /// Create worker options for language-specific runtimes.
 /// These runtimes have the same Rust service extensions but minimal JS bootstrap.
 pub fn language_worker_options() -> WorkerOptions {
@@ -53,17 +72,98 @@ pub fn language_worker_options() -> WorkerOptions {
                 Some(include_bytes!("../../CUSTOM_DENO_SNAPSHOT.bin"))
             }
         },
-        extensions: vec![
-            wallet_service::init(),
-            utils_service::init(),
-            pubsub_service::init(),
-            holochain_service::init(),
-            signature_service::init(),
-            agent_service::init(),
-            entanglement_service::init(),
-            runtime_service::init(),
-            language_service::init(),
-        ],
+        // deno 2.9: `lazy_loaded_esm` / `lazy_loaded_js` sources that were
+        // NOT consumed at snapshot build time (e.g. `node:buffer` and its
+        // deno_node polyfill graph) are NOT embedded in the V8 snapshot.
+        // At runtime, `add_residual_lazy_loaded_sources` populates the
+        // module map from these slices; if they're empty,
+        // `take_lazy_esm_source("node:buffer")` returns None and the
+        // fallback path hits our `StringModuleLoader`, which correctly
+        // returns NotFound (it doesn't own `node:*`). Regenerate via
+        // `cargo run --features generate_snapshot --bin generate_snapshot`.
+        #[cfg(not(feature = "generate_snapshot"))]
+        residual_lazy_esm_sources: super::residual_lazy::RESIDUAL_LAZY_ESM_SOURCES,
+        #[cfg(not(feature = "generate_snapshot"))]
+        residual_lazy_js_sources: super::residual_lazy::RESIDUAL_LAZY_JS_SOURCES,
+        extensions: ad4m_language_extensions(),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ad4m_language_extensions;
+
+    /// The wallet extension exposed the node's main private key and keystore export to
+    /// every language. No language uses it, so the runtime must not register it.
+    #[test]
+    fn the_language_runtime_does_not_expose_the_wallet() {
+        let names: Vec<&str> = ad4m_language_extensions()
+            .iter()
+            .map(|ext| ext.name)
+            .collect();
+        assert!(
+            !names.contains(&"wallet_service"),
+            "the language runtime still registers the wallet extension: {names:?}"
+        );
+    }
+
+    /// The wallet extension's JS installed `globalThis.WALLET`. A language runtime booted from
+    /// the embedded snapshot must not have it. This also catches a snapshot generated before
+    /// the extension went away.
+    #[tokio::test]
+    async fn a_language_runtime_has_no_wallet_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            "wallet-check".to_string(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        let wallet = runtime.execute("typeof globalThis.WALLET").await.unwrap();
+        assert!(wallet.contains("undefined"), "WALLET is {wallet}");
+        let signature = runtime
+            .execute("typeof globalThis.SIGNATURE")
+            .await
+            .unwrap();
+        assert!(signature.contains("object"), "SIGNATURE is {signature}");
+    }
+
+    /// `AGENT.unlock` let any language probe the node's passphrase, `AGENT.lock` lock the
+    /// node under a passphrase of its choosing, `AGENT.load` reload the keystore, and
+    /// `AGENT.save_agent_profile` overwrite the node's profile. Signing stays.
+    #[tokio::test]
+    async fn a_language_runtime_cannot_unlock_lock_reload_or_rewrite_the_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = crate::languages::language_runtime::LanguageRuntime::new(
+            "agent-ops-check".to_string(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        runtime.init().await.unwrap();
+        for op in ["unlock", "lock", "load", "save_agent_profile"] {
+            let kind = runtime
+                .execute(&format!("typeof globalThis.AGENT.{op}"))
+                .await
+                .unwrap();
+            assert!(kind.contains("undefined"), "AGENT.{op} is {kind}");
+        }
+        let sign = runtime
+            .execute("typeof globalThis.AGENT.sign")
+            .await
+            .unwrap();
+        assert!(sign.contains("function"), "AGENT.sign is {sign}");
+    }
+
+    /// The legitimate signing path stays: languages sign through signature_service and
+    /// act as their agent through agent_service.
+    #[test]
+    fn the_language_runtime_keeps_the_signing_extensions() {
+        let names: Vec<&str> = ad4m_language_extensions()
+            .iter()
+            .map(|ext| ext.name)
+            .collect();
+        assert!(names.contains(&"signature_service"), "{names:?}");
+        assert!(names.contains(&"agent_service"), "{names:?}");
     }
 }

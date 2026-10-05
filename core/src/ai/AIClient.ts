@@ -1,4 +1,4 @@
-import { ApiClient } from "../apiClient";
+import { ApiClient, CallOptions, longCall } from "../apiClient";
 import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
@@ -9,7 +9,7 @@ export class AIClient {
     #apiClient: ApiClient;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
     }
 
@@ -26,8 +26,24 @@ export class AIClient {
         return this.#apiClient.call<Model[]>('ai.models');
     }
 
-    async addModel(model: ModelInput): Promise<string> {
-        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) });
+    /**
+     * Ask a remote endpoint which models it serves, before adding one.
+     *
+     * Takes the credentials of a model that does not exist yet — a settings
+     * form is being filled in and wants the list to pick from. Rejects when
+     * the endpoint is unreachable or the key is refused, which makes this the
+     * credential check too: without it a bad key surfaces later as a failed
+     * completion carrying an error from a different layer.
+     *
+     * `apiType` defaults to the OpenAI shape, which is what every endpoint
+     * that is not Anthropic speaks.
+     */
+    async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
+        return this.#apiClient.call<string[]>('ai.discoverModels', { baseUrl, apiKey, apiType });
+    }
+
+    async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
+        return this.#apiClient.call<string>('ai.addModel', { model: this.serializeModelInput(model) }, longCall(options));
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
@@ -75,17 +91,20 @@ export class AIClient {
         return this.#apiClient.call<AIModelLoadingStatus>('ai.modelLoadingStatus', { model });
     }
 
-    async prompt(taskId: string, prompt: string): Promise<string> {
-        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt });
+    async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
+        return this.#apiClient.call<string>('ai.prompt', { taskId, prompt }, longCall(options));
     }
 
-    async embed(modelId: string, text: string): Promise<Array<number>> {
-        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text });
+    async embed(modelId: string, text: string, options?: CallOptions): Promise<Array<number>> {
+        const aiEmbed = await this.#apiClient.call<string>('ai.embed', { modelId, text }, longCall(options));
 
         const compressed = base64js.toByteArray(aiEmbed);
-        // Decode to a string via TextDecoder rather than pako's `{ to: 'string' }`
-        // option: newer @types/pako dropped that overload, which broke the build.
-        const decompressed = JSON.parse(new TextDecoder().decode(pako.inflate(compressed)));
+        // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
+        // pako v3 also drops that overload from its bundled types. Call the
+        // version-agnostic form (returns Uint8Array) and decode explicitly so
+        // this works regardless of which pako major the lockfile pins.
+        const inflated = pako.inflate(compressed);
+        const decompressed = JSON.parse(new TextDecoder('utf-8').decode(inflated));
 
         return decompressed;
     }
@@ -118,11 +137,10 @@ export class AIClient {
 
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
-        await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
-
-        const unsub = this.#transcriptionUnsubscribers.get(streamId);
-        if (unsub) {
-            unsub();
+        try {
+            await this.#apiClient.call<void>('ai.transcriptionClose', { streamId });
+        } finally {
+            this.#transcriptionUnsubscribers.get(streamId)?.();
             this.#transcriptionUnsubscribers.delete(streamId);
         }
     }

@@ -31,7 +31,6 @@ import { fileURLToPath } from "url";
 import { expect } from "chai";
 import {
   baseUrl,
-  sleep,
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
@@ -58,7 +57,15 @@ const SCOPE_QUERY = `SELECT ?speaker ?text ?timestamp WHERE {
 }
 ORDER BY ?timestamp`;
 
-describe("AutoProcessor runs for managed users on a hosted node", function () {
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
+describeIfLLM("AutoProcessor runs for managed users on a hosted node", function () {
   this.timeout(600_000);
 
   const TEST_DIR = path.join(`${__dirname}/../tst-tmp`);
@@ -98,7 +105,7 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
       bootstrapUrl!,
     );
 
-    admin = new Ad4mClient(baseUrl(apiPort), undefined, false);
+    admin = new Ad4mClient(baseUrl(apiPort));
     await admin.agent.generate("passphrase");
     await admin.runtime.setMultiUserEnabled(true);
 
@@ -121,8 +128,8 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
     // Log in both — one JWT per user, one client per user.
     const aliceToken = await admin.agent.loginUser("alice@apmutest.local", "password");
     const bobToken = await admin.agent.loginUser("bob@apmutest.local", "password");
-    alice = new Ad4mClient(baseUrl(apiPort), aliceToken, false);
-    bob = new Ad4mClient(baseUrl(apiPort), bobToken, false);
+    alice = new Ad4mClient(baseUrl(apiPort), aliceToken);
+    bob = new Ad4mClient(baseUrl(apiPort), bobToken);
 
     // Trigger last_seen updates for both — the supervisor's freshness filter
     // is what decides whether to spawn a loop per user, and last_seen is set
@@ -154,7 +161,7 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
     await ConversationSubgroup.register(aliceP);
 
     const events: AutoProcessorEvent[] = [];
-    await aliceP.addAutoProcessorEventListener((e) => events.push(e));
+    aliceP.addAutoProcessorEventListener((e) => events.push(e));
 
     await aliceP.addAutoProcessor({
       processorId: "managed-users-channel",
@@ -165,9 +172,6 @@ describe("AutoProcessor runs for managed users on a hosted node", function () {
       batchMax: 32,
       claimTtlMs: 60_000,
     } as any);
-
-    // Give the supervisor its first tick (5s) to spawn per-user loops.
-    await sleep(6_000);
 
     // `perspective.add` assigns the caller as the owner, so a strict
     // ownership regime would make Bob's `byUUID` return `null`

@@ -10,19 +10,21 @@ pub mod helpers;
 pub mod holochain_service;
 pub mod js_core;
 pub mod mcp;
+pub mod perspective_snapshot;
 pub mod perspectives;
 mod prolog_service;
 pub mod runtime_service;
 pub mod unyt_service;
 pub mod user_management;
 pub mod utils;
-mod wallet;
+pub mod wallet;
 
 pub mod agent;
 pub mod ai_service;
 pub mod billing;
 mod dapp_server;
 pub mod db;
+pub mod db_backend;
 pub mod init;
 pub mod languages;
 pub mod logging;
@@ -44,7 +46,7 @@ use crate::{
     languages::LanguageController, runtime_service::RuntimeService, utils::find_port,
 };
 pub use config::Ad4mConfig;
-pub use holochain_service::run_local_hc_services;
+
 #[cfg(unix)]
 use libc::{sigaction, sigemptyset, sighandler_t, SA_ONSTACK, SIGURG};
 #[cfg(unix)]
@@ -180,6 +182,23 @@ async fn holochain_signal_receiver() {
                     Signal::System(_) => {
                         info!("Received system signal");
                     }
+                    // HC 0.7.0 added Signal::AppDirect (direct peer-to-peer
+                    // signal that bypasses the DHT). AD4M's per-language
+                    // signal routing goes through Signal::App only; direct
+                    // signals are logged and ignored here — individual
+                    // languages that want direct-signal support can wire it
+                    // in later via a dedicated handler.
+                    //
+                    // Matched explicitly so any *future* Signal variant
+                    // surfaces as an unhandled-variant compile error instead
+                    // of being silently rebranded as an AppDirect.
+                    // (Data's PR #907 review MED-4.)
+                    Signal::AppDirect { .. } => {
+                        log::debug!(
+                            "Received Signal::AppDirect (HC 0.7 direct peer signal; \
+                             not routed to per-language handlers)"
+                        );
+                    }
                 }
             } else {
                 // stream_receiver.recv() returned None — channel closed.
@@ -201,11 +220,11 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
         action.sa_flags = SA_ONSTACK;
-        action.sa_sigaction = handle_sigurg as sighandler_t;
+        action.sa_sigaction = handle_sigurg as *const () as sighandler_t;
         sigemptyset(&mut action.sa_mask);
 
         if libc::sigaction(SIGURG, &action, ptr::null_mut()) != 0 {
-            eprintln!("Failed to set up SIGURG signal handler");
+            error!("Failed to set up SIGURG signal handler");
         }
     }
 
@@ -285,6 +304,87 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Store config globally so services (e.g. agent mutation resolvers) can access it
     crate::config::set_global_config(config.clone());
+
+    // Initialise the wallet backend based on config.
+    // "shared" mode connects to an external HTTP wallet service;
+    // everything else (including unset) uses the in-process LocalWallet.
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::wallet::WalletBackend> = match config.wallet_backend.as_deref()
+        {
+            Some("shared") => {
+                let url = config
+                    .wallet_backend_url
+                    .as_ref()
+                    .expect("WALLET_BACKEND_URL required when wallet_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared wallet backend at {}", url);
+                Arc::new(crate::wallet::SharedWallet::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local wallet backend");
+                Arc::new(crate::wallet::LocalWallet::new())
+            }
+        };
+        crate::wallet::init_wallet_backend(backend);
+    }
+
+    // Initialise the database backend.
+    // "shared" mode delegates to the platform Worker's internal DB API;
+    // everything else uses the in-process Ad4mDb (LocalDb).
+    {
+        use std::sync::Arc;
+        let backend: Arc<dyn crate::db_backend::DbBackend> = match config.db_backend.as_deref() {
+            Some("shared") => {
+                let url = config
+                    .db_backend_url
+                    .as_ref()
+                    .expect("DB_BACKEND_URL required when db_backend = shared");
+                let token = config
+                    .internal_api_token
+                    .as_ref()
+                    .expect("INTERNAL_API_TOKEN required for shared backends");
+                info!("Initialising shared database backend at {}", url);
+                Arc::new(crate::db_backend::SharedDb::new(url.clone(), token.clone()))
+            }
+            _ => {
+                info!("Initialising local database backend");
+                Arc::new(crate::db_backend::LocalDb::new())
+            }
+        };
+        crate::db_backend::init_db_backend(backend);
+    }
+
+    // Restore perspective data from the platform backend if running in shared mode.
+    // Downloads the tar.gz snapshot and extracts to the data directory
+    // before perspectives initialise (so OxiGraph opens with restored data).
+    if config.wallet_backend.as_deref() == Some("shared") {
+        match crate::perspective_snapshot::restore_perspectives(&config) {
+            Ok(true) => info!("Restored perspectives from remote snapshot"),
+            Ok(false) => info!("No remote snapshot found — starting with fresh perspectives"),
+            Err(e) => log::warn!("Perspective restore failed (continuing without): {}", e),
+        }
+    }
+
+    // ── Token separation assertion ──────────────────────────────────────
+    // internal_api_token (executor → Worker) must differ from admin_credential
+    // (client → executor) to maintain trust boundary separation. Same value
+    // means compromise of any admin-capable client leaks platform-internal auth.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        if let (Some(internal), Some(admin)) =
+            (&config.internal_api_token, &config.admin_credential)
+        {
+            if internal == admin {
+                panic!(
+                    "INTERNAL_API_TOKEN must differ from ADMIN_CREDENTIAL in shared mode. \
+                     Using the same value collapses two trust boundaries."
+                );
+            }
+        }
+    }
 
     // Create data directories that were previously created by the JS executor's Config.init().
     // These must exist before any service tries to write to them.
@@ -396,14 +496,19 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .expect("App data path not set in Ad4mConfig"),
     );
 
-    if let Some(admin_credential) = &config.admin_credential {
-        if admin_credential.is_empty() {
-            warn!(
-                "adminCredential is not set or empty, empty token will possess admin capabilities."
-            );
-        }
-    } else {
-        warn!("adminCredential is not set or empty, empty token will possess admin capabilities.");
+    if config
+        .admin_credential
+        .as_deref()
+        .map(|s| s.is_empty())
+        .unwrap_or(true)
+    {
+        warn!("╔══════════════════════════════════════════════════════════════╗");
+        warn!("║  SECURITY WARNING: no adminCredential configured             ║");
+        warn!("║  Every request — including unauthenticated ones — receives  ║");
+        warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
+        warn!("║  This mode is intended for local testing ONLY.               ║");
+        warn!("║  Set adminCredential in your config before going to prod.    ║");
+        warn!("╚══════════════════════════════════════════════════════════════╝");
     }
 
     {
@@ -421,7 +526,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         static V8_FLAGS_INIT: Once = Once::new();
         V8_FLAGS_INIT.call_once(|| {
             deno_core::v8::V8::set_flags_from_string("--max-opt=0");
-            deno_core::JsRuntime::init_platform(None, false);
+            // deno v2.9: init_platform signature changed — was (Option, bool),
+            // now takes only Option<v8::SharedRef<v8::Platform>>. The second
+            // `bool` argument (`predictable`) was removed.
+            deno_core::JsRuntime::init_platform(None);
         });
     }
 
@@ -430,13 +538,18 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     LanguageController::init_global_instance();
 
-    // NOTE: load_system_languages() is called directly from Rust in
-    // agent_generate/agent_unlock mutation resolvers.
+    // NOTE: system languages are loaded from the agent.generate/agent.unlock handlers:
+    // the core ones inline, the conductor-dependent ones in `agent::conductor_startup`.
 
     // Set app data path for perspectives module
     perspectives::set_app_data_path(config.app_data_path.clone().unwrap());
 
     perspectives::initialize_from_db();
+
+    // Start periodic perspective snapshots in shared mode.
+    if config.wallet_backend.as_deref() == Some("shared") {
+        crate::perspective_snapshot::spawn_periodic_backup(config.clone());
+    }
 
     // Start periodic memory diagnostics (logs RSS, jemalloc stats,
     // per-perspective data structure sizes every 30s).
@@ -463,29 +576,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     };
 
-    // Start holochain signal receiver as standalone task
-    tokio::spawn(crate::holochain_signal_receiver());
+    // Start holochain signal receiver and Unyt service only when holochain runs
+    if config.run_holochain.unwrap_or(true) {
+        // Start holochain signal receiver as standalone task
+        tokio::spawn(crate::holochain_signal_receiver());
 
-    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
-    tokio::spawn(async {
-        if unyt_service::get_membrane_proof().is_none() {
-            info!("No Unyt membrane proof stored — skipping eager DNA install");
-            return;
-        }
-        match unyt_service::ensure_installed().await {
-            Ok(()) => info!("Unyt alliance DNA ready"),
-            Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
-        }
-    });
+        // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
+        tokio::spawn(async {
+            if unyt_service::get_membrane_proof().is_none() {
+                info!("No Unyt membrane proof stored — skipping eager DNA install");
+                return;
+            }
+            match unyt_service::ensure_installed().await {
+                Ok(()) => info!("Unyt alliance DNA ready"),
+                Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
+            }
+        });
 
-    // Spawn payment completion polling (every 30 seconds)
-    tokio::spawn(async {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            unyt_service::check_pending_payments().await;
-            unyt_service::check_pending_sends().await;
-        }
-    });
+        // Spawn payment completion polling (every 30 seconds)
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                unyt_service::check_pending_payments().await;
+                unyt_service::check_pending_sends().await;
+            }
+        });
+    } else {
+        info!(
+            "Holochain disabled (run_holochain=false) — skipping signal receiver and Unyt service"
+        );
+    }
 
     // Spawn credit change flush loop (every 2 seconds)
     // When any credit mutation marks a user dirty, this drains the set
@@ -493,8 +613,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     tokio::spawn(async {
         use crate::db::Ad4mDb;
         use crate::pubsub::{
-            get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
-            HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
+            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
         };
 
         loop {
@@ -576,25 +695,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                         .await;
                 }
             }
-
-            // Drain and publish pending compute log entries
-            let pending_entries: Vec<crate::types::domain::ComputeLogEntry> = {
-                match PENDING_COMPUTE_LOG_ENTRIES.lock() {
-                    Ok(mut vec) => vec.drain(..).collect(),
-                    Err(e) => {
-                        error!(
-                            "Credit flush: failed to lock pending compute log entries: {}",
-                            e
-                        );
-                        Vec::new()
-                    }
-                }
-            };
-            for entry in pending_entries {
-                if let Ok(json) = serde_json::to_string(&entry) {
-                    pubsub.publish(&COMPUTE_LOG_UPDATED_TOPIC, &json).await;
-                }
-            }
         }
     });
 
@@ -602,6 +702,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     if config.enable_mcp == Some(true) {
         info!("Starting MCP server alongside REST API...");
         let admin_credential = config.admin_credential.clone();
+        // Cloned out here, not read inside the closure: a non-Copy field read
+        // in there would move `config`, which the API server thread below
+        // still needs.
+        let mcp_tls = config.tls.clone();
 
         std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -611,6 +715,10 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                 .unwrap();
             let mcp_config = mcp::server::McpServerConfig {
                 port: config.mcp_port.unwrap_or(3001),
+                dynamic_class_tools: config.dynamic_class_tools.unwrap_or(false),
+                // The same certificate the RPC port terminates with. MCP has
+                // none of its own to issue or renew.
+                tls: mcp_tls,
                 ..Default::default()
             };
             if let Err(e) = runtime.block_on(mcp::start_mcp_server(

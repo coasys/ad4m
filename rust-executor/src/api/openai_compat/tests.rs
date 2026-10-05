@@ -1,8 +1,5 @@
 use super::audio::{audio_decode, decode_pcm_wav};
-use super::billing_amounts::{
-    chat_or_completion_amount, embedding_amount, speech_amount, stream_prompt_amount,
-    MIN_PROMPT_BILL,
-};
+use super::billing_amounts::speech_amount;
 use super::errors::OpenAIError;
 use super::realtime::pcm16_to_f32;
 use super::types::*;
@@ -428,61 +425,11 @@ fn estimate_token_count_counts_unicode_scalars_not_bytes() {
 // Billing: per-endpoint amount formulas
 // ---------------------------------------------------------------------------
 //
-// Every /v1 endpoint that debits credits routes its amount through
-// `billing_amounts` — the handlers no longer inline formulas. Tests below
-// pin the exact formula per endpoint so a silent change to billing math
-// is caught before it hits production.
+// Handler-level formulas in `billing_amounts` are pinned here so a silent
+// change to billing math is caught before it hits production.
+// (Chat — streaming and non-streaming — and embeddings are billed by
+// `AIService` via host_rates; see `stream_completion_bills_once_on_success`.)
 // ---------------------------------------------------------------------------
-
-#[test]
-fn chat_amount_zero_tokens_floors_to_minimum() {
-    // An "empty" prompt still bills a floor amount so the request shows
-    // up in the compute log at all (invariant: MIN_PROMPT_BILL).
-    assert!((chat_or_completion_amount(0, 0) - MIN_PROMPT_BILL).abs() < f64::EPSILON);
-}
-
-#[test]
-fn chat_amount_proportional_above_floor() {
-    // Below the 1000-token bucket → still floored.
-    let a = chat_or_completion_amount(100, 100);
-    assert!(a >= MIN_PROMPT_BILL);
-    assert!(a > 0.199 && a < 0.201, "200 tokens → 0.2 credits, got {a}");
-
-    // Exactly at the bucket boundary.
-    assert!((chat_or_completion_amount(500, 500) - 1.0).abs() < 1e-12);
-
-    // Above the bucket → scales linearly.
-    assert!((chat_or_completion_amount(1500, 2500) - 4.0).abs() < 1e-12);
-}
-
-#[test]
-fn chat_amount_scaling_is_linear() {
-    // 10× the tokens → 10× the amount (once above the floor).
-    let ten_k = chat_or_completion_amount(5_000, 5_000);
-    let hundred_k = chat_or_completion_amount(50_000, 50_000);
-    assert!((hundred_k - 10.0 * ten_k).abs() < 1e-9);
-}
-
-#[test]
-fn stream_prompt_amount_is_flat_one() {
-    // Streaming path bills a flat 1.0 today because Kalosm's stream API
-    // doesn't yield per-token counts. Locked in so any switch to
-    // proportional streaming billing is a deliberate, tested change.
-    assert!((stream_prompt_amount() - 1.0).abs() < f64::EPSILON);
-}
-
-#[test]
-fn embedding_amount_per_vector() {
-    // Batch of N inputs bills N credits — fair scaling for callers who
-    // batch to reduce round-trips.
-    assert!(
-        (embedding_amount(0) - 1.0).abs() < f64::EPSILON,
-        "min-one floor"
-    );
-    assert!((embedding_amount(1) - 1.0).abs() < f64::EPSILON);
-    assert!((embedding_amount(5) - 5.0).abs() < f64::EPSILON);
-    assert!((embedding_amount(100) - 100.0).abs() < f64::EPSILON);
-}
 
 #[test]
 fn speech_amount_per_thousand_chars() {
@@ -617,7 +564,7 @@ fn init_test_db() {
         // If a prior init attempt panicked, the mutex may be poisoned.
         // Recover by taking the poisoned inner value.
         let arc = crate::db::Ad4mDb::global_instance();
-        let mut guard = match arc.lock() {
+        let guard = match arc.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -1020,4 +967,599 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
         "streaming chat setup should defer billing to end-of-stream; got calls: {calls:?}"
     );
     test_seam::reset();
+}
+
+// ---------------------------------------------------------------------------
+// Streaming billing forwarder: the missing charge is the whole point of
+// this section. On success the stream must bill exactly once (same shape
+// as the non-stream path: ai_prompt, prompt+completion tokens, host-rate
+// priced); on error it must not bill at all. The forwarder is exercised
+// directly (no live LLM channel needed in unit tests).
+// ---------------------------------------------------------------------------
+
+use crate::ai_service::{AIService, PromptResult};
+
+/// Ensure the global wallet has a "main" keypair (decode_jwt signs and
+/// verifies with it) and return a user JWT whose `sub` is `email`.
+///
+/// Mints against the *current* global "main" key. Safe under the project's
+/// single-threaded test convention (`--test-threads=1`, see package.json);
+/// a parallel test rotating the key via `test_utils::setup_wallet()`
+/// between mint and decode would break verification.
+fn user_jwt_token(email: &str) -> String {
+    use jsonwebtoken::{encode, EncodingKey, Header};
+    // Use the trait-based wallet_backend (same path as decode_jwt) so the
+    // signing and verification keys match.
+    let local = std::sync::Arc::new(crate::wallet::LocalWallet::new());
+    let _ = crate::wallet::try_init_wallet_backend(
+        local as std::sync::Arc<dyn crate::wallet::WalletBackend>,
+    );
+    crate::config::set_global_config(crate::config::Ad4mConfig::default());
+
+    let backend = crate::wallet::wallet_backend();
+    let key_name = crate::agent::capabilities::token::signing_key_name();
+    if !backend.key_exists(&key_name) {
+        backend
+            .generate_keypair(&key_name)
+            .expect("generate signing key");
+    }
+    let secret = backend
+        .get_secret_key(&key_name)
+        .expect("signing key must exist");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    encode(
+        &Header::default(),
+        &serde_json::json!({
+            "iss": "ad4m-test",
+            "sub": email,
+            "aud": "ad4m-test",
+            "exp": now + 3600,
+            "iat": now,
+            "nonce": "test-nonce",
+            "capabilities": { "appName": "test", "appDesc": "test" },
+        }),
+        &EncodingKey::from_secret(secret.as_slice()),
+    )
+    .unwrap()
+}
+
+fn sample_prompt_result() -> PromptResult {
+    PromptResult {
+        text: "hello world".to_string(),
+        prompt_tokens: 10,
+        completion_tokens: 5,
+        model_id: "gpt-4".to_string(),
+    }
+}
+
+/// Restores multi-user mode + host rates on drop, so a panicking
+/// assertion can't leak settings into the rest of the test binary (the
+/// global in-memory DB is shared across all tests).
+struct DbSettingsGuard {
+    prev_multi_user: bool,
+    prev_rates: Vec<(String, f64)>,
+}
+
+impl DbSettingsGuard {
+    fn set(multi_user: bool, rates: &[(String, f64)]) -> Self {
+        let prev_multi_user = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.get_multi_user_enabled().unwrap_or(false)
+        });
+        let prev_rates =
+            crate::db::Ad4mDb::with_global_instance(|db| db.get_host_rates().unwrap_or_default());
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(multi_user)?;
+            db.set_host_rates(rates)
+        });
+        Self {
+            prev_multi_user,
+            prev_rates,
+        }
+    }
+}
+
+impl Drop for DbSettingsGuard {
+    fn drop(&mut self) {
+        let _ = crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(self.prev_multi_user)?;
+            db.set_host_rates(&self.prev_rates)
+        });
+    }
+}
+
+#[tokio::test]
+async fn stream_completion_bills_once_on_success() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    // bill_prompt_if_authed needs multi-user mode on + a user JWT, and
+    // bill_ai_operation needs a priced model. The guard restores both even
+    // if an assertion below panics.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
+
+    let token = user_jwt_token("billing-user@ex.test");
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(Some(token), "gpt-4", Ok(sample_prompt_result()), tx)
+        .await;
+    let forwarded = rx.await.unwrap().unwrap();
+    assert_eq!(forwarded.text, "hello world");
+    assert_eq!(forwarded.prompt_tokens, 10);
+    assert_eq!(forwarded.completion_tokens, 5);
+
+    let calls = test_seam::calls();
+    assert_eq!(
+        calls.len(),
+        1,
+        "stream completion must bill exactly once; got calls: {calls:?}"
+    );
+    assert_eq!(calls[0].email, "billing-user@ex.test");
+    assert!(
+        (calls[0].amount - 7.5).abs() < f64::EPSILON,
+        "15 tokens @ 0.5"
+    );
+    assert_eq!(calls[0].operation, "ai_prompt");
+    assert_eq!(
+        calls[0].summary.as_deref(),
+        Some("15 tokens (model: gpt-4)")
+    );
+
+    test_seam::reset();
+}
+
+#[tokio::test]
+async fn stream_error_does_not_bill() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    // Multi-user mode + a priced model are enabled on purpose: the only
+    // thing that must stop billing here is the Err gate. Without this, the
+    // skip would come from the missing user email and the test would pass
+    // even if error streams did bill.
+    let _guard = DbSettingsGuard::set(true, &[("gpt-4".to_string(), 0.5)]);
+
+    // A valid user token is passed on purpose: the skip must come from
+    // the Err gate, not from token absence (matches prompt_messages, which
+    // bills only after a successful prompt).
+    let result: Result<PromptResult, anyhow::Error> = Err(anyhow::anyhow!("inference failed"));
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(
+        Some(user_jwt_token("billing-user@ex.test")),
+        "gpt-4",
+        result,
+        tx,
+    )
+    .await;
+    let err = rx.await.unwrap().unwrap_err();
+    assert_eq!(err.to_string(), "inference failed");
+
+    assert!(
+        test_seam::calls().is_empty(),
+        "failed streams must not bill; got calls: {:?}",
+        test_seam::calls()
+    );
+    test_seam::reset();
+}
+
+#[tokio::test]
+async fn stream_without_token_does_not_bill() {
+    init_test_db();
+    test_seam::reset();
+    test_seam::force_result(test_seam::ForcedResult::Success);
+
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    AIService::bill_and_forward_stream_result(None, "gpt-4", Ok(sample_prompt_result()), tx).await;
+    let forwarded = rx.await.unwrap().unwrap();
+    assert_eq!(forwarded.text, "hello world");
+
+    assert!(
+        test_seam::calls().is_empty(),
+        "unauthenticated streams must not bill; got calls: {:?}",
+        test_seam::calls()
+    );
+    test_seam::reset();
+}
+
+// ---------------------------------------------------------------------------
+// flatten_message — tool results and tool calls folded into prompt text
+// ---------------------------------------------------------------------------
+
+fn tool_result(content: &str, tool_call_id: Option<&str>) -> ChatMessage {
+    ChatMessage {
+        role: Role::Tool,
+        content: Some(ChatMessageContent::Text(content.to_string())),
+        name: None,
+        tool_calls: None,
+        tool_call_id: tool_call_id.map(|s| s.to_string()),
+    }
+}
+
+#[test]
+fn tool_result_carries_its_call_id() {
+    // Correlation matters the moment a turn dispatches more than one tool:
+    // without the id the model sees an unordered pile of responses and has to
+    // guess which answers which.
+    let (role, text) = super::chat::flatten_message(&tool_result("42", Some("call_abc")));
+
+    assert_eq!(role, "user");
+    assert!(
+        text.contains(r#"<tool_response id="call_abc">"#),
+        "expected the id to survive, got: {text}"
+    );
+    assert!(text.contains("42"));
+}
+
+#[test]
+fn tool_result_without_an_id_renders_the_bare_tag() {
+    // Callers that send no id, and the hand-written messages in these tests,
+    // must keep working rather than growing an empty attribute.
+    let (_, text) = super::chat::flatten_message(&tool_result("42", None));
+
+    assert!(text.contains("<tool_response>"), "got: {text}");
+    assert!(!text.contains("id="), "got: {text}");
+}
+
+#[test]
+fn tool_result_with_an_empty_id_renders_the_bare_tag() {
+    let (_, text) = super::chat::flatten_message(&tool_result("42", Some("")));
+
+    assert!(text.contains("<tool_response>"), "got: {text}");
+    assert!(!text.contains("id="), "got: {text}");
+}
+
+// ---------------------------------------------------------------------------
+// ai.addModel / ai.updateModel — a saved key must not travel in the clear
+// ---------------------------------------------------------------------------
+
+fn model_at(base_url: &str, api_key: &str) -> crate::types::ModelInput {
+    crate::types::ModelInput {
+        name: "m".into(),
+        api: Some(crate::types::ModelApiInput {
+            base_url: base_url.into(),
+            api_key: api_key.into(),
+            model: "m".into(),
+            api_type: "ANTHROPIC".into(),
+            max_num_ctx: None,
+        }),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_saved_model_may_not_send_its_key_over_plain_http() {
+    // Discovery sends a key once; a saved model sends it on every completion.
+    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    let error = refuse(&model_at("http://api.anthropic.com", "sk-ant")).expect_err("refused");
+    assert!(error.message.contains("plain HTTP"), "{}", error.message);
+}
+
+#[test]
+fn a_saved_model_is_held_to_the_same_exemptions_as_discovery() {
+    use super::super::ai_ws::refuse_cleartext_credential as refuse;
+    assert!(refuse(&model_at("https://api.anthropic.com", "sk-ant")).is_ok());
+    assert!(refuse(&model_at("http://localhost:11434/v1", "ollama")).is_ok());
+    // Keyless over plain HTTP carries nothing to leak.
+    assert!(refuse(&model_at("http://192.168.1.10:11434/v1", "")).is_ok());
+    // A local model has no endpoint at all.
+    assert!(refuse(&crate::types::ModelInput::default()).is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// native_tools — /v1 chat for a provider that carries tools as data
+// ---------------------------------------------------------------------------
+
+use super::native_tools;
+use crate::ai_service::providers::{ChatReply, ChatRole, ChatUsage};
+
+fn messages(value: serde_json::Value) -> Vec<ChatMessage> {
+    serde_json::from_value(value).expect("valid OpenAI messages")
+}
+
+fn reply_calling(text: &str) -> ChatReply {
+    ChatReply {
+        text: text.to_string(),
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::json!({ "patches": [] }),
+        }],
+        usage: ChatUsage::default(),
+    }
+}
+
+#[test]
+fn parallel_tool_results_each_answer_their_own_call() {
+    // A client that loads two things at once sends two `role:"tool"` messages
+    // after one assistant turn. Both have to arrive as results, each naming its
+    // call: a provider refuses the request if either call goes unanswered.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "system", "content": "be terse" },
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+                { "id": "call_b", "type": "function", "function": { "name": "load_b", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "section a" },
+        { "role": "tool", "tool_call_id": "call_b", "content": "section b" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 5);
+    assert_eq!(turns[0].role, ChatRole::System);
+    assert_eq!(turns[2].tool_calls.len(), 2);
+    assert_eq!(turns[3].tool_result_for.as_deref(), Some("call_a"));
+    assert_eq!(turns[3].content, "section a");
+    assert_eq!(turns[4].tool_result_for.as_deref(), Some("call_b"));
+    assert_eq!(turns[4].content, "section b");
+}
+
+#[test]
+fn tool_call_arguments_reach_the_provider_as_an_object() {
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        {
+            "role": "assistant", "content": "",
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "update_schema", "arguments": "{\"patches\":[1]}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "Patches applied." },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].tool_calls[0].arguments["patches"][0], 1);
+}
+
+#[test]
+fn an_empty_placeholder_message_does_not_reach_the_provider() {
+    // `content: null` with no tool_calls is legal on the OpenAI wire and
+    // clients send it as a placeholder. The injected path read it as empty
+    // prose; a provider refuses an empty message outright.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "   " },
+        { "role": "user", "content": "actually, two" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[0].content, "add a button");
+    assert_eq!(turns[1].content, "actually, two");
+}
+
+#[test]
+fn a_blank_turn_that_carries_a_call_or_answers_one_is_kept() {
+    // The drop is about turns with nothing on them. Removing one that holds a
+    // `tool_use` — or the `tool_result` naming it — is the unbalanced
+    // conversation the fold exists to prevent.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "user", "content": "add a button" },
+        {
+            "role": "assistant", "content": null,
+            "tool_calls": [
+                { "id": "call_a", "type": "function", "function": { "name": "load_a", "arguments": "{}" } },
+            ],
+        },
+        { "role": "tool", "tool_call_id": "call_a", "content": "" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns.len(), 3);
+    assert_eq!(turns[1].tool_calls.len(), 1);
+    assert_eq!(turns[2].tool_result_for.as_deref(), Some("call_a"));
+}
+
+#[test]
+fn a_request_whose_messages_all_come_out_blank_is_a_bad_request() {
+    // Sending nothing is refused by the provider, which would report as a 500
+    // on a request the caller can see is empty.
+    let err = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "assistant", "content": null },
+        { "role": "user", "content": "" },
+    ])))
+    .expect_err("refused");
+
+    assert!(err.to_string().contains("content"));
+}
+
+#[test]
+fn a_developer_message_is_a_system_turn() {
+    // OpenAI's newer name for the system role; read as the user speaking it
+    // would lose its authority.
+    let turns = native_tools::to_turns(&messages(serde_json::json!([
+        { "role": "developer", "content": "be terse" },
+        { "role": "user", "content": "hi" },
+    ])))
+    .expect("maps");
+
+    assert_eq!(turns[0].role, ChatRole::System);
+}
+
+#[test]
+fn a_function_without_parameters_still_sends_an_object_schema() {
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load_stores" } },
+        { "type": "function", "function": {
+            "name": "update_schema", "description": "Apply patches",
+            "parameters": { "type": "object", "properties": { "patches": { "type": "array" } } },
+        } },
+    ]))
+    .unwrap();
+
+    let specs = native_tools::to_specs(&tools);
+
+    assert_eq!(specs[0].name, "load_stores");
+    assert_eq!(specs[0].description, "");
+    assert_eq!(specs[0].parameters["type"], "object");
+    assert_eq!(specs[1].description, "Apply patches");
+    assert_eq!(
+        specs[1].parameters["properties"]["patches"]["type"],
+        "array"
+    );
+}
+
+#[test]
+fn parameters_that_are_not_a_schema_object_are_replaced() {
+    // `"parameters": []` is the likeliest way a caller produces a request the
+    // provider refuses: an `input_schema` has to be an object.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "a", "parameters": [] } },
+        { "type": "function", "function": { "name": "b", "parameters": "" } },
+        { "type": "function", "function": { "name": "c", "parameters": null } },
+    ]))
+    .unwrap();
+
+    for spec in native_tools::to_specs(&tools) {
+        assert_eq!(spec.parameters["type"], "object", "{}", spec.name);
+    }
+}
+
+#[test]
+fn two_tools_of_one_name_are_named_as_a_bad_request() {
+    // Anthropic refuses the pair, and choosing one of them for the caller is a
+    // guess about which the model should be able to call.
+    let tools: Vec<ToolDef> = serde_json::from_value(serde_json::json!([
+        { "type": "function", "function": { "name": "load" } },
+        { "type": "function", "function": { "name": "save" } },
+        { "type": "function", "function": { "name": "load" } },
+    ]))
+    .unwrap();
+
+    assert_eq!(native_tools::duplicate_tool_name(&tools), Some("load"));
+    assert_eq!(native_tools::duplicate_tool_name(&tools[..2]), None);
+}
+
+#[test]
+fn a_reply_with_calls_finishes_with_tool_calls_and_keeps_its_text() {
+    let (message, finish_reason) = native_tools::response_message(reply_calling("Adding it now."));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "tool_calls");
+    assert_eq!(body["content"], "Adding it now.");
+    assert_eq!(body["tool_calls"][0]["id"], "toolu_1");
+    assert_eq!(body["tool_calls"][0]["type"], "function");
+    assert_eq!(body["tool_calls"][0]["function"]["name"], "update_schema");
+    // A JSON string on the wire, as the OpenAI spec has it.
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"patches":[]}"#
+    );
+}
+
+#[test]
+fn a_reply_that_only_calls_omits_content() {
+    let (message, _) = native_tools::response_message(reply_calling(""));
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert!(body.get("content").is_none(), "{body}");
+}
+
+#[test]
+fn arguments_a_provider_did_not_send_as_an_object_go_out_under_raw() {
+    // `ContentBlock::input` is `#[serde(default)]`, so a `tool_use` block that
+    // arrives without one reads as null. Sent on as `"null"`, a client parses
+    // it and indexes the result — a failure in the caller, before the call can
+    // be answered. Under `_raw` the call is still a call, and still wrong in a
+    // way the model can see and correct.
+    let reply = ChatReply {
+        tool_calls: vec![crate::ai_service::providers::ToolCall {
+            id: "toolu_1".to_string(),
+            name: "update_schema".to_string(),
+            arguments: serde_json::Value::Null,
+        }],
+        ..Default::default()
+    };
+
+    let (message, _) = native_tools::response_message(reply.clone());
+    let body = serde_json::to_value(&message).unwrap();
+    assert_eq!(
+        body["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+
+    // The streamed framing of the same reply says the same thing.
+    let chunks = native_tools::reply_chunks(&reply, "chatcmpl-1", "default", 7);
+    let call = serde_json::to_value(&chunks[1]).unwrap();
+    assert_eq!(
+        call["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"],
+        r#"{"_raw":"null"}"#
+    );
+}
+
+#[test]
+fn a_reply_without_calls_is_a_plain_stop() {
+    let (message, finish_reason) = native_tools::response_message(ChatReply {
+        text: "Done.".to_string(),
+        ..Default::default()
+    });
+    let body = serde_json::to_value(&message).unwrap();
+
+    assert_eq!(finish_reason, "stop");
+    assert_eq!(body["content"], "Done.");
+    assert!(body.get("tool_calls").is_none(), "{body}");
+}
+
+#[test]
+fn a_streamed_reply_is_framed_as_role_text_calls_then_finish() {
+    let chunks =
+        native_tools::reply_chunks(&reply_calling("Adding it now."), "chatcmpl-1", "default", 7);
+    let chunks: Vec<serde_json::Value> = chunks
+        .iter()
+        .map(|c| serde_json::to_value(c).unwrap())
+        .collect();
+
+    assert_eq!(chunks.len(), 4);
+    assert_eq!(chunks[0]["choices"][0]["delta"]["role"], "assistant");
+    assert_eq!(
+        chunks[1]["choices"][0]["delta"]["content"],
+        "Adding it now."
+    );
+    let call = &chunks[2]["choices"][0]["delta"]["tool_calls"][0];
+    assert_eq!(call["index"], 0);
+    assert_eq!(call["id"], "toolu_1");
+    assert_eq!(call["function"]["name"], "update_schema");
+    assert_eq!(call["function"]["arguments"], r#"{"patches":[]}"#);
+    assert_eq!(chunks[3]["choices"][0]["finish_reason"], "tool_calls");
+    for chunk in &chunks {
+        assert_eq!(chunk["object"], "chat.completion.chunk");
+        assert_eq!(chunk["id"], "chatcmpl-1");
+    }
+}
+
+#[test]
+fn a_streamed_reply_without_text_or_calls_is_role_then_stop() {
+    let chunks = native_tools::reply_chunks(&ChatReply::default(), "chatcmpl-1", "default", 7);
+    let last = serde_json::to_value(chunks.last().unwrap()).unwrap();
+
+    assert_eq!(chunks.len(), 2);
+    assert_eq!(last["choices"][0]["finish_reason"], "stop");
+}
+
+#[test]
+fn usage_counts_cached_input_as_prompt_tokens() {
+    // Anthropic reports cache reads and writes apart from input_tokens; an
+    // OpenAI client reads prompt_tokens as everything that went in.
+    let usage = native_tools::usage_of(&ChatUsage {
+        input_tokens: Some(100),
+        output_tokens: Some(20),
+        cache_read_tokens: Some(7000),
+        cache_write_tokens: Some(5),
+    });
+
+    assert_eq!(usage.prompt_tokens, 7105);
+    assert_eq!(usage.completion_tokens, 20);
+    assert_eq!(usage.total_tokens, 7125);
+}
+
+#[test]
+fn usage_a_provider_did_not_report_reads_as_zero() {
+    let usage = native_tools::usage_of(&ChatUsage::default());
+    assert_eq!(usage.total_tokens, 0);
 }
