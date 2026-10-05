@@ -11,6 +11,7 @@ Language in its own Deno isolate on its own OS thread. Split plan: spec item 9.
 | `mod.rs` (2.9k, no tests) | `LanguageController` global (`LanguageController::global_instance()`; lazily self-initialises). Load/unload runtimes, `execute_on_language[_with_context]`, install from address / bundle, system languages, settings, `language_by_ref` (306 lines), expression get/create/interact, **and** neighbourhood create/get + Holochain DNA templating (both moving out) |
 | `language_runtime.rs` | One runtime = thread + `JsCore::new_for_language` + request channel; thread-local `AgentContext` so ops sign as the right user |
 | `language_runtime_handle.rs` | Cloneable handle: send JS source string, await result |
+| `expressions.rs` | Expression reads (cache first, misses batched into one runtime call per language), prefetch of synced links' immutable expressions, local-first create via `expressionPrepare`/`expressionPublish`, and the publish-queue worker (`start_publish_worker`, started in `lib.rs`) |
 | `language.rs` | `Language` struct: executor-side view (name, address, adapters present) |
 | `conductor_languages.rs` | `load_link_and_installed_languages`: the system-language steps whose constructors wait for the Holochain conductor (known link languages, installed languages). Run in the background after generate/unlock by `agent::conductor_startup` |
 | `language_context.rs`, `capability.rs`, `literal.rs`, `byte_array.rs`, `error.rs`, `wasm_delegate.rs` | context passed at load, per-language capability grants, `Literal` codec, `LanguageError` |

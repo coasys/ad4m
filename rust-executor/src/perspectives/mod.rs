@@ -535,6 +535,20 @@ pub async fn handle_perspective_diff_from_link_language_impl(
     language_address: String,
 ) {
     if let Some(perspective) = perspective_by_link_language(language_address.clone()).await {
+        // Fetch the immutable expressions the new links point at while we are
+        // online, so a synced neighbourhood stays readable offline, not only the parts
+        // someone opened.
+        let urls: Vec<String> = diff
+            .additions
+            .iter()
+            .flat_map(|l| [l.data.source.clone(), l.data.target.clone()])
+            .collect();
+        tokio::spawn(async move {
+            crate::languages::LanguageController::global_instance()
+                .prefetch_expressions(&urls)
+                .await;
+        });
+
         if let Err(e) = perspective.diff_from_link_language(diff).await {
             log::error!(
                 "Failed to persist diff from link language ({}): {:?}",

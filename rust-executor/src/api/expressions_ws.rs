@@ -69,31 +69,16 @@ async fn get_many_expressions(
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let controller = LanguageController::global_instance();
-    let mut results: Vec<Option<ExpressionRendered>> = Vec::new();
-
-    for url in &body.urls {
-        if let Ok((lang_address, expression_address)) = LanguageController::parse_expr_url(url) {
-            let is_literal = lang_address == "literal";
-            let is_loaded = is_literal || controller.is_language_loaded(&lang_address).await;
-
-            if is_loaded {
-                match controller
-                    .get_expression(&lang_address, &expression_address)
-                    .await
-                {
-                    Ok(Some(expr_json)) => {
-                        results.push(Some(build_expression_rendered(&expr_json, &lang_address)));
-                    }
-                    Ok(None) => results.push(None),
-                    Err(_) => results.push(None),
-                }
-            } else {
-                results.push(None);
-            }
-        } else {
-            results.push(None);
-        }
-    }
+    let expressions = controller.get_expressions_by_url(&body.urls, false).await;
+    let results: Vec<Option<ExpressionRendered>> = body
+        .urls
+        .iter()
+        .zip(expressions)
+        .map(|(url, expr)| {
+            let (lang_address, _) = LanguageController::parse_expr_url(url).ok()?;
+            Some(build_expression_rendered(&expr?, &lang_address))
+        })
+        .collect();
 
     Ok(serde_json::to_value(results)?)
 }

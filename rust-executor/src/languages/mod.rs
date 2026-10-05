@@ -2,6 +2,7 @@ mod byte_array;
 pub mod capability;
 mod conductor_languages;
 pub mod error;
+mod expressions;
 pub mod language;
 pub mod language_context;
 pub mod language_runtime;
@@ -2337,63 +2338,12 @@ impl LanguageController {
 
     // ─── Expression handling methods ────────────────────────────────────
 
-    /// Check if an expression is immutable (cacheable).
-    pub async fn is_immutable_expression(
-        &self,
-        lang_address: &str,
-        expression_address: &str,
-    ) -> Result<bool, LanguageError> {
-        if lang_address == "literal" {
-            return Ok(true);
-        }
-
-        let escaped_addr =
-            serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
-        // Three hardening fixes in one script:
-        //   1. `typeof === "function"` guard instead of a truthy check —
-        //      a language that exports `isImmutableExpression` as a
-        //      non-function truthy value (stub, object, constant) would
-        //      otherwise TypeError deep in v8 on the call site.
-        //   2. Wrap the awaited result in `JSON.stringify(...)` and parse
-        //      it Rust-side as a bool. A bare `true`/`false` does
-        //      round-trip through `to_rust_string_lossy`, but a language
-        //      that returns a truthy non-bool (e.g. the string "yes")
-        //      would silently be treated as false by a `== "true"`
-        //      compare — the JSON parse rejects it loudly instead.
-        //   3. Coerce any non-bool result to `false` in JS via `!!` so
-        //      `JSON.stringify` always yields a valid boolean literal.
-        let script = format!(
-            r#"JSON.stringify(
-                (typeof language.isImmutableExpression === "function")
-                    ? !!(await language.isImmutableExpression({}))
-                    : false
-            )"#,
-            escaped_addr
-        );
-
-        let result = self.execute_on_language(lang_address, &script).await?;
-        Ok(matches!(
-            serde_json::from_str::<bool>(result.trim()),
-            Ok(true)
-        ))
-    }
-
-    /// Get an expression from a language.
+    /// Get an expression from a language. Cache first; see `expressions.rs`.
     pub async fn get_expression(
         &self,
         lang_address: &str,
         expression_address: &str,
     ) -> Result<Option<JsonValue>, LanguageError> {
-        // Resolve alias forward (e.g. "did" → actual hash)
-        let lang_address = {
-            let aliases = self.language_aliases.lock().await;
-            aliases
-                .get(lang_address)
-                .cloned()
-                .unwrap_or_else(|| lang_address.to_string())
-        };
-        let lang_address = lang_address.as_str();
-
         // Handle literal language
         if lang_address == "literal" {
             let mut decoded = literal_decode(expression_address)?;
@@ -2402,71 +2352,10 @@ impl LanguageController {
             return Ok(Some(decoded));
         }
 
-        // Check immutability for caching
-        let immutable = self
-            .is_immutable_expression(lang_address, expression_address)
+        self.get_expressions(lang_address, &[expression_address.to_string()])
             .await
-            .unwrap_or(false);
-
-        // Check cache for immutable expressions
-        if immutable {
-            let cached = crate::db::Ad4mDb::with_global_instance(|db| {
-                db._get_expression(expression_address)
-            });
-            if let Ok(Some(expr)) = cached {
-                let mut expr_json = serde_json::to_value(&expr).unwrap_or(JsonValue::Null);
-                // Verify and set proof.valid
-                Self::verify_expression_proof(&mut expr_json);
-                return Ok(Some(expr_json));
-            }
-        }
-
-        // Fetch from the language runtime
-        let escaped_addr =
-            serde_json::to_string(expression_address).unwrap_or_else(|_| "\"\"".to_string());
-        // Guard the expressionGet existence — a pure link/telepresence
-        // language (no expression-get export) would TypeError if we called
-        // it unconditionally. Return null so the caller treats it as
-        // "expression not available".
-        let script = format!(
-            r#"JSON.stringify(
-                (typeof language.expressionGet === "function")
-                    ? (await language.expressionGet({})) ?? null
-                    : null
-            )"#,
-            escaped_addr
-        );
-
-        let result = self.execute_on_language(lang_address, &script).await?;
-
-        if result.trim() == "null" || result.trim() == "undefined" || result.is_empty() {
-            return Ok(None);
-        }
-
-        let mut expr_json: JsonValue =
-            serde_json::from_str(&result).map_err(|e| LanguageError::SerializationError {
-                message: format!("Failed to parse expression: {}", e),
-            })?;
-
-        if expr_json.is_null() {
-            return Ok(None);
-        }
-
-        // Cache immutable expressions
-        if immutable {
-            if let Ok(expr) =
-                serde_json::from_value::<crate::types::Expression<JsonValue>>(expr_json.clone())
-            {
-                let _ = crate::db::Ad4mDb::with_global_instance(|db| {
-                    db._add_expression(expression_address, &expr)
-                });
-            }
-        }
-
-        // Verify signature
-        Self::verify_expression_proof(&mut expr_json);
-
-        Ok(Some(expr_json))
+            .pop()
+            .unwrap_or(Ok(None))
     }
 
     /// Verify an expression's proof and set the `valid` field.
@@ -2582,6 +2471,10 @@ impl LanguageController {
                 message: format!("Failed to serialize content: {}", e),
             })?;
 
+        let prepared_address = self
+            .create_via_prepare(&resolved_address, &content_json, agent_context)
+            .await?;
+
         // Spec §5 makes every expression sub-capability optional, so a
         // language can legitimately expose `expressionGet` (read) without
         // `expressionCreate` / `expressionAddressOf` (write). Without the
@@ -2609,23 +2502,29 @@ impl LanguageController {
             content_json, content_json
         );
 
-        let result = self
-            .execute_on_language_with_context(&resolved_address, &script, agent_context)
-            .await?;
+        let expression_address = match prepared_address {
+            Some(address) => address,
+            None => {
+                let result = self
+                    .execute_on_language_with_context(&resolved_address, &script, agent_context)
+                    .await?;
 
-        // The dispatcher returns `JSON.stringify(<string>)`, which is the
-        // quoted string literal. Parse it as a JSON string so we get the
-        // unquoted value back — trim_matches('"') used to work for simple
-        // ASCII addresses but would mangle any address containing
-        // embedded quotes, backslashes, or non-ASCII, all of which the
-        // "did:…" scheme happily allows.
-        let expression_address: String =
-            serde_json::from_str(result.trim()).map_err(|e| LanguageError::SerializationError {
-                message: format!(
-                    "expressionCreate dispatcher returned a non-string result: {} ({:?})",
-                    e, result
-                ),
-            })?;
+                // The dispatcher returns `JSON.stringify(<string>)`, which is the
+                // quoted string literal. Parse it as a JSON string so we get the
+                // unquoted value back — trim_matches('"') used to work for simple
+                // ASCII addresses but would mangle any address containing
+                // embedded quotes, backslashes, or non-ASCII, all of which the
+                // "did:…" scheme happily allows.
+                serde_json::from_str(result.trim()).map_err(|e| {
+                    LanguageError::SerializationError {
+                        message: format!(
+                            "expressionCreate dispatcher returned a non-string result: {} ({:?})",
+                            e, result
+                        ),
+                    }
+                })?
+            }
+        };
 
         // Special case: for the "did" scheme, the expression address IS the full URL
         // (e.g. "did:key:z6Mk..."), so don't prefix with "did://"

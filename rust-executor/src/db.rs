@@ -3,9 +3,9 @@ use crate::types::{
     NotificationInput, PerspectiveExpression, PerspectiveHandle, PerspectiveState, SentMessage,
 };
 use crate::types::{
-    AIPromptExamples, AITask, DateTime, Expression, ExpressionProof, Link, LinkExpression,
-    LocalModel, Model, ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff,
-    TokenizerSource, User, UserInfo, UserStatistics,
+    AIPromptExamples, AITask, DateTime, ExpressionProof, Link, LinkExpression, LocalModel, Model,
+    ModelApi, ModelApiType, ModelType, Notification, PerspectiveDiff, TokenizerSource, User,
+    UserInfo, UserStatistics,
 };
 use crate::utils::constant_time_eq;
 use argon2::{
@@ -23,6 +23,9 @@ use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 use url::Url;
 use uuid::Uuid;
+
+mod expression_store;
+pub use expression_store::PendingPublish;
 
 #[derive(Serialize, Deserialize)]
 struct LinkSchema {
@@ -134,14 +137,7 @@ impl Ad4mDb {
             [],
         )?;
 
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS expression (
-                id INTEGER PRIMARY KEY,
-                url TEXT NOT NULL UNIQUE,
-                data TEXT NOT NULL
-             )",
-            [],
-        )?;
+        expression_store::create_tables(&conn)?;
 
         conn.execute(
             "CREATE TABLE IF NOT EXISTS perspective_diff (
@@ -1747,33 +1743,6 @@ impl Ad4mDb {
             params![perspective_uuid],
         )?;
         Ok(())
-    }
-
-    // Expression Methods
-
-    pub fn _add_expression<T: Serialize>(
-        &self,
-        url: &str,
-        expression: &Expression<T>,
-    ) -> Ad4mDbResult<()> {
-        self.conn.execute(
-            "INSERT INTO expression (url, data)
-             VALUES (?1, ?2)",
-            params![url, serde_json::to_string(expression)?,],
-        )?;
-        Ok(())
-    }
-
-    pub fn _get_expression(
-        &self,
-        url: &str,
-    ) -> Ad4mDbResult<Option<Expression<serde_json::Value>>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT data FROM expression WHERE url = ?1")?;
-        let expression: Option<String> =
-            stmt.query_row(params![url], |row| row.get(0)).optional()?;
-        Ok(expression.map(|e| serde_json::from_str(&e).unwrap()))
     }
 
     pub fn add_model(&self, model: &ModelInput) -> Ad4mDbResult<String> {

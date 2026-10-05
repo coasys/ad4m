@@ -953,61 +953,55 @@ async fn resolve_language_transforms(
         return Ok(());
     }
 
+    // Fetch every expression-resolved value up front, in one batch per
+    // language: one fetch per instance and property, awaited in turn, made a
+    // page of N records take N network round trips back to back. The
+    // controller also loads any language that is not loaded yet —
+    // resolveLanguage languages (e.g. FILE_STORAGE_LANGUAGE) may not be.
     let controller = crate::languages::LanguageController::global_instance();
-
-    for instance in instances.iter_mut() {
-        for prop in &resolve_props {
-            // Compute the "resolved" focus value for the transform:
-            //   - String that parses as a language expression URL → fetch via controller
-            //   - Anything else (already-decoded literal string, object, etc.) → use as-is
-            let current = instance[&prop.name].clone();
-            // Only expression-resolved properties fetch their data from the
-            // language controller. Deterministic-literal properties (with a
-            // transform) use their already-decoded value as the transform focus
-            // directly — never re-interpreted as an expression URL.
-            let is_expr = !prop.is_deterministic_literal();
-            let resolved: Option<Value> = match &current {
-                Value::String(uri) if is_expr && !uri.starts_with("literal:") => {
-                    match crate::languages::LanguageController::parse_expr_url(uri) {
-                        Ok((lang, expr_addr)) => {
-                            // Ensure the language is loaded before attempting to fetch the
-                            // expression. The runtimes map only contains languages that have
-                            // been explicitly installed/loaded; languages referenced via
-                            // resolveLanguage (e.g. FILE_STORAGE_LANGUAGE) may not be
-                            // loaded yet at query time.
-                            if !controller.is_language_loaded(&lang).await {
-                                if let Err(e) = controller.language_by_ref(&lang).await {
-                                    log::warn!(
-                                        "resolve_language_transforms: failed to load language {} \
-                                         for property '{}': {}",
-                                        lang,
-                                        prop.name,
-                                        e
-                                    );
-                                    instance[&prop.name] = current;
-                                    continue;
-                                }
-                            }
-                            match controller.get_expression(&lang, &expr_addr).await {
-                                Ok(Some(expr_json)) => {
-                                    let data =
-                                        expr_json.get("data").cloned().unwrap_or(Value::Null);
-                                    Some(match &data {
-                                        Value::String(s) => serde_json::from_str(s).unwrap_or(data),
-                                        _ => data,
-                                    })
-                                }
-                                // Not a fetchable expression — fall back to the raw value
-                                _ => Some(current.clone()),
-                            }
-                        }
-                        Err(_) => Some(current.clone()),
-                    }
+    let mut urls = Vec::new();
+    let mut slots = Vec::new();
+    for (i, instance) in instances.iter().enumerate() {
+        for (p, prop) in resolve_props.iter().enumerate() {
+            if prop.is_deterministic_literal() {
+                continue;
+            }
+            if let Value::String(uri) = &instance[&prop.name] {
+                if !uri.starts_with("literal:")
+                    && crate::languages::LanguageController::parse_expr_url(uri).is_ok()
+                {
+                    urls.push(uri.clone());
+                    slots.push((i, p));
                 }
-                Value::Object(_) => Some(current.clone()),
-                Value::String(_) => Some(current.clone()),
-                Value::Null => None,
-                _ => Some(current.clone()),
+            }
+        }
+    }
+    let mut fetched: HashMap<(usize, usize), Value> = HashMap::new();
+    for (slot, expr) in slots
+        .into_iter()
+        .zip(controller.get_expressions_by_url(&urls, true).await)
+    {
+        if let Some(expr_json) = expr {
+            let data = expr_json.get("data").cloned().unwrap_or(Value::Null);
+            let data = match &data {
+                Value::String(s) => serde_json::from_str(s).unwrap_or(data),
+                _ => data,
+            };
+            fetched.insert(slot, data);
+        }
+    }
+
+    for (i, instance) in instances.iter_mut().enumerate() {
+        for (p, prop) in resolve_props.iter().enumerate() {
+            // Compute the "resolved" focus value for the transform: the
+            // fetched expression data where there is one, else the value
+            // as-is (already-decoded literal string, object, or an
+            // expression that could not be fetched).
+            let current = instance[&prop.name].clone();
+            let resolved: Option<Value> = match fetched.remove(&(i, p)) {
+                Some(data) => Some(data),
+                None if current.is_null() => None,
+                None => Some(current),
             };
 
             if let Some(resolved) = resolved {
