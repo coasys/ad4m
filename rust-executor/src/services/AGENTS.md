@@ -25,17 +25,28 @@ through.
 
 | Interface | Module | Over |
 |---|---|---|
-| `ai.inference` (prompt, embed, transcription, tasks) · `ai.models` | `ai.rs` | `AIService` |
-| `billing.ledger` (credits, rates, free access, compute log, `check`) · `billing.settlement` (linked HoT wallet) | `billing.rs` | `Ad4mDb` billing tables |
+| `ai.inference` (prompt, embed, chat / chatStream / chatWithTools, embedding, transcription, transcribe, tasks) · `ai.models` | `ai.rs` | `AIService` |
+| `billing.ledger` (credits, rates, free access, compute log, `check`, `charge` (credits, or units of a host rate via `rateKey`), `chargeUsage`, `rate`) · `billing.settlement` (linked HoT wallet) | `billing.rs` | `Ad4mDb` billing tables |
 | `unyt.wallet` | `unyt.rs` | `unyt_service` |
-| `holochain.conductor` (agent infos, metrics, restart) | `holochain.rs` | `HolochainServiceInterface` |
+| `holochain.conductor` (`running` probe, agent infos, metrics, apps, zome calls, keys, DNA/hApp packing, `signal` event, restart) | `holochain.rs` | `HolochainServiceInterface` |
 
 - All built-ins share one author DID (`builtins::AUTHOR`) and are registered and started by `builtins::start_all`, called from `api::start_server`. Their event bridges (pubsub topic → service event) run on that runtime.
 - `interfaces/*.json` are the checked-in contracts. Regenerate: `UPDATE_SERVICE_FIXTURES=1 cargo test --lib services::builtins::tests::interfaces_are_current`. `pnpm run generate:api-types` in `core/` also writes `core/src/generated/services/*.ts` and `rust-client/src/services.rs`; a test fails when either is stale.
-- The host meters methods that declare `meter` by calling `billing.ledger.check` first (402 on refusal). Charging itself still happens inside `AIService`.
-- Operator-only actions (host rates, Unyt DNA, Holochain restart, another user's compute log) check `CallContext::is_admin` (the admin credential) on top of the grant.
+- The host meters methods that declare `meter` by calling `billing.ledger.check` first (402 on refusal). The work itself charges through `billing.ledger.charge` / `chargeUsage` (409 `InsufficientCredits`).
+- Operator-only actions (host rates, Unyt DNA, Holochain restart, another user's compute log) check `CallContext::is_admin` (the admin credential) on top of the grant. The host clears `is_admin` before it calls a non-builtin implementation.
+- `holochain.conductor` methods that wait for a starting conductor are `long`; `running` answers at once (use it to probe, not `agentInfos`). Only a conductor that is not up maps to 503 (`direct::NotRunning`).
 - `get_user_default_capabilities` grants users the built-in actions they need; operator actions are not in it.
 - Entry points outside the host (OpenAI-compatible API, transcription feed) check grants with `builtins::capability(Builtin, action)`.
+
+## Internal callers
+
+Executor code outside `services/` and each service's own module reaches AI, billing, Unyt and Holochain only through the host, so grants, schema checks and metering apply to every caller. `builtins::tests::internal_callers_go_through_the_host` enforces this; lifecycle (`AIService::init_global_instance`, conductor shutdown) is the only exemption.
+
+- Call: `builtins::call::<R>(Builtin, method, params, &ctx)` — the same `dispatch` the socket uses.
+- Context: `CallContext::system(Caller::Executor { module }, user, agent_did)` carries the executor's grants and the admin flag. A call made for a request keeps that request's grant layers instead (`ServiceHost::context_for_request`), so the executor never widens what a client may do. Work done later for a session's token (`ai::token_ctx`) holds that token's grants and admin flag.
+- Events: `ServiceHost::watch(event_type, scope)` subscribes in-process; `watch_stream(chunk_type, stream_id)` yields a stream's chunks and ends on `service-stream-end` (or on bus lag). Both end when the receiver is dropped. A refused call emits no stream end: stop on the call's error, and give the end marker a grace period after success (`ai::chat_stream`). Stream events of a caller without an agent go to the executor only. `builtins::event_type(Builtin, event)` gives the wire name.
+- Background loops live in the service's `start()`: billing's `account-changed` announcer, Holochain's `signal` forwarder, Unyt's boot install, payment loop and signal watcher. `languages::holochain_signals::start_router` routes `signal` events to language callbacks.
+- Deno language ops (`holochain_service_extension.rs`) call `holochain.conductor` as `Executor { "language_host" }`; the raw operations sit in its `direct` module, which only the service calls.
 
 ## Wire
 

@@ -21,6 +21,8 @@ use crate::agent::capabilities::Capability;
 pub enum Caller {
     /// An app over WS RPC or MCP.
     App,
+    /// Executor code acting on its own (boot, background tasks), by module.
+    Executor { module: String },
     /// A language, by address.
     Language { address: String },
     /// A service, by implementation hash.
@@ -50,6 +52,27 @@ pub struct CallContext {
     /// This is the intersection rule that prevents a confused deputy.
     pub grants: Vec<Vec<Capability>>,
     pub deadline: Option<Instant>,
+}
+
+impl CallContext {
+    /// A call the executor makes on its own behalf (a background task, a
+    /// language, boot), for `user` / `agent_did` when it acts for one. It
+    /// holds the executor's grants; calls made while serving a request
+    /// should use that request's context instead, so its grants apply.
+    pub fn system(caller: Caller, user: Option<String>, agent_did: Option<String>) -> Self {
+        CallContext {
+            caller,
+            origin: Vec::new(),
+            agent_did,
+            user,
+            auth_token: None,
+            is_admin: true,
+            grants: vec![vec![
+                crate::agent::capabilities::defs::ALL_CAPABILITY.clone()
+            ]],
+            deadline: None,
+        }
+    }
 }
 
 /// A failure an implementation reports.
@@ -105,6 +128,8 @@ pub enum EventOwner {
     User(String),
     /// Every socket.
     All,
+    /// No user's sockets: admin sockets and the executor's own consumers.
+    Executor,
 }
 
 impl EventEmitter {

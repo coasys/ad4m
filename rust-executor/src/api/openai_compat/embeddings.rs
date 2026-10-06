@@ -14,9 +14,7 @@ use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
 use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
-use crate::billing::check_compute_credits;
 use crate::types::ModelType;
 
 pub async fn embeddings(
@@ -44,15 +42,15 @@ pub async fn embeddings(
     let model_id_response = req.model.clone();
     let inputs = req.input.into_vec();
 
-    if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
-    {
-        check_compute_credits(&email)
-            .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
+    // The AI service charges per input, and the host checks credits before
+    // each one. Check once up front too, so a caller without credits gets
+    // 429 before any input is embedded and charged.
+    let ctx = crate::services::ServiceHost::context_for_request(&auth.to_request_context());
+    if !crate::services::builtins::billing::may_spend(&ctx) {
+        return Err(OpenAIError::insufficient_quota(
+            "Insufficient compute credits",
+        ));
     }
-
-    let service = AIService::global_instance()
-        .await
-        .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
     let mut data: Vec<EmbeddingItem> = Vec::with_capacity(inputs.len());
     let mut total_tokens: u64 = 0;
@@ -60,15 +58,14 @@ pub async fn embeddings(
     let batch_n = inputs.len();
 
     for (index, text) in inputs.into_iter().enumerate() {
-        let result = service
-            .embed(model_id.clone(), text, Some(auth.auth_token.clone()))
+        let result = crate::services::builtins::ai::embedding(&ctx, &model_id, &text)
             .await
-            .map_err(|e| OpenAIError::internal(e.to_string()))?;
-        total_tokens += result.token_count as u64;
+            .map_err(super::ai_error)?;
+        total_tokens += result.token_count;
         data.push(EmbeddingItem {
             object: "embedding",
             index,
-            embedding: result.embeddings,
+            embedding: result.vector,
         });
     }
     // Batch-level info replaces the per-call info in AIService::embed (now

@@ -14,7 +14,6 @@
 //! | `agent-status-changed`        | `agent`       | DID                    | Agent status changed                 |
 //! | `agent-updated`               | `agent`       | DID                    | Agent profile updated                |
 //! | `apps-changed`                | (inline)      | user                   | Installed apps changed               |
-//! | `hosting-user-info-changed`   | (inline)      | email                  | Hosting user info changed            |
 //! | `perspective-added`           | (inline)      | owner DID              | New perspective created              |
 //! | `perspective-removed`         | (inline)      | owner DID              | Perspective deleted                  |
 //! | `perspective-updated`         | (inline)      | owner DID              | Perspective metadata updated         |

@@ -7,8 +7,8 @@ use axum::response::Json;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
-use crate::agent::capabilities::check_capability;
-use crate::ai_service::AIService;
+use base64::Engine;
+
 use crate::services::builtins::{self, Builtin};
 
 /// POST /ai/transcription/feed
@@ -21,17 +21,8 @@ pub async fn feed_transcription_stream(
     headers: axum::http::HeaderMap,
     body: axum::body::Bytes,
 ) -> Result<Json<String>, ApiError> {
-    let context = auth.to_request_context();
-    check_capability(
-        &context.capabilities,
-        &builtins::capability(Builtin::AiInference, "TRANSCRIBE"),
-    )
-    .map_err(ApiError::Forbidden)?;
-    // Same credit check the service host applies to metered methods.
-    let ctx = crate::services::ServiceHost::context_for_request(&context);
-    if !builtins::billing::may_spend(&ctx) {
-        return Err(ApiError::Forbidden("Insufficient compute credits".into()));
-    }
+    // `ai.inference.transcriptionFeed` checks the grant and the credits.
+    let ctx = crate::services::ServiceHost::context_for_request(&auth.to_request_context());
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -68,25 +59,30 @@ pub async fn feed_transcription_stream(
             "Body length must be a multiple of 4 (Float32 samples)".into(),
         ));
     }
-    let audio_f32: Vec<f32> = body
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+    // Every stream failing answers `AllStreamsFailed`; otherwise the result
+    // names the streams that failed.
+    let failed: Vec<builtins::ai::FeedFailure> = builtins::call(
+        Builtin::AiInference,
+        "transcriptionFeed",
+        serde_json::json!({
+            "streamIds": stream_ids,
+            "audio": base64::prelude::BASE64_STANDARD.encode(&body),
+        }),
+        &ctx,
+    )
+    .await
+    .map_err(|e| match e.code {
+        402 | 403 => ApiError::Forbidden(e.message),
+        400 | 422 => ApiError::BadRequest(e.message),
+        _ => ApiError::Internal(e.message),
+    })?;
+    let errors: Vec<String> = failed
+        .iter()
+        .map(|f| {
+            log::warn!("Error feeding stream {}: {}", f.stream_id, f.error);
+            format!("{}: {}", f.stream_id, f.error)
+        })
         .collect();
-
-    let service = AIService::global_instance()
-        .await
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let mut errors: Vec<String> = Vec::new();
-    for stream_id in &stream_ids {
-        if let Err(e) = service
-            .feed_transcription_stream(stream_id, audio_f32.clone(), &context.auth_token)
-            .await
-        {
-            log::warn!("Error feeding stream {}: {}", stream_id, e);
-            errors.push(format!("{}: {}", stream_id, e));
-        }
-    }
 
     feed_outcome(&errors, stream_ids.len())?;
     Ok(Json("true".to_string()))

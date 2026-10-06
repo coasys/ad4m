@@ -133,7 +133,6 @@ lazy_static::lazy_static! {
     pub static ref AI_TRANSCRIPTION_TEXT_TOPIC: String = "ai-transcription-text-topic".to_owned();
     pub static ref AI_MODEL_LOADING_STATUS: String = "ai-model-loading-status".to_owned();
     pub static ref PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC: String = "perspective-query-subscription-topic".to_owned();
-    pub static ref HOSTING_USER_INFO_CHANGED_TOPIC: String = "hosting-user-info-changed-topic".to_owned();
     pub static ref AUTO_PROCESSOR_EVENT_TOPIC: String = "auto-processor-event-topic".to_owned();
     /// Neighbourhood observation of an auto-processor pass: fires when THIS
     /// executor claims, finishes, or abandons a batch. Payload is a

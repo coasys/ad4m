@@ -34,6 +34,14 @@
           "operation": {
             "type": "string",
             "description": "The metered operation, e.g. `ai.prompt`."
+          },
+          "userEmail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Check another account than the caller's (admin credential only).",
+            "default": null
           }
         },
         "required": [
@@ -42,6 +50,139 @@
       },
       "result": {
         "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
+    },
+    "charge": {
+      "description": "Deduct credits and log the operation. Answers `false` when no account is charged (single-user executor).",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "amount": {
+            "type": "number",
+            "format": "double",
+            "description": "Credits to deduct; with `rateKey`, units priced at that host rate.",
+            "minimum": 0.0
+          },
+          "rateKey": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A host-rate key, e.g. `link write`: `amount` counts units of it\n(the executor's default rate applies when none is set).",
+            "default": null
+          },
+          "operation": {
+            "type": "string",
+            "description": "What the charge is for, e.g. `link_write`; goes to the compute log."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "userEmail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Charge another account than the caller's (admin credential only).",
+            "default": null
+          }
+        },
+        "required": [
+          "amount",
+          "operation"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "CHARGE",
+      "errors": {
+        "InsufficientCredits": {
+          "code": 409
+        },
+        "UnknownAccount": {
+          "code": 422
+        }
+      }
+    },
+    "chargeUsage": {
+      "description": "Charge `units` of a model's usage at the model's host rate. Answers `false` when no account is charged.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "modelId": {
+            "type": "string",
+            "description": "The model the usage is priced by: its name is the host-rate key."
+          },
+          "operation": {
+            "type": "string"
+          },
+          "units": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "unitLabel": {
+            "type": "string",
+            "description": "What a unit is, e.g. `tokens`, `words`; goes to the compute log."
+          },
+          "userEmail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "modelId",
+          "operation",
+          "units",
+          "unitLabel"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "CHARGE",
+      "errors": {
+        "InsufficientCredits": {
+          "code": 409
+        },
+        "UnknownAccount": {
+          "code": 422
+        }
+      }
+    },
+    "rate": {
+      "description": "The host rate of a key, with the executor's defaults; `null` when unpriced.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string",
+            "description": "The host-rate key, e.g. `link write`."
+          }
+        },
+        "required": [
+          "key"
+        ]
+      },
+      "result": {
+        "type": [
+          "number",
+          "null"
+        ],
+        "format": "double"
       },
       "action": "READ",
       "read": true
@@ -200,6 +341,11 @@
       "label": "See credits and rates",
       "description": "Read your credits, the host rates and your compute log.",
       "risk": "safe"
+    },
+    "CHARGE": {
+      "label": "Charge credits",
+      "description": "Deduct compute credits for work done.",
+      "risk": "spend"
     },
     "ADMIN": {
       "label": "Administer billing",

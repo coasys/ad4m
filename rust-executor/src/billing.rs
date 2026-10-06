@@ -100,12 +100,21 @@ pub mod test_seam {
 
 const DEFAULT_LINK_WRITE_RATE: f64 = 0.25; // credits per link write
 
-/// Look up the link write rate from the host_rates DB table, falling back to the default.
-pub fn get_link_write_rate() -> f64 {
-    Ad4mDb::with_global_instance(|db| db.get_host_rate("link write"))
+/// Host rates with an executor default when the operator set none.
+const DEFAULT_RATES: &[(&str, f64)] = &[("link write", DEFAULT_LINK_WRITE_RATE)];
+
+/// The rate of `key` from the host_rates table, else its default; `None`
+/// when neither exists.
+pub fn host_rate(key: &str) -> Option<f64> {
+    Ad4mDb::with_global_instance(|db| db.get_host_rate(key))
         .ok()
         .flatten()
-        .unwrap_or(DEFAULT_LINK_WRITE_RATE)
+        .or_else(|| {
+            DEFAULT_RATES
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, r)| *r)
+        })
 }
 
 /// Bill a single AI compute operation using the shared `host_rates` table.
@@ -189,27 +198,6 @@ pub fn bill_ai_operation(
             Err(e)
         }
     }
-}
-
-/// Read-only credit check. Returns Ok(()) if the user can afford compute.
-/// Used as a pre-check before link operations; the actual deduction happens
-/// after the operation via bill_compute with the exact cost.
-/// No-ops (allows) if free hosting is enabled or user has free access.
-pub fn check_compute_credits(email: &str) -> Result<(), anyhow::Error> {
-    let global_free =
-        Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
-    if global_free {
-        return Ok(());
-    }
-    let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))?;
-    if free {
-        return Ok(());
-    }
-    let credits = Ad4mDb::with_global_instance(|db| db.get_user_credits(email))?;
-    if credits <= 0.0 {
-        return Err(anyhow::anyhow!("Insufficient compute credits"));
-    }
-    Ok(())
 }
 
 /// Deduct credits and log a compute event for the given user email.

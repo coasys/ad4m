@@ -1,7 +1,6 @@
 use super::{
     class_label, instances_by_class, relation_predicates, ExistingInstances, TranscriptTurn,
 };
-use crate::db::Ad4mDb;
 use crate::perspectives::flow_context::{render_consensus_rule, ContentionStatus, FlowContext};
 use crate::perspectives::model_query::types::ModelShape;
 use crate::types::{AIPromptExamples, AITask};
@@ -705,78 +704,56 @@ pub(crate) fn register_interpretation_task() -> anyhow::Result<(AITask, bool)> {
     register_interpretation_task_for_model(None)
 }
 
-/// idempotently register the generic interpretation task row in the AI-task DB,
-/// optionally bound to a specific model (`Some(model_id)` → a distinct
-/// `?model=<id>` row; `None` → the shared-default row).
-///
-/// DB-only, synchronous, and does not touch the running `AIService` — so task
-/// registration stays unit-testable without a model/GPU. Returns `(task,
-/// created)`; `created` is `true` only when this call inserted the row. The
-/// async entry points [`ensure_interpretation_task`] /
-/// [`ensure_interpretation_task_for_model`] wrap this and spawn the task.
+/// Register the interpretation task row for `model_id` without spawning it
+/// (`None`: the shared-default row). Returns `(task, created)`. Test-only:
+/// production goes through [`ensure_interpretation_task_for_model`], which
+/// also spawns the task.
+#[cfg(test)]
 pub(crate) fn register_interpretation_task_for_model(
     model_id: Option<&str>,
 ) -> anyhow::Result<(AITask, bool)> {
-    let name = interpretation_task_name_for_model(model_id);
-    if let Some(existing) = Ad4mDb::with_global_instance(|db| db.get_tasks())?
-        .into_iter()
-        .find(|t| t.name == name)
-    {
-        return Ok((existing, false));
-    }
-    let db_model_id = model_id.unwrap_or("default").to_string();
-    let task_id = Ad4mDb::with_global_instance(|db| {
-        db.add_task(
-            name.clone(),
-            db_model_id,
-            INTERPRETATION_SYSTEM_PROMPT.to_string(),
-            interpretation_examples(),
-            None,
-        )
-    })?;
-    let task = Ad4mDb::with_global_instance(|db| db.get_task(task_id))?
-        .ok_or_else(|| anyhow::anyhow!("interpretation task vanished immediately after insert"))?;
-    Ok((task, true))
+    crate::services::builtins::ai::ensure_task_row(interpretation_task_input(model_id))
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
-/// Return a ready-to-prompt interpretation task: register the DB row if absent
-/// (via [`register_interpretation_task`]) AND ensure it is spawned into its LLM
-/// worker, so the caller can immediately `AIService::prompt` it.
-///
-/// The spawn is what makes this async and AIService-dependent. `register_...`
-/// only writes the DB row; a freshly-registered task is invisible to the worker
-/// until the next `set_default_model`/restart `load()` sweep, so its first
-/// `prompt` would fail with "Task not spawned". We spawn it here, but only when
-/// this call actually minted the row — a pre-existing row is already spawned
-/// (boot-time `load()` sweep, or the call that first created it), so re-spawning
-/// would force a redundant local-model warmup on every interpretation run.
+/// Return a ready-to-prompt interpretation task: `ai.inference.ensureTask`
+/// creates the row when missing and spawns it into its LLM worker, so the
+/// caller can prompt it at once. A row that exists is already spawned (boot
+/// `load()` sweep, or the call that created it), so it is not spawned again.
 pub async fn ensure_interpretation_task() -> anyhow::Result<AITask> {
     ensure_interpretation_task_for_model(None).await
 }
 
-/// Per-model variant of [`ensure_interpretation_task`]: register the row for
-/// `model_id` if absent (via [`register_interpretation_task_for_model`]) AND
-/// ensure it is spawned into its LLM worker, so the caller can immediately
-/// `AIService::prompt` it. `None` targets the shared-default row. Spawns only on
-/// the call that minted the row (a pre-existing row is already spawned), avoiding
-/// a redundant local-model warmup on every interpretation run.
+/// Per-model variant of [`ensure_interpretation_task`]: `Some(model_id)` gets a
+/// distinct `?model=<id>` row, `None` the shared-default row.
 pub async fn ensure_interpretation_task_for_model(
     model_id: Option<&str>,
 ) -> anyhow::Result<AITask> {
-    let (task, created) = register_interpretation_task_for_model(model_id)?;
-    if created {
-        crate::ai_service::AIService::global_instance()
-            .await
-            .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: AIService not ready: {e:#}"))?
-            .spawn_registered_task(task.clone())
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "ensure_interpretation_task: failed to spawn interpretation task: {e:#}"
-                )
-            })?;
+    use crate::services::builtins::ai;
+    let ensured = ai::ensure_task(
+        &ai::executor_ctx("interpretation"),
+        &interpretation_task_input(model_id),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("ensure_interpretation_task: {}", e.message))?;
+    Ok(ensured.task)
+}
+
+/// The interpretation task for `model_id` (`None`: the shared default row).
+pub(crate) fn interpretation_task_input(model_id: Option<&str>) -> crate::types::AITaskInput {
+    crate::types::AITaskInput {
+        name: interpretation_task_name_for_model(model_id),
+        model_id: model_id.unwrap_or("default").to_string(),
+        system_prompt: INTERPRETATION_SYSTEM_PROMPT.to_string(),
+        prompt_examples: interpretation_examples()
+            .into_iter()
+            .map(|e| crate::types::AIPromptExamplesInput {
+                input: e.input,
+                output: e.output,
+            })
+            .collect(),
+        meta_data: None,
     }
-    Ok(task)
 }
 
 #[cfg(test)]

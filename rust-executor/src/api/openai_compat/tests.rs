@@ -446,18 +446,34 @@ fn speech_amount_per_thousand_chars() {
 }
 
 // ---------------------------------------------------------------------------
-// Billing: From<BillingError> for OpenAIError
+// Billing: ledger failures as OpenAI errors (`charge_error`)
 // ---------------------------------------------------------------------------
 //
-// The whole handler stack relies on `bill_compute(...)?` for error
-// propagation via this conversion. If it drifts — wrong status, wrong
-// error code, wrong wire message shape — SDK clients that key their retry
-// logic off HTTP 429 / `insufficient_quota` silently break.
+// Every handler maps ledger failures through `charge_error`. If it drifts —
+// wrong status, wrong error code, wrong wire message shape — SDK clients
+// that key their retry logic off HTTP 429 / `insufficient_quota` silently
+// break.
 // ---------------------------------------------------------------------------
 
+fn ledger_error(
+    code: u16,
+    message: &str,
+    name: Option<&str>,
+) -> crate::api::ws_handler::WsRpcError {
+    let e = crate::api::ws_handler::WsRpcError::new(code, message);
+    match name {
+        Some(n) => e.with_data(serde_json::json!({ "name": n })),
+        None => e,
+    }
+}
+
 #[test]
-fn billing_error_insufficient_credits_maps_to_429_quota() {
-    let err: OpenAIError = BillingError::InsufficientCredits.into();
+fn insufficient_credits_maps_to_429_quota() {
+    let err = super::charge_error(ledger_error(
+        409,
+        "Insufficient compute credits",
+        Some("InsufficientCredits"),
+    ));
     assert_eq!(err.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
     let body = serde_json::to_value(&err).unwrap();
     assert_eq!(body["error"]["type"], "insufficient_quota");
@@ -467,48 +483,19 @@ fn billing_error_insufficient_credits_maps_to_429_quota() {
 }
 
 #[test]
-fn billing_error_user_not_found_maps_to_500_internal() {
-    let err: OpenAIError = BillingError::UserNotFound("alice@x".into()).into();
-    assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    let body = serde_json::to_value(&err).unwrap();
-    assert_eq!(body["error"]["type"], "server_error");
-    // The specific user email must NOT leak in the client-facing body —
-    // the raw error message is only logged, the response gets a generic
-    // "Billing operation failed" string.
-    let msg = body["error"]["message"].as_str().unwrap();
-    assert!(
-        !msg.contains("alice@x"),
-        "user email leaked to client: {msg}"
-    );
-    assert_eq!(msg, "Billing operation failed");
-}
-
-#[test]
-fn billing_error_other_maps_to_500_internal() {
-    let err: OpenAIError = BillingError::Other(anyhow::anyhow!("db offline")).into();
-    assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-    let body = serde_json::to_value(&err).unwrap();
-    assert_eq!(body["error"]["type"], "server_error");
-    // Same redaction rule — details go to the log, generic string to client.
-    let msg = body["error"]["message"].as_str().unwrap();
-    assert!(!msg.contains("db offline"), "internal detail leaked: {msg}");
-    assert_eq!(msg, "Billing operation failed");
-}
-
-#[test]
-fn billing_error_conversion_is_terminal_via_question_mark() {
-    // Simulates the exact call-site shape used in every handler:
-    //     bill_compute(...)? → returns OpenAIError automatically.
-    // If BillingError implements Display in a way that changes the
-    // OpenAIError message we constructed above, this catches it too.
-    fn handler() -> Result<(), OpenAIError> {
-        Err::<(), BillingError>(BillingError::InsufficientCredits)?;
-        Ok(())
+fn other_billing_failures_map_to_500_without_details() {
+    for e in [
+        ledger_error(422, "User not found: alice@x", Some("UnknownAccount")),
+        ledger_error(500, "db offline", None),
+        ledger_error(503, "no running implementation of billing.ledger", None),
+    ] {
+        let err = super::charge_error(e);
+        assert_eq!(err.status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = serde_json::to_value(&err).unwrap();
+        assert_eq!(body["error"]["type"], "server_error");
+        // The account and internal details go to the log, not the client.
+        assert_eq!(body["error"]["message"], "Billing operation failed");
     }
-    let err = handler().unwrap_err();
-    assert_eq!(err.status, axum::http::StatusCode::TOO_MANY_REQUESTS);
-    let body = serde_json::to_value(&err).unwrap();
-    assert_eq!(body["error"]["code"], "insufficient_quota");
 }
 
 // ---------------------------------------------------------------------------
@@ -780,9 +767,8 @@ async fn transcriptions_handler_does_not_bill() {
 //
 //   1. `speech_amount_per_thousand_chars` (pure unit) pins the exact
 //      amount formula the speech handler uses.
-//   2. `insufficient_quota_error` + `handler_shape_bill_compute_question_mark_propagates_insufficient_credits`
-//      (pre-existing) pin the From<BillingError> for OpenAIError
-//      conversion at 429 with the insufficient_quota code.
+//   2. `insufficient_credits_maps_to_429_quota` pins `charge_error`: a
+//      ledger refusal reaches the client as 429 `insufficient_quota`.
 //   3. `seam_records_calls_and_resets` proves the seam records what
 //      the handler would call — so if a live handler ever runs against
 //      the seam (e.g. in a future e2e binary with Wallet+DB), the
@@ -956,11 +942,10 @@ async fn chat_completions_stream_does_not_bill_at_setup() {
         .unwrap();
 
     let _ = test_router().oneshot(req).await.unwrap();
-    // The stream setup path calls check_compute_credits (no seam
-    // record) and then attempts to open the stream — which fails at
-    // AIService::global_instance(). NO bill_compute call happens here;
-    // billing is deferred to end-of-stream. If setup starts calling
-    // bill_compute up front, this fails.
+    // The stream setup path checks credits (no seam record) and then
+    // attempts to open the stream, which fails. No charge happens here;
+    // billing is deferred to end-of-stream. If setup starts charging up
+    // front, this fails.
     let calls = test_seam::calls();
     assert!(
         calls.is_empty(),
@@ -1073,6 +1058,9 @@ impl Drop for DbSettingsGuard {
 #[tokio::test]
 async fn stream_completion_bills_once_on_success() {
     init_test_db();
+    crate::services::builtins::start_all(&crate::services::host())
+        .await
+        .unwrap();
     test_seam::reset();
     test_seam::force_result(test_seam::ForcedResult::Success);
 

@@ -5,6 +5,19 @@
   "description": "The executor's embedded Holochain conductor.",
   "selection": "executor",
   "methods": {
+    "running": {
+      "description": "Is the conductor up? Answers at once.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "read": true
+    },
     "agentInfos": {
       "description": "The conductor's agent infos (encoded).",
       "params": {
@@ -19,7 +32,8 @@
         }
       },
       "action": "READ",
-      "read": true
+      "read": true,
+      "long": true
     },
     "addAgentInfos": {
       "description": "Add other agents' infos to the conductor.",
@@ -41,7 +55,8 @@
       "result": {
         "type": "boolean"
       },
-      "action": "PEERS"
+      "action": "PEERS",
+      "long": true
     },
     "networkMetrics": {
       "description": "The conductor's network metrics (JSON text).",
@@ -56,8 +71,359 @@
       "action": "READ",
       "read": true
     },
+    "logNetworkStatus": {
+      "description": "Write the conductor's network metrics to the executor log.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "READ",
+      "long": true
+    },
+    "installApp": {
+      "description": "Install an app; answers its `AppInfo`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "payload": {
+            "description": "Holochain's `InstallAppPayload`, as serde serialises it."
+          }
+        },
+        "required": [
+          "payload"
+        ]
+      },
+      "result": true,
+      "action": "APPS",
+      "long": true,
+      "errors": {
+        "InvalidPayload": {
+          "code": 422
+        }
+      }
+    },
+    "appInfo": {
+      "description": "An installed app's `AppInfo`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "appId"
+        ]
+      },
+      "result": true,
+      "action": "APPS",
+      "read": true,
+      "long": true
+    },
+    "enableApp": {
+      "description": "Enable an installed app.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "appId"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "removeApp": {
+      "description": "Uninstall an app.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "appId"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "packDna": {
+      "description": "Pack a DNA directory; answers the bundle path.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "unpackDna": {
+      "description": "Unpack a DNA bundle; answers the directory.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "packHapp": {
+      "description": "Pack an hApp directory; answers the bundle path.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "unpackHapp": {
+      "description": "Unpack an hApp bundle; answers the directory.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "APPS",
+      "long": true
+    },
+    "callZome": {
+      "description": "Call a zome function with JSON; answers `{ type: \"Ok\" | \"NetworkError\" | \"CountersigningSession\", value }`.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          },
+          "cellName": {
+            "type": "string"
+          },
+          "zomeName": {
+            "type": "string"
+          },
+          "fnName": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "JSON; `Uint8Array`s as `{ \"__binary\": [...] }`.",
+            "default": null
+          }
+        },
+        "required": [
+          "appId",
+          "cellName",
+          "zomeName",
+          "fnName"
+        ]
+      },
+      "result": true,
+      "action": "CALL",
+      "long": true
+    },
+    "callZomeRaw": {
+      "description": "Call a zome function with msgpack in and out.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "appId": {
+            "type": "string"
+          },
+          "cellName": {
+            "type": "string"
+          },
+          "zomeName": {
+            "type": "string"
+          },
+          "fnName": {
+            "type": "string"
+          },
+          "payload": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Msgpack, base64.",
+            "default": null,
+            "contentEncoding": "base64"
+          }
+        },
+        "required": [
+          "appId",
+          "cellName",
+          "zomeName",
+          "fnName"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/RawZomeResponse"
+      },
+      "action": "CALL",
+      "long": true,
+      "errors": {
+        "InvalidPayload": {
+          "code": 422
+        }
+      }
+    },
+    "agentKey": {
+      "description": "The conductor's agent key.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "action": "KEYS",
+      "read": true,
+      "long": true
+    },
+    "newSignKeypair": {
+      "description": "Create a random signing key pair; answers its agent key.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "action": "KEYS",
+      "long": true
+    },
+    "signWithKey": {
+      "description": "Sign data with a conductor-held key; answers the 64-byte signature.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            },
+            "description": "The agent key (39 bytes) that signs."
+          },
+          "data": {
+            "type": "string",
+            "description": "Base64.",
+            "contentEncoding": "base64"
+          }
+        },
+        "required": [
+          "key",
+          "data"
+        ]
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "uint8",
+          "minimum": 0,
+          "maximum": 255
+        }
+      },
+      "action": "KEYS",
+      "long": true,
+      "errors": {
+        "InvalidPayload": {
+          "code": 422
+        }
+      }
+    },
     "restart": {
-      "description": "Restart the conductor from its stored configuration. Needs the admin credential.",
+      "description": "Restart the conductor from its stored configuration.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "ADMIN",
+      "long": true
+    },
+    "shutdown": {
+      "description": "Stop the conductor.",
       "params": {
         "type": "object",
         "additionalProperties": false,
@@ -70,7 +436,54 @@
       "long": true
     }
   },
-  "events": {},
+  "events": {
+    "signal": {
+      "description": "An app signal a cell emitted.",
+      "payload": {
+        "type": "object",
+        "properties": {
+          "cellId": {
+            "type": "string",
+            "description": "`<dna hash hex>:<agent key hex>`."
+          },
+          "dnaHash": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            }
+          },
+          "agentPubKey": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "uint8",
+              "minimum": 0,
+              "maximum": 255
+            }
+          },
+          "zomeName": {
+            "type": "string"
+          },
+          "payload": {
+            "description": "The signal decoded from msgpack; `Uint8Array`s as `__binary` markers."
+          }
+        },
+        "required": [
+          "cellId",
+          "dnaHash",
+          "agentPubKey",
+          "zomeName",
+          "payload"
+        ],
+        "description": "`signal`: an app signal a cell emitted."
+      },
+      "action": "SIGNALS",
+      "scope": "cellId"
+    }
+  },
   "actions": {
     "READ": {
       "label": "See Holochain peers",
@@ -82,10 +495,118 @@
       "description": "Tell the conductor about other agents.",
       "risk": "write"
     },
+    "CALL": {
+      "label": "Call Holochain zomes",
+      "description": "Call zome functions of installed apps.",
+      "risk": "admin"
+    },
+    "APPS": {
+      "label": "Manage Holochain apps",
+      "description": "Install, enable, remove and pack Holochain apps and DNAs.",
+      "risk": "admin"
+    },
+    "KEYS": {
+      "label": "Use Holochain keys",
+      "description": "Create agent keys and sign with them.",
+      "risk": "admin"
+    },
+    "SIGNALS": {
+      "label": "Receive Holochain signals",
+      "description": "Receive every app signal of every cell.",
+      "risk": "admin"
+    },
     "ADMIN": {
       "label": "Operate Holochain",
-      "description": "Restart the conductor.",
+      "description": "Restart and stop the conductor.",
       "risk": "admin"
+    }
+  },
+  "types": {
+    "RawZomeResponse": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "ok"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "description": "The zome's msgpack answer, base64."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "networkError"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "countersigningSession"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "unauthorized"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "description": "The zome refused the call's capability."
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "authenticationFailed"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ]
+        }
+      ]
     }
   }
 }
