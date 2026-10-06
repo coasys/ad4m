@@ -774,7 +774,7 @@ describe('PerspectiveClient', () => {
         expect(ws.rpc.slice(2).map(c => c.type)).toEqual(['events.watch', 'perspective.snapshot']);
     });
 
-    test('waitForSubscription() settles only after the events.watch reply', async () => {
+    test('watchApplied() settles only after the events.watch reply', async () => {
         const watchReply = MOCK_RESPONSES['events.watch'];
         let acceptWatch!: (ok: boolean) => void;
         MOCK_RESPONSES['events.watch'] = () => new Promise<boolean>(r => { acceptWatch = r; });
@@ -783,7 +783,7 @@ describe('PerspectiveClient', () => {
         try {
             api.on('link-added', () => {}, { perspective: 'A' });
             let settled = false;
-            const waiting = api.waitForSubscription().then(() => { settled = true; });
+            const waiting = api.watchApplied().then(() => { settled = true; });
             await new Promise(r => setTimeout(r, 20));
             expect(lastOf(MockWebSocket.instances).rpc.map(c => c.type)).toEqual(['events.watch']);
             expect(settled).toBe(false);

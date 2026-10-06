@@ -206,7 +206,11 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
             "Holochain is disabled on this executor (run_holochain=false)",
         ));
     }
-    let _ = get_holochain_service().await;
+    // Shuts the running conductor down, waits for its port, and starts it again
+    // from the stored config. The same path the Unyt space override uses.
+    crate::holochain_service::HolochainService::restart_service()
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Holochain restart failed: {e}")))?;
     Ok(Value::Bool(true))
 }
 
@@ -274,26 +278,17 @@ async fn remove_friends(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(friends)?)
 }
 
+/// Not implemented: nothing delivers an outbox message, and the outbox has no owner, so every
+/// user could read every other user's messages through `runtime.outbox`. The params are still
+/// checked against the contract.
 async fn send_friend_message(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_MESSAGES_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-
-    let body: RuntimeSendFriendMessageParams = serde_json::from_value(params)
+    let _: RuntimeSendFriendMessageParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
-
-    // The agent signs the perspective; the SDK sends bare signed links.
-    let agent_context = crate::agent::AgentContext::from_auth_token(ctx.auth_token.clone());
-    let perspective = crate::types::domain::Perspective::from(body.message);
-    let signed = crate::agent::create_signed_expression(perspective, &agent_context)
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
-    RuntimeService::with_global_instance(|runtime| {
-        runtime.add_message_to_outbox(SentMessage {
-            message: PerspectiveExpression::from(signed),
-            recipient: body.did,
-        });
-    });
-
-    Ok(Value::Bool(true))
+    Err(WsRpcError::not_implemented(
+        "Direct messages are not implemented: there is no delivery and no per-user outbox",
+    ))
 }
 
 async fn get_inbox(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
