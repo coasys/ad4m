@@ -19,15 +19,16 @@
  *
  * Run after `bash tests/rust-languages/build.sh`:
  *   node tests/rust-languages/smoke-test.mjs
- *   deno run --allow-read tests/rust-languages/smoke-test.mjs
+ *   deno run --allow-read --allow-write --allow-env tests/rust-languages/smoke-test.mjs
  *
  * Both Node and Deno are validated — the AD4M runtime is Deno-based,
  * so the Deno run is the production-relevant one; Node is supported for
  * developer convenience.
  */
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { strict as assert } from "node:assert";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -68,7 +69,20 @@ globalThis.holochainCall = () => null;
 globalThis.holochainRegisterDnas = () => null;
 
 // ---------- exercise the bundle ----------
-const mod = await import(bundlePath);
+// The bundle imports the stubs above from `ad4m:host`, which only the
+// executor's module loader resolves. Point that specifier at a module that
+// re-exports the stubs, in a temporary copy of the bundle.
+const hostNames = Object.keys(globalThis).filter((k) => /^(language|agent|storage|emit|holochain)[A-Z]/.test(k));
+const tmp = mkdtempSync(join(tmpdir(), "ad4m-smoke-"));
+writeFileSync(
+    join(tmp, "host.mjs"),
+    hostNames.map((k) => `export const ${k} = (...a) => globalThis.${k}(...a);`).join("\n"),
+);
+writeFileSync(
+    join(tmp, "bundle.mjs"),
+    readFileSync(bundlePath, "utf8").replace(/from\s*(["'])ad4m:host\1/g, 'from "./host.mjs"'),
+);
+const mod = await import(pathToFileURL(join(tmp, "bundle.mjs")).href);
 
 assert.equal(mod.name(), "test-wasm-language");
 assert.equal(mod.version(), "0.1.0");
@@ -129,7 +143,22 @@ assert.ok(recorded.some(([k]) => k === "put"), "storage_put was called");
 assert.ok(recorded.some(([k]) => k === "get"), "storage_get was called");
 assert.ok(recorded.some(([k]) => k === "signal"), "emit_signal was called");
 
-mod.teardown();
+// A host import that throws fails only its own call. The exception comes back
+// to Rust as an error (`catch` imports), so the call releases the instance
+// lock. Before, it unwound the module and every later call waited forever.
+const sign = globalThis.agentCreateSignedExpression;
+globalThis.agentCreateSignedExpression = () => { throw new Error("main key not found"); };
+const settles = (p) => Promise.race([
+    p.then(() => "resolved", (e) => `rejected: ${e?.message ?? JSON.stringify(e)}`),
+    new Promise((r) => setTimeout(() => r("still waiting"), 2000)),
+]);
+const failed = await settles(mod.expressionCreate({ note: "no key" }));
+assert.match(failed, /^rejected: .*main key not found/, "the throwing call rejects with the host error");
+globalThis.agentCreateSignedExpression = sign;
+assert.equal(await settles(mod.expressionCreate({ note: "after" })), "resolved", "the next call runs");
+
+await mod.teardown();
+rmSync(tmp, { recursive: true });
 
 console.log("OK — Rust ALDK end-to-end pipeline validated");
 console.log(`     ${recorded.length} host imports invoked across the run`);

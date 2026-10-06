@@ -488,10 +488,14 @@ export class SHACLFlow {
   }
 
   /**
-   * Get a transition URI
+   * Get a transition URI: `{namespace}{name}.transition/{from}/{to}/{action}`.
+   * Each part is RFC 3986-encoded, so the URI is unique per transition. The
+   * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
-  transitionUri(fromState: string, toState: string): string {
-    return `${this.namespace}${this.name}.${fromState}To${toState}`;
+  transitionUri(fromState: string, toState: string, actionName: string): string {
+    const part = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
   /**
@@ -660,7 +664,7 @@ export class SHACLFlow {
 
     // Transitions
     for (const transition of this._transitions) {
-      const transitionUri = this.transitionUri(transition.fromState, transition.toState);
+      const transitionUri = this.transitionUri(transition.fromState, transition.toState, transition.actionName);
       const fromStateUri = this.stateUri(transition.fromState);
       const toStateUri = this.stateUri(transition.toState);
 
@@ -764,7 +768,7 @@ export class SHACLFlow {
     if (inputTypesLink) {
       try {
         const jsonStr = inputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -782,7 +786,7 @@ export class SHACLFlow {
     if (outputTypesLink) {
       try {
         const jsonStr = outputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -819,7 +823,7 @@ export class SHACLFlow {
     if (contextLink) {
       try {
         const jsonStr = contextLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -840,7 +844,7 @@ export class SHACLFlow {
     if (consensusRuleLink) {
       try {
         const jsonStr = consensusRuleLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -906,7 +910,7 @@ export class SHACLFlow {
       if (requiresLink) {
         try {
           const jsonStr = requiresLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -944,7 +948,7 @@ export class SHACLFlow {
       if (stateConsensusLink) {
         try {
           const jsonStr = stateConsensusLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -1009,7 +1013,7 @@ export class SHACLFlow {
       let actions: AD4MAction[] = [];
       if (actionsLink) {
         try {
-          const jsonStr = actionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          const jsonStr = actionsLink.target.replace(/^literal:string:/, '');
           actions = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors
@@ -1107,6 +1111,8 @@ export class SHACLFlow {
       }
       flow.addState(sanitized);
     }
+    // Same "states[0] is the initial state" ordering as fromLinks.
+    flow._states.sort((a, b) => a.value - b.value);
     for (const transition of json.transitions || []) {
       flow.addTransition(transition);
     }
