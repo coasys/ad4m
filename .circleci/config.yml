@@ -86,6 +86,63 @@ commands:
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
+  build_adam:
+    description: "Build the dapp, the Deno snapshot and the ADAM binaries (target/release/ad4m, ad4m-executor)"
+    steps:
+      - run:
+          # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
+          # Cargo.lock. Needed before build_integration_inputs because the bootstrap-languages
+          # build.sh files pack DNAs with `hc`, and downstream integration
+          # tests spawn `kitsune2-bootstrap-srv`. Both must match what the
+          # executor is linked against, otherwise packed bundles trip
+          # `unknown field 'signal_url'` at install time and cross-node
+          # signals never route between agents. The `build` job stashes the
+          # binaries with the language bundles so the integration jobs do not
+          # each build `hc` from source after a Holochain bump.
+          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Build dapp
+          command: pnpm build-dapp
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build deno snapshot
+          command: pnpm run build-deno-snapshot
+          no_output_timeout: 30m
+      - run:
+          name: Remove stale binaries (self-hosted runner incremental cache)
+          command: rm -f target/release/ad4m target/release/ad4m-executor
+      - run:
+          name: Build ADAM (without bootstrap languages)
+          command: pnpm run build-libs
+          no_output_timeout: 30m
+
+  build_integration_inputs:
+    description: "Build the bootstrap languages with the pinned hc (after build_adam)"
+    steps:
+      - run:
+          # Same clear the integration jobs used to do before their own
+          # language build: turbo's cache (.turbo/cache in turbo 2) does not
+          # hash the `hc` binary, so a replayed cache entry could carry a happ
+          # packed by a previous Holochain version.
+          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
+          command: |
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
+      - run:
+          # Built ONCE in `build` instead of in every integration job (Nico,
+          # 2026-09-25); the integration jobs restore the outputs. Only the
+          # nightly, which has no `build` job, runs this itself. Rollup
+          # bundles + Holochain wasm DNAs packed with build_adam's pinned `hc`.
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+          no_output_timeout: 30m
+
   restore_binaries:
     description: "Restore the ad4m + ad4m-executor binaries that build stashed on this host"
     steps:
@@ -146,6 +203,14 @@ commands:
         # which the test scripts read to pick the language set.
         type: boolean
         default: false
+      build_binaries:
+        description: >-
+          Build ADAM and the integration inputs in this job instead of restoring
+          the `build` job's stash. A scheduled pipeline has no `build` job, and
+          `build` deletes stashes older than 12 hours, so the stash for the SHA
+          may be gone.
+        type: boolean
+        default: false
     steps:
       - fix_workdir
       - checkout
@@ -155,15 +220,26 @@ commands:
             - run:
                 name: Set LOCAL_MODE for downstream test suites
                 command: echo 'export LOCAL_MODE=true' >> "$BASH_ENV"
-      - restore_binaries
+      - unless:
+          condition: << parameters.build_binaries >>
+          steps:
+            - restore_binaries
       - setup_env
+      - when:
+          condition: << parameters.build_binaries >>
+          steps:
+            - build_adam
+            - build_integration_inputs
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
       - run:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
-      - restore_integration_inputs
+      - unless:
+          condition: << parameters.build_binaries >>
+          steps:
+            - restore_integration_inputs
       - run:
           # core/lib itself comes from the tarball; this is the remaining
           # half of core's build script (`patch-package && tsc && bundle`),
@@ -212,54 +288,8 @@ jobs:
           # Local git repo + fake cargo, no network; about a second.
           name: Test install-hc-toolchain.sh
           command: bash scripts/install-hc-toolchain.test.sh
-      - run:
-          # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
-          # Cargo.lock. Needed here (in build) because the bootstrap-languages
-          # build.sh files pack DNAs with `hc`, and downstream integration
-          # tests spawn `kitsune2-bootstrap-srv`. Both must match what the
-          # executor is linked against, otherwise packed bundles trip
-          # `unknown field 'signal_url'` at install time and cross-node
-          # signals never route between agents. The binaries are stashed
-          # with the language bundles below so the integration jobs do not
-          # each build `hc` from source after a Holochain bump.
-          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
-          command: bash scripts/install-hc-toolchain.sh
-          no_output_timeout: 30m
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Build dapp
-          command: pnpm build-dapp
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build deno snapshot
-          command: pnpm run build-deno-snapshot
-          no_output_timeout: 30m
-      - run:
-          name: Remove stale binaries (self-hosted runner incremental cache)
-          command: rm -f target/release/ad4m target/release/ad4m-executor
-      - run:
-          name: Build ADAM (without bootstrap languages)
-          command: pnpm run build-libs
-          no_output_timeout: 30m
-      - run:
-          # Same clear the integration jobs used to do before their own
-          # language build: turbo's cache (.turbo/cache in turbo 2) does not
-          # hash the `hc` binary, so a replayed cache entry could carry a happ
-          # packed by a previous Holochain version.
-          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
-          command: |
-            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
-      - run:
-          # Built ONCE here instead of in every integration job (Nico,
-          # 2026-09-25). Rollup bundles + Holochain wasm DNAs packed with the
-          # pinned `hc` above; the integration jobs restore the outputs.
-          name: Build bootstrap languages
-          command: pnpm run build-languages
-          no_output_timeout: 30m
+      - build_adam
+      - build_integration_inputs
       - run:
           name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
           command: |
@@ -557,6 +587,11 @@ jobs:
   # These hit Marvin's local Ollama; too slow + occasionally flaky for
   # per-push CI, so they run once nightly against `dev` via a scheduled
   # pipeline (`run-nightly-llm: true`).
+  #
+  # The exception is `anthropic_e2e`, which calls api.anthropic.com and
+  # costs real money on every run. It reads `ANTHROPIC_API_KEY`
+  # from the `nightly-llm-e2e` context and skips each test when the key is
+  # unset, so it is inert until the key is added there.
   llm-e2e:
     machine: true
     resource_class: coasys/marvin
@@ -566,32 +601,42 @@ jobs:
       # the job cleanly (green) so the workflow shows no wasted GPU cycles
       # on quiet days. `CIRCLECI_API_TOKEN` comes from the `nightly-llm-e2e`
       # context — set once via the API, org-scoped, read-only calls only.
+      #
+      # The lookup reads v1.1 `tree/dev`: one row per job, newest first, with
+      # `vcs_revision`. (v2 `insights/.../jobs` returns per-job-name metrics
+      # without a status or SHA, so a check built on it never halts.) Any API
+      # failure leaves LAST_SHA empty, and the suite runs.
       - checkout
       - run:
           name: Skip if dev SHA unchanged since last successful llm-e2e
           command: |
-            LAST_SHA=$(curl -sL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
-              "https://circleci.com/api/v2/insights/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/workflows/nightly-llm-e2e/jobs?branch=dev" \
-              | jq -r '.items[]? | select(.status=="success") | .commit_id' \
-              | head -1)
+            LAST_SHA=$(curl -sfL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
+              "https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/tree/dev?filter=successful&limit=100&shallow=true" \
+              | jq -r 'if type == "array" then first(.[] | select(.workflows.job_name? == "llm-e2e") | .vcs_revision) // "" else "" end') \
+              || LAST_SHA=""
             if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CIRCLE_SHA1" ]; then
               echo "dev @ $CIRCLE_SHA1 already tested by last nightly — halting"
               circleci-agent step halt
+              exit 0
             fi
             if [ -z "$LAST_SHA" ]; then
               echo "no previous successful llm-e2e run found — proceeding"
             else
               echo "dev @ $CIRCLE_SHA1, last tested $LAST_SHA — proceeding"
             fi
-      - setup_integration_test_environment
+      # Build here: this pipeline has no `build` job, and the stash of an
+      # older `build` for this SHA may already be deleted.
+      - setup_integration_test_environment:
+          build_binaries: true
       - run:
           name: Rust LLM-E2E (interpretation + harness + flow-context suites)
           command: |
-            cargo test --release --lib \
+            cd rust-executor && cargo test --release --lib -- \
               perspectives::interpretation_e2e \
               perspectives::interpretation_harness_e2e \
               perspectives::flow_context::real_llm_e2e \
-              -- --ignored --test-threads=1 --nocapture
+              ai_service::providers::anthropic_e2e \
+              --ignored --test-threads=1 --nocapture
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (auto-processor + interpretation suites)
@@ -600,8 +645,11 @@ jobs:
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
+          # The wrapper runs prepare-test first, as the per-push
+          # integration-tests-multi-node-holochain job does. Bare
+          # `test-integration` needs the publishing agent in tst-tmp/.
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm run test-integration
+            cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
   integration-tests-cli:
