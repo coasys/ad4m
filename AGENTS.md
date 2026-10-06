@@ -73,11 +73,12 @@ After the Holochain 0.7.0 update with PR #5550:
 
 ## Running Integration Tests
 
-The integration tests are in `tests/js`. Three suites, one CI job each:
+The integration tests are in `tests/js`. Four suites, one CI job each:
 
 | Script (in `tests/js`) | CI job | Executors |
 |---|---|---|
 | `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` (required check) | single-executor suites + Alice/Bob on `bootstrap-languages/local/*`, `--run-holochain false` |
+| `pnpm run test-model`, then `pnpm run test-flow` | `integration-tests-model` | the `Ad4mModel` and flow suites. Not part of `test-main`, so a CI run does not run them twice. |
 | `pnpm run test-main-server-link` | `integration-tests-multi-node-server-link` | Alice + Bob on local languages, links over the server-link-language and a link-server the suite starts (`tests/js/tests/integration-server-link.test.ts`) |
 | `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Alice + Bob with Holochain: agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
 
