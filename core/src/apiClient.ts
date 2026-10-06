@@ -2,7 +2,13 @@ import { callSafely } from './notifyListeners'
 import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
+import { SERVICE_EVENT_ALIASES, type ServiceEventAliasMap } from './services/eventAliases'
 import { EVENT_SCOPE_FIELDS } from './generated/api/Events'
+
+/** Every event `on` takes: the executor's core events, plus the former core
+ *  event names built-in services now emit. */
+export type ClientEventMap = EventMap & ServiceEventAliasMap
+export type ClientEventName = keyof ClientEventMap
 
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
@@ -370,7 +376,9 @@ export class ApiClient {
      * handler. Like `addEventListener`, registering the same handler for the
      * same type and perspective again changes nothing.
      */
-    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+    on<K extends ClientEventName>(type: K, handler: (event: ClientEventMap[K]) => void, filter?: EventFilter): () => void {
+        const alias = SERVICE_EVENT_ALIASES[type as keyof ServiceEventAliasMap]
+        if (alias) return this.onEvent(alias.type, handler as (event: never) => void, alias.scopeField)
         return this._on(type, handler as (event: never) => void, filter?.perspective)
     }
 

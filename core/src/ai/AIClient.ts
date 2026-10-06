@@ -3,14 +3,23 @@ import base64js from 'base64-js';
 import pako from 'pako'
 import { AIModelLoadingStatus, AITask, AITaskInput } from "./Tasks";
 import { ModelInput, Model, ModelType } from "./AITypes"
-import type { ModelInput as ModelInputData } from "../generated/api/ModelInput";
+import { ServiceClient } from '../services/ServiceClient'
+import { AiInference_1_0_0 } from '../generated/services/ai.inference'
+import type { AiInference_1_0_0_Events, AiInference_1_0_0_Methods } from '../generated/services/ai.inference'
+import { AiModels_1_0_0 } from '../generated/services/ai.models'
+import type { AiModels_1_0_0_Events, AiModels_1_0_0_Methods, AiModels_1_0_0_ModelInput as ModelInputData } from '../generated/services/ai.models'
 
+/** The executor's AI, through the `ai.inference` and `ai.models` services. */
 export class AIClient {
     #apiClient: ApiClient;
+    #inference: ServiceClient<AiInference_1_0_0_Methods, AiInference_1_0_0_Events>;
+    #models: ServiceClient<AiModels_1_0_0_Methods, AiModels_1_0_0_Events>;
     #transcriptionUnsubscribers: Map<string, () => void> = new Map();
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token);
+        this.#inference = new ServiceClient(this.#apiClient, AiInference_1_0_0);
+        this.#models = new ServiceClient(this.#apiClient, AiModels_1_0_0);
     }
 
     /** The executor names the model type `type`. */
@@ -19,7 +28,7 @@ export class AIClient {
     }
 
     async getModels(): Promise<Model[]> {
-        return this.#apiClient.call('ai.models', {});
+        return this.#models.call('models', {}) as Promise<Model[]>;
     }
 
     /**
@@ -35,44 +44,44 @@ export class AIClient {
      * that is not Anthropic speaks.
      */
     async discoverModels(baseUrl: string, apiKey?: string, apiType?: string): Promise<string[]> {
-        return this.#apiClient.call('ai.discoverModels', { baseUrl, apiKey, apiType });
+        return this.#models.call('discoverModels', { baseUrl, apiKey, apiType });
     }
 
     async addModel(model: ModelInput, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call('ai.addModel', { model: this.serializeModelInput(model) }, options);
+        return this.#models.call('addModel', { model: this.serializeModelInput(model) }, options);
     }
 
     async updateModel(modelId: string, model: ModelInput): Promise<boolean> {
-        return this.#apiClient.call('ai.updateModel', { id: modelId, model: this.serializeModelInput(model) });
+        return this.#models.call('updateModel', { id: modelId, model: this.serializeModelInput(model) });
     }
 
     async removeModel(modelId: string): Promise<boolean> {
-        return this.#apiClient.call('ai.removeModel', { id: modelId });
+        return this.#models.call('removeModel', { id: modelId });
     }
 
     async setDefaultModel(modelType: ModelType, modelId: string): Promise<boolean> {
-        return this.#apiClient.call('ai.setDefaultModel', { id: modelId, modelType });
+        return this.#models.call('setDefaultModel', { id: modelId, modelType });
     }
 
     async getDefaultModel(modelType: ModelType): Promise<Model> {
-        return this.#apiClient.call('ai.getDefaultModel', { modelType });
+        return this.#models.call('getDefaultModel', { modelType }) as Promise<Model>;
     }
 
     async tasks(): Promise<AITask[]> {
-        return this.#apiClient.call('ai.tasks', {});
+        return this.#inference.call('tasks', {});
     }
 
     async addTask(name: string, modelId: string, systemPrompt: string, promptExamples: { input: string, output: string }[], metaData?: string): Promise<AITask> {
         const task = new AITaskInput(name, modelId, systemPrompt, promptExamples, metaData);
-        return this.#apiClient.call('ai.addTask', { task });
+        return this.#inference.call('addTask', { task });
     }
 
     async removeTask(taskId: string): Promise<boolean> {
-        return this.#apiClient.call('ai.removeTask', { id: taskId });
+        return this.#inference.call('removeTask', { id: taskId });
     }
 
     async updateTask(taskId: string, task: AITask): Promise<AITask> {
-        return this.#apiClient.call('ai.updateTask', {
+        return this.#inference.call('updateTask', {
             task: {
                 taskId,
                 name: task.name,
@@ -87,15 +96,15 @@ export class AIClient {
     }
 
     async modelLoadingStatus(model: string): Promise<AIModelLoadingStatus> {
-        return this.#apiClient.call('ai.modelLoadingStatus', { model });
+        return this.#models.call('modelLoadingStatus', { model });
     }
 
     async prompt(taskId: string, prompt: string, options?: CallOptions): Promise<string> {
-        return this.#apiClient.call('ai.prompt', { taskId, prompt }, options);
+        return this.#inference.call('prompt', { taskId, prompt }, options);
     }
 
     async embed(modelId: string, text: string, options?: CallOptions): Promise<Array<number>> {
-        const aiEmbed = await this.#apiClient.call('ai.embed', { modelId, text }, options);
+        const aiEmbed = await this.#inference.call('embed', { modelId, text }, options);
 
         const compressed = base64js.toByteArray(aiEmbed);
         // NB: pako v1 accepts `{ to: 'string' }`, pako v2 wants `{ toText: true }`,
@@ -119,11 +128,11 @@ export class AIClient {
             timeBeforeSpeech?: number;
         }
     ): Promise<string> {
-        const streamId = await this.#apiClient.call('ai.transcriptionOpen', { modelId, params });
+        const streamId = await this.#inference.call('transcriptionOpen', { modelId, params });
 
-        const unsub = this.#apiClient.on('transcription-text', (event) => {
-            if (event.streamId === streamId && event.text) streamCallback(event.text);
-        });
+        const unsub = this.#inference.on('transcription-text', (event) => {
+            if (event.text) streamCallback(event.text);
+        }, { scope: streamId });
 
         this.#transcriptionUnsubscribers.set(streamId, unsub);
 
@@ -133,7 +142,7 @@ export class AIClient {
     async closeTranscriptionStream(streamId: string): Promise<void> {
         this.#pendingStreamIds.delete(streamId);
         try {
-            await this.#apiClient.call('ai.transcriptionClose', { streamId });
+            await this.#inference.call('transcriptionClose', { streamId });
         } finally {
             this.#transcriptionUnsubscribers.get(streamId)?.();
             this.#transcriptionUnsubscribers.delete(streamId);

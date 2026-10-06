@@ -29,9 +29,7 @@ use super::errors::{OpenAIError, OpenAIJson, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::tts_passthrough;
 use super::types::{SpeechRequest, TranscriptionResponse};
-use crate::agent::capabilities::{
-    check_capability, AI_PROMPT_CAPABILITY, AI_TRANSCRIBE_CAPABILITY,
-};
+use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::billing::{bill_compute, check_compute_credits};
@@ -41,8 +39,14 @@ pub async fn transcriptions(
     auth: AuthContext,
     mut multipart: Multipart,
 ) -> Result<Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_TRANSCRIBE_CAPABILITY)
-        .map_err(OpenAIError::forbidden)?;
+    check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "TRANSCRIBE",
+        ),
+    )
+    .map_err(OpenAIError::forbidden)?;
 
     let mut model_field: Option<String> = None;
     let mut audio_bytes: Option<Vec<u8>> = None;
@@ -120,7 +124,14 @@ pub async fn speech(
     auth: AuthContext,
     OpenAIJson(req): OpenAIJson<SpeechRequest>,
 ) -> Result<Response, OpenAIError> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "PROMPT",
+        ),
+    )
+    .map_err(OpenAIError::forbidden)?;
 
     if let Some(email) = crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
     {

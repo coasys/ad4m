@@ -13,7 +13,7 @@ use super::errors::OpenAIJson;
 use super::errors::{OpenAIError, OpenAIResult};
 use super::model_selector::resolve_model;
 use super::types::{EmbeddingItem, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage};
-use crate::agent::capabilities::{check_capability, AI_PROMPT_CAPABILITY};
+use crate::agent::capabilities::check_capability;
 use crate::ai_service::AIService;
 use crate::api::auth::AuthContext;
 use crate::billing::check_compute_credits;
@@ -23,7 +23,14 @@ pub async fn embeddings(
     auth: AuthContext,
     OpenAIJson(req): OpenAIJson<EmbeddingRequest>,
 ) -> OpenAIResult<Json<EmbeddingResponse>> {
-    check_capability(&auth.capabilities, &AI_PROMPT_CAPABILITY).map_err(OpenAIError::forbidden)?;
+    check_capability(
+        &auth.capabilities,
+        &crate::services::builtins::capability(
+            crate::services::builtins::Builtin::AiInference,
+            "PROMPT",
+        ),
+    )
+    .map_err(OpenAIError::forbidden)?;
 
     if let Some(ref fmt) = req.encoding_format {
         if fmt != "float" {

@@ -1,0 +1,91 @@
+{
+  "name": "holochain.conductor",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "The executor's embedded Holochain conductor.",
+  "selection": "executor",
+  "methods": {
+    "agentInfos": {
+      "description": "The conductor's agent infos (encoded).",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "action": "READ",
+      "read": true
+    },
+    "addAgentInfos": {
+      "description": "Add other agents' infos to the conductor.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "agentInfos": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "agentInfos"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "PEERS"
+    },
+    "networkMetrics": {
+      "description": "The conductor's network metrics (JSON text).",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "READ",
+      "read": true
+    },
+    "restart": {
+      "description": "Restart the conductor from its stored configuration. Needs the admin credential.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "ADMIN",
+      "long": true
+    }
+  },
+  "events": {},
+  "actions": {
+    "READ": {
+      "label": "See Holochain peers",
+      "description": "Read the conductor's agent infos and network metrics.",
+      "risk": "safe"
+    },
+    "PEERS": {
+      "label": "Add Holochain peers",
+      "description": "Tell the conductor about other agents.",
+      "risk": "write"
+    },
+    "ADMIN": {
+      "label": "Operate Holochain",
+      "description": "Restart the conductor.",
+      "risk": "admin"
+    }
+  }
+}

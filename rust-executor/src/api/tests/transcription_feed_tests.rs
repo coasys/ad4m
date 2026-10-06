@@ -1,7 +1,7 @@
 //! `feed_outcome`: what POST /ai/transcription/feed answers when some streams fail.
 
-use crate::api::ai_ws::feed_outcome;
 use crate::api::errors::ApiError;
+use crate::api::transcription_feed::feed_outcome;
 
 fn message(result: Result<(), ApiError>) -> String {
     match result {

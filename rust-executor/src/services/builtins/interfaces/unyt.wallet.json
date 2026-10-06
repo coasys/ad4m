@@ -1,0 +1,224 @@
+{
+  "name": "unyt.wallet",
+  "author": "did:key:z6MknSghZ8tdR9EtAQDqi6qTrCBKYh8x4kzha27aeBLAz2ix",
+  "version": "1.0.0",
+  "description": "The executor's HoT wallet on the Unyt alliance DNA.",
+  "selection": "executor",
+  "methods": {
+    "versionInfo": {
+      "description": "Installed and bundled DNA versions, and why the last install failed.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "$ref": "#/types/UnytVersionInfo"
+      },
+      "action": "READ",
+      "read": true
+    },
+    "setMembraneProof": {
+      "description": "Store the membrane proof, then install the DNA in the background; `versionInfo` shows the outcome. Needs the admin credential.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "proof": {
+            "type": "string",
+            "description": "Base64-encoded membrane proof from the hosting joining service."
+          }
+        },
+        "required": [
+          "proof"
+        ]
+      },
+      "result": {
+        "type": "boolean"
+      },
+      "action": "ADMIN",
+      "errors": {
+        "InvalidProof": {
+          "code": 422
+        }
+      }
+    },
+    "agentKey": {
+      "description": "The executor's Unyt agent key, created on first use.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "READ",
+      "long": true
+    },
+    "hotAgentPubkey": {
+      "description": "The agent key the alliance cell runs as.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "type": "string"
+      },
+      "action": "READ",
+      "long": true
+    },
+    "balance": {
+      "description": "The ledger (`get_ledger` of the transactor zome).",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": true,
+      "action": "READ",
+      "long": true
+    },
+    "history": {
+      "description": "One page of transactions (`get_history`).",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Page boundary from a previous page; omit for the newest page.",
+            "default": null
+          },
+          "perPage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "uint64",
+            "minimum": 0,
+            "description": "Defaults to 50.",
+            "default": null
+          }
+        }
+      },
+      "result": true,
+      "action": "READ",
+      "long": true
+    },
+    "sendHot": {
+      "description": "Propose a payment to `recipient`; it settles when they commit.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "recipient": {
+            "type": "string",
+            "description": "The recipient's Unyt agent key."
+          },
+          "amount": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "recipient",
+          "amount"
+        ]
+      },
+      "result": {
+        "$ref": "#/types/Outcome"
+      },
+      "action": "SEND",
+      "long": true
+    },
+    "reinstallDna": {
+      "description": "Uninstall and install the DNA again. Needs the admin credential.",
+      "params": {
+        "type": "object",
+        "additionalProperties": false,
+        "description": "The empty object a method with no params takes."
+      },
+      "result": {
+        "$ref": "#/types/Outcome"
+      },
+      "action": "ADMIN",
+      "long": true
+    }
+  },
+  "events": {},
+  "actions": {
+    "READ": {
+      "label": "See the HoT wallet",
+      "description": "Read the wallet's balance, history, keys and DNA version.",
+      "risk": "safe"
+    },
+    "SEND": {
+      "label": "Send HoT",
+      "description": "Send HoT from the executor's wallet.",
+      "risk": "spend"
+    },
+    "ADMIN": {
+      "label": "Administer the Unyt DNA",
+      "description": "Install, reinstall and authorise the Unyt DNA.",
+      "risk": "admin"
+    }
+  },
+  "types": {
+    "UnytVersionInfo": {
+      "type": "object",
+      "properties": {
+        "installed": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Version of the installed DNA; `null` until an install succeeds."
+        },
+        "bundled": {
+          "type": "string",
+          "description": "Version of the DNA bundled with this executor."
+        },
+        "installError": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Error of the last install that failed; `null` after a success or a new proof."
+        }
+      },
+      "required": [
+        "bundled"
+      ],
+      "description": "The Unyt alliance DNA: installed and bundled versions, and why the last\ninstall failed. `setUnytMembraneProof` installs in the background, so this\nis where its outcome shows."
+    },
+    "Outcome": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string",
+          "description": "The proposal hash after a send; the reason after a failure."
+        }
+      },
+      "required": [
+        "success",
+        "message"
+      ]
+    }
+  }
+}

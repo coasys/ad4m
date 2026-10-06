@@ -366,6 +366,11 @@ export default function aiTests(testContext: TestContext) {
                 const defaultModel = await ad4mClient.ai.getDefaultModel("EMBEDDING")
                 expect(defaultModel?.id).to.equal(id)
 
+                // A default must name a model of that type: the declared method error.
+                const wrongType = await ad4mClient.ai.setDefaultModel("LLM", id).catch(e => e)
+                expect(wrongType.status, wrongType.message).to.equal(422)
+                expect(wrongType.data?.name).to.equal("InvalidDefaultModel")
+
                 await ad4mClient.ai.removeModel(id)
             })
 

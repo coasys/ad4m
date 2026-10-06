@@ -3,7 +3,7 @@ use ts_rs::TS;
 
 use crate::types::{
     AuthInfoInput, InteractionCall, LanguageMetaInput, LinkExpression, LinkExpressionInput,
-    LinkInput, LinkMutations, ModelType,
+    LinkInput, LinkMutations,
 };
 
 // Re-export for use in handler files
@@ -330,13 +330,6 @@ pub struct ImportRequest {
 #[derive(Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub struct AddAgentInfosRequest {
-    pub agent_infos: Vec<String>,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
 pub struct FriendSendMessageRequest {
     #[ts(type = "any")]
     pub message: serde_json::Value,
@@ -375,29 +368,6 @@ pub struct SetUserFreeAccessRequest {
 }
 
 // ── AI ──
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct PromptRequest {
-    pub task_id: String,
-    pub prompt: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct EmbedRequest {
-    pub model_id: String,
-    pub text: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SetDefaultModelRequest {
-    pub model_type: ModelType,
-}
 
 // ── Notifications ──
 
@@ -752,7 +722,7 @@ pub struct SetFreeHostingEnabledRequest {
 // ── Host rates ──
 
 /// Price in HOT the host charges for one metered operation.
-#[derive(Serialize, Deserialize, TS, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, TS, Debug, Clone, PartialEq, schemars::JsonSchema)]
 #[ts(export)]
 pub struct HostRate {
     pub description: String,
@@ -760,25 +730,10 @@ pub struct HostRate {
     pub price_in_hot: f64,
 }
 
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SetHostRatesRequest {
-    pub rates: Vec<HostRate>,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SetUnytMembraneProofRequest {
-    /// Base64-encoded membrane proof from the hosting joining service.
-    pub proof: String,
-}
-
 /// The Unyt alliance DNA: installed and bundled versions, and why the last
 /// install failed. `setUnytMembraneProof` installs in the background, so this
 /// is where its outcome shows.
-#[derive(Serialize, Deserialize, TS, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, TS, Debug, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub struct UnytVersionInfo {
@@ -791,21 +746,6 @@ pub struct UnytVersionInfo {
 }
 
 // ── Hosting wallet ──
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct SetHotWalletAddressRequest {
-    pub address: String,
-}
-
-#[derive(Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub struct RequestPaymentRequest {
-    #[serde(rename = "amountHOT")]
-    pub amount_hot: String,
-}
 
 // ── Users: request verification ──
 

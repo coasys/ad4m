@@ -10,13 +10,15 @@ REST/WS shim. Split plan: spec item 6.
 | `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) |
 | `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same content as above; candidate for removal, spec D3) |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
-| `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
+| `POST /api/v1/ai/transcription/feed` | `transcription_feed.rs` | Binary PCM audio for `ai.inference` transcription streams (JSON RPC cannot carry it) |
+| `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS. Grants are the `ai.inference` / `ai.models` service actions (`services::builtins::capability`) |
 
 ## Handler modules
 
-`*_ws.rs`, one per RPC namespace: `agent`, `ai`, `expressions`, `hosting`,
+`*_ws.rs`, one per core RPC namespace: `agent`, `expressions`,
 `languages`, `neighbourhoods`, `perspectives` (largest; also SHACL + interpretation
-handlers), `runtime`, `users`. Each exposes `register_ws_handlers(&mut HandlerMap)`
+handlers), `runtime`, `users`. AI, billing, Unyt and Holochain administration are
+built-in services, not RPC namespaces (`services/builtins/`). Each exposes `register_ws_handlers(&mut HandlerMap)`
 called from `ws_handler::build_handler_map`.
 
 Service methods (`<hash>.<method>`) are not in the map: `HandlerMap::dispatch` falls

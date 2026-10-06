@@ -1,14 +1,12 @@
 // Auto-generated from the executor's event table (rust-executor/src/api/events_ws.rs).
 // Do NOT edit manually — regenerate with: pnpm run generate:api-types
 
-import type { AIModelLoadingStatus } from "./AIModelLoadingStatus";
 import type { AgentStatusChangedEvent } from "./AgentStatusChangedEvent";
 import type { AgentUpdatedEvent } from "./AgentUpdatedEvent";
 import type { Apps } from "./Apps";
 import type { AutoProcessorEvent } from "./AutoProcessorEvent";
 import type { AutoProcessorNeighbourhoodState } from "./AutoProcessorNeighbourhoodState";
 import type { ExceptionOccurredEvent } from "./ExceptionOccurredEvent";
-import type { HostingUserInfo } from "./HostingUserInfo";
 import type { MessageReceivedEvent } from "./MessageReceivedEvent";
 import type { NeighbourhoodSignalFilter } from "./NeighbourhoodSignalFilter";
 import type { NotificationTriggeredEvent } from "./NotificationTriggeredEvent";
@@ -19,14 +17,12 @@ import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner"
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
 import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
 import type { ServiceStreamEnd } from "./ServiceStreamEnd";
-import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
 export interface EventMap {
   "agent-status-changed": AgentStatusChangedEvent;
   "agent-updated": AgentUpdatedEvent;
   "apps-changed": Apps;
-  "hosting-user-info-changed": HostingUserInfo;
   "perspective-added": PerspectiveWithOwner;
   "perspective-removed": PerspectiveRemovedWithOwner;
   "perspective-updated": PerspectiveWithOwner;
@@ -38,8 +34,6 @@ export interface EventMap {
   "message-received": MessageReceivedEvent;
   "notification-triggered": NotificationTriggeredEvent;
   "exception-occurred": ExceptionOccurredEvent;
-  "transcription-text": TranscriptionTextFilter;
-  "model-loading-status": AIModelLoadingStatus;
   "query-subscription-update": PerspectiveQuerySubscriptionFilter;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;

@@ -113,10 +113,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: RuntimeFunctions) -> Result<(
             println!("{}", serde_json::to_string_pretty(&parsed)?);
         }
         RuntimeFunctions::HcAgentInfos => {
-            let infos = ad4m_client.runtime.hc_agent_infos().await?;
-            println!("\x1b[36mAll AgentInfos encoded:\n \x1b[32m{}\n\n", infos);
-
-            let separate_agent_infos: Vec<String> = serde_json::from_str(&infos)?;
+            let separate_agent_infos = ad4m_client.runtime.hc_agent_infos().await?;
+            println!(
+                "\x1b[36mAll AgentInfos encoded:\n \x1b[32m{}\n\n",
+                serde_json::to_string(&separate_agent_infos)?
+            );
 
             println!("\x1b[36mSeparate AgentInfos:\n");
             for agent_info in &separate_agent_infos {
