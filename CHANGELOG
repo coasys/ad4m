@@ -6,6 +6,9 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
 ## unreleased
 
 ### Changed
+- **Breaking: the agent keystore uses a new format, and a node cannot downgrade after the first unlock** [#1163](https://github.com/coasys/ad4m/pull/1163)
+  - The keystore key now comes from Argon2id over the whole passphrase with a random salt, and every write uses a fresh nonce. The first unlock rewrites `agent.json` in the new format. An older executor cannot read the rewritten file and panics at unlock, so back up `agent.json` before upgrading if you might need to roll back.
+  - The old key only used the first 24 bytes of the space-padded passphrase, so a trailing space or a typo after byte 24 also opened the old file. The migration keeps the old file as `agent.json.legacy` until the new file has opened once, so the real passphrase still works if a variant did the migration. That fallback stops as soon as the node adds or replaces a key (a new user, `agent.generate`), because the old file lacks it: from then on, only the variant opens `agent.json`.
 - **`subjectClasses()` and `subjectClassTargetClasses()` reject when the lookup fails, instead of answering `[]`** [#1241](https://github.com/coasys/ad4m/pull/1241)
   - An empty answer reads as "no classes are registered". A caller that checks before registering its classes acted on it and registered everything again. Both methods now let the error through. `subjectClassesByTemplate` already catches it and falls back to property matching, so its behaviour is unchanged.
 - Release binaries ship without symbols [#1244](https://github.com/coasys/ad4m/pull/1244)
