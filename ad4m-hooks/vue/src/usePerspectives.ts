@@ -31,14 +31,12 @@ function addListeners(p: PerspectiveProxy) {
     onAddedLinkCbs.value.forEach((cb) => {
       cb(p, link);
     });
-    return null;
   });
 
-  p.removeListener("link-removed", (link) => {
-    onAddedLinkCbs.value.forEach((cb) => {
+  p.addListener("link-removed", (link) => {
+    onRemovedLinkCbs.value.forEach((cb) => {
       cb(p, link);
     });
-    return null;
   });
 }
 
@@ -61,7 +59,6 @@ export function usePerspectives(client: Ad4mClient) {
       addListeners(p);
     });
 
-    // @ts-ignore
     client.perspective.addPerspectiveUpdatedListener(async (handle) => {
       const perspective = await client.perspective.byUUID(handle.uuid);
 
@@ -71,11 +68,9 @@ export function usePerspectives(client: Ad4mClient) {
           [handle.uuid]: perspective,
         };
       }
-      return null;
     });
 
     // Add new incoming perspectives
-    // @ts-ignore
     client.perspective.addPerspectiveAddedListener(async (handle) => {
       const perspective = await client.perspective.byUUID(handle.uuid);
 
@@ -97,7 +92,6 @@ export function usePerspectives(client: Ad4mClient) {
         },
         {}
       );
-      return null;
     });
   }, {});
 
