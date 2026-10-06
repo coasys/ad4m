@@ -97,6 +97,16 @@ pub async fn run_flow_consensus_pass(
     flow_filter: Option<&[String]>,
     instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
+    // The pass reads as the agent it records for: another agent's Local graph
+    // stays out of the flows, instances and votes it folds.
+    let mut view = match crate::agent::did_for_context(context) {
+        Ok(did) => perspective.clone().for_viewer(did),
+        Err(e) => {
+            log::warn!("run_flow_consensus_pass: no DID for the pass: {e:#}");
+            return Vec::new();
+        }
+    };
+    let perspective = &mut view;
     let loaded = async {
         let mut flows_by_uri = load_shacl_flows(perspective).await?;
         retain_selected_flows(&mut flows_by_uri, flow_filter);

@@ -3631,6 +3631,16 @@ describe("Ad4mModel named-graph placement", () => {
     expect(parentLinkIn(p)).toBe(LOCAL);
   });
 
+  it("keeps a graph-rooted child of a Local parent Local", async () => {
+    const p = perspective();
+    await Channel.create(p, { name: "sub" }, {
+      batchId: "b",
+      parent: { model: Channel, id: "c1", field: "notes", graph: LOCAL },
+    });
+    expect(createdIn(p)).toBe(LOCAL);
+    expect(parentLinkIn(p)).toBe(LOCAL);
+  });
+
   it("puts a private child and its parent link in the override graph, not the parent's", async () => {
     const p = perspective();
     await Note.create(p, { text: "hi" }, { batchId: "b", parent: { model: Channel, id: "c1" }, graph: LOCAL });

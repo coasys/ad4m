@@ -129,7 +129,7 @@ pub(crate) async fn list_overlays(
         let rows = perspective
             .sparql_store
             .query_decorated_links(&source_constraint, &filter)?;
-        for l in rows {
+        for l in rows.into_iter().filter(|l| perspective.sees(l)) {
             by_base.entry(l.data.source.clone()).or_default().push(l);
         }
     }

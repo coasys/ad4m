@@ -526,6 +526,11 @@ export type LinkStatus = "shared" | "local"
  * Links in a Local graph never sync, and only their agent reads them.
  */
 export const LOCAL_GRAPH = "ad4m://local"
+
+/** Whether `graph` names a Local graph: the alias or an agent's `ad4m://local/<did>`. */
+export function isLocalGraph(graph: string | undefined): boolean {
+    return graph === LOCAL_GRAPH || !!graph?.startsWith(`${LOCAL_GRAPH}/`)
+}
 interface Parameter {
     name: string
     value: string

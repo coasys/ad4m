@@ -87,6 +87,11 @@ impl Language {
         if !self.has(Capability::PerspectiveCommit) {
             return Ok(None);
         }
+        #[cfg(test)]
+        if let Some(commits) = recording::RECORDED.lock().unwrap().get_mut(&self.address) {
+            commits.push(diff);
+            return Ok(None);
+        }
         let controller = LanguageController::global_instance();
         let diff_json = serde_json::to_string(&diff)?;
         // Spec §5.2 perspective-commit returns nothing, so `await commit(...)`
@@ -143,6 +148,14 @@ impl Language {
     pub async fn render(&mut self) -> Result<Option<Perspective>, AnyError> {
         if !self.has(Capability::PerspectiveRender) {
             return Ok(None);
+        }
+        #[cfg(test)]
+        if recording::RECORDED
+            .lock()
+            .unwrap()
+            .contains_key(&self.address)
+        {
+            return Ok(Some(Perspective::default()));
         }
         let controller = LanguageController::global_instance();
         let script = r#"JSON.stringify((await language.perspectiveSyncRender()) ?? null)"#;
@@ -289,5 +302,42 @@ impl Language {
             .await
             .map_err(|e| anyhow::anyhow!(e.to_string()))?;
         Ok(())
+    }
+}
+
+/// Test seam: a link language that records each committed diff instead of
+/// running a JS language, and renders an empty remote perspective.
+#[cfg(test)]
+pub(crate) mod recording {
+    use super::{Capability, Language, PerspectiveDiff};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::{Arc, Mutex};
+
+    lazy_static::lazy_static! {
+        pub(super) static ref RECORDED: Mutex<HashMap<String, Vec<PerspectiveDiff>>> =
+            Mutex::new(HashMap::new());
+    }
+
+    pub(crate) fn language(address: &str) -> Language {
+        RECORDED
+            .lock()
+            .unwrap()
+            .insert(address.to_string(), Vec::new());
+        Language {
+            address: address.to_string(),
+            capabilities: Arc::new(HashSet::from([
+                Capability::PerspectiveCommit,
+                Capability::PerspectiveRender,
+            ])),
+        }
+    }
+
+    pub(crate) fn commits(address: &str) -> Vec<PerspectiveDiff> {
+        RECORDED
+            .lock()
+            .unwrap()
+            .get(address)
+            .cloned()
+            .unwrap_or_default()
     }
 }

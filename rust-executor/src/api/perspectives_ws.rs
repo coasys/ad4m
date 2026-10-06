@@ -2731,3 +2731,39 @@ pub fn register_ws_handlers(map: &mut HandlerMap) {
     map.register("perspective.getShacl", get_shacl);
     map.register("perspective.getAllShacl", get_all_shacl);
 }
+
+#[cfg(test)]
+mod local_graph_tests {
+    use super::*;
+    use crate::perspectives::local_graph_tests::two_users_and_shared_links;
+
+    /// Every handler in this file reads through `get_perspective_with_access`,
+    /// so its stamp is what keeps other agents' Local graphs out of WS reads.
+    #[tokio::test]
+    async fn a_request_reads_as_its_caller() {
+        let (p, _, _) = two_users_and_shared_links().await;
+        crate::perspectives::register_perspective(p.uuid.clone(), p.clone());
+        let ctx = RequestContext {
+            capabilities: Ok(vec![]),
+            auto_permit_cap_requests: false,
+            auth_token: String::new(),
+            is_admin_credential: true,
+            user_email: None,
+            user_did: None,
+            cancel_token: None,
+        };
+        let view = get_perspective_with_access(&p.uuid, &ctx).await.unwrap();
+        crate::perspectives::unregister_perspective(&p.uuid);
+
+        let mut seen: Vec<String> = view
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|l| l.data.source)
+            .collect();
+        seen.sort();
+        // The admin's request sees the shared links, not Alice's or Bob's Local ones.
+        assert_eq!(seen, vec!["ad4m://s/default", "ad4m://s/shared"]);
+    }
+}

@@ -1531,6 +1531,10 @@ impl SparqlStore {
             let mut q = parsed_query;
             q.dataset_mut()
                 .set_default_graph(iris.iter().map(|iri| scope_graph_name(iri)).collect());
+            // The regex above can miss a `GRAPH` pattern (`$g`, a comment, a
+            // prefixed name). Bound the named graphs here too, so privacy never
+            // depends on how the query is spelled.
+            restrict_dataset_to_scope(q.dataset_mut(), iris, &self.named_graphs()?)?;
 
             #[allow(deprecated)]
             self.store
@@ -1704,6 +1708,22 @@ impl SparqlStore {
                 )
                 .collect(),
         ))
+    }
+
+    /// Whether named graph `graph` holds a triple with subject `subject`. One
+    /// index seek.
+    pub fn graph_has_subject(&self, graph: &str, subject: &str) -> bool {
+        let subject = NamedNode::new_unchecked(subject);
+        let graph = NamedNode::new_unchecked(graph);
+        self.store
+            .quads_for_pattern(
+                Some(subject.as_ref().into()),
+                None,
+                None,
+                Some(graph.as_ref().into()),
+            )
+            .next()
+            .is_some()
     }
 
     /// Check whether a named graph exists.

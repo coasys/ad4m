@@ -2309,3 +2309,64 @@ async fn a_tool_call_does_not_read_another_agents_local_graph() {
         "a Local link leaked: {out}"
     );
 }
+
+/// Write tools act as their caller too: the admin cannot remove a link that
+/// sits in a user's Local graph.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_tool_does_not_touch_another_agents_local_graph() {
+    use crate::agent::AgentContext;
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    use crate::types::{Link, LinkQuery, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let created = parse(
+        &handler
+            .instance_create(Parameters(InstanceCreateParams {
+                perspective_id: uuid.clone(),
+                class_name: "Channel".to_string(),
+                properties: Some(props(&[("name", json!("general"))])),
+                base_uri: None,
+                parent: None,
+            }))
+            .await,
+    );
+    let channel = created["base_uri"].as_str().unwrap().to_string();
+
+    let email = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+    let alice = AgentContext::for_user_email(email);
+    let mut raw = crate::perspectives::get_perspective(&uuid).unwrap();
+    let private = Link {
+        source: channel.clone(),
+        predicate: Some("ad4m://has_child".to_string()),
+        target: "ad4m://msg/private".to_string(),
+    };
+    raw.add_link(
+        private,
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+
+    handler
+        .instance_remove_from_collection(Parameters(InstanceRemoveFromCollectionParams {
+            perspective_id: uuid.clone(),
+            class_name: "Channel".into(),
+            base_uri: channel.clone(),
+            collection: "messages".into(),
+            item_uri: "ad4m://msg/private".into(),
+        }))
+        .await;
+
+    let kept = raw
+        .get_links(&LinkQuery {
+            target: Some("ad4m://msg/private".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(kept.len(), 1, "the admin removed Alice's Local link");
+}

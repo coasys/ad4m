@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
-import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { PerspectiveProxy, isLocalGraph } from "../perspectives/PerspectiveProxy";
 import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
@@ -1947,9 +1947,9 @@ export class Ad4mModel {
    *     graph. `LOCAL_GRAPH` keeps the instance in the caller's Local graph:
    *     it never syncs, and only the caller reads it.
    *
-   * Graph precedence: `options.graph`, then this model's own graph
-   * (`@Model({ graph: true })`), then the parent's graph (`parent.graph`, or a
-   * graph-rooted parent model), then the default graph.
+   * Graph precedence: `options.graph`, then a Local parent graph, then this
+   * model's own graph (`@Model({ graph: true })`), then the parent's graph
+   * (`parent.graph`, or a graph-rooted parent model), then the default graph.
    * @returns The saved model instance
    *
    * @example
@@ -1981,9 +1981,13 @@ export class Ad4mModel {
     Object.assign(instance, data);
     const metadata = (this as typeof Ad4mModel).getModelMetadata();
     const parentGraphIri = resolveParentGraph(options?.parent);
+    // A Local parent keeps its children Local, even a graph-rooted child: there
+    // the graph is a privacy rule, not a placement preference.
     instance._resolvedGraphIri =
       options?.graph ??
-      (metadata.graph ? Ad4mModel.graphIriFor(instance._baseExpression) : parentGraphIri);
+      (isLocalGraph(parentGraphIri) || !metadata.graph
+        ? parentGraphIri
+        : Ad4mModel.graphIriFor(instance._baseExpression));
     // The parent→child link follows an explicit graph, so a private child under
     // a shared parent leaves no shared trace; otherwise it sits in the parent's graph.
     const parentLinkGraph = options?.graph ?? parentGraphIri;

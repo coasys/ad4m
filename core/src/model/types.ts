@@ -109,7 +109,11 @@ export type Scope =
    * `graph` names the parent's named graph when it was created with an
    * explicit one (`create(..., { graph })`). A child created under it then
    * lands there too; without it, only a graph-rooted parent model passes its
-   * graph down.
+   * graph down. A scope cannot read the parent's graph from its id. Under a
+   * parent created with `LOCAL_GRAPH` whose model is not graph-rooted, leave
+   * `graph` out and the child and the parent→child link land in a shared
+   * graph. (A graph-rooted Local parent keeps its children Local: the executor
+   * redirects writes into its own graph.)
    */
   | { model: typeof Ad4mModel; id: string; field?: string; graph?: string }
   | { id: string; predicate: string }

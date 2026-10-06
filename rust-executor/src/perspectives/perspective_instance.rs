@@ -10,7 +10,8 @@ use crate::agent::{create_signed_expression, did_for_context};
 use crate::languages::language::Language;
 use crate::languages::LanguageController;
 use crate::perspectives::sparql_store::{
-    graph_visible_to, is_local_graph, link_visible_to, local_graph_owner, resolve_graph_for,
+    graph_visible_to, is_local_graph, link_visible_to, local_graph_iri, local_graph_owner,
+    resolve_graph_for,
 };
 use crate::perspectives::utils::{prolog_get_first_binding, prolog_value_to_json_string};
 use crate::prolog_service::get_prolog_service;
@@ -1235,7 +1236,7 @@ impl PerspectiveInstance {
         link_language_guard.is_some()
     }
 
-    async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
+    pub(crate) async fn commit_pending_diffs(&self) -> Result<(), AnyError> {
         let uuid = self.uuid.clone();
 
         let (pending_diffs, pending_ids) = Ad4mDb::with_global_instance(|db| {
@@ -1730,9 +1731,15 @@ impl PerspectiveInstance {
         super::publish_telepresence_signal(handle, signal, recipient_did).await;
     }
 
+    /// Test seam: plug in a link language, such as `languages::language::recording`.
+    #[cfg(test)]
+    pub(crate) async fn set_link_language_for_test(&self, language: Language) {
+        *self.link_language.write().await = Some(language);
+    }
+
     /// Whether this instance's viewer reads the stored `link`. The executor's
     /// own view (no viewer) reads every link.
-    fn sees(&self, link: &DecoratedLinkExpression) -> bool {
+    pub(crate) fn sees(&self, link: &DecoratedLinkExpression) -> bool {
         self.viewer
             .as_deref()
             .is_none_or(|viewer| link_visible_to(link, viewer))
@@ -1922,7 +1929,11 @@ impl PerspectiveInstance {
             // For perspectives without explicit owners (main agent), publish with main agent DID
             let main_agent_did = crate::agent::did();
 
-            for link in &decorated_diff.additions {
+            for link in decorated_diff
+                .additions
+                .iter()
+                .filter(|l| link_visible_to(l, &main_agent_did))
+            {
                 pubsub
                     .publish(
                         &PERSPECTIVE_LINK_ADDED_TOPIC,
@@ -1936,7 +1947,11 @@ impl PerspectiveInstance {
                     .await;
             }
 
-            for link in &decorated_diff.removals {
+            for link in decorated_diff
+                .removals
+                .iter()
+                .filter(|l| link_visible_to(l, &main_agent_did))
+            {
                 pubsub
                     .publish(
                         &PERSPECTIVE_LINK_REMOVED_TOPIC,
@@ -2347,7 +2362,7 @@ impl PerspectiveInstance {
                         )
                         .await;
                 }
-            } else {
+            } else if link_visible_to(&decorated_new_link_expression, &crate::agent::did()) {
                 // For perspectives without explicit owners (main agent), publish with main agent DID
                 let main_agent_did = crate::agent::did();
                 pubsub
@@ -2525,11 +2540,16 @@ impl PerspectiveInstance {
             uuid
         );
         // Query for SHACL class definition links
-        let shacl_class_links = self.get_links_local(&LinkQuery {
-            predicate: Some("rdf://type".to_string()),
-            target: Some("ad4m://SubjectClass".to_string()),
-            ..Default::default()
-        })?;
+        // Classes act for every agent: a Local graph never declares one.
+        let shacl_class_links: Vec<_> = self
+            .get_links_local(&LinkQuery {
+                predicate: Some("rdf://type".to_string()),
+                target: Some("ad4m://SubjectClass".to_string()),
+                ..Default::default()
+            })?
+            .into_iter()
+            .filter(|(link, _)| !link.graph.as_deref().is_some_and(is_local_graph))
+            .collect();
         log::debug!(
             "🔶 get_subject_classes_from_shacl: Found {} links",
             shacl_class_links.len()
@@ -5080,15 +5100,16 @@ impl PerspectiveInstance {
     /// they all share one. `None` for a new subject, a default-graph one, or one
     /// whose links span graphs (a shared subject with a private annotation stays
     /// shared).
-    /// Only links `viewer` reads count.
-    fn graph_of_subject(&self, subject: &str, viewer: &str) -> Result<Option<String>, AnyError> {
+    /// Only links that `keep` accepts count.
+    fn graph_of_subject(
+        &self,
+        subject: &str,
+        keep: impl Fn(&DecoratedLinkExpression) -> bool,
+    ) -> Result<Option<String>, AnyError> {
         let links = self
             .sparql_store
             .query_links(Some(subject), None, None, None, None, None)?;
-        let mut graphs = links
-            .iter()
-            .filter(|l| link_visible_to(l, viewer))
-            .map(|l| l.graph.as_deref());
+        let mut graphs = links.iter().filter(|l| keep(l)).map(|l| l.graph.as_deref());
         let first = graphs.next().flatten();
         Ok(match first {
             Some(graph) if graphs.all(|g| g == Some(graph)) => Some(graph.to_string()),
@@ -5097,20 +5118,38 @@ impl PerspectiveInstance {
     }
 
     /// The graph a write that names `graph` lands in. A write into the own
-    /// graph of a graph-rooted subject (`ad4m://graph/<S>`) that never got one,
-    /// because S was created in the writer's Local graph, goes to that Local
-    /// graph: children of a Local instance stay Local.
+    /// graph `ad4m://graph/<S>` of a subject S that lives in the writer's Local
+    /// graph goes to that Local graph: children of a Local instance stay Local.
+    ///
+    /// - S lives in the writer's Local graph when all its links the writer
+    ///   reads sit there. While `ad4m://graph/<S>` does not exist, the writer's
+    ///   own links decide, so a link someone else put elsewhere cannot flip it.
+    /// - Nobody may create the own graph of another agent's Local subject: that
+    ///   graph would pull the owner's later children into a shared graph.
     fn follow_local_subject(&self, graph: String, viewer: &str) -> Result<String, AnyError> {
         let Some(subject) = graph.strip_prefix("ad4m://graph/") else {
             return Ok(graph);
         };
-        if self.sparql_store.contains_named_graph(&graph) {
-            return Ok(graph);
+        let local = local_graph_iri(viewer);
+        let exists = self.sparql_store.contains_named_graph(&graph);
+        // Cheap index probe first: most writes name a subject with no Local links.
+        if self.sparql_store.graph_has_subject(&local, subject) {
+            let lives_in = |keep: &dyn Fn(&DecoratedLinkExpression) -> bool| {
+                self.graph_of_subject(subject, keep)
+                    .map(|g| g.as_deref() == Some(local.as_str()))
+            };
+            let local_subject = lives_in(&|l| link_visible_to(l, viewer))?
+                || (!exists && lives_in(&|l| l.author == viewer)?);
+            return Ok(if local_subject { local } else { graph });
         }
-        Ok(match self.graph_of_subject(subject, viewer)? {
-            Some(local) if is_local_graph(&local) => local,
-            _ => graph,
-        })
+        if !exists {
+            if let Some(owner_graph) = self.graph_of_subject(subject, |_| true)? {
+                if is_local_graph(&owner_graph) {
+                    return Err(anyhow!("Cannot write into graph {}", graph));
+                }
+            }
+        }
+        Ok(graph)
     }
 
     pub async fn execute_commands(
@@ -5128,7 +5167,7 @@ impl PerspectiveInstance {
         // stays Local even when the command names a graph: a client that loaded
         // it without a scope only knows the model's default graph.
         let viewer = did_for_context(context)?;
-        let stored = self.graph_of_subject(&expression, &viewer)?;
+        let stored = self.graph_of_subject(&expression, |l| link_visible_to(l, &viewer))?;
         let graph = match (graph, stored) {
             (_, Some(stored)) if is_local_graph(&stored) => Some(stored),
             (Some(graph), _) => Some(self.follow_local_subject(graph, &viewer)?),
@@ -6920,7 +6959,16 @@ impl PerspectiveInstance {
         };
 
         let uuid = self.uuid.clone();
-        let configs = match load_processors(self).await {
+        // The pass reads as the agent it runs for: another agent's Local graph
+        // must never reach the LLM or the shared graphs the pass writes to.
+        let view = match did_for_context(context) {
+            Ok(did) => self.clone().for_viewer(did),
+            Err(e) => {
+                log::warn!("auto_processor_tick [{}]: no DID for the pass: {e:#}", uuid);
+                return;
+            }
+        };
+        let configs = match load_processors(&view).await {
             Ok(cs) => cs,
             Err(e) => {
                 log::warn!(
@@ -6937,7 +6985,7 @@ impl PerspectiveInstance {
         // 1. Record new-since-last-processed turns per config (payload kept).
         for cfg in &configs {
             let transcript = match crate::perspectives::interpretation::gather_transcript_sparql(
-                self,
+                &view,
                 &cfg.source_scope_query,
             )
             .await
@@ -6953,7 +7001,7 @@ impl PerspectiveInstance {
                 }
             };
             let processed = match load_processed_source_ids(
-                self,
+                &view,
                 &cfg.processor_id,
                 now_ms,
                 cfg.source_window_ms,
@@ -7004,7 +7052,7 @@ impl PerspectiveInstance {
                     .with_batch_key(&batch_id),
             )
             .await;
-            let mut perspective_clone = self.clone();
+            let mut perspective_clone = view.clone();
             // Stall-fallback: if this batch has been standing down for its online
             // elected author past `claim_ttl_ms`, escalate past election straight
             // to the claim (the min-DID claim still prevents doubles among peers
@@ -7153,8 +7201,48 @@ impl PerspectiveInstance {
 
         let mut persist_diff = PerspectiveDiff::empty();
 
+        // A subject this batch puts wholly in a Local graph keeps its children
+        // there too: a write into its own graph `ad4m://graph/<S>` follows it,
+        // as `follow_local_subject` does for stored subjects.
+        let mut staged_graphs: HashMap<&str, HashSet<Option<&str>>> = HashMap::new();
+        for link in &diff.additions {
+            // Links into S's own graph are the ones that may follow S; they do
+            // not decide where S lives.
+            if link
+                .graph
+                .as_deref()
+                .and_then(|g| g.strip_prefix("ad4m://graph/"))
+                == Some(link.data.source.as_str())
+            {
+                continue;
+            }
+            staged_graphs
+                .entry(link.data.source.as_str())
+                .or_default()
+                .insert(link.graph.as_deref());
+        }
+        let local_subjects: HashMap<String, String> = staged_graphs
+            .into_iter()
+            .filter_map(
+                |(subject, graphs)| match graphs.into_iter().collect::<Vec<_>>()[..] {
+                    [Some(graph)] if is_local_graph(graph) => {
+                        Some((subject.to_string(), graph.to_string()))
+                    }
+                    _ => None,
+                },
+            )
+            .collect();
+
         // Process additions
-        for link in diff.additions {
+        for mut link in diff.additions {
+            if let Some(local) = link
+                .graph
+                .as_deref()
+                .and_then(|g| g.strip_prefix("ad4m://graph/"))
+                .and_then(|subject| local_subjects.get(subject))
+            {
+                link.graph = Some(local.clone());
+            }
             // A link in a Local graph is Local, however it got into the batch.
             let status = if link.graph.as_deref().is_some_and(is_local_graph) {
                 LinkStatus::Local

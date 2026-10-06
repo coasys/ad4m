@@ -23,7 +23,7 @@ mod interpretation_harness_e2e;
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
 #[cfg(test)]
-mod local_graph_tests;
+pub(crate) mod local_graph_tests;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;

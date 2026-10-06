@@ -2,11 +2,12 @@
 //! agent reads. Each test pins one rule of the design agreed on #812.
 
 use super::perspective_instance::{
-    shareable, Command, Parameter, PerspectiveInstance, SdnaType, SubjectClassOption,
+    Command, Parameter, PerspectiveInstance, SdnaType, SubjectClassOption,
 };
 use super::sparql_store::{local_graph_iri, resolve_graph_for, LOCAL_GRAPH_ALIAS};
 use crate::agent::{AgentContext, AgentService};
 use crate::db::Ad4mDb;
+use crate::languages::language::recording;
 use crate::prolog_service::init_prolog_service;
 use crate::pubsub::{get_global_pubsub, PERSPECTIVE_LINK_ADDED_TOPIC};
 use crate::test_utils::setup_wallet;
@@ -43,7 +44,7 @@ async fn setup(owners: Option<Vec<String>>) -> PerspectiveInstance {
 }
 
 /// A managed user with a key, as signup leaves one.
-fn user(label: &str) -> (AgentContext, String) {
+pub(crate) fn user(label: &str) -> (AgentContext, String) {
     init();
     let email = format!("{label}.{}@example.org", Uuid::new_v4());
     AgentService::ensure_user_key_exists(&email).unwrap();
@@ -67,7 +68,7 @@ fn sources(links: &[crate::types::DecoratedLinkExpression]) -> Vec<String> {
 
 /// Alice and Bob each write one link into their Local graph; the main agent
 /// writes one into a shared named graph and one into the default graph.
-async fn two_users_and_shared_links() -> (PerspectiveInstance, String, String) {
+pub(crate) async fn two_users_and_shared_links() -> (PerspectiveInstance, String, String) {
     let (alice, alice_did) = user("alice");
     let (bob, bob_did) = user("bob");
     let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
@@ -143,41 +144,53 @@ async fn a_write_to_the_alias_lands_in_the_writers_local_graph_as_local() {
     assert_eq!(stored[0].status, Some(LinkStatus::Local));
 }
 
-/// The commit funnel is the last guard before the link language: whatever
-/// status a write path set, a link in a Local graph never passes it.
-#[test]
-fn links_in_a_local_graph_never_reach_the_link_language() {
-    init();
-    let in_graph = |graph: Option<&str>, status: LinkStatus| {
-        let mut l = LinkExpression::from(
-            crate::agent::create_signed_expression(
-                link("x").normalize(),
-                &AgentContext::main_agent(),
-            )
+/// A signed link in `graph`, marked `Shared` whatever the graph.
+fn shared_in(name: &str, graph: &str) -> LinkExpression {
+    let mut l = LinkExpression::from(
+        crate::agent::create_signed_expression(link(name).normalize(), &AgentContext::main_agent())
             .unwrap(),
-        );
-        l.graph = graph.map(str::to_string);
-        l.status = Some(status);
-        l
-    };
+    );
+    l.graph = Some(graph.to_string());
+    l.status = Some(LinkStatus::Shared);
+    l
+}
+
+/// Each path into the link language is the last guard before it: whatever
+/// status a write path set, a link in a Local graph never passes.
+#[tokio::test]
+async fn no_path_into_the_link_language_carries_a_local_graph_link() {
+    let p = setup(None).await;
+    let address = format!("test://recording/{}", Uuid::new_v4());
+    p.set_link_language_for_test(recording::language(&address))
+        .await;
+    let mut handle = p.persisted.lock().await.clone();
+    handle.neighbourhood = Some(Default::default());
+    p.update_from_handle(handle).await;
+
+    let private = shared_in("private", &local_graph_iri("did:a"));
+    let public = shared_in("public", SHARED_GRAPH);
     let diff = PerspectiveDiff {
-        additions: vec![
-            in_graph(Some(&local_graph_iri("did:a")), LinkStatus::Shared),
-            in_graph(Some(SHARED_GRAPH), LinkStatus::Shared),
-            in_graph(None, LinkStatus::Shared),
-        ],
-        removals: vec![in_graph(
-            Some(&local_graph_iri("did:a")),
-            LinkStatus::Shared,
-        )],
+        additions: vec![private.clone(), public.clone()],
+        removals: vec![private.clone()],
     };
-    let out = shareable(&diff);
-    assert_eq!(out.additions.len(), 2);
-    assert!(out
-        .additions
-        .iter()
-        .all(|l| l.graph.as_deref() != Some(&local_graph_iri("did:a"))));
-    assert!(out.removals.is_empty());
+
+    // 1. A commit.
+    p.commit(&diff).await.unwrap();
+    // 2. A queued pending diff.
+    Ad4mDb::with_global_instance(|db| db.add_pending_diff(&p.uuid, &diff)).unwrap();
+    p.commit_pending_diffs().await.unwrap();
+    // 3. The fallback sync of stored shared links.
+    p.sparql_store.add_link(&private).unwrap();
+    p.sparql_store.add_link(&public).unwrap();
+    assert!(p.ensure_public_links_are_shared().await);
+
+    let commits = recording::commits(&address);
+    assert_eq!(commits.len(), 3, "{commits:?}");
+    for commit in &commits {
+        assert_eq!(commit.additions.len(), 1, "{commit:?}");
+        assert_eq!(commit.additions[0].data.source, "ad4m://s/public");
+        assert!(commit.removals.is_empty(), "{commit:?}");
+    }
 }
 
 #[tokio::test]
@@ -291,8 +304,23 @@ async fn other_agents_local_graphs_leave_link_and_sparql_reads() {
         rows(alice_view.sparql_query(both).unwrap()),
         vec!["ad4m://s/alice", "ad4m://s/default", "ad4m://s/shared"]
     );
-    // Naming another agent's Local graph fails, in the query or in the scope.
+    // However the query spells its `GRAPH` pattern, another agent's Local
+    // graph stays out (found by review: `$g`, a comment, a prefixed name).
     let bob_graph = local_graph_iri(&bob_did);
+    for spelled in [
+        "SELECT ?s WHERE { GRAPH $g { ?s <ad4m://p> ?o } }".to_string(),
+        "SELECT ?s WHERE { GRAPH #c\n?g { ?s <ad4m://p> ?o } }".to_string(),
+        format!(
+            "PREFIX l: <ad4m://local/> SELECT ?s WHERE {{ GRAPH l:{bob_did} {{ ?s <ad4m://p> ?o }} }}"
+        ),
+    ] {
+        let seen = alice_view.sparql_query(spelled.clone()).map(rows);
+        assert!(
+            !seen.as_ref().is_ok_and(|s| s.iter().any(|s| s == "ad4m://s/bob")),
+            "{spelled} read Bob's Local graph: {seen:?}"
+        );
+    }
+    // Naming another agent's Local graph fails, in the query or in the scope.
     assert!(alice_view
         .sparql_query(format!("SELECT ?s FROM <{bob_graph}> WHERE {{ ?s ?p ?o }}"))
         .is_err());
@@ -765,4 +793,146 @@ async fn a_notification_trigger_does_not_read_another_agents_local_graph() {
     let mut seen: Vec<&str> = rows.iter().filter_map(|r| r["s"].as_str()).collect();
     seen.sort();
     assert_eq!(seen, vec!["ad4m://s/default", "ad4m://s/shared"]);
+}
+
+/// The auto-processor reads as the agent it runs for: Bob's Local draft never
+/// reaches Alice's pass, so it cannot go to the LLM or into a shared graph.
+#[tokio::test]
+async fn the_auto_processor_does_not_gather_another_agents_local_graph() {
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+
+    let (mut p, _shapes, main) = setup_perspective_no_llm(&[]).await;
+    let (alice, _) = user("alice");
+    let (bob, _) = user("bob");
+    p.add_link(
+        Link {
+            source: "msg://draft".to_string(),
+            predicate: Some("ns://body".to_string()),
+            target: "literal:string:secret".to_string(),
+        },
+        LinkStatus::Shared,
+        None,
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    let cfg = AutoProcessorConfig {
+        processor_id: "local-graph".into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        interpretation_classes: vec!["ns://Task".into()],
+        debounce_ms: 60_000,
+        batch_min: 1,
+        batch_max: 32,
+        claim_ttl_ms: 60_000,
+        ..Default::default()
+    };
+    write_processor(&mut p, &cfg, Some(false), &main)
+        .await
+        .unwrap();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let gathered = |watcher: &WatcherState| {
+        watcher
+            .pending_for("local-graph")
+            .map(|e| e.items.len())
+            .unwrap_or(0)
+    };
+
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &alice)
+        .await;
+    assert_eq!(gathered(&watcher), 0, "Alice's pass gathered Bob's draft");
+
+    // Control: Bob's own pass gathers it.
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &bob).await;
+    assert_eq!(gathered(&watcher), 1);
+}
+
+/// "Children of a Local instance stay Local" holds when someone else creates
+/// the subject's own graph, and inside one batch.
+#[tokio::test]
+async fn a_local_subjects_own_graph_cannot_pull_its_children_out() {
+    let (alice, alice_did) = user("alice");
+    let (bob, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did])).await;
+    let local = Some(LOCAL_GRAPH_ALIAS.to_string());
+    let channel_link = |s: &str, p: &str, t: &str| Link {
+        source: s.to_string(),
+        predicate: Some(p.to_string()),
+        target: t.to_string(),
+    };
+    p.add_link(
+        channel_link("t://channel/1", "t://name", "literal:string:mine"),
+        LinkStatus::Shared,
+        None,
+        &alice,
+        local.clone(),
+    )
+    .await
+    .unwrap();
+
+    // Bob may not create the own graph of Alice's Local channel.
+    assert!(p
+        .add_link(
+            channel_link("t://x", "t://p", "t://y"),
+            LinkStatus::Shared,
+            None,
+            &bob,
+            Some("ad4m://graph/t://channel/1".to_string()),
+        )
+        .await
+        .is_err());
+    // Alice's child still follows her channel.
+    let child = p
+        .add_link(
+            channel_link("t://channel/1", "t://note", "t://note/1"),
+            LinkStatus::Shared,
+            None,
+            &alice,
+            Some("ad4m://graph/t://channel/1".to_string()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(child.graph, Some(local_graph_iri(&alice_did)));
+
+    // Inside one batch: the channel and its child commit together.
+    let batch = p.create_batch().await;
+    p.add_link(
+        channel_link("t://channel/2", "t://name", "literal:string:draft"),
+        LinkStatus::Shared,
+        Some(batch.clone()),
+        &alice,
+        local,
+    )
+    .await
+    .unwrap();
+    p.add_link(
+        channel_link("t://channel/2", "t://note", "t://note/2"),
+        LinkStatus::Shared,
+        Some(batch.clone()),
+        &alice,
+        Some("ad4m://graph/t://channel/2".to_string()),
+    )
+    .await
+    .unwrap();
+    p.commit_batch(batch, &alice).await.unwrap();
+    let stored = p
+        .get_links(&LinkQuery {
+            source: Some("t://channel/2".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 2);
+    assert!(
+        stored
+            .iter()
+            .all(|l| l.graph == Some(local_graph_iri(&alice_did))
+                && l.status == Some(LinkStatus::Local)),
+        "{stored:?}"
+    );
 }
