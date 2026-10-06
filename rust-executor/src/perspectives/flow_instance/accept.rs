@@ -13,28 +13,48 @@
 //! task cited by a finished transition would unwind the flow that consumed
 //! it.
 //!
+//! A proposal into a **terminal** state is checked for one more thing before
+//! we sign: its outputs commitment (#1104). The proposer names the run's
+//! outputs as `(class, id)` pairs and signs `outputs_hash` over their content
+//! next to the seal. We load each named output through its class on our own
+//! graph ([`load_outputs`]), refuse one that is not an instance of that
+//! class, and recompute the hash over what we read
+//! ([`check_outputs_commitment`]). An output edited since the proposal no
+//! longer hashes the same, so we decline, exactly as for a stale seal. A
+//! receipt for the run is later bound to that hash, so this is the check
+//! that makes a receipt's outputs something the quorum agreed to.
+//!
 //! At `{n: 1}` the proposer's own mint is the only vote, and the seal was
 //! computed by that replica at mint time. A dishonest solo proposer could
 //! always have written real evidence and proposed honestly, so the rule
 //! already grants them the move; the check that matters is the reviewer's,
 //! and it is the one that runs here.
 
-use super::atom::{signed_by, TransitionAtom, ACCEPTED_BY_PREDICATE, FLOW_INSTANCE_PREDICATE};
+use super::atom::{
+    check_outputs_commitment, signed_by, OutputRef, TransitionAtom, ACCEPTED_BY_PREDICATE,
+    FLOW_INSTANCE_PREDICATE,
+};
 use super::pass::{run_flow_consensus_pass, FireOutcome};
+use super::receipt::is_terminal_state;
 use super::FlowInstance;
 use crate::agent::AgentContext;
 use crate::perspectives::flow_context::{
     load_all_flow_instances, load_shacl_flows, FlowInstanceRecord,
 };
-use crate::perspectives::flow_evaluator::recompute_evidence_hash;
+use crate::perspectives::flow_evaluator::{
+    recompute_evidence_hash, run_query, EvidenceItem, RequiresQueryable,
+};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
+use std::collections::HashMap;
 
 /// Vote for a proposal as the acting DID, then sweep its instance.
 ///
 /// Refuses — writing nothing — when the proposal is not an identity-checked
-/// atom, when it leaves a state the flow is not standing in, or when its
-/// evidence seal does not recompute on this replica. Returns whatever
+/// atom, when it leaves a state the flow is not standing in, when its
+/// evidence seal does not recompute on this replica, or, into a terminal
+/// state, when its outputs commitment fails [`check_outputs_commitment`]
+/// (each failure names its own `OutputsRefusal`). Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
 /// quorum is a landed vote, not a failure.
 pub async fn accept_flow_proposal(
@@ -103,6 +123,19 @@ pub async fn accept_flow_proposal(
             "proposal {proposal_uri} cites evidence this replica cannot reproduce — refusing to co-sign; the proposal is left untouched"
         ));
     }
+
+    // Into a terminal state the vote also agrees to the run's outputs.
+    let terminal = is_terminal_state(flow, &atom.to_state);
+    let loaded = if terminal {
+        load_outputs(&*perspective, &atom.outputs).await?
+    } else {
+        HashMap::new()
+    };
+    check_outputs_commitment(&atom, terminal, |r| loaded.get(r).cloned()).map_err(|refusal| {
+        anyhow::anyhow!(
+            "proposal {proposal_uri} is refused: {refusal} — refusing to co-sign; the proposal is left untouched"
+        )
+    })?;
 
     let did = crate::agent::did_for_context(context)
         .map_err(|e| anyhow::anyhow!("accept_flow_proposal: no acting DID: {e:#}"))?;
@@ -191,6 +224,40 @@ pub async fn reject_flow_proposal(
     Ok(retracted)
 }
 
+/// What this replica's `model_query` returns for each named output, keyed by
+/// ref. A ref that is not an instance of its class is absent. The content half
+/// of [`check_outputs_commitment`], shared by the co-sign here and the
+/// proposer's own vote in [`super::propose`].
+///
+/// Each output is read with `where: { id }` through its class and no other
+/// options, the same hydration a `requires` guard reads evidence with
+/// (`flow_evaluator::run_query`), so an output the engine names out of a
+/// guard hashes the same here as it did there. A class this replica has no
+/// shape for is a query error, not an absence: the caller refuses either
+/// way, and the error says why.
+pub(crate) async fn load_outputs<Q: RequiresQueryable + ?Sized>(
+    perspective: &Q,
+    refs: &[OutputRef],
+) -> anyhow::Result<HashMap<OutputRef, EvidenceItem>> {
+    let mut loaded = HashMap::new();
+    for output in refs {
+        let input = serde_json::json!({ "where": { "id": output.id } });
+        let matched = run_query(perspective, &output.class_name, &input)
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "loading output {} as `{}` failed: {e:#}",
+                    output.id,
+                    output.class_name
+                )
+            })?;
+        if let Some(item) = matched.into_iter().find(|i| i.id == output.id) {
+            loaded.insert(output.clone(), item);
+        }
+    }
+    Ok(loaded)
+}
+
 /// Every source-link of a proposal. `Err` when the URI carries none —
 /// a typo'd or already-deleted URI must not succeed silently.
 async fn proposal_links(
@@ -210,4 +277,76 @@ async fn proposal_links(
         ));
     }
     Ok(links)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// A store that answers every `model_query` with the same instances,
+    /// whatever the query says, and records what it was asked.
+    struct Answers {
+        instances: serde_json::Value,
+        asked: Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RequiresQueryable for Answers {
+        async fn model_query(&self, class_name: &str, query_json: &str) -> anyhow::Result<String> {
+            self.asked.lock().unwrap().push((
+                class_name.to_string(),
+                serde_json::from_str(query_json).expect("query is JSON"),
+            ));
+            Ok(serde_json::json!({ "instances": self.instances, "totalCount": 1 }).to_string())
+        }
+    }
+
+    /// `load_outputs` asks for each output by id, through its class, and
+    /// keeps only an instance whose id is the one named. A store that
+    /// answers with some other instance (a `where` it did not apply, a
+    /// shape that cannot express the filter) must not make that instance's
+    /// content count as the named output's.
+    ///
+    /// Red if `load_outputs` keeps the first instance returned instead of
+    /// the one with the named id, or asks anything but `where: { id }`
+    /// through the output's class.
+    #[tokio::test]
+    async fn load_outputs_keeps_only_the_named_instance() {
+        let named = OutputRef {
+            class_name: "ns://Task".to_string(),
+            id: "ad4m://task/1".to_string(),
+        };
+        let other = Answers {
+            instances: serde_json::json!([{ "id": "ad4m://task/other", "title": "not it" }]),
+            asked: Mutex::new(Vec::new()),
+        };
+        let loaded = load_outputs(&other, std::slice::from_ref(&named))
+            .await
+            .expect("load");
+        assert!(
+            loaded.is_empty(),
+            "another instance's content is not the named output's: {loaded:?}"
+        );
+        assert_eq!(
+            other.asked.lock().unwrap().as_slice(),
+            &[(
+                "ns://Task".to_string(),
+                serde_json::json!({ "where": { "id": "ad4m://task/1" } })
+            )]
+        );
+
+        let itself = Answers {
+            instances: serde_json::json!([{ "id": "ad4m://task/1", "title": "it" }]),
+            asked: Mutex::new(Vec::new()),
+        };
+        let loaded = load_outputs(&itself, std::slice::from_ref(&named))
+            .await
+            .expect("load");
+        assert_eq!(
+            loaded.get(&named).map(|i| i.content.as_str()),
+            Some(r#"{"id":"ad4m://task/1","title":"it"}"#),
+            "control: the named instance is loaded with its content"
+        );
+    }
 }

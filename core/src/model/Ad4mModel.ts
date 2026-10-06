@@ -7,7 +7,7 @@ import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { resolveParentPredicate } from "./query-common";
+import { requireSingleParent, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -22,8 +22,9 @@ import type {
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
-  TypedQuery, IncludeExtras, IncludeOf,
+  TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
+import { isTraverseScope } from "./types";
 
 
 
@@ -392,6 +393,11 @@ export class Ad4mModel {
   author: string;
   createdAt: any;
   updatedAt: any;
+  /**
+   * Per-link rows for the entries asked for with `Query.links`, keyed as they
+   * were asked. Absent when the query did not ask for any.
+   */
+  declare __links?: LinksMap;
 
   /**
    * Backwards compatibility alias for createdAt.
@@ -990,7 +996,28 @@ export class Ad4mModel {
     const queryInput: any = {};
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      // A traversal keeps its own shape on the wire: the executor reads `ids`,
+      // and flattening it to one `id` here is how a request for a whole level
+      // would quietly become a request for one parent's children.
+      //
+      // Its fields are named rather than spread, because `model` — the class
+      // itself — is how the scope may name its predicate, and that is a
+      // constructor, not something to put in a query variable. The predicate is
+      // resolved above; what travels is the result.
+      if (isTraverseScope(query.parent)) {
+        const t = query.parent;
+        const traverse: Record<string, unknown> = {
+          ids: t.ids,
+          predicate: parentPredicate,
+        };
+        if (t.transitive !== undefined) traverse.transitive = t.transitive;
+        if (t.direction !== undefined) traverse.direction = t.direction;
+        if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+        if (t.levels !== undefined) traverse.levels = t.levels;
+        queryInput.parent = traverse;
+      } else {
+        queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      }
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
@@ -1043,7 +1070,10 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
+    if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes
     // are all resolved by the executor from the perspective's SHACL triples
@@ -1439,62 +1469,47 @@ export class Ad4mModel {
       batchId = await this.perspective.createBatch()
       batchCreatedHere = true;
     }
-    
 
-    // Check if the model has any constructor actions (required properties,
-    // flags, or properties with initial values).  Models whose properties are
-    // all optional, have no @Flag, and have no initial values produce an empty
-    // SHACL constructor, so calling createSubject would fail on the Rust side
-    // ("No SHACL constructor found").  In that case we skip createSubject
-    // entirely and let innerUpdate write the links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasConstructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag || p.initial !== undefined
-    );
 
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
     // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
-    if (hasConstructor) {
-      const initialValues = {};
-      for (const [key, value] of Object.entries(this)) {
-        if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          const propMeta = metadata.properties[key];
-          // Only offer keys with a declared, settable model property. This
-          // excludes ORM bookkeeping fields (_baseExpression, _perspective —
-          // enumerable instance fields, not model properties), HasMany
-          // relations (tracked in a separate registry, never in
-          // `metadata.properties`), and read-only properties/flags
-          // (readOnly: true). None of these have an `ad4m://setter` on the
-          // Rust side, which otherwise logs a "declares no setter" warning
-          // per key on every save().
-          if (!propMeta || propMeta.readOnly) {
-            continue;
-          }
-          if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
-            deferredExpressionProps.push(key);
-            continue;
-          }
-          initialValues[key] = value;
+    const initialValues = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+        const propMeta = metadata.properties[key];
+        // Only offer keys with a declared, settable model property. This
+        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
+        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
+          continue;
         }
+        if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+          deferredExpressionProps.push(key);
+          continue;
+        }
+        initialValues[key] = value;
       }
-
-      const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-      await this.perspective.createSubject(
-        className,
-        this._baseExpression,
-        initialValues,
-        batchId
-      );
     }
 
-    // Set properties and relations via innerUpdate.
-    // When createSubject was skipped (no constructor actions), we must enable
-    // property writing so that scalar values are persisted as links.
-    await this.innerUpdate(!hasConstructor, batchId)
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+    await this.perspective.createSubject(
+      className,
+      this._baseExpression,
+      initialValues,
+      batchId
+    );
+
+    // Relations via innerUpdate; createSubject wrote the scalar properties.
+    await this.innerUpdate(false, batchId)
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
@@ -1880,9 +1895,10 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });
@@ -1898,9 +1914,10 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });

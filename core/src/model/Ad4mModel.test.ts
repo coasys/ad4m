@@ -1449,14 +1449,13 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(callArg).toHaveProperty("pageNumber", 1);
   });
 
-  it("paginateSubscribe must not deliver a stale re-fetch over a newer one", async () => {
-    // Two server dispatches each trigger a re-fetch, and the executor can
-    // answer them out of order: the re-fetch dispatched before a save
-    // committed (1 result) resolves AFTER the one that saw the save
-    // (2 results). Without ordering, the consumer's last page silently rolls
-    // back to the stale state and no later dispatch corrects it — the exact
-    // shape of the flaky "Paginate callback did not see second model save"
-    // failure in tests/js prolog-and-literals.
+  it("paginateSubscribe coalesces overlapping dispatches into a trailing fetch", async () => {
+    // Two server dispatches arrive while the first re-fetch is still in
+    // flight. A generation counter (#1020) would start both and could keep
+    // the one that read 1 model while dropping the one that read 2. The
+    // server then has nothing further to dispatch — "Paginate callback did
+    // not see second model save". Coalesce: one in-flight read, then a
+    // trailing fetch after the last dispatch.
     const mockSubscriptionId = "paginate-stale-sub";
     let capturedCallback: ((result: any) => void) | null = null;
 
@@ -1473,9 +1472,8 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
       disposeQuerySubscription: jest.fn().mockResolvedValue(true),
     };
 
-    // First call is the initial fetch (resolves immediately, empty). The two
-    // update-triggered re-fetches get manually controlled promises so the
-    // test can resolve them in reverse order.
+    // First call is the initial fetch (resolves immediately, empty). Later
+    // re-fetches are deferred so the test can see coalescing.
     const deferred: Array<(v: any) => void> = [];
     let call = 0;
     const mockPerspective = {
@@ -1505,27 +1503,245 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     const builder = StaleTest.query(mockPerspective);
     await builder.paginateSubscribe(10, 1, userCallback);
 
-    // Two dispatches arrive back to back; both re-fetches are now in flight.
     capturedCallback!({});
     capturedCallback!({});
     await new Promise(r => setTimeout(r, 10));
-    expect(deferred.length).toBe(2);
+    expect(deferred.length).toBe(1);
 
-    // The NEWER re-fetch resolves first, with both models…
-    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
-    await new Promise(r => setTimeout(r, 10));
-    // …then the STALE one resolves, with only the first model.
+    // In-flight read saw only the first model.
     deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
     await new Promise(r => setTimeout(r, 10));
+    // Trailing fetch started because a dispatch arrived during that read.
+    expect(deferred.length).toBe(2);
 
-    // The stale result must have been dropped: last delivered page is the
-    // 2-model one, and it was delivered exactly once.
-    expect(userCallback).toHaveBeenCalledTimes(1);
+    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
     const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
     expect(lastArg.totalCount).toBe(2);
     expect(lastArg.results.length).toBe(2);
 
     builder.dispose();
+  });
+
+  it("paginateSubscribe still runs the trailing fetch when the in-flight read rejects", async () => {
+    const mockSubscriptionId = "paginate-reject-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "RejectTest" })
+    class RejectTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://reject" })
+      type: string = "test://reject";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = RejectTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    deferred[0].reject(new Error("re-fetch failed"));
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(2);
+
+    deferred[1].resolve({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(userCallback).toHaveBeenCalled();
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe handles a rejection from the trailing fetch", async () => {
+    // The trailing fetch is started from the in-flight read's finally block,
+    // detached from any caller. If it also rejects, only its own .catch()
+    // observes the error; without one it is an unhandled rejection.
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const mockSubscriptionId = "paginate-reject-twice-sub";
+      let capturedCallback: ((result: any) => void) | null = null;
+
+      const mockClient = {
+        modelSubscribe: jest.fn().mockResolvedValue({
+          subscriptionId: mockSubscriptionId,
+          result: { instances: [], totalCount: 0 },
+        }),
+        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+          capturedCallback = cb;
+          return () => {};
+        }),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      };
+
+      const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+      let call = 0;
+      const mockPerspective = {
+        uuid: "test-uuid",
+        client: mockClient,
+        modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+          return mockClient.modelSubscribe("test-uuid", className, queryJson);
+        }),
+        modelQuery: jest.fn().mockImplementation(() => {
+          call++;
+          if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+          return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+        }),
+      } as any;
+
+      const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+      @Model({ name: "RejectTwiceTest" })
+      class RejectTwiceTest extends Ad4mModel {
+        @Flag({ through: "test://type", value: "test://reject-twice" })
+        type: string = "test://reject-twice";
+        @Property({ through: "test://name" })
+        name: string = "";
+      }
+
+      const userCallback = jest.fn();
+      const builder = RejectTwiceTest.query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, userCallback);
+
+      capturedCallback!({});
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+
+      deferred[0].reject(new Error("in-flight read failed"));
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(2);
+
+      deferred[1].reject(new Error("trailing read failed"));
+      await new Promise(r => setTimeout(r, 10));
+
+      const logged = errorSpy.mock.calls
+        .filter(args => args[0] === "Paginate subscription error:")
+        .map(args => (args[1] as Error).message);
+      expect(logged).toEqual(["in-flight read failed", "trailing read failed"]);
+      expect(userCallback).not.toHaveBeenCalled();
+
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("paginateSubscribe delivers nothing and starts no trailing fetch after dispose", async () => {
+    // dispose() while a read is in flight and a trailing fetch is pending.
+    const mockSubscriptionId = "paginate-dispose-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeMidReadTest" })
+    class DisposeMidReadTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://dispose-mid-read" })
+      type: string = "test://dispose-mid-read";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = DisposeMidReadTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    builder.dispose();
+
+    // The in-flight read's finally block still sees pending === true, so the
+    // coalescing log must not claim a trailing fetch that the disposed guard
+    // then drops.
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(userCallback).not.toHaveBeenCalled();
+      expect(deferred.length).toBe(1);
+      expect(
+        debugSpy.mock.calls.filter(args =>
+          String(args[0]).includes("coalesced into one trailing fetch")
+        )
+      ).toEqual([]);
+
+      // A dispatch that races the unsubscribe starts no read either.
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+    } finally {
+      debugSpy.mockRestore();
+    }
   });
 });
 
@@ -2593,20 +2809,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2689,7 +2892,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2698,7 +2901,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
     });
   });
@@ -2718,20 +2920,19 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       @HasMany({ through: "test://has_tag" })
       tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
     }
 
-    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
       const perspective = makePerspective();
 
-      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      const initialValues = perspective.createSubject.mock.calls[0][2];
-      expect(initialValues).toEqual({ title: "hello" });
-      expect(initialValues).not.toHaveProperty("_baseExpression");
-      expect(initialValues).not.toHaveProperty("_perspective");
-      expect(initialValues).not.toHaveProperty("type");
-      expect(initialValues).not.toHaveProperty("tags");
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
     });
   });
 
@@ -3216,5 +3417,152 @@ describe("Ordered relations", () => {
     const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
     const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
     expect(tasks!.ordering).toBe("linkedList");
+  });
+});
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// includeUnverified — opt-in to links whose signature did not verify (#1113)
+// ──────────────────────────────────────────────────────────
+
+describe("includeUnverified — wire format", () => {
+  @Model({ name: "UnverifiedWireRecipe" })
+  class UnverifiedWireRecipe extends Ad4mModel {
+    @Flag({ through: "uv://type", value: "uv://recipe" })
+    type: string = "";
+
+    @Property({ through: "uv://name" })
+    name: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so the executor's default applies", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
+  });
+
+  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
+      includeUnverified: true,
+    });
+    expect(JSON.parse(queryJson).includeUnverified).toBe(true);
+
+    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
+    expect((builder as any).queryParams.includeUnverified).toBe(true);
   });
 });

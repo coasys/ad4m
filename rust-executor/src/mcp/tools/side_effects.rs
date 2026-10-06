@@ -106,6 +106,8 @@ pub(crate) const STATIC_TOOL_SIDE_EFFECTS: &[(&str, SideEffect)] = &[
     ("flow_actions", SideEffect::Read),
     ("flow_proposal_accept", SideEffect::Write),
     ("flow_proposal_reject", SideEffect::Write),
+    // Enumerates receipt-verified outputs; verification writes nothing.
+    ("flow_valid_outputs", SideEffect::Read),
     // ── subscriptions.rs ────────────────────────────────────────────
     // Both tools construct a query string / return config metadata; the
     // actual subscription is a separate transport-level concern outside

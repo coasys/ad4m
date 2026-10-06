@@ -3,6 +3,10 @@
  * (or resolves to) `true`.  Throws a descriptive error on timeout.
  *
  * Works with both sync and async condition functions.
+ *
+ * Kept next to utils' `pollUntil` on purpose: an exception from `condition`
+ * fails immediately here instead of counting as "not yet", so a broken query
+ * in the model tests surfaces at once rather than as a timeout.
  */
 export async function waitUntil(
   condition: () => boolean | Promise<boolean>,

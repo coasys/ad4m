@@ -6,20 +6,20 @@ use super::projection::{
     build_projection_order_clause, build_projection_where_patterns, resolve_projections,
 };
 use super::shape::parse_shape_from_json;
-use super::sparql_builder::build_instance_sparql;
+use super::sparql_builder::{build_instance_sparql, LinkGuard};
 use super::test_helpers::{
     evaluate_getters_batch_from_json, execute_model_query_from_json, StaticShapeResolver,
 };
-use super::types::{ModelQueryInput, ModelShape, ShapeProperty};
+use super::types::{ModelQueryInput, ModelShape, Scope, ScopeDirection, ShapeProperty};
 use super::utils::literal_percent_encode;
 use super::*;
 use crate::perspectives::sparql_store::SparqlStore;
-use crate::types::{DecoratedExpressionProof, DecoratedLinkExpression, Link};
+use crate::types::{ExpressionProof, Link, LinkExpression};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
-fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
+fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    LinkExpression {
         author: "did:key:test123".to_string(),
         timestamp: ts.to_string(),
         data: Link {
@@ -27,13 +27,13 @@ fn make_link(source: &str, predicate: &str, target: &str, ts: &str) -> Decorated
             predicate: Some(predicate.to_string()),
             target: target.to_string(),
         },
-        proof: DecoratedExpressionProof {
+        proof: ExpressionProof {
             key: "key".to_string(),
             signature: "sig".to_string(),
-            valid: Some(true),
-            invalid: Some(false),
         },
-        status: None,
+        // The store refuses status-less inserts; Shared is the plain case,
+        // `make_link_with_status` overrides for the local-property tests.
+        status: Some(crate::types::LinkStatus::Shared),
     }
 }
 
@@ -44,10 +44,46 @@ fn make_link_with_status(
     target: &str,
     ts: &str,
     status: crate::types::LinkStatus,
-) -> DecoratedLinkExpression {
+) -> LinkExpression {
     let mut link = make_link(source, predicate, target, ts);
     link.status = Some(status);
     link
+}
+
+/// `query` with the #1113 opt-in set, unless it sets the flag itself.
+///
+/// `make_link` proofs are `key`/`sig` and its timestamps are `"1"`, `"2"`…, so
+/// no fixture link verifies and the default `proof_valid_filter` withholds every
+/// row. The tests that use these fixtures are about hydration, filtering and
+/// paging, not signatures, so they read through [`fixture_query`] /
+/// [`fixture_query_from_json`] with `include_unverified` (which `include` and
+/// projection sub-queries inherit). The default itself is tested against real
+/// signatures in `proof_valid_tests.rs`, and through the SDK in
+/// `tests/js/tests/model/model-unverified-links.test.ts`.
+fn with_unverified(query: &ModelQueryInput) -> ModelQueryInput {
+    let mut query = query.clone();
+    if query.include_unverified.is_none() {
+        query.include_unverified = Some(true);
+    }
+    query
+}
+
+async fn fixture_query(
+    store: &SparqlStore,
+    shape: &ModelShape,
+    query: &ModelQueryInput,
+    resolver: &dyn super::types::ShapeResolver,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    super::query::execute_model_query(store, shape, &with_unverified(query), resolver).await
+}
+
+async fn fixture_query_from_json(
+    store: &SparqlStore,
+    class_name: &str,
+    query: &ModelQueryInput,
+    shape_json: &str,
+) -> Result<super::types::ModelQueryResult, deno_core::anyhow::Error> {
+    execute_model_query_from_json(store, class_name, &with_unverified(query), shape_json).await
 }
 
 const LOCAL_CACHE_SHAPE_JSON: &str = r#"{
@@ -106,7 +142,7 @@ async fn local_property_hydrates_only_from_local_links() {
         ))
         .unwrap();
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Cache",
         &ModelQueryInput::default(),
@@ -143,7 +179,7 @@ async fn local_property_hydrates_only_from_local_links() {
         ))
         .unwrap();
 
-    let result2 = execute_model_query_from_json(
+    let result2 = fixture_query_from_json(
         &store2,
         "Cache",
         &ModelQueryInput::default(),
@@ -202,7 +238,7 @@ async fn test_full_model_query_with_where_filter() {
 
     // Query without WHERE - should find 1 instance
     let query_no_where = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Recipe", &query_no_where, shape_json)
+    let result = fixture_query_from_json(&store, "Recipe", &query_no_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -225,7 +261,7 @@ async fn test_full_model_query_with_where_filter() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result2 = execute_model_query_from_json(&store, "Recipe", &query_with_where, shape_json)
+    let result2 = fixture_query_from_json(&store, "Recipe", &query_with_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -290,7 +326,7 @@ async fn test_where_clause_raw_uri_property() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -359,7 +395,7 @@ async fn test_where_clause_literal_prop_with_raw_uri_value() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Todo", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Todo", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -507,7 +543,7 @@ async fn test_shared_predicate_relations_all_populated_via_store() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
         .await
         .unwrap();
 
@@ -635,7 +671,7 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Parent", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Parent", &query, shape_json)
         .await
         .unwrap();
 
@@ -661,6 +697,7 @@ async fn test_shared_predicate_with_unique_predicates_no_cross_contamination() {
 #[tokio::test]
 async fn test_build_projection_where_patterns_empty_when_no_clause() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: true,
         target_class_name: None,
@@ -669,7 +706,10 @@ async fn test_build_projection_where_patterns_empty_when_no_clause() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    assert_eq!(build_projection_where_patterns(&proj, &resolver), "");
+    assert_eq!(
+        build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY),
+        ""
+    );
 }
 
 #[tokio::test]
@@ -680,6 +720,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         WhereCondition::String("signal://abc".to_string()),
     );
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -688,7 +729,7 @@ async fn test_build_projection_where_patterns_id_filter() {
         order: None,
     };
     let resolver = super::test_helpers::StaticShapeResolver::new();
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("FILTER(STR(?t) = \"signal://abc\")"),
         "expected id IRI filter, got: {patterns}"
@@ -713,6 +754,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         WhereCondition::String("like".to_string()),
     );
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: true,
         target_class_name: Some("Signal".to_string()),
@@ -725,7 +767,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
         "Signal",
         parse_shape_from_json(target_shape_json, "Signal").unwrap(),
     );
-    let patterns = build_projection_where_patterns(&proj, &resolver);
+    let patterns = build_projection_where_patterns(&proj, &resolver, LinkGuard::ANY);
     assert!(
         patterns.contains("?t <signal://type>"),
         "expected triple pattern for signal://type, got: {patterns}"
@@ -739,6 +781,7 @@ async fn test_build_projection_where_patterns_with_target_shape() {
 #[tokio::test]
 async fn test_build_projection_order_clause_empty_when_no_order() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -752,6 +795,7 @@ async fn test_build_projection_order_clause_empty_when_no_order() {
 #[tokio::test]
 async fn test_build_projection_order_clause_by_id() {
     let proj = ProjectionInput {
+        transitive: false,
         from: "signals".to_string(),
         count: false,
         target_class_name: None,
@@ -831,6 +875,7 @@ async fn test_resolve_projections_count() {
     projections.insert(
         "$itemCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: true,
             target_class_name: None,
@@ -842,9 +887,18 @@ async fn test_resolve_projections_count() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let count_a = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -877,6 +931,7 @@ async fn test_resolve_projections_list() {
     projections.insert(
         "$items".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: false,
             target_class_name: None,
@@ -888,9 +943,18 @@ async fn test_resolve_projections_list() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let items = instances[0]["$items"]
@@ -922,6 +986,7 @@ async fn test_resolve_projections_scalar() {
     projections.insert(
         "$firstItem".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: false,
             target_class_name: None,
@@ -933,9 +998,18 @@ async fn test_resolve_projections_scalar() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let val = &instances[0]["$firstItem"];
@@ -959,6 +1033,7 @@ async fn test_resolve_projections_count_zero_when_no_links() {
     projections.insert(
         "$itemCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "items".to_string(),
             count: true,
             target_class_name: None,
@@ -970,9 +1045,18 @@ async fn test_resolve_projections_count_zero_when_no_links() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$itemCount"].as_u64().unwrap_or(999);
@@ -1026,6 +1110,7 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "reactions".to_string(),
             count: true,
             target_class_name: None,
@@ -1037,9 +1122,18 @@ async fn test_resolve_projections_where_filter_by_plain_iri() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$likeCount"].as_u64().unwrap_or(999);
@@ -1090,6 +1184,7 @@ async fn test_resolve_projections_where_filter_by_author() {
     projections.insert(
         "$mySignalCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: true,
             target_class_name: None,
@@ -1101,9 +1196,18 @@ async fn test_resolve_projections_where_filter_by_author() {
 
     {
         let _resolver = super::test_helpers::StaticShapeResolver::new();
-        resolve_projections(&store, &mut instances, &projections, &shape, &_resolver, 0)
-            .await
-            .unwrap();
+        resolve_projections(
+            &store,
+            &mut instances,
+            &projections,
+            &shape,
+            &_resolver,
+            0,
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     let count = instances[0]["$mySignalCount"].as_u64().unwrap_or(999);
@@ -1381,7 +1485,8 @@ async fn test_evaluate_getters_where_compiled_literal_filter() {
     };
 
     let mut instances = vec![serde_json::json!({"id": board})];
-    let eval_result = evaluate_getters(&store, &mut instances, &shape, None, true);
+    let eval_result =
+        evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true));
     assert!(
         eval_result.is_ok(),
         "evaluate_getters should succeed: {:?}",
@@ -1684,7 +1789,7 @@ async fn test_deep_query_defaults_to_true() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert!(!result.instances.is_empty(), "should find instance");
@@ -1738,7 +1843,7 @@ async fn test_deep_query_false_skips_property_getters() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert!(!result.instances.is_empty());
@@ -1807,7 +1912,7 @@ async fn test_getters_run_after_pagination() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Message", &query_input, shape_json)
+    let result = fixture_query_from_json(&store, "Message", &query_input, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "should return 2 instances");
@@ -1952,7 +2057,7 @@ async fn test_where_filter_signed_expression_string() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(
@@ -2031,7 +2136,7 @@ async fn test_where_filter_signed_expression_no_matches() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["activeChildren"].as_array().unwrap();
     assert_eq!(result.len(), 0, "Should be empty when no matches");
@@ -2158,7 +2263,7 @@ async fn test_where_filter_multiple_conditions() {
     };
 
     let mut instances = vec![json!({"id": board})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["highPriActive"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only task_hi should match: {:?}", result);
@@ -2230,7 +2335,7 @@ async fn test_where_filter_missing_property_on_target() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["active"].as_array().unwrap();
     assert_eq!(result.len(), 1, "Only child_with should match");
@@ -2300,7 +2405,7 @@ async fn test_where_filter_plain_literal_string() {
     };
 
     let mut instances = vec![json!({"id": parent})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let result = instances[0]["redChildren"].as_array().unwrap();
     assert_eq!(result.len(), 1);
@@ -2393,7 +2498,7 @@ async fn test_where_filter_on_multiple_instances() {
     };
 
     let mut instances = vec![json!({"id": board1}), json!({"id": board2})];
-    evaluate_getters(&store, &mut instances, &shape, None, true).unwrap();
+    evaluate_getters(&store, &mut instances, &shape, None, true, None, Some(true)).unwrap();
 
     let active1 = instances[0]["activeTasks"].as_array().unwrap();
     assert_eq!(active1.len(), 1, "board1 should have 1 active task");
@@ -2481,7 +2586,7 @@ async fn test_full_model_query_signed_expression_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -2558,7 +2663,7 @@ async fn test_full_model_query_signed_expression_numeric_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -2611,7 +2716,7 @@ async fn test_full_model_query_signed_expression_boolean_where() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Thing", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Thing", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
@@ -2679,7 +2784,7 @@ async fn test_full_model_query_where_string_array_in() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 2, "active and pending should match");
@@ -2740,7 +2845,7 @@ async fn test_full_model_query_where_ops_not() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Item", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Item", &query, shape_json)
         .await
         .unwrap();
     assert_eq!(result.instances.len(), 1);
@@ -3044,7 +3149,7 @@ async fn test_build_instance_sparql_integration_getter_excluded_from_results() {
     }"#;
 
     let query = ModelQueryInput::default();
-    let result = execute_model_query_from_json(&store, "Channel", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Channel", &query, shape_json)
         .await
         .unwrap();
 
@@ -3116,7 +3221,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3138,7 +3243,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3160,7 +3265,7 @@ async fn test_full_model_query_ops_gt_lt_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3217,7 +3322,7 @@ async fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3239,7 +3344,7 @@ async fn test_full_model_query_ops_gte_lte_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3291,7 +3396,7 @@ async fn test_full_model_query_ops_not_string_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3341,7 +3446,7 @@ async fn test_full_model_query_ops_not_array_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Thing",
         &ModelQueryInput {
@@ -3398,7 +3503,7 @@ async fn test_full_model_query_ops_with_pagination_pushed() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -3452,7 +3557,7 @@ async fn test_full_model_query_ops_contains_sparql_push() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -3514,7 +3619,7 @@ async fn test_full_model_query_ops_contains_with_pagination() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -3614,7 +3719,7 @@ async fn test_plain_literal_where_paginate_count() {
         "status".to_string(),
         WhereCondition::String("active".to_string()),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3636,7 +3741,7 @@ async fn test_plain_literal_where_paginate_count() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Beta");
     assert_eq!(result.instances[0]["status"].as_str().unwrap(), "active");
 
-    let result2 = execute_model_query_from_json(
+    let result2 = fixture_query_from_json(
         &store,
         "Task",
         &ModelQueryInput {
@@ -3716,7 +3821,7 @@ async fn test_plain_literal_contains_filter() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Msg",
         &ModelQueryInput {
@@ -3791,7 +3896,7 @@ async fn test_perf_large_dataset_paginated_query() {
     );
 
     let start = std::time::Instant::now();
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -3898,7 +4003,7 @@ async fn test_perf_flux_message_parent_scope_paginated() {
 
     // Query: get 30 most recent messages from channel-2 (ORDER BY createdAt DESC)
     let start = std::time::Instant::now();
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Message",
         &ModelQueryInput {
@@ -4085,7 +4190,7 @@ async fn test_full_model_query_order_by_property_string() {
     }"#;
 
     // ORDER BY name ASC with limit (triggers SPARQL pagination)
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4104,7 +4209,7 @@ async fn test_full_model_query_order_by_property_string() {
     assert_eq!(result.instances[1]["name"].as_str().unwrap(), "Bob");
 
     // ORDER BY name DESC with limit
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person",
         &ModelQueryInput {
@@ -4162,7 +4267,7 @@ async fn test_full_model_query_order_by_property_string_signed_envelope() {
         "relations": {}
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Person2",
         &ModelQueryInput {
@@ -4212,7 +4317,7 @@ async fn test_full_model_query_order_by_property_number() {
     }"#;
 
     // ORDER BY score ASC, limit 3 → should get 1, 5, 42
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -4234,7 +4339,7 @@ async fn test_full_model_query_order_by_property_number() {
     assert_eq!(got_scores, vec![1.0, 5.0, 42.0], "ASC numeric sort");
 
     // ORDER BY score DESC, limit 2 → should get 999, 100
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -4357,6 +4462,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     projections.insert(
         "$totalLikeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: true,
             target_class_name: Some("Signal".to_string()),
@@ -4366,9 +4472,18 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances, &projections, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances,
+        &projections,
+        &shape,
+        &resolver,
+        0,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
 
     let count = instances[0]["$totalLikeCount"].as_u64().unwrap_or(999);
     assert_eq!(
@@ -4382,6 +4497,7 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
     projections2.insert(
         "$myLikeSignal".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "signals".to_string(),
             count: false,
             target_class_name: Some("Signal".to_string()),
@@ -4391,9 +4507,18 @@ async fn test_resolve_projections_where_filter_via_target_shape_property() {
         },
     );
 
-    resolve_projections(&store, &mut instances2, &projections2, &shape, &resolver, 0)
-        .await
-        .unwrap();
+    resolve_projections(
+        &store,
+        &mut instances2,
+        &projections2,
+        &shape,
+        &resolver,
+        0,
+        None,
+        Some(true),
+    )
+    .await
+    .unwrap();
 
     let got = &instances2[0]["$myLikeSignal"];
     assert_eq!(
@@ -4463,6 +4588,7 @@ async fn test_sort_by_projection_count_desc() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,
@@ -4472,7 +4598,7 @@ async fn test_sort_by_projection_count_desc() {
         },
     );
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -4530,6 +4656,7 @@ async fn test_sort_by_projection_count_asc() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,
@@ -4539,7 +4666,7 @@ async fn test_sort_by_projection_count_asc() {
         },
     );
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -4602,6 +4729,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     projections.insert(
         "$likeCount".to_string(),
         ProjectionInput {
+            transitive: false,
             from: "likes".to_string(),
             count: true,
             target_class_name: None,
@@ -4612,7 +4740,7 @@ async fn test_sort_by_projection_count_with_pagination() {
     );
 
     // Ask for page 1 (top-2 by likes DESC): should be 10 and 8
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Post",
         &ModelQueryInput {
@@ -4720,7 +4848,7 @@ async fn test_sort_by_relation_property_asc() {
     resolver.register("Post", post_shape.clone());
     resolver.register("Location", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -4795,7 +4923,7 @@ async fn test_sort_by_relation_property_desc() {
     resolver.register("Post2", post_shape.clone());
     resolver.register("Location2", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -4888,7 +5016,7 @@ async fn test_sort_by_relation_property_with_signed_envelope_literal() {
     resolver.register("Post3", post_shape.clone());
     resolver.register("Location3", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -4993,7 +5121,7 @@ async fn test_sort_by_relation_property_with_missing_relation() {
     resolver.register("Post3", post_shape.clone());
     resolver.register("Location3", loc_shape);
 
-    let result = super::query::execute_model_query(
+    let result = fixture_query(
         &store,
         &post_shape,
         &ModelQueryInput {
@@ -5184,7 +5312,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5211,7 +5339,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5241,7 +5369,7 @@ async fn test_persistent_store_typed_literal_comparison() {
             ..Default::default()
         }),
     );
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Scored",
         &ModelQueryInput {
@@ -5299,8 +5427,6 @@ async fn test_persistent_store_typed_literal_comparison() {
 
 #[tokio::test]
 async fn test_model_query_from_js_wire_format() {
-    use super::query::execute_model_query;
-
     let store = SparqlStore::new(None).unwrap();
     let ts = "1700000000000";
 
@@ -5347,7 +5473,7 @@ async fn test_model_query_from_js_wire_format() {
     eprintln!("[wire] parsed query: {:?}", query_input);
 
     let (resolver, shape) = StaticShapeResolver::from_json("TestPost", shape_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5362,7 +5488,7 @@ async fn test_model_query_from_js_wire_format() {
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
     eprintln!("[wire] parsed not query: {:?}", query_input);
 
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5375,7 +5501,7 @@ async fn test_model_query_from_js_wire_format() {
     // between from JS wire format
     let wire_json = r#"{"where": {"viewCount": {"between": [20, 40]}}, "deepQuery": true}"#;
     let query_input: ModelQueryInput = serde_json::from_str(wire_json).unwrap();
-    let result = execute_model_query(&store, shape.as_ref(), &query_input, &resolver)
+    let result = fixture_query(&store, shape.as_ref(), &query_input, &resolver)
         .await
         .unwrap();
     assert_eq!(
@@ -5438,7 +5564,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
 
     // Identical body text must NOT collapse the two instances into one.
     let result =
-        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
             .await
             .unwrap();
     assert_eq!(
@@ -5476,7 +5602,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result2 = execute_model_query_from_json(&store, "Message", &query_where, shape_json)
+    let result2 = fixture_query_from_json(&store, "Message", &query_where, shape_json)
         .await
         .unwrap();
     assert_eq!(
@@ -5508,7 +5634,7 @@ async fn test_duplicate_literal_property_values_keep_instances_distinct() {
         .unwrap();
 
     let result3 =
-        execute_model_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
+        fixture_query_from_json(&store, "Message", &ModelQueryInput::default(), shape_json)
             .await
             .unwrap();
     let body_by_id: HashMap<String, String> = result3
@@ -5927,7 +6053,7 @@ async fn test_or_where_filters_in_sparql_with_order_and_limit() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .unwrap();
 
@@ -5992,7 +6118,7 @@ async fn test_not_where_filters_in_sparql() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .unwrap();
 
@@ -6052,7 +6178,7 @@ async fn test_and_with_two_conditions_on_one_property() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .expect("the clause must compile to valid SPARQL");
 
@@ -6117,7 +6243,7 @@ async fn test_not_on_a_property_also_constrained_outside() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "Post", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Post", &query, shape_json)
         .await
         .expect("the clause must compile to valid SPARQL");
 
@@ -6247,7 +6373,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
     };
 
     // "has no comments at all"
-    let none_any = super::query::execute_model_query(
+    let none_any = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(None, Some(BTreeMap::new())),
@@ -6258,7 +6384,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
     assert_eq!(ids(&none_any), vec!["we://post/3".to_string()]);
 
     // "has at least one comment"
-    let some_any = super::query::execute_model_query(
+    let some_any = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(Some(BTreeMap::new()), None),
@@ -6273,7 +6399,7 @@ async fn test_relation_quantifiers_filter_by_linked_records() {
 
     // "has a comment whose body is spam" — the nested clause names a property
     // of Comment, so it only resolves because the target class is known.
-    let some_spam = super::query::execute_model_query(
+    let some_spam = fixture_query(
         &store,
         post_shape.as_ref(),
         &quantifier(
@@ -6380,7 +6506,7 @@ async fn test_getter_relation_with_target_class_hydrates_via_include() {
         ..Default::default()
     };
 
-    let result = execute_model_query_from_json(&store, "TextBlock", &query, shape_json)
+    let result = fixture_query_from_json(&store, "TextBlock", &query, shape_json)
         .await
         .unwrap();
 
@@ -6521,7 +6647,7 @@ async fn test_relation_quantifier_requires_the_target_class() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, &post_shape, &query, &resolver)
+    let result = fixture_query(&store, &post_shape, &query, &resolver)
         .await
         .unwrap();
 
@@ -6657,10 +6783,9 @@ async fn test_polymorphic_include_hydrates_each_child_as_its_own_class() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 2, "both children hydrate");
@@ -6783,10 +6908,9 @@ async fn test_polymorphic_include_hydrates_the_most_derived_class() {
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     assert_eq!(children.len(), 1, "one link, one child");
@@ -6906,10 +7030,9 @@ async fn test_polymorphic_include_returns_one_member_per_link_for_a_multi_class_
         ..Default::default()
     };
 
-    let result =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .unwrap();
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
 
     let children = result.instances[0]["children"].as_array().unwrap();
     // The point of the test: two readings, one link, one member. Hydrating the
@@ -6998,10 +7121,9 @@ async fn test_limit_on_a_polymorphic_include_is_rejected() {
         ..Default::default()
     };
 
-    let err =
-        super::query::execute_model_query(&store, collection_shape.as_ref(), &query, &resolver)
-            .await
-            .expect_err("a limit that cannot be honoured must not be dropped in silence");
+    let err = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .expect_err("a limit that cannot be honoured must not be dropped in silence");
     let msg = err.to_string();
     assert!(msg.contains("children"), "names the relation: {msg}");
     assert!(msg.contains("limit"), "names what was refused: {msg}");
@@ -7105,7 +7227,7 @@ async fn test_polymorphic_include_prefers_a_class_the_caller_named() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
         .await
         .unwrap();
 
@@ -7223,7 +7345,7 @@ async fn test_preferring_classes_does_not_drop_the_ones_not_named() {
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, feed_shape.as_ref(), &query, &resolver)
+    let result = fixture_query(&store, feed_shape.as_ref(), &query, &resolver)
         .await
         .unwrap();
 
@@ -7291,7 +7413,7 @@ async fn test_limit_on_a_polymorphic_include_is_rejected_even_with_no_targets() 
             ..Default::default()
         };
 
-        let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+        let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
             .await
             .expect_err("an empty relation must not make an unanswerable query answerable");
         let msg = err.to_string();
@@ -7331,7 +7453,7 @@ async fn test_untyped_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
@@ -7451,7 +7573,7 @@ async fn test_polymorphic_reverse_include_hydrates_each_source_as_its_own_class(
         ..Default::default()
     };
 
-    let result = super::query::execute_model_query(&store, block_shape.as_ref(), &query, &resolver)
+    let result = fixture_query(&store, block_shape.as_ref(), &query, &resolver)
         .await
         .unwrap();
 
@@ -7512,7 +7634,7 @@ async fn test_untyped_reverse_include_without_polymorphic_explains_itself() {
         ..Default::default()
     };
 
-    let err = super::query::execute_model_query(&store, shape.as_ref(), &query, &resolver)
+    let err = fixture_query(&store, shape.as_ref(), &query, &resolver)
         .await
         .expect_err("must not silently succeed");
     let msg = err.to_string();
@@ -7564,10 +7686,9 @@ async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() 
     }"#;
 
     // Class-wide read: the batch mixes an unparseable id with a real IRI.
-    let result =
-        execute_model_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
-            .await
-            .expect("a non-IRI store id must not make the query fail to parse");
+    let result = fixture_query_from_json(&store, "Recipe", &ModelQueryInput::default(), shape_json)
+        .await
+        .expect("a non-IRI store id must not make the query fail to parse");
     assert_eq!(
         result.instances.len(),
         2,
@@ -7590,7 +7711,7 @@ async fn legacy_non_iri_store_id_round_trips_through_add_link_and_model_query() 
         where_clause: Some(where_clause),
         ..Default::default()
     };
-    let result = execute_model_query_from_json(&store, "Recipe", &query, shape_json)
+    let result = fixture_query_from_json(&store, "Recipe", &query, shape_json)
         .await
         .expect("where-by-id on a non-IRI id must not fail to parse");
     assert_eq!(result.instances.len(), 1, "exactly the legacy row");
@@ -7673,7 +7794,7 @@ async fn test_ordered_collection_hydrates_in_crdt_order() {
         }
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Collection",
         &ModelQueryInput::default(),
@@ -7729,7 +7850,7 @@ async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
         }
     }"#;
 
-    let result = execute_model_query_from_json(
+    let result = fixture_query_from_json(
         &store,
         "Collection",
         &ModelQueryInput::default(),
@@ -7745,4 +7866,1749 @@ async fn test_ordered_collection_without_entries_falls_back_to_timestamps() {
         .map(|v| v.as_str().unwrap())
         .collect();
     assert_eq!(children, vec!["we://x/a", "we://x/b"]);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded traversal (Scope::Traverse)
+// ---------------------------------------------------------------------------
+
+const COMMENT_SHAPE_JSON: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A thread three levels deep:
+///
+/// ```text
+/// root ── c1 ── r1 ── rr1
+///   │      └─── r2
+///   ├──── c2
+///   └──── c3
+/// ```
+///
+/// Timestamps ascend in declaration order so a `createdAt` sort is deterministic.
+fn comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let edges = [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://root", "we://c3"),
+        ("we://c1", "we://r1"),
+        ("we://c1", "we://r2"),
+        ("we://r1", "we://rr1"),
+    ];
+    let mut t = 1000;
+    for (parent, child) in edges {
+        t += 1;
+        store
+            .add_link(&make_link(
+                parent,
+                "we://comment",
+                child,
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "ad4m://type",
+                "we://Comment",
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+        store
+            .add_link(&make_link(
+                child,
+                "we://text",
+                &format!("literal:string:{}", child.trim_start_matches("we://")),
+                &format!("2026-01-01T00:00:{t:04}Z"),
+            ))
+            .unwrap();
+    }
+    store
+}
+
+fn traverse_scope(
+    ids: &[&str],
+    transitive: bool,
+    direction: ScopeDirection,
+    limit_per_anchor: Option<usize>,
+) -> Scope {
+    Scope::Traverse {
+        ids: ids.iter().map(|s| s.to_string()).collect(),
+        predicate: "we://comment".to_string(),
+        transitive,
+        direction,
+        limit_per_anchor,
+        levels: None,
+    }
+}
+
+async fn traverse_ids(store: &SparqlStore, scope: Scope, order: bool) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(scope),
+        order: if order {
+            Some(vec![("createdAt".to_string(), OrderDirection::ASC)])
+        } else {
+            None
+        },
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let mut ids: Vec<String> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    if !order {
+        ids.sort();
+    }
+    ids
+}
+
+/// The claim the whole feature rests on: Oxigraph walks a `+` path, so one
+/// query answers for a whole subtree. Until this ran, only the emitted SPARQL
+/// text had been checked, not what the store does with it.
+#[tokio::test]
+async fn transitive_scope_returns_every_descendant() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "a transitive read should reach every level, and exclude the anchor itself"
+    );
+}
+
+#[tokio::test]
+async fn non_transitive_scope_stays_one_step() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://c1".to_string(),
+            "we://c2".to_string(),
+            "we://c3".to_string()
+        ],
+        "one step should be the direct replies only"
+    );
+}
+
+/// One query for a whole level, which is what takes a paginated tree from a
+/// round trip per parent to a round trip per level.
+#[tokio::test]
+async fn multi_anchor_scope_answers_for_every_anchor_at_once() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://c1", "we://r1"], false, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec![
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string()
+        ],
+        "both anchors' children should come back from the single query"
+    );
+}
+
+/// Per-anchor, not overall: two anchors with a limit of one must yield one
+/// each, where a global limit of two could have taken both from one anchor.
+#[tokio::test]
+async fn per_anchor_limit_keeps_the_top_n_under_each_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(
+            &["we://root", "we://c1"],
+            false,
+            ScopeDirection::Out,
+            Some(1),
+        ),
+        true,
+    )
+    .await;
+
+    assert_eq!(ids.len(), 2, "one per anchor, not one overall: {ids:?}");
+    assert!(
+        ids.contains(&"we://c1".to_string()),
+        "root's earliest reply should survive: {ids:?}"
+    );
+    assert!(
+        ids.contains(&"we://r1".to_string()),
+        "c1's earliest reply should survive: {ids:?}"
+    );
+}
+
+/// Searching among what points *at* a node, which a reverse `include` cannot
+/// do because it can only hydrate for rows already in hand.
+#[tokio::test]
+async fn inbound_direction_finds_the_parent() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://rr1"], false, ScopeDirection::In, None),
+        false,
+    )
+    .await;
+
+    assert_eq!(
+        ids,
+        vec!["we://r1".to_string()],
+        "the inbound read should find exactly the parent"
+    );
+}
+
+/// An anchor nobody has written under is a legitimate answer of nothing. The
+/// failure guarded against is the opposite: an unconstrained anchor variable
+/// matching every comment in the store.
+#[tokio::test]
+async fn traverse_scope_with_an_unknown_anchor_returns_nothing() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://nobody"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+
+    assert!(ids.is_empty(), "expected no results, got {ids:?}");
+}
+
+/// What a collapsed branch's "N replies" label reads from: the conversation
+/// below each row, not its direct children. `c1` has two direct replies and
+/// three descendants, so the two numbers are distinguishable.
+#[tokio::test]
+async fn transitive_projection_counts_descendants_not_children() {
+    let store = comment_tree_store();
+
+    let counts = |transitive: bool| {
+        let store = &store;
+        async move {
+            let mut projections = HashMap::new();
+            projections.insert(
+                "$replyCount".to_string(),
+                ProjectionInput {
+                    transitive,
+                    from: "comments".to_string(),
+                    count: true,
+                    target_class_name: None,
+                    where_clause: None,
+                    limit: None,
+                    order: None,
+                },
+            );
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root"],
+                    false,
+                    ScopeDirection::Out,
+                    None,
+                )),
+                projections: Some(projections),
+                ..Default::default()
+            };
+            let result =
+                fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_WITH_REPLIES)
+                    .await
+                    .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .find(|i| i["id"] == "we://c1")
+                .and_then(|i| i["$replyCount"].as_u64())
+                .unwrap_or(0)
+        }
+    };
+
+    assert_eq!(counts(false).await, 2, "c1 has two direct replies");
+    assert_eq!(
+        counts(true).await,
+        3,
+        "c1 has three descendants — r1, r2 and rr1"
+    );
+}
+
+const COMMENT_SHAPE_WITH_REPLIES: &str = r#"{
+    "className": "Comment",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "we://Comment"
+        },
+        "text": {
+            "predicate": "we://text",
+            "required": false
+        },
+        "comments": {
+            "predicate": "we://comment",
+            "required": false,
+            "collection": true
+        }
+    },
+    "relations": {}
+}"#;
+
+/// A wide, deep thread: 4 top-level replies, 4 under each of those, 4 under each of *those*.
+/// 4 + 16 + 64 = 84 comments, which is enough for a per-level walk to differ visibly from both a
+/// one-level read and an unbounded transitive one.
+fn wide_comment_tree_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let link = |parent: &str, child: &str, t: &mut i32| {
+        *t += 1;
+        let ts = format!("2026-01-01T00:00:{:04}Z", t);
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    };
+    for a in 0..4 {
+        let l1 = format!("we://a{a}");
+        link("we://root", &l1, &mut t);
+        for b in 0..4 {
+            let l2 = format!("we://b{a}{b}");
+            link(&l1, &l2, &mut t);
+            for c in 0..4 {
+                let l3 = format!("we://c{a}{b}{c}");
+                link(&l2, &l3, &mut t);
+            }
+        }
+    }
+    store
+}
+
+async fn walk(store: &SparqlStore, levels: Vec<usize>) -> Vec<String> {
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(levels),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect()
+}
+
+/// The shape the whole feature exists for: "three replies, then two under each of those, then one
+/// under each of *those*" — 3 + 6 + 6 = 15 rows out of 84, in one request.
+#[tokio::test]
+async fn a_level_walk_bounds_the_breadth_of_each_depth() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2, 1]).await;
+
+    assert_eq!(ids.len(), 15, "expected 3 + 6 + 6, got {ids:?}");
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://a")).count(), 3);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://b")).count(), 6);
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+/// Per anchor, not per level: the second level's six rows must be two under EACH of the three
+/// parents, not the first six the store happened to return.
+#[tokio::test]
+async fn a_level_walk_spreads_its_limit_across_every_parent() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![3, 2]).await;
+
+    for a in 0..3 {
+        let under = ids
+            .iter()
+            .filter(|id| id.starts_with(&format!("we://b{a}")))
+            .count();
+        assert_eq!(
+            under, 2,
+            "parent a{a} should contribute two replies: {ids:?}"
+        );
+    }
+}
+
+/// A shorter list of levels is a shallower read — the walk stops where the caller stopped asking,
+/// rather than running to the bottom of the tree.
+#[tokio::test]
+async fn a_level_walk_stops_at_the_depth_it_was_given() {
+    let store = wide_comment_tree_store();
+    let ids = walk(&store, vec![2]).await;
+
+    assert_eq!(ids.len(), 2);
+    assert!(ids.iter().all(|id| id.starts_with("we://a")), "{ids:?}");
+}
+
+/// The walk asks each level about every anchor on it at once. A level that turns up nothing ends
+/// it, so asking for more levels than the tree has is not an error and costs nothing extra.
+#[tokio::test]
+async fn a_level_walk_ends_when_the_tree_does() {
+    let store = comment_tree_store();
+    let ids = walk(&store, vec![10, 10, 10, 10, 10]).await;
+
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["we://c1", "we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "the whole tree, and nothing repeated: {ids:?}"
+    );
+}
+
+/// A walk must survive a where-clause the store cannot evaluate.
+///
+/// The plan shape used to be chosen by `can_push_pagination`, which is false whenever any part of
+/// the filter has to be applied after hydration — and `author` always does, being link metadata
+/// rather than a property of the shape. So a thread filtering out muted authors — which is any
+/// thread with a mute list behind it — silently got the single-phase plan: the walk never ran and
+/// only the first level
+/// came back. The tests all passed because none of them filtered.
+#[tokio::test]
+async fn a_level_walk_survives_a_where_clause_it_cannot_push_down() {
+    let store = wide_comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2, 1]),
+        }),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+
+    assert_eq!(
+        ids.len(),
+        15,
+        "every level should still be walked, got {ids:?}"
+    );
+    assert_eq!(ids.iter().filter(|id| id.starts_with("we://c")).count(), 6);
+}
+
+// ---------------------------------------------------------------------------
+// Bounded traversal × the global window (limit/offset), and refused combos
+// ---------------------------------------------------------------------------
+
+/// The global window must cap the union AFTER the per-anchor slice. Pushed
+/// into the id subquery it lands before, where one prolific anchor's rows fill
+/// it and starve the others: LIMIT 3 kept root's c1,c2,c3, the slice kept c1,
+/// and c1-the-anchor's own top reply never came back — one row where the
+/// correct answer is one per anchor, capped at three total.
+#[tokio::test]
+async fn global_limit_caps_the_union_after_the_per_anchor_slice() {
+    let store = comment_tree_store();
+    let ids_for = |limit: usize| {
+        let store = &store;
+        async move {
+            let query = ModelQueryInput {
+                parent: Some(traverse_scope(
+                    &["we://root", "we://c1"],
+                    false,
+                    ScopeDirection::Out,
+                    Some(1),
+                )),
+                order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+                limit: Some(limit),
+                ..Default::default()
+            };
+            let result = fixture_query_from_json(store, "Comment", &query, COMMENT_SHAPE_JSON)
+                .await
+                .expect("query should execute");
+            result
+                .instances
+                .iter()
+                .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        }
+    };
+
+    assert_eq!(
+        ids_for(3).await,
+        vec!["we://c1".to_string(), "we://r1".to_string()],
+        "one per anchor, and both fit the window"
+    );
+    assert_eq!(
+        ids_for(1).await,
+        vec!["we://c1".to_string()],
+        "the window still truncates the sliced union"
+    );
+}
+
+/// When the scope forces the two-phase plan but the filter cannot be pushed
+/// down, the window is not pushed either — and it must still be applied, after
+/// the filter. It used to be silently dropped: `Some(pagination)` was read
+/// downstream as "the store already truncated this".
+#[tokio::test]
+async fn global_limit_applies_when_the_filter_cannot_be_pushed() {
+    let store = comment_tree_store();
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(3),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(1),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1"],
+        "limit 1 after the filter, not dropped"
+    );
+}
+
+/// The window belongs to the walk's whole result. Pushed into the store it
+/// would apply at every level — an OFFSET skipping rows at every depth.
+#[tokio::test]
+async fn the_window_applies_to_the_walks_union_not_to_each_level() {
+    let store = wide_comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3, 2]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        offset: Some(1),
+        limit: Some(4),
+        ..Default::default()
+    };
+    let ids: Vec<String> = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute")
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str().map(|s| s.to_string()))
+        .collect();
+    // Breadth-first union: a0 a1 a2 b00 b01 b10 b11 b20 b21 — skip 1, take 4.
+    assert_eq!(
+        ids,
+        vec!["we://a1", "we://a2", "we://b00", "we://b01"],
+        "one window over the whole walk"
+    );
+}
+
+/// The documented mutual exclusions are refused, not silently resolved:
+/// honouring one of the two would be a wrong answer that looks like a right
+/// one, which is the failure mode this feature refuses everywhere else.
+#[tokio::test]
+async fn a_walk_refuses_the_combinations_its_docs_rule_out() {
+    let store = comment_tree_store();
+
+    let with_transitive = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: true,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &with_transitive, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("transitive + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+
+    let with_limit = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: Some(vec![3]),
+        }),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &with_limit, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("limitPerAnchor + levels must be refused");
+    assert!(err.to_string().contains("mutually exclusive"), "got: {err}");
+}
+
+/// A cycle back to the anchor: the walk neither returns the anchor as its own
+/// descendant nor walks it twice. (The suite's other stores are all trees, so
+/// nothing else reaches this path.)
+#[tokio::test]
+async fn a_level_walk_through_a_cycle_terminates_and_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://a".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://b"],
+        "b once, a never — the walk saw the cycle"
+    );
+}
+
+/// One anchor named below another is still an anchor: it is where the walk
+/// starts, not something the walk found, so it does not occupy a place in the
+/// other's breadth — and its own subtree is walked from depth 0 rather than
+/// again one level down.
+///
+/// This is the multi-anchor face of seeding `seen` with the roots, and the
+/// spelling a caller reaches by accident — "refresh these two branches" where
+/// one happens to sit under the other. The cycle test covers a graph that loops
+/// back; this covers a tree where the caller's own anchor list overlaps.
+#[tokio::test]
+async fn an_anchor_named_below_another_is_not_also_reported_as_its_child() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string(), "we://c1".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![10, 10]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    // Depth 0 from both anchors: root's c2, c3 (c1 is an anchor) and c1's r1, r2.
+    // Depth 1 from those: r1's rr1. c1's subtree is walked once, from c1.
+    assert_eq!(
+        ids,
+        vec!["we://c2", "we://c3", "we://r1", "we://r2", "we://rr1"],
+        "c1 appears nowhere, and its subtree is not walked twice"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A scope the builder cannot express, a slice that counts rows, and a total
+// that belongs to neither question
+// ---------------------------------------------------------------------------
+
+/// A shape with no flag property and no required property, so the timestamp
+/// probe falls back to `?source ?_anyP ?_anyT` and binds one row per property.
+/// That fallback is what turns "rows" and "instances" into different numbers.
+const LOOSE_SHAPE_JSON: &str = r#"{
+    "className": "Loose",
+    "properties": {
+        "text": { "predicate": "we://text", "required": false },
+        "title": { "predicate": "we://title", "required": false },
+        "note": { "predicate": "we://note", "required": false }
+    },
+    "relations": {}
+}"#;
+
+/// Build a store whose first child carries three properties and second carries
+/// one, so the two differ in how many timestamp rows they bind.
+fn lopsided_property_store() -> SparqlStore {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    let mut link = |s: &str, p: &str, o: &str, t: &mut i32| {
+        *t += 1;
+        store
+            .add_link(&make_link(s, p, o, &format!("2026-01-01T00:00:{:04}Z", t)))
+            .unwrap();
+    };
+    link("we://root", "we://comment", "we://k1", &mut t);
+    link("we://k1", "we://text", "literal://string:a", &mut t);
+    link("we://k1", "we://title", "literal://string:b", &mut t);
+    link("we://k1", "we://note", "literal://string:c", &mut t);
+    link("we://root", "we://comment", "we://k2", &mut t);
+    link("we://k2", "we://text", "literal://string:d", &mut t);
+    link("we://root", "we://comment", "we://k3", &mut t);
+    link("we://k3", "we://text", "literal://string:e", &mut t);
+    store
+}
+
+/// A row of the id phase has to mean an instance, or every limit counts the
+/// wrong thing. The fallback timestamp probe binds one row per property, so
+/// without aggregation a source with three properties takes three of its
+/// parent's places and the caller gets one result where two were asked for.
+#[tokio::test]
+async fn a_per_anchor_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: Some(2),
+            levels: None,
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two per anchor means two instances, not two rows about one instance"
+    );
+}
+
+/// The same arithmetic on the ordinary paged path, which has always had it:
+/// `limit: 2` over a shape whose probe binds several rows per source returned
+/// one instance.
+#[tokio::test]
+async fn a_global_limit_counts_instances_not_timestamp_rows() {
+    let store = lopsided_property_store();
+    let query = ModelQueryInput {
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Loose", &query, LOOSE_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://k1", "we://k2"],
+        "two instances, not two rows"
+    );
+}
+
+/// An id or predicate that cannot be written as a term cannot match one, so a
+/// scope built on it selects nothing. Dropping the scope instead dropped the
+/// class conformance with it and answered with every link in the store — the
+/// unbounded read the empty anchor list is already guarded against.
+#[tokio::test]
+async fn a_traverse_scope_with_an_unwritable_predicate_matches_nothing() {
+    let store = comment_tree_store();
+    store
+        .add_link(&make_link(
+            "we://unrelated",
+            "ad4m://type",
+            "we://Something",
+            "2026-01-01T00:00:9999Z",
+        ))
+        .unwrap();
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            // A space cannot appear in an IRI term.
+            predicate: "we://comment oops".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: None,
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "expected no rows, got {:?}",
+        result
+            .instances
+            .iter()
+            .filter_map(|i| i["id"].as_str())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(result.total_count, 0, "and a total that agrees");
+}
+
+/// The same rule for the older spellings, which had the same hole: a `Raw`
+/// scope kept the class conformance and answered with every instance of the
+/// class, a `Model` scope dropped conformance too and answered with the store.
+#[tokio::test]
+async fn the_older_scopes_with_an_unwritable_id_match_nothing() {
+    let store = comment_tree_store();
+
+    let raw = ModelQueryInput {
+        parent: Some(Scope::Raw {
+            id: "we://root".to_string(),
+            predicate: "we://comment <oops>".to_string(),
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &raw, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(result.instances.is_empty(), "Raw scope must match nothing");
+
+    let model = ModelQueryInput {
+        parent: Some(Scope::Model {
+            id: "we://root <oops>".to_string(),
+            model: "Comment".to_string(),
+            field: None,
+        }),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &model, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert!(
+        result.instances.is_empty(),
+        "Model scope must match nothing"
+    );
+}
+
+/// A per-anchor limit picks its N in the store, so an order the store cannot
+/// express fully picks a different N than the caller asked for — and the rows
+/// it discards are never hydrated, so sorting afterwards cannot recover them.
+/// Refused rather than approximated.
+#[tokio::test]
+async fn a_per_anchor_limit_refuses_an_order_the_store_cannot_express() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![
+            ("text".to_string(), OrderDirection::ASC),
+            ("createdAt".to_string(), OrderDirection::ASC),
+        ]),
+        ..Default::default()
+    };
+    let err = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect_err("two order keys cannot drive a per-anchor slice");
+    assert!(err.to_string().contains("one key"), "got: {err}");
+
+    // One pushable key is the supported spelling and still works.
+    let ok = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &ok, COMMENT_SHAPE_JSON)
+        .await
+        .expect("one key is fine");
+    assert_eq!(result.instances.len(), 2);
+
+    // A where-clause the store cannot push is not an ordering problem: the
+    // order is still pushed faithfully, so the slice is still right.
+    let mut where_clause = BTreeMap::new();
+    where_clause.insert(
+        "author".to_string(),
+        WhereCondition::Ops(WhereOps {
+            not: Some(serde_json::json!(["did:key:muted"])),
+            ..Default::default()
+        }),
+    );
+    let unpushable_filter = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root"],
+            false,
+            ScopeDirection::Out,
+            Some(2),
+        )),
+        where_clause: Some(where_clause),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    fixture_query_from_json(&store, "Comment", &unpushable_filter, COMMENT_SHAPE_JSON)
+        .await
+        .expect("a post-hydration filter is not a refusal");
+}
+
+/// A walk is bounded by its own figures, so the store's count answers a
+/// question it never asked — one step from the anchors, however many levels
+/// were walked. `levels: [1, 1]` returns two rows; the count reported three,
+/// the number of direct replies, which a client paging on reads as more to
+/// fetch.
+#[tokio::test]
+async fn a_walk_totals_the_walk_rather_than_one_step_of_it() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(ids, vec!["we://c1", "we://r1"], "one per level, two levels");
+    assert_eq!(
+        result.total_count, 2,
+        "the total is the walk's own union, not root's three direct replies"
+    );
+}
+
+/// The same walk asked as a count. `count()` in TypeScript is `limit: 0`, which
+/// takes the COUNT-only fast path — and that path builds its query from the
+/// scope as written, so it answers for one step from the anchors however many
+/// levels were walked. The full query above reports two; this reported three.
+///
+/// Two numbers for one question, from the same query written two ways.
+#[tokio::test]
+async fn a_count_only_walk_totals_the_walk_too() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![1, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        limit: Some(0),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("count-only walk should execute");
+    assert!(
+        result.instances.is_empty(),
+        "a count-only query returns no rows"
+    );
+    assert_eq!(
+        result.total_count, 2,
+        "the count is the walk's own union, exactly as the full query reports it"
+    );
+}
+
+/// A node reachable from two anchors on the same level — a diamond, which needs
+/// no cycle and is ordinary in a graph.
+///
+/// ```text
+/// root ─┬─ c1 ─── x
+///       └─ c2 ─┬─ x     (the same x)
+///              └─ z
+/// ```
+///
+/// The dedup ran *after* the per-anchor slice, so c2's one slot was spent on an
+/// `x` that was then dropped for having been seen, and `z` — the reply c2 had
+/// left to give — was never reported at all.
+#[tokio::test]
+async fn a_node_reached_twice_does_not_consume_the_second_anchor_s_slot() {
+    let store = SparqlStore::new(None).unwrap();
+    let mut t = 1000;
+    for (parent, child) in [
+        ("we://root", "we://c1"),
+        ("we://root", "we://c2"),
+        ("we://c1", "we://x"),
+        ("we://c2", "we://x"),
+        ("we://c2", "we://z"),
+    ] {
+        t += 1;
+        let ts = format!("2026-01-01T00:00:{t:04}Z");
+        store
+            .add_link(&make_link(parent, "we://comment", child, &ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", &ts))
+            .unwrap();
+    }
+
+    let query = ModelQueryInput {
+        parent: Some(Scope::Traverse {
+            ids: vec!["we://root".to_string()],
+            predicate: "we://comment".to_string(),
+            transitive: false,
+            direction: ScopeDirection::Out,
+            limit_per_anchor: None,
+            levels: Some(vec![2, 1]),
+        }),
+        order: Some(vec![("createdAt".to_string(), OrderDirection::ASC)]),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("walk should execute");
+    let ids: Vec<&str> = result
+        .instances
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["we://c1", "we://c2", "we://x", "we://z"],
+        "c2's one slot goes to the reply it still had, not to an x already spoken for"
+    );
+}
+
+/// `transitive` promises it excludes the anchor — and `+` delivers that only in
+/// a tree. In a cycle `a → b → a` the anchor is one-or-more steps from itself,
+/// so the path matched it and the caller got their own anchor back as its own
+/// descendant.
+#[tokio::test]
+async fn a_transitive_read_through_a_cycle_still_excludes_the_anchor() {
+    let store = SparqlStore::new(None).unwrap();
+    for (parent, child, ts) in [
+        ("we://a", "we://b", "2026-01-01T00:00:1001Z"),
+        ("we://b", "we://a", "2026-01-01T00:00:1002Z"),
+    ] {
+        store
+            .add_link(&make_link(parent, "we://comment", child, ts))
+            .unwrap();
+        store
+            .add_link(&make_link(child, "ad4m://type", "we://Comment", ts))
+            .unwrap();
+    }
+
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://a"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec!["we://b".to_string()],
+        "the anchor is where the read started, not something it found"
+    );
+}
+
+/// The multi-anchor face of the same promise: a transitive read from two
+/// anchors, one of which sits below the other, reports neither of them.
+#[tokio::test]
+async fn a_transitive_read_excludes_every_named_anchor() {
+    let store = comment_tree_store();
+    let ids = traverse_ids(
+        &store,
+        traverse_scope(&["we://root", "we://c1"], true, ScopeDirection::Out, None),
+        false,
+    )
+    .await;
+    assert_eq!(
+        ids,
+        vec![
+            "we://c2".to_string(),
+            "we://c3".to_string(),
+            "we://r1".to_string(),
+            "we://r2".to_string(),
+            "we://rr1".to_string(),
+        ],
+        "c1 is an anchor, so it is not also reported as root's descendant"
+    );
+}
+
+/// The total a transitive read reports is built from the same scope as its rows.
+///
+/// The anchor exclusion is a conformance pattern rather than a post-filter, so it
+/// reaches `build_count_sparql` through the same `build_query_patterns` the rows
+/// go through. Asserted rather than assumed: a total that counts the anchors the
+/// query will not return is a client paging for rows that do not exist, which is
+/// the failure the walk's own total was fixed for.
+#[tokio::test]
+async fn a_transitive_read_totals_what_it_returns() {
+    let store = comment_tree_store();
+    let query = ModelQueryInput {
+        parent: Some(traverse_scope(
+            &["we://root", "we://c1"],
+            true,
+            ScopeDirection::Out,
+            None,
+        )),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Comment", &query, COMMENT_SHAPE_JSON)
+        .await
+        .expect("query should execute");
+    assert_eq!(
+        result.instances.len(),
+        5,
+        "c2, c3, r1, r2, rr1 — both anchors excluded"
+    );
+    assert_eq!(
+        result.total_count, 5,
+        "the total counts what the scope returns, not the anchors it starts from"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `links` — per-link rows, including undeclared predicates (#1046 §3/§4,
+// #1111, #1112)
+// ---------------------------------------------------------------------------
+
+const REVOKED: &str = "ad4m://flow/role_grant_revoked";
+const ROLE_ADMIN: &str = "did:key:zRoleAdmin";
+const ROLE_T0: &str = "2026-09-01T10:00:00.000Z";
+const ROLE_T1: &str = "2026-09-01T11:00:00.000Z";
+const ROLE_T2: &str = "2026-09-01T12:00:00.000Z";
+
+/// A role class the way the flow engine reads one: a type flag, a name, and a
+/// DID collection that `didProperty` names. It deliberately does NOT declare the
+/// revocation predicate — tombstones are links on the instance, not properties.
+const ROLE_SHAPE_JSON: &str = r#"{
+    "className": "Reviewer",
+    "properties": {
+        "type": {
+            "predicate": "ad4m://type",
+            "required": true,
+            "flag": true,
+            "initial": "role://Reviewer"
+        },
+        "name": {
+            "predicate": "role://name",
+            "required": false
+        }
+    },
+    "relations": {
+        "members": {
+            "predicate": "role://member"
+        }
+    }
+}"#;
+
+fn link_by(author: &str, source: &str, predicate: &str, target: &str, ts: &str) -> LinkExpression {
+    let mut l = make_link(source, predicate, target, ts);
+    l.author = author.to_string();
+    l
+}
+
+/// Role instance created at T0 (type + name by admin), one member added at T1
+/// by admin, and — when `revoked` — a tombstone on the instance at T2.
+fn seed_role(store: &SparqlStore, role: &str, member: &str, revoked: bool) {
+    for l in [
+        link_by(ROLE_ADMIN, role, "ad4m://type", "role://Reviewer", ROLE_T0),
+        link_by(
+            ROLE_ADMIN,
+            role,
+            "role://name",
+            "literal:string:reviewers",
+            ROLE_T0,
+        ),
+        link_by(ROLE_ADMIN, role, "role://member", member, ROLE_T1),
+    ] {
+        store.add_link(&l).unwrap();
+    }
+    if revoked {
+        store
+            .add_link(&link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2))
+            .unwrap();
+    }
+}
+
+fn links_query(keys: &[&str]) -> ModelQueryInput {
+    ModelQueryInput {
+        links: Some(keys.iter().map(|k| k.to_string()).collect()),
+        ..Default::default()
+    }
+}
+
+/// #1111: a revocation tombstone — a link whose predicate the class does not
+/// declare — is visible through `model_query` when asked for, and comes back as
+/// the full signed link.
+///
+/// Before `links` there was no way to reach it through the class layer at all:
+/// the instance query binds `VALUES ?predicate` to the shape's predicates and
+/// hydration drops the rest, so a revoked role kept voting unless the caller
+/// went around `model_query` to raw `get_links`. Fails on `dev`: `__links` is
+/// absent (the `links` key is ignored by deserialization).
+#[tokio::test]
+async fn a_revocation_tombstone_is_reachable_through_links() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let member = "did:key:zMember";
+    seed_role(&store, role, member, true);
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances.len(), 1);
+    let rows = result.instances[0]["__links"][REVOKED]
+        .as_array()
+        .unwrap_or_else(|| {
+            panic!(
+                "the tombstone must be reachable through model_query: {}",
+                result.instances[0]
+            )
+        });
+    assert_eq!(rows.len(), 1, "exactly the one tombstone: {rows:?}");
+
+    // A row is the stored link itself, not a summary of it: a consumer can
+    // deserialize it and check the signature, which is what the flow engine's
+    // revocation rule does.
+    let parsed: LinkExpression = serde_json::from_value(rows[0].clone()).expect("LinkExpression");
+    let mut expected = link_by(ROLE_ADMIN, role, REVOKED, member, ROLE_T2);
+    expected.status = None;
+    assert_eq!(parsed, expected);
+}
+
+/// The additive half of #1111: asking for `links` adds `__links` and changes
+/// nothing else, and not asking returns the instance JSON exactly as before.
+///
+/// The case that would break it is the tombstone itself: it is the instance's
+/// latest link, so if it leaked into hydration `updatedAt` would move to T2.
+#[tokio::test]
+async fn links_is_additive_and_a_tombstone_does_not_move_updated_at() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    seed_role(&store, role, "did:key:zMember", true);
+
+    let plain = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &ModelQueryInput::default(),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let with_links = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&[REVOKED]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+
+    let plain = plain.instances[0].clone();
+    assert!(
+        plain.get("__links").is_none(),
+        "not asked, not added: {plain}"
+    );
+    assert_eq!(
+        plain["updatedAt"],
+        json!(ROLE_T1),
+        "the tombstone is not a property link"
+    );
+
+    let mut stripped = with_links.instances[0].clone();
+    assert!(stripped
+        .as_object_mut()
+        .unwrap()
+        .remove("__links")
+        .is_some());
+    assert_eq!(
+        stripped, plain,
+        "`links` must add one key and change nothing else"
+    );
+}
+
+/// #1112, on the #1103 shape: the role instance exists from T0, a member is
+/// added at T1, and the query dates that member from T1 — its own link — not
+/// from the instance's `createdAt`. A second member added later by someone else
+/// is dated and attributed separately.
+///
+/// Fails on `dev`: there is no per-link timestamp to read, only `createdAt`
+/// (T0) and `updatedAt`, both computed across every link.
+#[tokio::test]
+async fn a_member_is_dated_and_attributed_by_its_own_link() {
+    let store = SparqlStore::new(None).unwrap();
+    let role = "role://instance/1";
+    let alice = "did:key:zAlice";
+    let bob = "did:key:zBob";
+    let mallory = "did:key:zMallory";
+    seed_role(&store, role, alice, false);
+    store
+        .add_link(&link_by(mallory, role, "role://member", bob, ROLE_T2))
+        .unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["members"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    let inst = &result.instances[0];
+    assert_eq!(inst["createdAt"], json!(ROLE_T0));
+
+    let rows = inst["__links"]["members"]
+        .as_array()
+        .unwrap_or_else(|| panic!("per-link rows for `members`: {inst}"));
+    let seen: Vec<(&str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r["data"]["target"].as_str().unwrap(),
+                r["timestamp"].as_str().unwrap(),
+                r["author"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        vec![(alice, ROLE_T1, ROLE_ADMIN), (bob, ROLE_T2, mallory)],
+        "each member dated and attributed by its own link, earliest first"
+    );
+    assert_eq!(
+        rows[0]["data"]["predicate"],
+        json!("role://member"),
+        "a name resolves to the predicate the shape declares"
+    );
+}
+
+/// Every requested key is present on every returned instance — `[]` when the
+/// instance has no such link — so "asked, none" never reads like "not asked".
+/// Also covers the paginated (two-phase) plan and a `properties` selection,
+/// which runs before `__links` is attached and must not strip it.
+#[tokio::test]
+async fn links_on_the_paginated_plan_with_a_property_selection() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    seed_role(&store, "role://instance/2", "did:key:zB", false);
+
+    let query = ModelQueryInput {
+        links: Some(vec![REVOKED.to_string(), "members".to_string()]),
+        properties: Some(vec!["name".to_string()]),
+        limit: Some(10),
+        ..Default::default()
+    };
+    let result = fixture_query_from_json(&store, "Reviewer", &query, ROLE_SHAPE_JSON)
+        .await
+        .unwrap();
+    assert_eq!(result.instances.len(), 2);
+    let by_id = |id: &str| {
+        result
+            .instances
+            .iter()
+            .find(|i| i["id"] == json!(id))
+            .unwrap_or_else(|| panic!("{id} missing"))
+    };
+    let one = by_id("role://instance/1");
+    let two = by_id("role://instance/2");
+    assert_eq!(one["__links"][REVOKED].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"][REVOKED], json!([]), "asked, none found");
+    assert_eq!(one["__links"]["members"].as_array().unwrap().len(), 1);
+    assert_eq!(two["__links"]["members"].as_array().unwrap().len(), 1);
+    assert!(
+        one.get("updatedAt").is_none(),
+        "the selection still applies"
+    );
+}
+
+/// A `local: true` property's links are read under the same Local-only rule as
+/// its hydrated value, so `links` is not a side door for a gossiped Shared link.
+/// The Shared link is the sole link on the predicate, so an unfiltered read
+/// cannot pass by result ordering.
+#[tokio::test]
+async fn links_on_a_local_property_withhold_a_shared_link() {
+    use crate::types::LinkStatus;
+
+    let store = SparqlStore::new(None).unwrap();
+    let id = "literal:string:cache_links";
+    store
+        .add_link(&make_link(id, "ad4m://type", "cache://Cache", ROLE_T0))
+        .unwrap();
+    store
+        .add_link(&make_link_with_status(
+            id,
+            "cache://state",
+            "literal:string:gossiped",
+            ROLE_T1,
+            LinkStatus::Shared,
+        ))
+        .unwrap();
+
+    let result = fixture_query_from_json(
+        &store,
+        "Cache",
+        &links_query(&["state"]),
+        LOCAL_CACHE_SHAPE_JSON,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.instances[0]["__links"]["state"], json!([]));
+}
+
+/// A key that is neither a declared name nor an absolute IRI is an error. The
+/// alternative — an empty list — would tell a caller who misspelled the
+/// revocation predicate that nobody was ever revoked.
+#[tokio::test]
+async fn links_rejects_a_key_it_cannot_resolve() {
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", "did:key:zA", true);
+    let err = fixture_query_from_json(
+        &store,
+        "Reviewer",
+        &links_query(&["role_grant_revoked"]),
+        ROLE_SHAPE_JSON,
+    )
+    .await
+    .expect_err("an unresolvable key must fail");
+    assert!(format!("{err}").contains("role_grant_revoked"), "{err}");
+}
+
+/// A reverse relation (`belongsToOne` / `belongsToMany`) is an error, not `[]`.
+///
+/// Its links point *at* the instance (`other --we://marks--> this`), and `links`
+/// reads the instance's outgoing links only. Resolving the name to its
+/// predicate and reading outgoing links answers "asked, none found" for a
+/// question that was never asked of the store, even with a real incoming link
+/// present, which this test seeds. On 6228563a5 the query succeeded with
+/// `"markedBy": []`.
+#[tokio::test]
+async fn links_rejects_a_reverse_relation_name() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://flag", "we://post", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://p/1", "we://children", "we://p/2", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://m/1", "we://marks", "we://p/1", "3"))
+        .unwrap();
+
+    let post_json = r#"{
+        "className": "Post",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://post"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "" },
+            "markedBy": { "predicate": "we://marks", "kind": "belongsToMany", "targetClassName": "", "direction": "reverse" }
+        }
+    }"#;
+
+    // Control: the forward relation on the same shape is read.
+    let ok = fixture_query_from_json(&store, "Post", &links_query(&["children"]), post_json)
+        .await
+        .unwrap();
+    assert_eq!(
+        ok.instances[0]["__links"]["children"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let err = fixture_query_from_json(&store, "Post", &links_query(&["markedBy"]), post_json)
+        .await
+        .expect_err("a reverse relation must not resolve to an empty list");
+    let msg = format!("{err}");
+    assert!(msg.contains("markedBy"), "names the key: {msg}");
+    assert!(msg.contains("reverse"), "says why: {msg}");
+}
+
+// ---------------------------------------------------------------------------
+// The role gate over a DID collection, through the real store (#1129 review)
+// ---------------------------------------------------------------------------
+
+/// The flow engine's role reads, answered by the real query pipeline over
+/// [`ROLE_SHAPE_JSON`] instead of a stub that decides membership by looking
+/// for the DID in the query text. Here nothing but `model_query` decides.
+///
+/// [`seed_role`] links do not verify, so it reads through
+/// [`fixture_query_from_json`] (#1113 opt-in): the tests are about the DID
+/// gate, not signatures.
+struct RoleStore(SparqlStore);
+
+#[async_trait::async_trait]
+impl crate::perspectives::flow_evaluator::RequiresQueryable for RoleStore {
+    async fn model_query(&self, class_name: &str, query_json: &str) -> anyhow::Result<String> {
+        let input: ModelQueryInput = serde_json::from_str(query_json)?;
+        let result = fixture_query_from_json(&self.0, class_name, &input, ROLE_SHAPE_JSON)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(serde_json::to_string(&result)?)
+    }
+}
+
+/// **A non-member is not a member**, whichever layer answers the DID condition.
+///
+/// `members` is a DID collection. When a role's `where` cannot be pushed to
+/// SPARQL in full, the unpushed part is re-tested on the hydrated instance by
+/// `matches_where`. That function used to skip every String/StringArray
+/// condition on a collection, on the assumption that SPARQL had already
+/// applied it. At the top level of a clause it had: pushable leaves are
+/// emitted even when a sibling is not, so the first two cases were always
+/// closed. Inside a declined `OR` it had not. One unpushable leaf in any
+/// branch sends the whole disjunction to the Rust filter, where the
+/// DID condition passed vacuously. Every Reviewer instance then matched every
+/// candidate.
+///
+/// The unpushable leaf here is `timestamp`: it is hydrated, so it can be
+/// filtered, but it is no link, so it cannot be pushed. It used to be
+/// `author`, until #1122 answered an `author` beside link-backed siblings in
+/// the store, per link. The `author` rows are kept: they are the route the
+/// #1129 review found, and they must stay closed now that SPARQL answers
+/// them. They no longer reach the Rust filter, which is why the `timestamp`
+/// rows exist.
+///
+/// Mallory authored nothing and belongs to nothing. Alice is the only member.
+/// Red before the fix on the `or` rows with `timestamp`: Mallory came back
+/// holding `role://instance/1`.
+#[tokio::test]
+#[rustfmt::skip]
+async fn a_did_collection_role_gate_does_not_admit_a_non_member() {
+    use crate::perspectives::flow_context::FlowInstanceRecord;
+    use crate::perspectives::flow_instance::roles::resolve_role_grants;
+    use crate::perspectives::shacl_parser::ModelQuery;
+
+    let alice = "did:key:zAlice";
+    let mallory = "did:key:zMallory";
+    let store = SparqlStore::new(None).unwrap();
+    seed_role(&store, "role://instance/1", alice, false);
+    let store = RoleStore(store);
+    let record = FlowInstanceRecord {
+        flow_uri: "delivery://DeliveryFlow".into(),
+        instance_uri: "ad4m://flow/instance/1".into(),
+        subject: "ad4m://task/1".into(),
+        current_state: "review".into(),
+        created_at: None,
+    };
+
+    // Holds for the instance (its earliest link is at T0), and only the Rust
+    // filter can answer it. `gte` takes epoch milliseconds.
+    let t0_ms = chrono::DateTime::parse_from_rfc3339(ROLE_T0).unwrap().timestamp_millis();
+    let since_t0 = json!({ "equals": { "gte": t0_ms } });
+    let cases: Vec<(&str, Value)> = vec![
+        ("top level: didProperty beside `author` (the reviewed route, per-link since #1122)",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "author": ROLE_ADMIN } })),
+        ("top level: `$did` on the collection beside `author`",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "author": ROLE_ADMIN } })),
+        ("`or`: the DID condition beside `author` in a branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "author": ROLE_ADMIN } }] })),
+        ("top level: didProperty beside an unpushable sibling",
+         json!({ "className": "Reviewer", "didProperty": "members",
+                 "where": { "timestamp": since_t0 } })),
+        ("top level: `$did` on the collection beside an unpushable sibling",
+         json!({ "className": "Reviewer",
+                 "where": { "members": "$did", "timestamp": since_t0 } })),
+        ("`or`: the DID condition inside a branch the compiler declines",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": "$did", "timestamp": since_t0 } }] })),
+        ("`or`: `in` over the collection inside a declined branch",
+         json!({ "className": "Reviewer",
+                 "or": [{ "className": "Reviewer",
+                          "where": { "members": { "in": ["$did"] }, "timestamp": since_t0 } }] })),
+    ];
+
+    for (name, role_json) in cases {
+        let role: ModelQuery = serde_json::from_value(role_json).expect("role query");
+        let evidence = resolve_role_grants(
+            &store, "approved", &role, &record, &[alice.to_string(), mallory.to_string()],
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name}: resolve_role_grants: {e:#}"));
+        let held = |did: &str| -> Vec<String> {
+            evidence.iter().find(|e| e.did == did).expect("one evidence per candidate")
+                .instances.iter().map(|i| i.instance_id.clone()).collect()
+        };
+        // The control pins that the branch is live, so the refusal below is
+        // the DID condition and not a query that matches nobody.
+        assert_eq!(held(alice), vec!["role://instance/1"], "{name}: the member holds the role");
+        assert_eq!(held(mallory), Vec::<String>::new(), "{name}: a non-member must hold nothing");
+    }
+}
+
+/// `links` inside an `include` sub-query: the sub-query recurses through
+/// `execute_model_query_inner`, so each included instance carries its own
+/// `__links`.
+#[tokio::test]
+async fn links_inside_an_include_sub_query() {
+    let store = SparqlStore::new(None).unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://flag", "we://collection", "1"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://c/1", "we://children", "we://t/1", "2"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://flag", "we://text_block", "3"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://t/1", "we://note", "literal:string:n", "4"))
+        .unwrap();
+
+    let collection_json = r#"{
+        "className": "Collection",
+        "properties": {
+            "flag": {"predicate":"we://flag","required":true,"flag":true,"initial":"we://collection"}
+        },
+        "relations": {
+            "children": { "predicate": "we://children", "kind": "hasMany", "targetClassName": "TextBlock" }
+        }
+    }"#;
+    let (resolver, collection_shape) =
+        StaticShapeResolver::from_json("Collection", collection_json).unwrap();
+    resolver.register(
+        "TextBlock",
+        parse_shape_from_json(
+            r#"{"className":"TextBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://text_block"}
+               },"relations":{}}"#,
+            "TextBlock",
+        )
+        .unwrap(),
+    );
+
+    let query = ModelQueryInput {
+        include: Some(HashMap::from([(
+            "children".to_string(),
+            super::types::IncludeValue::SubQuery(Box::new(links_query(&["we://note"]))),
+        )])),
+        ..Default::default()
+    };
+    let result = fixture_query(&store, collection_shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+    let child = &result.instances[0]["children"][0];
+    assert_eq!(child["id"], json!("we://t/1"), "{}", result.instances[0]);
+    let rows = child["__links"]["we://note"]
+        .as_array()
+        .unwrap_or_else(|| panic!("included instance carries __links: {child}"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["data"]["target"], json!("literal:string:n"));
+    assert!(
+        result.instances[0].get("__links").is_none(),
+        "the parent did not ask"
+    );
 }

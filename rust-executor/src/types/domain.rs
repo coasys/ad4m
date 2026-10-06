@@ -816,6 +816,9 @@ pub struct ModelApiInput {
     pub api_key: String,
     pub model: String,
     pub api_type: String,
+    /// Optional ceiling for the provider's context window, in tokens.
+    /// See [`crate::types::ModelApi::max_num_ctx`].
+    pub max_num_ctx: Option<u32>,
 }
 
 #[derive(Default, Debug, Deserialize, Serialize, Clone)]
