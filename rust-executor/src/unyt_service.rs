@@ -159,7 +159,7 @@ impl Conductor {
     }
 
     async fn restart_service() -> Result<(), AnyError> {
-        Self::call::<bool>("restartService", serde_json::json!({}))
+        Self::call::<bool>("restart", serde_json::json!({}))
             .await
             .map(|_| ())
     }

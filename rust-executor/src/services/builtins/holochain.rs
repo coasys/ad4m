@@ -11,7 +11,7 @@ use tokio::sync::OnceCell;
 
 use super::{internal, params, require_admin, to_value, NoParams};
 use crate::holochain_service::holochain_service_extension::direct;
-use crate::holochain_service::{get_holochain_service, maybe_get_holochain_service};
+use crate::holochain_service::maybe_get_holochain_service;
 use crate::services::builtin::{
     CallContext, EventEmitter, EventOwner, ServiceError, ServiceHealth, ServiceImplementation,
     StartContext,
@@ -157,8 +157,7 @@ pub fn conductor_interface() -> Value {
     .method::<NoParams, Vec<u8>>("agentKey", "KEYS", "The conductor's agent key.", opts(true, true))
     .method::<NoParams, Vec<u8>>("newSignKeypair", "KEYS", "Create a random signing key pair; answers its agent key.", opts(false, true))
     .method::<SignParams, Vec<u8>>("signWithKey", "KEYS", "Sign data with a conductor-held key; answers the 64-byte signature.", invalid_payload(opts(false, true)))
-    .method::<NoParams, bool>("restart", "ADMIN", "Wait until the conductor is up. Needs the admin credential.", opts(false, true))
-    .method::<NoParams, bool>("restartService", "ADMIN", "Restart the conductor with its stored configuration.", opts(false, true))
+    .method::<NoParams, bool>("restart", "ADMIN", "Restart the conductor from its stored configuration.", opts(false, true))
     .method::<NoParams, bool>("shutdown", "ADMIN", "Stop the conductor.", opts(false, true))
     .event::<Signal>("signal", "SIGNALS", "An app signal a cell emitted.", Some("cellId"))
     .build()
@@ -410,10 +409,8 @@ impl ServiceImplementation for Holochain {
                 to_value(sig)
             }
             "restart" => {
-                let _ = get_holochain_service().await;
-                to_value(true)
-            }
-            "restartService" => {
+                // Shuts the running conductor down, waits for its port, and
+                // starts it again from the stored config.
                 crate::holochain_service::HolochainService::restart_service()
                     .await
                     .map_err(conductor_error)?;

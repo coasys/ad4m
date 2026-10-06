@@ -157,6 +157,9 @@ export class AIClient {
      * NOTE: This method still uses HTTP fetch because binary audio data
      * cannot be efficiently sent over the JSON-based WebSocket RPC protocol.
      * Transcription results are delivered via the WS event channel.
+     *
+     * Rejects if any stream did not take the audio. When only some failed, the message names them
+     * and the others were fed, so retry only the failed ids.
      */
     async feedTranscriptionStream(streamIds: string | string[], audio: Float32Array | number[]): Promise<void> {
         const ids = Array.isArray(streamIds) ? streamIds : [streamIds];

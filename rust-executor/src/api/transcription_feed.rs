@@ -59,6 +59,8 @@ pub async fn feed_transcription_stream(
             "Body length must be a multiple of 4 (Float32 samples)".into(),
         ));
     }
+    // Every stream failing answers `AllStreamsFailed`; otherwise the result
+    // names the streams that failed.
     let failed: Vec<builtins::ai::FeedFailure> = builtins::call(
         Builtin::AiInference,
         "transcriptionFeed",
@@ -74,9 +76,37 @@ pub async fn feed_transcription_stream(
         400 | 422 => ApiError::BadRequest(e.message),
         _ => ApiError::Internal(e.message),
     })?;
-    for f in failed {
-        log::warn!("Error feeding stream {}: {}", f.stream_id, f.error);
-    }
+    let errors: Vec<String> = failed
+        .iter()
+        .map(|f| {
+            log::warn!("Error feeding stream {}: {}", f.stream_id, f.error);
+            format!("{}: {}", f.stream_id, f.error)
+        })
+        .collect();
 
+    feed_outcome(&errors, stream_ids.len())?;
     Ok(Json("true".to_string()))
+}
+
+/// Whether a feed to `stream_count` streams succeeded, given the streams that failed.
+///
+/// Any failure fails the request. When only some streams failed, the audio has already reached
+/// the others, so the message says so and names the failures: a caller retrying the whole feed
+/// would give the streams that took it the same audio twice.
+pub(crate) fn feed_outcome(errors: &[String], stream_count: usize) -> Result<(), ApiError> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    if errors.len() == stream_count {
+        return Err(ApiError::Internal(format!(
+            "All streams failed: {}",
+            errors.join("; ")
+        )));
+    }
+    Err(ApiError::Internal(format!(
+        "{} of {} streams failed; the others were fed: {}",
+        errors.len(),
+        stream_count,
+        errors.join("; ")
+    )))
 }

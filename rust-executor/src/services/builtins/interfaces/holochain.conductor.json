@@ -410,20 +410,7 @@
       }
     },
     "restart": {
-      "description": "Wait until the conductor is up. Needs the admin credential.",
-      "params": {
-        "type": "object",
-        "additionalProperties": false,
-        "description": "The empty object a method with no params takes."
-      },
-      "result": {
-        "type": "boolean"
-      },
-      "action": "ADMIN",
-      "long": true
-    },
-    "restartService": {
-      "description": "Restart the conductor with its stored configuration.",
+      "description": "Restart the conductor from its stored configuration.",
       "params": {
         "type": "object",
         "additionalProperties": false,

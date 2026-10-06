@@ -440,7 +440,7 @@ pub fn models_interface() -> Value {
         MethodOptions { errors: vec![("CleartextCredential", 422)], ..Default::default() },
     )
     .method::<IdParams, bool>("removeModel", "MANAGE", "Remove a model.", MethodOptions::default())
-    .method::<SetDefaultModelParams, bool>("setDefaultModel", "MANAGE", "Make a model the default of its type.", MethodOptions::default())
+    .method::<SetDefaultModelParams, bool>("setDefaultModel", "MANAGE", "Make a model the default of its type. The model must exist and have that type.", MethodOptions { errors: vec![("InvalidDefaultModel", 422)], ..Default::default() })
     .method::<ModelTypeParams, Option<Model>>("getDefaultModel", "READ", "The default model of a type.", MethodOptions { read: true, ..Default::default() })
     .method::<ModelParams, AIModelLoadingStatus>("modelLoadingStatus", "READ", "Download and load progress of a model.", MethodOptions { read: true, ..Default::default() })
     .method::<ModelIdParams, bool>(
@@ -1222,7 +1222,14 @@ impl ServiceImplementation for Ai {
                     .await?
                     .set_default_model(p.model_type, p.id)
                     .await
-                    .map_err(internal)?;
+                    .map_err(
+                        |e| match e.downcast_ref::<crate::db::InvalidDefaultModel>() {
+                            Some(invalid) => {
+                                ServiceError::method("InvalidDefaultModel", invalid.to_string())
+                            }
+                            None => internal(e),
+                        },
+                    )?;
                 to_value(true)
             }
             "getDefaultModel" => {
