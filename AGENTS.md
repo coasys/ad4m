@@ -64,7 +64,22 @@ After the Holochain 0.7.0 update with PR #5550:
 
 ## Running Integration Tests
 
-The integration tests are in `tests/js` and run with `pnpm run test-main`.
+The integration tests are in `tests/js`. Three suites, one CI job each:
+
+| Script (in `tests/js`) | CI job | Executors |
+|---|---|---|
+| `pnpm run test-main` (= `test-main-local`) | `integration-tests-js` (required check) | single-executor suites + Alice/Bob on `bootstrap-languages/local/*`, `--run-holochain false` |
+| `pnpm run test-main-server-link` | `integration-tests-multi-node-server-link` | Alice + Bob on local languages, links over the server-link-language and a link-server the suite starts (`tests/js/tests/integration-server-link.test.ts`) |
+| `pnpm run test-main-multi-node-holochain` | `integration-tests-multi-node-holochain` | Alice + Bob with Holochain: agent language + p-diff-sync (`tests/js/tests/integration.test.ts`) |
+
+Where a two-executor test belongs: if it only needs one executor to see
+languages, neighbourhoods or agent profiles the other published, the local
+suite — `startExecutor` points the local language-language, neighbourhood store
+and agent-language of every executor at shared directories under
+`tests/js/tst-tmp` (`tests/js/utils/sharedStores.ts`). If it needs links to sync
+between executors, the server-link suite (and, for p-diff-sync itself, the
+Holochain suite); such suites take a `LinkLangConfig` (`utils/linkLangConfig.ts`)
+so the same file runs on both link languages.
 
 ### Port Conflicts
 
@@ -85,3 +100,34 @@ The integration tests use the `ad4m-executor` CLI binary. Depending on what code
 | Deno JS (`js_core/*.js`, `*_extension.js`) | `pnpm build` in `rust-executor/` (rebuilds the Deno snapshot) |
 
 **Deno Snapshot**: Anything that changes the content of the Deno JS engine at startup (language bootstrap, `ad4m:host`, or `#[op2]` extension `.js` files) requires rebuilding the snapshot. `pnpm build` in `rust-executor/` does that; `cargo build --release` in `cli/` does not.
+
+## bootstrap-languages/*/esbuild.ts: the `@coasys/ad4m-ldk` relative path
+
+Every `bootstrap-languages/*/esbuild.ts` resolves `@coasys/ad4m-ldk` via a
+hardcoded relative path from the language's own directory. Inside this monorepo
+that path must be `../../ad4m-ldk/js/lib/index.js` (two levels up:
+`bootstrap-languages/<lang>/` → `bootstrap-languages/` → repo root →
+`ad4m-ldk/js/lib/index.js`) — this convention applies to all bootstrap-languages.
+Verify with:
+
+```bash
+grep -n "ad4m-ldk/js/lib" bootstrap-languages/*/esbuild.ts
+```
+
+If you copy/scaffold a language from a **standalone repo** (one developed as
+a sibling checkout next to `ad4m/`, e.g. via `ad4m-link-language-template`),
+its `esbuild.ts` and `tsconfig.json` `paths` will default to a sibling-repo
+path like `../ad4m/ad4m-ldk/js/lib/index.js` instead — that resolves to a
+nonexistent location once the language lives inside the monorepo and must be
+repointed to the `../../ad4m-ldk/...` form in both files before `build`/
+`typecheck` will work. (`bootstrap-languages/server-link-language` needed
+this fix when imported from its standalone repo.)
+
+## link-server and server-link-language
+
+`link-server/` (self-hosted Fastify/SQLite link-persistence server) and
+`bootstrap-languages/server-link-language/` (the AD4M link language that
+syncs through it) were imported from standalone repos as an alternative to
+the default Holochain-based `p-diff-sync` link language — see the README's
+"Link languages: Holochain or self-hosted" section. Each has its own
+AGENTS.md with build/test commands and architecture notes.

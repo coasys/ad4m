@@ -16,6 +16,9 @@ import { Ad4mModel } from './model/Ad4mModel'
  * AgentClient, ExpressionClient, LanguageClient,
  * NeighbourhoodClient, PerspectiveClient and RuntimeClient
  * for the respective functionality.
+ *
+ * Event listeners (`addXListener`, `addXCallback`) receive events from the moment of
+ * registration: the first one opens the event subscription of its sub-client.
  */
 export class Ad4mClient {
     #baseUrl: string
@@ -32,22 +35,21 @@ export class Ad4mClient {
     constructor(
         baseUrl: string,
         token?: string,
-        subscribe: boolean = true,
         options?: { webSocketImpl?: new (url: string) => WebSocket; fetchImpl?: typeof fetch }
     ) {
         this.#baseUrl = baseUrl
         this.#token = token
         this.#apiClient = new ApiClient(baseUrl, token, options?.webSocketImpl, options?.fetchImpl)
-        this.#agentClient = new AgentClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#agentClient = new AgentClient(baseUrl, token, this.#apiClient)
         this.#expressionClient = new ExpressionClient(baseUrl, token, this.#apiClient)
         this.#languageClient = new LanguageClient(baseUrl, token, this.#apiClient)
         this.#neighbourhoodClient = new NeighbourhoodClient(baseUrl, token, this.#apiClient)
-        this.#aiClient = new AIClient(baseUrl, token, subscribe, this.#apiClient)
-        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#aiClient = new AIClient(baseUrl, token, this.#apiClient)
+        this.#perspectiveClient = new PerspectiveClient(baseUrl, token, this.#apiClient)
         this.#perspectiveClient.setExpressionClient(this.#expressionClient)
         this.#perspectiveClient.setNeighbourhoodClient(this.#neighbourhoodClient)
         this.#perspectiveClient.setAIClient(this.#aiClient)
-        this.#runtimeClient = new RuntimeClient(baseUrl, token, subscribe, this.#apiClient)
+        this.#runtimeClient = new RuntimeClient(baseUrl, token, this.#apiClient)
 
         // Register with AD4M DevTools if the bridge is installed (e.g. browser extension)
         try {
@@ -85,14 +87,6 @@ export class Ad4mClient {
 
     get ai(): AIClient {
         return this.#aiClient
-    }
-
-    /** Start event subscriptions (agent-updated, agent-status-changed, apps-changed).
-     *  Safe to call if subscriptions were deferred at construction (subscribe=false). */
-    startSubscriptions(): void {
-        this.#agentClient.subscribeAgentUpdated()
-        this.#agentClient.subscribeAgentStatusChanged()
-        this.#agentClient.subscribeAppsChanged()
     }
 
     /** Close all event connections and clear in-memory caches */

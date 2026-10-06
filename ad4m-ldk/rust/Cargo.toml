@@ -21,6 +21,11 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde-wasm-bindgen = "0.6"
 js-sys = "0.3"
+# `futures::lock::Mutex` (needs the `std` feature) serializes calls into the language instance.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
 
 [profile.release]
 opt-level = "s"

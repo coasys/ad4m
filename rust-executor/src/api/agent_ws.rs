@@ -331,17 +331,28 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     });
 
     let mut init_errors: Vec<String> = Vec::new();
-
-    // Start the conductor before loading languages: a seed whose system languages run on
-    // Holochain waits for it in their constructors. See `agent::conductor_startup`.
-    let startup = spawn_conductor_startup(body.passphrase.clone());
     let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
-    if let Err(e) = startup.load_core_languages(language_language_only).await {
-        log::error!("Error loading system languages: {:?}", e);
-        init_errors.push(format!("Failed to load system languages: {}", e));
+
+    if config.run_holochain.unwrap_or(true) {
+        let startup = spawn_conductor_startup(body.passphrase.clone());
+        if let Err(e) = startup.load_core_languages(language_language_only).await {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
     } else {
-        log::info!("System languages loaded");
+        log::info!("Skipping Holochain conductor (run_holochain=false)");
+        if let Err(e) = LanguageController::global_instance()
+            .load_core_system_languages(language_language_only)
+            .await
+        {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
     }
 
     spawn_main_agent_publish();
@@ -423,16 +434,28 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        // Start the conductor before loading languages: a seed whose system languages run on
-        // Holochain waits for it in their constructors. See `agent::conductor_startup`.
-        let startup = spawn_conductor_startup(body.passphrase.clone());
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
-        if let Err(e) = startup.load_core_languages(language_language_only).await {
-            log::error!("Error loading system languages: {:?}", e);
-            init_errors.push(format!("Failed to load system languages: {}", e));
+
+        if config.run_holochain.unwrap_or(true) {
+            let startup = spawn_conductor_startup(body.passphrase.clone());
+            if let Err(e) = startup.load_core_languages(language_language_only).await {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
         } else {
-            log::info!("System languages loaded");
+            log::info!("Skipping Holochain conductor (run_holochain=false)");
+            if let Err(e) = LanguageController::global_instance()
+                .load_core_system_languages(language_language_only)
+                .await
+            {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
         }
 
         log::info!("AD4M init complete");

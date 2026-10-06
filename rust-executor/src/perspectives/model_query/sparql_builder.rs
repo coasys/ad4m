@@ -12,19 +12,63 @@
 //! The main entry points are [`build_instance_sparql`] (full row query) and
 //! [`build_count_sparql`] (lightweight `COUNT`).  Both delegate to
 //! [`build_query_patterns`] for the shared conformance + where logic.
+//!
+//! Every link either kind of pattern matches passes the query's [`LinkGuard`]
+//! (`linkStatus`, `includeUnverified`), the same links hydration reads. So a
+//! link that is withheld from an instance's values cannot select it, count it,
+//! order it or exclude it either (#1120).
 
 use serde_json::Value;
 
+use crate::perspectives::sparql_store::status_str;
+use crate::types::LinkStatus;
 use std::collections::BTreeMap;
 
+use super::link_author::{
+    instance_author_filter, is_link_leaf, link_author_join, may_hold_link_author,
+    side_by_side_author, side_by_side_scopes, split_leaf, LinkAuthorState,
+};
 use super::types::{
-    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ShapeResolver, SortKey,
-    SparqlPagination, WhereCondition,
+    InstanceQueryPlan, ModelQueryInput, ModelShape, OrderDirection, Scope, ScopeDirection,
+    ShapeResolver, SortKey, SparqlPagination, WhereCondition,
 };
 use super::utils::{
     emittable_iri, escape_sparql_string, format_literal_number, looks_like_absolute_iri,
-    validate_iri,
+    not_in_filter, validate_iri, values_or_str_filter,
 };
+
+/// The variable a [`Scope::Traverse`] binds its anchor to.
+///
+/// Projected out of the id phase whenever a per-anchor limit is asked for, so
+/// the executor can group the ids it got back by the anchor each came from.
+pub(super) const ANCHOR_VAR: &str = "_anchor";
+
+/// The per-anchor limit this query asks for, if any.
+///
+/// Read off the scope rather than passed separately because three layers need
+/// the same answer — the builder (project the anchor), the planner (force the
+/// two-phase shape so the slice lands before hydration) and the executor (do
+/// the slicing) — and a parameter threaded through all of them is a parameter
+/// one of them will eventually be called without.
+pub(super) fn per_anchor_limit(query: &ModelQueryInput) -> Option<usize> {
+    match &query.parent {
+        Some(Scope::Traverse {
+            limit_per_anchor, ..
+        }) => *limit_per_anchor,
+        _ => None,
+    }
+}
+
+/// The per-level breadth limits this query asks to walk, if any.
+///
+/// Read off the scope for the same reason `per_anchor_limit` is: the planner needs it to choose the
+/// two-phase shape, and the executor needs it to drive the walk.
+pub(super) fn level_limits(query: &ModelQueryInput) -> Option<&Vec<usize>> {
+    match &query.parent {
+        Some(Scope::Traverse { levels, .. }) => levels.as_ref(),
+        _ => None,
+    }
+}
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
 const XSD_INTEGER: &str = "http://www.w3.org/2001/XMLSchema#integer";
@@ -51,9 +95,23 @@ fn typed_number_literal(n: f64) -> Option<String> {
 /// probe tries to use a specific conformance predicate (flag or required
 /// property) for efficiency, falling back to a generic `?source ?_anyP ?_anyT`
 /// pattern if no specific predicate is available.
-pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
+///
+/// It binds `?_first_ts_v`, one row per matching reifier, which the caller
+/// folds to one row per source with `MIN`. The fallback pattern matches every
+/// property of the source, so a source with three properties binds three
+/// timestamps; a caller that read them as rows would count one instance three
+/// times against a limit. Aggregating is therefore not an optimisation — it is
+/// what makes a row mean an instance.
+///
+/// Only links the query's [`LinkGuard`] admits are probed (#1113, #1120), so
+/// an unverified or other-status earlier link cannot move an instance up the
+/// page. The probe joins one reifier per link, so the checks sit on that same
+/// reifier. The probe is a required pattern, and conformance reads the same
+/// links, so a source whose probe link is withheld is not an instance at all.
+pub(super) fn build_timestamp_probe(shape: &ModelShape, guard: LinkGuard) -> String {
     let rdf_reifies = "http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies";
     let ont_ts = "ad4m://ontology/timestamp";
+    let verified = guard.on_reifier("?_r");
 
     if let Some(prop) = shape.properties.iter().find(|p| {
         // `emittable_iri` on the initial: the value is inlined as `<…>`
@@ -69,7 +127,7 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     }) {
         let initial = prop.initial_value.as_ref().unwrap();
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> <{initial}> )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
@@ -81,14 +139,30 @@ pub(super) fn build_timestamp_probe(shape: &ModelShape) -> String {
     {
         let safe_name = prop.name.replace(|c: char| !c.is_alphanumeric(), "_");
         return format!(
-            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts .",
+            "?_r <{rdf_reifies}> <<( ?source <{}> ?_cf_{safe_name} )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}",
             prop.predicate
         );
     }
 
     format!(
-        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts ."
+        "?source ?_anyP ?_anyT . ?_r <{rdf_reifies}> <<( ?source ?_anyP ?_anyT )>> . ?_r <{ont_ts}> ?_first_ts_v .{verified}"
     )
+}
+
+/// The predicates of the links hydration reads for an instance, deduplicated
+/// and sorted. Empty means every predicate.
+///
+/// The instance's `author` and `timestamp` come from the earliest of these
+/// links, so [`super::link_author::instance_author_filter`] reads the same set.
+pub(super) fn instance_link_predicates(shape: &ModelShape) -> Vec<&str> {
+    let unique: std::collections::BTreeSet<&str> = shape
+        .properties
+        .iter()
+        .filter(|p| !p.predicate.is_empty())
+        .filter(|p| !(p.is_collection && p.getter.is_some()))
+        .map(|p| p.predicate.as_str())
+        .collect();
+    unique.into_iter().collect()
 }
 
 /// Build the SPARQL query (or two-phase plan) that retrieves instance rows.
@@ -105,20 +179,14 @@ pub(super) fn build_instance_sparql(
     resolver: Option<&dyn ShapeResolver>,
 ) -> InstanceQueryPlan {
     let (conformance, where_extra) = build_query_patterns(shape, query, resolver);
+    let guard = LinkGuard::of(query);
 
-    let needed: Vec<&str> = shape
-        .properties
-        .iter()
-        .filter(|p| !p.predicate.is_empty())
-        .filter(|p| !(p.is_collection && p.getter.is_some()))
-        .map(|p| p.predicate.as_str())
-        .collect();
+    let needed = instance_link_predicates(shape);
 
     let predicate_filter = if needed.is_empty() {
         String::new()
     } else {
-        let unique: std::collections::BTreeSet<&str> = needed.into_iter().collect();
-        let values: String = unique
+        let values: String = needed
             .iter()
             .map(|p| format!("<{p}>"))
             .collect::<Vec<_>>()
@@ -162,6 +230,14 @@ pub(super) fn build_instance_sparql(
                 ));
             }
         }
+        // Instances that tie on the sort key (created in the same millisecond, equal
+        // values) keep one order, so a page never swaps them between queries. With
+        // per-anchor grouping a source is one row per anchor, so the anchor breaks
+        // the remaining tie.
+        suffix.push_str(" ASC(?source)");
+        if per_anchor_limit(query).is_some() || level_limits(query).is_some() {
+            suffix.push_str(&format!(" ASC(?{ANCHOR_VAR})"));
+        }
         if let Some(offset) = pg.offset {
             if offset > 0 {
                 suffix.push_str(&format!("\n    OFFSET {offset}"));
@@ -175,16 +251,28 @@ pub(super) fn build_instance_sparql(
         String::new()
     };
 
+    // Carry the anchor out of the id phase when the executor will slice by it.
+    // Grouping by (source, anchor) rather than source alone is deliberate: a
+    // node reachable from two anchors is two rows here, because it occupies a
+    // place in each of their top-N. Collapsing it would silently cost one
+    // anchor a result.
+    let (anchor_select, anchor_group) =
+        if per_anchor_limit(query).is_some() || level_limits(query).is_some() {
+            (format!(" ?{ANCHOR_VAR}"), format!(" ?{ANCHOR_VAR}"))
+        } else {
+            (String::new(), String::new())
+        };
+
     if let Some(pg) = sparql_pagination {
         let subquery_body = match &pg.sort_key {
             SortKey::Timestamp => {
-                let ts_probe = build_timestamp_probe(shape);
+                let ts_probe = build_timestamp_probe(shape, guard);
                 format!(
-                    r#"SELECT DISTINCT ?source ?_first_ts WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (MIN(?_first_ts_v) AS ?_first_ts) WHERE {{
 {conformance}
 {where_extra}
             {ts_probe}
-        }}{pagination_suffix}"#
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Property(predicate) => {
@@ -198,33 +286,37 @@ pub(super) fn build_instance_sparql(
                 // filtered set, so there is no index to lose here.
                 // The xsd:double cast yields the numeric sort key when the
                 // value parses as a number.
+                let link = order_key_link(guard, "?source", predicate, "?_sort_raw");
                 format!(
-                    r#"SELECT DISTINCT ?source (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_nv) AS ?_sort_num) (SAMPLE(?_sv) AS ?_sort_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_sort_raw . BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
-        }} GROUP BY ?source{pagination_suffix}"#
+            OPTIONAL {{ {link} BIND(STR(<ad4m://fn/parse_literal>(?_sort_raw)) AS ?_sv) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_sort_raw))) AS ?_nv) }}
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::Projection(predicate) => {
+                let link = order_key_link(guard, "?source", predicate, "?_proj_t");
                 format!(
-                    r#"SELECT DISTINCT ?source (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (COUNT(DISTINCT ?_proj_t) AS ?_proj_sort) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{predicate}> ?_proj_t . }}
-        }} GROUP BY ?source{pagination_suffix}"#
+            OPTIONAL {{ {link} }}
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
             SortKey::RelationProperty {
                 rel_pred,
                 prop_pred,
             } => {
+                let rel_link = order_key_link(guard, "?source", rel_pred, "?_rp_rel");
+                let prop_link = order_key_link(guard, "?_rp_rel", prop_pred, "?_rp_raw");
                 format!(
-                    r#"SELECT DISTINCT ?source (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
+                    r#"SELECT DISTINCT ?source{anchor_select} (SAMPLE(?_rp_num_v) AS ?_rp_num) (SAMPLE(?_rp_str_v) AS ?_rp_str) WHERE {{
 {conformance}
 {where_extra}
-            OPTIONAL {{ ?source <{rel_pred}> ?_rp_rel . OPTIONAL {{ ?_rp_rel <{prop_pred}> ?_rp_raw . BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
-        }} GROUP BY ?source{pagination_suffix}"#
+            OPTIONAL {{ {rel_link} OPTIONAL {{ {prop_link} BIND(STR(<ad4m://fn/parse_literal>(?_rp_raw)) AS ?_rp_str_v) BIND(<http://www.w3.org/2001/XMLSchema#double>(STR(<ad4m://fn/parse_literal>(?_rp_raw))) AS ?_rp_num_v) }} }}
+        }} GROUP BY ?source{anchor_group}{pagination_suffix}"#
                 )
             }
         };
@@ -234,8 +326,10 @@ pub(super) fn build_instance_sparql(
         }
     } else {
         let local_status = local_status_filter(shape);
+        let link_status = link_status_filter(query.link_status.as_ref());
+        let proof_valid = proof_valid_filter(query.include_unverified);
         InstanceQueryPlan::Single(format!(
-            r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
+            r#"SELECT DISTINCT ?source ?predicate ?target ?author ?timestamp WHERE {{
 {conformance}
 {where_extra}
 {predicate_filter}    ?source ?predicate ?target .
@@ -243,9 +337,234 @@ pub(super) fn build_instance_sparql(
     FILTER(isIRI(?source) && isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{local_status}}}"#
+{link_status}{proof_valid}{local_status}}}"#
         ))
     }
+}
+
+/// The link an order key reads, `subject <predicate> object`, as the pattern
+/// inside its `OPTIONAL`: only a link the guard admits supplies the key.
+///
+/// The guarded form is a sub-`SELECT`. Oxigraph evaluates an `OPTIONAL` over a
+/// reifier join, or over `FILTER EXISTS`, row by row with a scan, which made a
+/// page ordered by a property take seconds on a few thousand instances
+/// (`test_perf_guarded_selection_paginated_query`); the sub-`SELECT` is
+/// evaluated once. Plain triple when the guard is open.
+fn order_key_link(guard: LinkGuard, subject: &str, predicate: &str, object: &str) -> String {
+    let triple = format!("{subject} <{predicate}> {object} .");
+    let join = guard.join("?_skr", subject, &format!("<{predicate}>"), object);
+    if join.is_empty() {
+        triple
+    } else {
+        format!("{{ SELECT {subject} {object} WHERE {{ {triple}{join} }} }}")
+    }
+}
+
+/// SPARQL fragment restricting the rows that hydrate an instance to links of
+/// one [`LinkStatus`], for every predicate: the `linkStatus` query option
+/// (#1046 §7, #1116).
+///
+/// Each row of the instance query is one link joined through its own reifier,
+/// so requiring `?_reifier <ad4m://ontology/status> "Shared"` keeps exactly the
+/// Shared links. The pattern is required, not `OPTIONAL`: a link with no status
+/// annotation is dropped, the same fail-closed rule as [`local_status_filter`].
+/// So a link written by a binary that stored no status is invisible under
+/// either value, and an old store can answer "no Shared links" without
+/// anything being wrong. Only callers that opt in are affected.
+/// The two compose. Under `Shared` a `local: true` property hydrates nothing,
+/// because its links are Local by declaration. That is the answer to "this
+/// instance as it exists in Shared links".
+///
+/// It sits next to [`proof_valid_filter`] on the same `?_reifier`, so the two
+/// combine per link: a row is kept when its link has the status **and**
+/// verified (or the query set `include_unverified`). A Local link that did not
+/// verify is withheld under `Some(Local)` unless `include_unverified` is set.
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// including the include and `$` projection sub-queries that hydrate related
+/// instances, and the `__links` rows. Everything that matches a bare triple
+/// instead, which is what *selects* instances (conformance, `where`, `COUNT`,
+/// the two-phase plan's order keys, scopes, projections) and the reverse
+/// relations, applies the same status through [`LinkGuard`].
+///
+/// Empty when no status is requested.
+pub(super) fn link_status_filter(status: Option<&LinkStatus>) -> String {
+    match status {
+        None => String::new(),
+        Some(s) => format!(
+            "    ?_reifier <ad4m://ontology/status> \"{}\" .\n",
+            status_str(s)
+        ),
+    }
+}
+
+/// SPARQL fragment withholding rows whose link signature did not verify — the
+/// `model_query` default (#1046 §2, #1113).
+///
+/// Each row of the instance query is one link, joined through its own reifier,
+/// and since #1064 the reifier's `proofValid` is computed from the signature on
+/// every insert rather than taken from the caller. So requiring it to be
+/// `"true"` drops exactly the links whose signature does not verify, and a link
+/// with no verdict at all is dropped with them: the triple pattern is required,
+/// not `OPTIONAL`, so absence fails closed. That is the same rule the flow
+/// engine applies by hand (`proof.valid == Some(true)`), and the reason it
+/// matters for hydration in particular is last-write-wins — without it, a later
+/// forged link on a scalar property *becomes* the property's value.
+///
+/// Why the join is sound: the reifier IRI is keyed on author, source,
+/// predicate, normalized target and timestamp (`make_reifier_iri` in
+/// `sparql_store.rs`), not on the triple alone. Two links asserting the same
+/// triple under different authors or timestamps get different reifiers, each
+/// with one `author`, one `timestamp` and one `proofValid`. So putting this
+/// pattern next to the `author`/`timestamp` reads is not a cross product, and a
+/// forged link cannot borrow a genuine sibling's verdict. A reifier holds two
+/// verdicts only when the same link expression is ingested twice, and then
+/// every projected column is identical. That is also why the cut is "a `true`
+/// exists" rather than "no `false` exists": the latter would let a
+/// re-ingestion of a genuine link suppress it.
+///
+/// Scope: this filters the rows that hydrate an instance, in both query plans,
+/// and the `__links` rows (`links.rs`). The reads that match a bare triple,
+/// which exists as soon as any link asserts it, get the same verdict through
+/// [`LinkGuard`]: conformance, pushed `where` (on the author's reifier when an
+/// `author` scopes the link), `COUNT` / `totalCount`, the order keys of the
+/// two-phase plan's pagination subquery ([`build_timestamp_probe`] on its own
+/// reifier), scopes, `$` projections and the reverse relations. A transitive
+/// scope or projection is walked one guarded step at a time
+/// (`query::guarded_reach`). A typed relation's generated getter gets it in
+/// `getters::verify_relation_getter`; a hand-written getter runs as written.
+///
+/// Empty when the query opts in with `includeUnverified`.
+pub(super) fn proof_valid_filter(include_unverified: Option<bool>) -> &'static str {
+    if include_unverified.unwrap_or(false) {
+        ""
+    } else {
+        "    ?_reifier <ad4m://ontology/proofValid> \"true\" .\n"
+    }
+}
+
+/// Which links a read may use: the query's `linkStatus` (#1116) and
+/// `includeUnverified` (#1113), as one value.
+///
+/// Every read that matches a link goes through this, whether it hydrates an
+/// instance or decides which instances match (#1120). The checks always sit on
+/// **one** reifier variable: a link passes when *it* has the status and *it*
+/// verified. Two clauses over two reifier variables would mean "a Shared link
+/// exists and a verified link exists", which a verified Local link and a forged
+/// Shared one on the same triple satisfy between them.
+///
+/// The default (`LinkGuard::default()`) is no status restriction and verified
+/// links only. A missing annotation fails closed: both checks are required
+/// triples, so a link with no status or no verdict does not pass.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct LinkGuard<'a> {
+    pub(super) status: Option<&'a LinkStatus>,
+    pub(super) include_unverified: Option<bool>,
+}
+
+impl<'a> LinkGuard<'a> {
+    /// The guard a query asks for.
+    pub(super) fn of(query: &'a ModelQueryInput) -> Self {
+        LinkGuard {
+            status: query.link_status.as_ref(),
+            include_unverified: query.include_unverified,
+        }
+    }
+
+    /// No restriction at all: any status, unverified links included. The
+    /// emitted SPARQL is then what it was before the guard existed.
+    #[cfg(test)]
+    pub(super) const ANY: LinkGuard<'static> = LinkGuard {
+        status: None,
+        include_unverified: Some(true),
+    };
+
+    /// Whether this guard lets every link through, so nothing is emitted.
+    pub(super) fn is_open(&self) -> bool {
+        self.status.is_none() && self.include_unverified.unwrap_or(false)
+    }
+
+    /// The checks as triple patterns on `reifier`, a variable the caller has
+    /// already joined to the link through `rdf:reifies`. Empty when open.
+    pub(super) fn on_reifier(&self, reifier: &str) -> String {
+        let mut out = String::new();
+        if let Some(s) = self.status {
+            out.push_str(&format!(
+                " {reifier} <ad4m://ontology/status> \"{}\" .",
+                status_str(s)
+            ));
+        }
+        if !self.include_unverified.unwrap_or(false) {
+            out.push_str(&format!(
+                " {reifier} <ad4m://ontology/proofValid> \"true\" ."
+            ));
+        }
+        out
+    }
+
+    /// Join `reifier` to a link asserting `subject predicate object` and check
+    /// it: what the patterns that *select* instances use. `predicate` is a
+    /// term, `<iri>` or a variable; `reifier` must be a fresh `?_` variable,
+    /// unique in the query. Empty when open.
+    ///
+    /// A join rather than [`Self::exists`]: Oxigraph evaluates a `FILTER
+    /// EXISTS` over a triple term by scanning, which made a guarded page two
+    /// orders of magnitude slower (`test_perf_guarded_selection_paginated_query`).
+    /// Two passing links over one triple yield the solution twice, so every
+    /// consumer of these patterns deduplicates: `COUNT(DISTINCT ?source)`, the
+    /// id phase's `GROUP BY ?source`, and the single plan's `SELECT DISTINCT`.
+    pub(super) fn join(
+        &self,
+        reifier: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> String {
+        if self.is_open() {
+            return String::new();
+        }
+        format!(
+            " {reifier} <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( {subject} {predicate} {object} )>> .{}",
+            self.on_reifier(reifier)
+        )
+    }
+
+    /// For a read that matches the bare triple `subject predicate object`
+    /// rather than joining one reifier per row: kept when at least one link
+    /// asserting the triple passes both checks on the same reifier.
+    /// `FILTER EXISTS` rather than a join, so two passing links over one triple
+    /// do not return the subject twice: the reads that hydrate a relation use
+    /// it. `predicate` is a term: `<iri>` or a variable. Empty when open.
+    pub(super) fn exists(&self, subject: &str, predicate: &str, object: &str) -> String {
+        if self.is_open() {
+            return String::new();
+        }
+        format!(
+            " FILTER EXISTS {{ ?_pv <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> \
+             <<( {subject} {predicate} {object} )>> .{} }}",
+            self.on_reifier("?_pv")
+        )
+    }
+}
+
+/// [`LinkGuard::exists`] for an IRI predicate, with the two options passed
+/// separately: the reverse relations in `relations.rs`, and a typed relation's
+/// generated getter and a relation's `where` (`getters.rs`).
+///
+/// Empty when no status is requested and `include_unverified` is `Some(true)`.
+pub(super) fn verified_link_exists(
+    subject: &str,
+    predicate: &str,
+    object: &str,
+    status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
+) -> String {
+    LinkGuard {
+        status,
+        include_unverified,
+    }
+    .exists(subject, &format!("<{predicate}>"), object)
 }
 
 /// SPARQL fragment restricting `local: true` properties to `LinkStatus::Local` links.
@@ -263,6 +582,19 @@ pub(super) fn build_instance_sparql(
 /// Returns an empty string when the shape declares no local properties, leaving the
 /// query byte-identical to before.
 pub(super) fn local_status_filter(shape: &ModelShape) -> String {
+    let preds = local_predicates(shape);
+    if preds.is_empty() {
+        return String::new();
+    }
+
+    format!(
+        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
+        preds.join(", ")
+    )
+}
+
+/// The `local: true` predicates, as `<iri>` terms, sorted and deduplicated.
+pub(super) fn local_predicates(shape: &ModelShape) -> Vec<String> {
     let mut preds: Vec<String> = shape
         .properties
         .iter()
@@ -272,15 +604,7 @@ pub(super) fn local_status_filter(shape: &ModelShape) -> String {
         .collect();
     preds.sort();
     preds.dedup();
-
-    if preds.is_empty() {
-        return String::new();
-    }
-
-    format!(
-        "    OPTIONAL {{ ?_reifier <ad4m://ontology/status> ?_status . }}\n    FILTER(!(?predicate IN ({})) || ?_status = \"Local\")\n",
-        preds.join(", ")
-    )
+    preds
 }
 
 /// Build a COUNT SPARQL query that returns the number of conforming instances.
@@ -327,7 +651,7 @@ pub(super) fn all_where_pushable(
 ) -> bool {
     match query.where_clause {
         None => true,
-        Some(ref wc) => compile_where_clause(wc, shape, resolver).complete,
+        Some(ref wc) => compile_where_clause(wc, shape, resolver, LinkGuard::of(query)).complete,
     }
 }
 
@@ -347,6 +671,22 @@ pub(super) fn build_query_patterns(
     resolver: Option<&dyn ShapeResolver>,
 ) -> (String, String) {
     let mut conformance_patterns = Vec::new();
+    let guard = LinkGuard::of(query);
+
+    /// A scope the builder cannot express, as patterns that match nothing.
+    ///
+    /// Returning empty strings here instead drops the scope *and* the class
+    /// conformance appended below it, leaving a query bounded by nothing at
+    /// all: every link in the store, of every class. A caller who scoped to a
+    /// parent and mistyped its predicate got the whole perspective back.
+    ///
+    /// Nothing is the honest answer. An id or predicate that cannot be written
+    /// as a term cannot match a term, so a scope built on one selects no rows —
+    /// the same reading the empty anchor list already has, and the opposite of
+    /// the unbounded read this guards against.
+    fn matches_nothing() -> (String, String) {
+        ("    FILTER(false)".to_string(), String::new())
+    }
 
     // Subject position for a parent id: inline `<id>` when it is a parseable
     // IRI, else a variable bound by the pattern plus a STR() filter — Flux ids
@@ -374,41 +714,142 @@ pub(super) fn build_query_patterns(
             Scope::Raw { id, predicate } => {
                 if let (Ok(safe_id), Ok(safe_pred)) = (validate_iri(id), validate_iri(predicate)) {
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} <{safe_pred}> ?source ."));
+                    let pred = format!("<{safe_pred}>");
+                    let guarded = guard.join("?_sr", &subj, &pred, "?source");
+                    conformance_patterns.push(format!("    {subj} {pred} ?source .{guarded}"));
                     conformance_patterns.extend(filter);
                 } else {
                     log::warn!(
-                        "Skipping parent scope: invalid IRI in id='{}' or predicate='{}'",
+                        "Parent scope matches nothing: invalid IRI in id='{}' or predicate='{}'",
                         id,
                         predicate
                     );
+                    return matches_nothing();
                 }
             }
             Scope::Model { id, field, model } => {
                 let safe_id = match validate_iri(id) {
                     Ok(s) => s,
                     Err(_) => {
-                        log::warn!("Skipping parent scope: invalid IRI in id='{}'", id);
-                        return (String::new(), String::new());
+                        log::warn!("Parent scope matches nothing: invalid IRI in id='{}'", id);
+                        return matches_nothing();
                     }
                 };
                 if let Some(ref f) = field {
                     if let Ok(safe_f) = validate_iri(f) {
                         let (subj, filter) = parent_subject(safe_id);
-                        conformance_patterns.push(format!("    {subj} <{safe_f}> ?source ."));
+                        let pred = format!("<{safe_f}>");
+                        let guarded = guard.join("?_sr", &subj, &pred, "?source");
+                        conformance_patterns.push(format!("    {subj} {pred} ?source .{guarded}"));
                         conformance_patterns.extend(filter);
                     } else {
-                        log::warn!("Skipping parent scope: invalid IRI in field='{}'", f);
+                        log::warn!("Parent scope matches nothing: invalid IRI in field='{}'", f);
+                        return matches_nothing();
                     }
                 } else {
                     let safe_model = escape_sparql_string(model);
                     let hash_model = format!("#{safe_model}");
                     let (subj, filter) = parent_subject(safe_id);
-                    conformance_patterns.push(format!("    {subj} ?_parentPred ?source ."));
+                    let guarded = guard.join("?_sr", &subj, "?_parentPred", "?source");
+                    conformance_patterns
+                        .push(format!("    {subj} ?_parentPred ?source .{guarded}"));
                     conformance_patterns.extend(filter);
                     conformance_patterns.push(format!(
                         "    FILTER(STRENDS(STR(?_parentPred), \"/{safe_model}\") || STRENDS(STR(?_parentPred), \"{hash_model}\"))",
                     ));
+                }
+            }
+            Scope::Traverse {
+                ids,
+                predicate,
+                transitive,
+                direction,
+                limit_per_anchor: _,
+                levels: _,
+            } => {
+                let safe_pred = match validate_iri(predicate) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        log::warn!(
+                            "Traverse scope matches nothing: invalid IRI in predicate='{}'",
+                            predicate
+                        );
+                        return matches_nothing();
+                    }
+                };
+
+                // An anchor that cannot be written as a term contributes no
+                // results; it must not widen the query to everything else.
+                let safe_ids: Vec<String> = ids
+                    .iter()
+                    .filter(|id| validate_iri(id).is_ok())
+                    .cloned()
+                    .collect();
+                if safe_ids.len() != ids.len() {
+                    log::warn!(
+                        "Traverse scope: {} of {} anchor ids are not valid IRIs and were dropped",
+                        ids.len() - safe_ids.len(),
+                        ids.len()
+                    );
+                }
+
+                // `+` is one-or-more, so a transitive read excludes the anchor
+                // itself — in a tree. In a cycle it does not: `a → b → a` puts
+                // the anchor one-or-more steps from itself, so the path matches
+                // it and the caller gets their own anchor back as its own
+                // descendant. The exclusion the doc promises is stated below
+                // rather than inferred from the path operator.
+                //
+                // A single step is guarded like any other link. A path has no
+                // single link per hop to read a verdict or status from, so
+                // under a guard that restricts links the executor walks it
+                // (`query::guarded_reach`) and this binds the pairs it reached.
+                let path = if *transitive { "+" } else { "" };
+                let anchor = format!("?{ANCHOR_VAR}");
+                let (subject, object) = match direction {
+                    ScopeDirection::Out => (anchor.as_str(), "?source"),
+                    ScopeDirection::In => ("?source", anchor.as_str()),
+                };
+                match (&query.walked, *transitive) {
+                    (Some(pairs), true) => conformance_patterns.push(walked_pairs(
+                        pairs,
+                        &format!("    {subject} <{safe_pred}>+ {object} ."),
+                    )),
+                    _ => {
+                        let guarded = if *transitive {
+                            String::new()
+                        } else {
+                            guard.join("?_sr", subject, &format!("<{safe_pred}>"), object)
+                        };
+                        conformance_patterns.push(format!(
+                            "    {subject} <{safe_pred}>{path} {object} .{guarded}"
+                        ));
+                    }
+                }
+                // An empty anchor list yields an empty VALUES, which is legal
+                // and answers with nothing — the right answer for "the replies
+                // to none of these", and much better than an unbound `?_anchor`
+                // walking the whole store.
+                conformance_patterns.push(format!(
+                    "    {}",
+                    values_or_str_filter(ANCHOR_VAR, &safe_ids)
+                ));
+
+                // A walk excludes the anchors it started from — every one of
+                // them, not just the one a given row came through, so a caller
+                // naming two anchors where one sits below the other gets neither
+                // back. This is what `levels` already does by seeding `seen`
+                // with the roots; the two forms of the same walk should not
+                // disagree about what an anchor is.
+                //
+                // A single step makes no such promise and does not get this
+                // filter: there the scope is "the children of these nodes", and
+                // a node that really is its own child by one link is a fact
+                // about the graph, not an artefact of walking it. The other two
+                // `Scope` forms have never excluded anything either.
+                if *transitive {
+                    conformance_patterns
+                        .extend(not_in_filter("source", &safe_ids).map(|f| format!("    {f}")));
                 }
             }
         }
@@ -418,19 +859,55 @@ pub(super) fn build_query_patterns(
     // narrowed `?source` to one node's children — narrow enough that a scan of
     // every node sharing a predicate would cost more than it excludes.
     let scoped_by_parent = !conformance_patterns.is_empty();
-    conformance_patterns.extend(shape_conformance_patterns(shape, !scoped_by_parent));
+    conformance_patterns.extend(shape_conformance_patterns(shape, !scoped_by_parent, guard));
 
     // WHERE clause filters that can be pushed to SPARQL.
     let where_patterns = query
         .where_clause
         .as_ref()
-        .map(|wc| compile_where_clause(wc, shape, resolver).patterns)
+        .map(|wc| compile_where_clause(wc, shape, resolver, guard).patterns)
         .unwrap_or_default();
 
     let conformance = conformance_patterns.join("\n");
     let where_extra = where_patterns.join("\n");
 
     (conformance, where_extra)
+}
+
+/// Bind `?_anchor` and `?source` to exactly the `(anchor, node)` pairs of a
+/// guarded walk.
+///
+/// A seekable `VALUES` when every id is an emittable IRI. Otherwise the ids are
+/// matched as strings, and `path` (the unguarded property path) binds the two
+/// variables: every guarded pair is also a path pair, so the intersection is
+/// exactly the guarded pairs.
+fn walked_pairs(pairs: &[(String, String)], path: &str) -> String {
+    if pairs
+        .iter()
+        .all(|(a, s)| emittable_iri(a) && emittable_iri(s))
+    {
+        let rows = pairs
+            .iter()
+            .map(|(a, s)| format!("(<{a}> <{s}>)"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("    VALUES (?{ANCHOR_VAR} ?source) {{ {rows} }}")
+    } else {
+        let rows = pairs
+            .iter()
+            .map(|(a, s)| {
+                format!(
+                    "(\"{}\" \"{}\")",
+                    escape_sparql_string(a),
+                    escape_sparql_string(s)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!(
+            "{path}\n    VALUES (?_walkedA ?_walkedS) {{ {rows} }}\n    FILTER(STR(?{ANCHOR_VAR}) = ?_walkedA && STR(?source) = ?_walkedS)"
+        )
+    }
 }
 
 /// The patterns that say "`?source` is an instance of this class", derived from
@@ -452,11 +929,34 @@ pub(super) fn build_query_patterns(
 /// own query — which applies these. Without them a record can match a clause and
 /// come back with the relation empty.
 ///
+/// Each triple is kept only when a link `guard` admits asserts it, so a forged
+/// flag, or one of the other status, does not make a node an instance.
+///
 /// `allow_structural_fallback` gates the final tier, which scans every node
 /// carrying any of the class's predicates. It is the weakest signal and the most
 /// expensive one, so a caller that has already narrowed the subject declines it.
-fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: bool) -> Vec<String> {
+fn shape_conformance_patterns(
+    shape: &ModelShape,
+    allow_structural_fallback: bool,
+    guard: LinkGuard,
+) -> Vec<String> {
     let mut conformance_patterns = Vec::new();
+    // `?source <pred> object .`, kept only when a link the guard admits
+    // asserts it. The object is `<iri>` or a `?_cf…` variable unique to the
+    // property, which also names the reifier.
+    let triple = |pred: &str, object: &str| {
+        let reifier = match object.strip_prefix("?_") {
+            Some(var) => format!("?_r{var}"),
+            None => format!(
+                "?_rcf{}",
+                format!("{pred}{object}").replace(|c: char| !c.is_alphanumeric(), "_")
+            ),
+        };
+        format!(
+            "    ?source <{pred}> {object} .{}",
+            guard.join(&reifier, "?source", &format!("<{pred}>"), object)
+        )
+    };
 
     let mut has_conformance = false;
     for prop in &shape.properties {
@@ -474,26 +974,20 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
                     // the whole query fail to parse. STR() matches the
                     // `new_unchecked` store term either way.
                     if emittable_iri(initial) {
-                        conformance_patterns
-                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
+                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?_cf_{safe_name} . FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
-                            prop.predicate
+                            "{} FILTER(STR(?_cf_{safe_name}) = \"{escaped}\")",
+                            triple(&prop.predicate, &format!("?_cf_{safe_name}"))
                         ));
                     }
                 } else {
-                    conformance_patterns.push(format!(
-                        "    ?source <{}> ?_cf_{safe_name} .",
-                        prop.predicate
-                    ));
+                    conformance_patterns
+                        .push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
                 }
             } else {
-                conformance_patterns.push(format!(
-                    "    ?source <{}> ?_cf_{safe_name} .",
-                    prop.predicate
-                ));
+                conformance_patterns.push(triple(&prop.predicate, &format!("?_cf_{safe_name}")));
             }
         }
     }
@@ -510,20 +1004,17 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
                 if prop.is_flag {
                     // Same `emittable_iri` gate as the required branch above.
                     if emittable_iri(initial) {
-                        conformance_patterns
-                            .push(format!("    ?source <{}> <{initial}> .", prop.predicate));
+                        conformance_patterns.push(triple(&prop.predicate, &format!("<{initial}>")));
                     } else {
                         let escaped = escape_sparql_string(initial);
                         conformance_patterns.push(format!(
-                            "    ?source <{}> ?_cfInit_{safe_name} . FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
-                            prop.predicate
+                            "{} FILTER(STR(?_cfInit_{safe_name}) = \"{escaped}\")",
+                            triple(&prop.predicate, &format!("?_cfInit_{safe_name}"))
                         ));
                     }
                 } else {
-                    conformance_patterns.push(format!(
-                        "    ?source <{}> ?_cfInit_{safe_name} .",
-                        prop.predicate
-                    ));
+                    conformance_patterns
+                        .push(triple(&prop.predicate, &format!("?_cfInit_{safe_name}")));
                 }
                 break;
             }
@@ -545,8 +1036,9 @@ fn shape_conformance_patterns(shape: &ModelShape, allow_structural_fallback: boo
 
         if !known_predicates.is_empty() {
             conformance_patterns.push(format!(
-                "    {{ SELECT DISTINCT ?source WHERE {{ ?source ?_structPred ?_structTarget . FILTER(?_structPred IN ({})) }} }}",
-                known_predicates.join(", ")
+                "    {{ SELECT DISTINCT ?source WHERE {{ ?source ?_structPred ?_structTarget . FILTER(?_structPred IN ({})){} }} }}",
+                known_predicates.join(", "),
+                guard.join("?_rstruct", "?source", "?_structPred", "?_structTarget")
             ));
         }
     }
@@ -569,6 +1061,16 @@ pub(super) struct CompiledWhere {
     /// rows, silently. This flag is the single source of that answer; deriving it
     /// separately from the emission is what let the two disagree.
     pub(super) complete: bool,
+    /// Whether a per-link `author` condition was compiled anywhere in the
+    /// clause, including a relation quantifier's nested clause (see
+    /// [`super::link_author`]).
+    ///
+    /// Such a condition cannot be re-checked after hydration, so a clause that
+    /// sets this and is not `complete` is refused rather than run.
+    pub(super) link_author_scoped: bool,
+    /// A malformed `author` or `eq` condition, with the reason. The query is
+    /// refused with it.
+    pub(super) link_author_error: Option<String>,
 }
 
 /// `None` when a condition produced no patterns at all.
@@ -623,9 +1125,18 @@ pub(super) fn compile_where_clause(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
 ) -> CompiledWhere {
     let mut seq = 0usize;
-    compile_where_clause_seq(wc, shape, resolver, &mut seq)
+    let mut la = LinkAuthorState::default();
+    let (patterns, complete) =
+        compile_where_clause_seq(wc, shape, resolver, guard, &mut seq, &mut la);
+    CompiledWhere {
+        patterns,
+        complete,
+        link_author_scoped: la.per_link,
+        link_author_error: la.error,
+    }
 }
 
 /// The recursive body, threading a counter that makes every generated variable
@@ -640,23 +1151,53 @@ pub(super) fn compile_where_clause(
 ///
 /// The counter advances once per leaf, so variables *within* a leaf still share a
 /// suffix and correlate as they must.
+///
+/// `la` collects what [`super::link_author`] needs to know about `author`:
+/// whether a per-link one was compiled, and any malformed one. A top-level
+/// `author` is side-by-side when this object has a link-backed sibling: it then
+/// adds its instance-level filter here and scopes those siblings' links. It
+/// never reaches into a sub-clause, and a sub-clause's never reaches out.
 fn compile_where_clause_seq(
     wc: &BTreeMap<String, WhereCondition>,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     seq: &mut usize,
-) -> CompiledWhere {
+    la: &mut LinkAuthorState,
+) -> (Vec<String>, bool) {
     let mut patterns = Vec::new();
     let mut complete = true;
+
+    // Side-by-side: sugar for the bare instance-level `author` plus the same
+    // `author` nested under every link-backed sibling. Both halves are pushed,
+    // because the per-link half forbids the post-hydration fallback.
+    let side_author = side_by_side_author(wc, shape);
+    if let Some(author) = side_author {
+        la.per_link = true;
+        let tag = *seq;
+        *seq += 1;
+        match instance_author_filter(shape, author, &tag.to_string(), guard) {
+            Some(p) => patterns.push(p),
+            None => {
+                la.fail(
+                    "`author` must be a DID, an array of DIDs, `{ not: did | [dids] }` or \
+                     `{ contains: text }`"
+                        .to_string(),
+                );
+                complete = false;
+            }
+        }
+    }
 
     for (prop_name, condition) in wc {
         match prop_name.as_str() {
             "AND" => match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
-                        patterns.extend(compiled.patterns);
-                        complete &= compiled.complete;
+                        let (p, c) =
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
+                        patterns.extend(p);
+                        complete &= c;
                     }
                 }
                 _ => complete = false,
@@ -665,13 +1206,18 @@ fn compile_where_clause_seq(
                 WhereCondition::SubClauses(branches) if !branches.is_empty() => {
                     let mut arms = Vec::with_capacity(branches.len());
                     let mut ok = true;
+                    // Every arm is compiled even after one fails, so that `la`
+                    // hears about a per-link `author` in any of them: that is
+                    // what decides whether the declined `OR` may fall back to
+                    // post-hydration at all.
                     for branch in branches {
-                        let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
-                        if !compiled.complete || !binds_source(&compiled.patterns) {
+                        let (p, c) =
+                            compile_where_clause_seq(branch, shape, resolver, guard, seq, la);
+                        if !c || !binds_source(&p) {
                             ok = false;
-                            break;
+                            continue;
                         }
-                        arms.push(format!("{{\n{}\n    }}", compiled.patterns.join("\n")));
+                        arms.push(format!("{{\n{}\n    }}", p.join("\n")));
                     }
                     if ok {
                         patterns.push(format!("    {}", arms.join(" UNION ")));
@@ -681,22 +1227,39 @@ fn compile_where_clause_seq(
                 }
                 _ => complete = false,
             },
-            "NOT" => match condition {
-                WhereCondition::SubClause(branch) => {
-                    let compiled = compile_where_clause_seq(branch, shape, resolver, seq);
-                    if compiled.complete && !compiled.patterns.is_empty() {
+            "NOT" => match condition.as_not_clause() {
+                Some(branch) => {
+                    let (p, c) = compile_where_clause_seq(&branch, shape, resolver, guard, seq, la);
+                    if c && !p.is_empty() {
                         patterns.push(format!(
                             "    FILTER NOT EXISTS {{\n{}\n    }}",
-                            compiled.patterns.join("\n")
+                            p.join("\n")
                         ));
                     } else {
                         complete = false;
                     }
                 }
-                _ => complete = false,
+                None => complete = false,
             },
+            // A side-by-side `author` was emitted above and rides on the
+            // siblings' reifier joins. A bare one falls through to the leaf
+            // compiler, which declines it, so it is matched after hydration.
+            "author" if side_author.is_some() => {}
             _ => {
-                match compile_leaf_condition(prop_name.as_str(), condition, shape, resolver, seq) {
+                let scoping: Vec<&WhereCondition> = side_author
+                    .filter(|_| side_by_side_scopes(prop_name, condition, shape))
+                    .into_iter()
+                    .collect();
+                match compile_leaf_condition(
+                    prop_name.as_str(),
+                    condition,
+                    shape,
+                    resolver,
+                    guard,
+                    seq,
+                    &scoping,
+                    la,
+                ) {
                     Some(p) => patterns.extend(p),
                     None => complete = false,
                 }
@@ -704,7 +1267,7 @@ fn compile_where_clause_seq(
         }
     }
 
-    CompiledWhere { patterns, complete }
+    (patterns, complete)
 }
 
 /// Compile one `(property, condition)` pair into SPARQL patterns.
@@ -714,12 +1277,20 @@ fn compile_where_clause_seq(
 /// condition shape no arm handles. The caller turns that into
 /// `CompiledWhere::complete = false`, which is what routes the condition to the
 /// post-hydration filter instead of dropping it.
+///
+/// The condition's own nested `author` (`{ eq: X, author: A }`) and the
+/// `scoping` authors of a side-by-side `author` restrict the link that
+/// satisfies the value condition; see [`super::link_author`]. A per-link author
+/// sets `la.per_link`, and a malformed one is recorded in `la.error`.
 fn compile_leaf_condition(
     prop_name: &str,
     condition: &WhereCondition,
     shape: &ModelShape,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     seq: &mut usize,
+    scoping: &[&WhereCondition],
+    la: &mut LinkAuthorState,
 ) -> Option<Vec<String>> {
     let mut out: Vec<String> = Vec::new();
     // One id per leaf: variables inside a leaf share it, because they are meant
@@ -727,8 +1298,53 @@ fn compile_leaf_condition(
     let leaf_id = *seq;
     *seq += 1;
 
+    // `value` is `None` for `{ author: A }` alone: some link, any value.
+    let (value, nested_author) = match split_leaf(condition) {
+        Ok(parts) => parts,
+        Err(reason) => {
+            la.fail(format!("`{prop_name}`: {reason}"));
+            return None;
+        }
+    };
+    if nested_author.is_some() && !is_link_leaf(prop_name, shape) {
+        la.fail(format!(
+            "`{prop_name}` has a nested `author`, but it is not a property stored as a link \
+             (a getter property, `timestamp`, `id` or an unknown name), so there is no link \
+             whose author could be checked"
+        ));
+        return None;
+    }
+    let authors: Vec<&WhereCondition> = nested_author
+        .into_iter()
+        .chain(scoping.iter().copied())
+        .collect();
+    if !authors.is_empty() {
+        la.per_link = true;
+    }
+
+    // What restricts the link behind a triple this leaf emits: its author when
+    // an `author` scopes the leaf (see `super::link_author`), and always the
+    // query's `guard`, on the same reifier. Empty when neither applies, `None`
+    // when an author cannot be rendered, which declines the leaf. `tag` tells
+    // apart two triples of one leaf, the arms of a UNION.
+    let author_join = |subject: &str, predicate: &str, object: &str, tag: &str| {
+        link_author_join(
+            &authors,
+            subject,
+            predicate,
+            object,
+            &format!("{leaf_id}{tag}"),
+            guard,
+        )
+        .ok()
+        .map(|join| join.map(|j| format!("\n{j}")).unwrap_or_default())
+    };
+
+    // Past the split, `condition` is the value condition alone.
+    let condition: Option<&WhereCondition> = value.as_deref();
+
     if prop_name == "base" || prop_name == "id" {
-        match condition {
+        match condition? {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
                     // `VALUES` rather than `FILTER(?source = <val>)`:
@@ -797,13 +1413,27 @@ fn compile_leaf_condition(
         }
         let safe_pred = validate_iri(&prop.predicate).ok()?;
         let direction = prop.direction.as_deref().unwrap_or("forward");
+        // `{ author: A }` alone: A wrote some link on the relation.
+        let Some(condition) = condition else {
+            let far = format!("?_ex_{leaf_id}");
+            let (subject, object) = if direction == "reverse" {
+                (far.as_str(), "?source")
+            } else {
+                ("?source", far.as_str())
+            };
+            let join = author_join(subject, safe_pred, object, "")?;
+            out.push(format!("    {subject} <{safe_pred}> {object} .{join}"));
+            return finish(out);
+        };
         match condition {
             WhereCondition::String(val) => {
                 if emittable_iri(val) {
                     if direction == "reverse" {
-                        out.push(format!("    <{val}> <{safe_pred}> ?source ."));
+                        let join = author_join(&format!("<{val}>"), safe_pred, "?source", "")?;
+                        out.push(format!("    <{val}> <{safe_pred}> ?source .{join}"));
                     } else {
-                        out.push(format!("    ?source <{safe_pred}> <{val}> ."));
+                        let join = author_join("?source", safe_pred, &format!("<{val}>"), "")?;
+                        out.push(format!("    ?source <{safe_pred}> <{val}> .{join}"));
                     }
                 } else {
                     let safe_name = format!(
@@ -812,12 +1442,16 @@ fn compile_leaf_condition(
                     );
                     let escaped = escape_sparql_string(val);
                     if direction == "reverse" {
+                        let join =
+                            author_join(&format!("?_rv_{safe_name}"), safe_pred, "?source", "")?;
                         out.push(format!(
-                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\")"
+                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) = \"{escaped}\"){join}"
                         ));
                     } else {
+                        let join =
+                            author_join("?source", safe_pred, &format!("?_ft_{safe_name}"), "")?;
                         out.push(format!(
-                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\")"
+                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) = \"{escaped}\"){join}"
                         ));
                     }
                 }
@@ -828,6 +1462,13 @@ fn compile_leaf_condition(
                     prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
                 );
                 let all_valid = vals.iter().all(|v| emittable_iri(v));
+                // Every form below binds `?_rv_`/`?_ft_` as the far end of the
+                // link, so one join covers them.
+                let join = if direction == "reverse" {
+                    author_join(&format!("?_rv_{safe_name}"), safe_pred, "?source", "")?
+                } else {
+                    author_join("?source", safe_pred, &format!("?_ft_{safe_name}"), "")?
+                };
                 if all_valid {
                     let iris = vals
                         .iter()
@@ -836,11 +1477,11 @@ fn compile_leaf_condition(
                         .join(" ");
                     if direction == "reverse" {
                         out.push(format!(
-                            "    VALUES ?_rv_{safe_name} {{ {iris} }}\n    ?_rv_{safe_name} <{safe_pred}> ?source ."
+                            "    VALUES ?_rv_{safe_name} {{ {iris} }}\n    ?_rv_{safe_name} <{safe_pred}> ?source .{join}"
                         ));
                     } else {
                         out.push(format!(
-                            "    VALUES ?_ft_{safe_name} {{ {iris} }}\n    ?source <{safe_pred}> ?_ft_{safe_name} ."
+                            "    VALUES ?_ft_{safe_name} {{ {iris} }}\n    ?source <{safe_pred}> ?_ft_{safe_name} .{join}"
                         ));
                     }
                 } else {
@@ -851,11 +1492,11 @@ fn compile_leaf_condition(
                         .join(", ");
                     if direction == "reverse" {
                         out.push(format!(
-                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) IN ({str_list}))"
+                            "    ?_rv_{safe_name} <{safe_pred}> ?source . FILTER(STR(?_rv_{safe_name}) IN ({str_list})){join}"
                         ));
                     } else {
                         out.push(format!(
-                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) IN ({str_list}))"
+                            "    ?source <{safe_pred}> ?_ft_{safe_name} . FILTER(STR(?_ft_{safe_name}) IN ({str_list})){join}"
                         ));
                     }
                 }
@@ -902,7 +1543,7 @@ fn compile_leaf_condition(
                     }
                 };
                 let quantified = compile_relation_quantifier(
-                    shape, prop, safe_pred, inner, negate, resolver, leaf_id,
+                    shape, prop, safe_pred, inner, negate, resolver, guard, leaf_id, &authors, la,
                 )?;
                 out.push(quantified);
             }
@@ -925,6 +1566,16 @@ fn compile_leaf_condition(
             prop_name.replace(|c: char| !c.is_alphanumeric(), "_")
         );
         let is_literal_prop = prop.is_deterministic_literal();
+        // `{ author: A }` alone: A wrote some link on the property.
+        let Some(condition) = condition else {
+            let var = format!("?_pw_{safe_name}");
+            out.push(format!(
+                "    ?source <{}> {var} .{}",
+                prop.predicate,
+                author_join("?source", &prop.predicate, &var, "")?
+            ));
+            return finish(out);
+        };
         match condition {
             WhereCondition::String(val) => {
                 if is_literal_prop {
@@ -935,16 +1586,17 @@ fn compile_leaf_condition(
                     // on literal-resolveLanguage properties still
                     // resolve.
                     let escaped = escape_sparql_string(val);
+                    let typed = format!("\"{escaped}\"^^<{XSD_STRING}>");
+                    let join = author_join("?source", &prop.predicate, &typed, "")?;
                     if looks_like_absolute_iri(val) {
+                        let iri_join =
+                            author_join("?source", &prop.predicate, &format!("<{val}>"), "b")?;
                         out.push(format!(
-                                    "    {{ ?source <{0}> \"{escaped}\"^^<{XSD_STRING}> . }} UNION {{ ?source <{0}> <{val}> . }}",
+                                    "    {{ ?source <{0}> {typed} .{join} }} UNION {{ ?source <{0}> <{val}> .{iri_join} }}",
                                     prop.predicate
                                 ));
                     } else {
-                        out.push(format!(
-                            "    ?source <{}> \"{escaped}\"^^<{XSD_STRING}> .",
-                            prop.predicate
-                        ));
+                        out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                     }
                 } else {
                     // Expression-resolved storage (signed literal envelope
@@ -955,7 +1607,11 @@ fn compile_leaf_condition(
                     // be an invalid relative IRI for non-absolute values.)
                     let var = format!("?_pw_{safe_name}");
                     let escaped = escape_sparql_string(val);
-                    out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &var, "")?
+                    ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{escaped}\")"
                     ));
@@ -964,13 +1620,18 @@ fn compile_leaf_condition(
             WhereCondition::Number(n) => {
                 if is_literal_prop {
                     if let Some(typed) = typed_number_literal(*n) {
-                        out.push(format!("    ?source <{}> {typed} .", prop.predicate));
+                        let join = author_join("?source", &prop.predicate, &typed, "")?;
+                        out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                     } else {
                         out.push("    FILTER(false)".to_string());
                     }
                 } else {
                     let var = format!("?_pw_{safe_name}");
-                    out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &var, "")?
+                    ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{n}\")"
                     ));
@@ -978,13 +1639,16 @@ fn compile_leaf_condition(
             }
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
-                    out.push(format!(
-                        "    ?source <{}> \"{b}\"^^<{XSD_BOOLEAN}> .",
-                        prop.predicate
-                    ));
+                    let typed = format!("\"{b}\"^^<{XSD_BOOLEAN}>");
+                    let join = author_join("?source", &prop.predicate, &typed, "")?;
+                    out.push(format!("    ?source <{}> {typed} .{join}", prop.predicate));
                 } else {
                     let var = format!("?_pw_{safe_name}");
-                    out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &var, "")?
+                    ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) = \"{b}\")"
                     ));
@@ -1002,7 +1666,11 @@ fn compile_leaf_condition(
                     }
                     let iv_var = format!("?_iv_{safe_name}");
                     out.push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
-                    out.push(format!("    ?source <{}> {iv_var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {iv_var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &iv_var, "")?
+                    ));
                 } else {
                     let values_list = vals
                         .iter()
@@ -1010,7 +1678,11 @@ fn compile_leaf_condition(
                         .collect::<Vec<_>>()
                         .join(", ");
                     let var = format!("?_pw_{safe_name}");
-                    out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &var, "")?
+                    ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
                     ));
@@ -1027,7 +1699,11 @@ fn compile_leaf_condition(
                     } else {
                         let iv_var = format!("?_iv_{safe_name}");
                         out.push(format!("    VALUES {iv_var} {{ {} }}", items.join(" ")));
-                        out.push(format!("    ?source <{}> {iv_var} .", prop.predicate));
+                        out.push(format!(
+                            "    ?source <{}> {iv_var} .{}",
+                            prop.predicate,
+                            author_join("?source", &prop.predicate, &iv_var, "")?
+                        ));
                     }
                 } else {
                     let values_list = vals
@@ -1036,7 +1712,11 @@ fn compile_leaf_condition(
                         .collect::<Vec<_>>()
                         .join(", ");
                     let var = format!("?_pw_{safe_name}");
-                    out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                    out.push(format!(
+                        "    ?source <{}> {var} .{}",
+                        prop.predicate,
+                        author_join("?source", &prop.predicate, &var, "")?
+                    ));
                     out.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>({var}) IN ({values_list}))"
                     ));
@@ -1045,7 +1725,11 @@ fn compile_leaf_condition(
             WhereCondition::Ops(ops) => {
                 let var = format!("?_pw_{safe_name}");
                 let val_var = format!("?_pw_{safe_name}_v");
-                out.push(format!("    ?source <{}> {var} .", prop.predicate));
+                out.push(format!(
+                    "    ?source <{}> {var} .{}",
+                    prop.predicate,
+                    author_join("?source", &prop.predicate, &var, "")?
+                ));
                 // Compare on the lexical string rather than on a typed
                 // literal term: Oxigraph treats a simple literal and an
                 // `xsd:string` literal as distinct terms, so `?v != "x"^^xsd:string`
@@ -1222,8 +1906,10 @@ mod tests {
             "should project ?_proj_sort: {sparql}"
         );
         assert!(
-            sparql.contains("OPTIONAL { ?source <test://has-like> ?_proj_t"),
-            "should join via predicate OPTIONAL: {sparql}"
+            sparql.contains(
+                "OPTIONAL { { SELECT ?source ?_proj_t WHERE { ?source <test://has-like> ?_proj_t ."
+            ),
+            "should join via predicate OPTIONAL, guarded in a sub-SELECT: {sparql}"
         );
         assert!(
             sparql.contains("GROUP BY ?source"),
@@ -1233,6 +1919,29 @@ mod tests {
             sparql.contains("DESC(?_proj_sort)"),
             "ORDER BY should use DESC: {sparql}"
         );
+    }
+
+    /// Instances that tie on the sort key must keep one order across queries,
+    /// or a page can swap or repeat them.
+    #[test]
+    fn test_pagination_orders_ties_by_source() {
+        let s = shape("Post", vec![flag("type", "test://type", "test://post")]);
+        for (key, dir) in [
+            (SortKey::Timestamp, OrderDirection::ASC),
+            (SortKey::Timestamp, OrderDirection::DESC),
+            (
+                SortKey::Projection("test://has-like".to_string()),
+                OrderDirection::DESC,
+            ),
+        ] {
+            let sparql = pagination_subquery(&s, &make_pg(key, dir));
+            let order = &sparql[sparql.find("ORDER BY").expect("ORDER BY")..];
+            let order = order.lines().next().unwrap();
+            assert!(
+                order.ends_with(" ASC(?source)"),
+                "tie-breaker last: {order}"
+            );
+        }
     }
 
     #[test]
@@ -1345,7 +2054,7 @@ mod tests {
     #[test]
     fn timestamp_probe_skips_flag_with_non_iri_initial() {
         let s = shape("Todo", vec![flag("done", "todo://done", "true")]);
-        let probe = build_timestamp_probe(&s);
+        let probe = build_timestamp_probe(&s, LinkGuard::ANY);
         assert!(
             !probe.contains("<true>"),
             "must not inline a non-IRI initial: {probe}"
@@ -1356,7 +2065,7 @@ mod tests {
         );
         // A parseable initial keeps the targeted reified form.
         let s = shape("Todo", vec![flag("done", "todo://done", "todo://yes")]);
-        let probe = build_timestamp_probe(&s);
+        let probe = build_timestamp_probe(&s, LinkGuard::ANY);
         assert!(
             probe.contains("<todo://yes>"),
             "a parseable initial stays targeted: {probe}"
@@ -1411,7 +2120,7 @@ mod where_compiler_tests {
             WhereCondition::String("anything".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.patterns.is_empty(), "nothing can be emitted");
         assert!(
@@ -1425,7 +2134,7 @@ mod where_compiler_tests {
     fn test_unknown_property_is_not_pushable() {
         let s = test_shape();
         let clause = wc(vec![("nope", WhereCondition::String("x".to_string()))]);
-        assert!(!compile_where_clause(&clause, &s, None).complete);
+        assert!(!compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -1438,7 +2147,7 @@ mod where_compiler_tests {
             ("nope", WhereCondition::String("x".to_string())),
         ]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(!compiled.patterns.is_empty(), "the known key still pushes");
         assert!(!compiled.complete, "but the clause is not fully covered");
@@ -1457,7 +2166,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1480,7 +2189,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(
             compiled.patterns.is_empty(),
@@ -1508,7 +2217,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete, "an id disjunction must push down");
         let sparql = compiled.patterns.join("\n");
@@ -1538,7 +2247,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -1556,7 +2265,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1578,7 +2287,7 @@ mod where_compiler_tests {
             )])),
         )]);
 
-        assert!(compile_where_clause(&clause, &s, None).complete);
+        assert!(compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 
     // ---- AND -------------------------------------------------------------
@@ -1596,7 +2305,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(!compiled.patterns.is_empty(), "the sound half still pushes");
         assert!(!compiled.complete);
@@ -1620,7 +2329,7 @@ mod where_compiler_tests {
             ]),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1652,6 +2361,21 @@ fn rebase_into_subquery(patterns: &[String], namespace: &str, target_var: &str) 
         .collect()
 }
 
+/// Whether the text after a `<` is an IRIREF: characters SPARQL allows in an
+/// IRI, then `>`. Whitespace, a quote or another `<` first means the `<` was
+/// an operator.
+fn opens_iri(rest: impl Iterator<Item = char>) -> bool {
+    for c in rest {
+        match c {
+            '>' => return true,
+            '<' | '"' | '{' | '}' | '|' | '^' | '`' | '\\' => return false,
+            c if c <= ' ' => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Rewrite the SPARQL variables in one pattern, leaving lexical values alone.
 fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + namespace.len());
@@ -1675,9 +2399,19 @@ fn rebase_pattern(pattern: &str, namespace: &str, target_var: &str) -> String {
                     }
                 }
             }
+            // `<<(` opens a triple term, not an IRI: its subject and object
+            // are ordinary terms, often `?source`, and must be rewritten. A
+            // link-author join (`super::link_author`) emits one.
+            '<' if chars.peek() == Some(&'<') => {
+                out.push(c);
+                out.push(chars.next().expect("peeked"));
+            }
             // An IRI is opaque too, and may legitimately carry `?source` in a
             // query component. `validate_iri` guarantees no `>` inside one.
-            '<' => {
+            // A `<` that does not open an IRIREF is the less-than operator
+            // (`STR(?t1) < STR(?t0)`, `lt`), and the variables after it must
+            // still be rewritten.
+            '<' if opens_iri(chars.clone()) => {
                 out.push(c);
                 for iri in chars.by_ref() {
                     out.push(iri);
@@ -1736,7 +2470,10 @@ fn compile_relation_quantifier(
     inner: &BTreeMap<String, WhereCondition>,
     negate: bool,
     resolver: Option<&dyn ShapeResolver>,
+    guard: LinkGuard,
     leaf_id: usize,
+    authors: &[&WhereCondition],
+    la: &mut LinkAuthorState,
 ) -> Option<String> {
     // The caller found `prop` *by* this name, so the two cannot disagree.
     let prop_name = prop.name.as_str();
@@ -1751,11 +2488,27 @@ fn compile_relation_quantifier(
 
     // A reverse relation is `target → source`, so the linked record is the
     // subject of the triple rather than its object.
-    let link = if prop.direction.as_deref() == Some("reverse") {
-        format!("        {target_var} <{safe_pred}> ?source .")
+    //
+    // A nested `author` restricts this link, inside the EXISTS: `some` is "A
+    // wrote a link to a record satisfying the clause", `none` is "A wrote no
+    // such link".
+    let (subject, object) = if prop.direction.as_deref() == Some("reverse") {
+        (target_var.as_str(), "?source")
     } else {
-        format!("        ?source <{safe_pred}> {target_var} .")
+        ("?source", target_var.as_str())
     };
+    let join = link_author_join(
+        authors,
+        subject,
+        safe_pred,
+        object,
+        &format!("q{leaf_id}"),
+        guard,
+    )
+    .ok()?
+    .map(|j| format!("\n    {j}"))
+    .unwrap_or_default();
+    let link = format!("        {subject} <{safe_pred}> {object} .{join}");
 
     let mut body = vec![link];
 
@@ -1796,7 +2549,7 @@ fn compile_relation_quantifier(
     // sharing a predicate would cost more inside an `EXISTS` than it excludes.
     if let Some(ref target_shape) = target_shape {
         body.extend(rebase_into_subquery(
-            &shape_conformance_patterns(target_shape.as_ref(), false),
+            &shape_conformance_patterns(target_shape.as_ref(), false, guard),
             &namespace,
             &target_var,
         ));
@@ -1812,10 +2565,22 @@ fn compile_relation_quantifier(
                  the query was compiled without a shape resolver. The query will return no \
                  rows."
             );
+            // Uncompiled, the clause can still hold a per-link `author`, and
+            // the refusal must hear of it from its syntax.
+            la.per_link |= may_hold_link_author(inner);
             return None;
         };
 
-        let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver);
+        let compiled = compile_where_clause(inner, target_shape.as_ref(), resolver, guard);
+        // Carried up before the clause can be declined below: a per-link
+        // `author` in a nested clause the store cannot answer in full must
+        // reach `refuse_unanswerable_link_author`. The post-hydration filter
+        // happens to fail closed on every quantifier too, but that is not what
+        // this refusal may rest on.
+        la.merge(
+            compiled.link_author_scoped,
+            compiled.link_author_error.clone(),
+        );
         if !compiled.complete || compiled.patterns.is_empty() {
             log::warn!(
                 "where: the nested clause on relation `{prop_name}` could not be compiled to \
@@ -1918,7 +2683,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(Some(vec![]), None))]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -1931,7 +2696,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(None, Some(vec![])))]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         assert!(compiled.patterns.join("\n").contains("FILTER NOT EXISTS"));
@@ -1949,7 +2714,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete, "the target shape resolves, so it pushes");
         let sparql = compiled.patterns.join("\n");
@@ -1984,7 +2749,7 @@ mod relation_quantifier_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(!compile_where_clause(&clause, &s, Some(&r)).complete);
+        assert!(!compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2000,7 +2765,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.patterns.is_empty());
         assert!(!compiled.complete, "must fall back rather than half-push");
@@ -2021,7 +2786,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2036,7 +2801,7 @@ mod relation_quantifier_tests {
         s.properties.push(rel);
 
         let clause = wc(vec![("mentions", ops_with(Some(vec![]), None))]);
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2059,7 +2824,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2097,7 +2862,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let sparql = compile_where_clause(&clause, &s, Some(&r))
+        let sparql = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY)
             .patterns
             .join("\n");
 
@@ -2122,7 +2887,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let sparql = compile_where_clause(&clause, &s, Some(&r))
+        let sparql = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY)
             .patterns
             .join("\n");
 
@@ -2151,7 +2916,7 @@ mod relation_quantifier_tests {
             ),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, Some(&r));
+        let compiled = compile_where_clause(&clause, &s, Some(&r), LinkGuard::ANY);
 
         assert!(compiled.complete);
         let sparql = compiled.patterns.join("\n");
@@ -2182,6 +2947,24 @@ mod relation_quantifier_tests {
         assert_eq!(
             rebased[0],
             "    ?_q0commentst <we://p?source=1> ?_q0commentsft_x ."
+        );
+    }
+
+    #[test]
+    fn rebasing_rewrites_variables_after_a_less_than_operator() {
+        // A `<` that opens no IRI is the operator. Read as an IRI it swallowed
+        // everything up to the next `>`, so `?_t0` and the `VALUES` variable
+        // kept their outer names, and a creator check inside a quantifier
+        // compared against an unbound variable (#1114).
+        let patterns = vec![
+            "FILTER(STR(?_t1) < STR(?_t0)) VALUES ?_p { <we://p> } FILTER(?_n <= 3)".to_string(),
+        ];
+
+        let rebased = rebase_into_subquery(&patterns, "q0", "?_q0t");
+
+        assert_eq!(
+            rebased[0],
+            "FILTER(STR(?_q0t1) < STR(?_q0t0)) VALUES ?_q0p { <we://p> } FILTER(?_q0n <= 3)"
         );
     }
 
@@ -2223,7 +3006,7 @@ mod relation_quantifier_tests {
         });
 
         let clause = wc(vec![("author", ops_with(None, Some(vec![])))]);
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
 
         assert!(compiled.complete, "cardinality does not gate a quantifier");
         let sparql = compiled.patterns.join("\n");
@@ -2247,7 +3030,7 @@ mod relation_quantifier_tests {
             WhereCondition::String("anything".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(compiled.patterns.is_empty(), "nothing can be emitted");
         assert!(
             !compiled.complete,
@@ -2269,7 +3052,7 @@ mod relation_quantifier_tests {
             WhereCondition::String("not-an-iri".to_string()),
         )]);
 
-        let compiled = compile_where_clause(&clause, &s, None);
+        let compiled = compile_where_clause(&clause, &s, None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2281,7 +3064,7 @@ mod relation_quantifier_tests {
         let s = post_shape();
         let clause = wc(vec![("comments", ops_with(Some(vec![]), Some(vec![])))]);
 
-        assert!(!compile_where_clause(&clause, &s, None).complete);
+        assert!(!compile_where_clause(&clause, &s, None, LinkGuard::ANY).complete);
     }
 }
 
@@ -2310,7 +3093,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(compile_where_clause(&c, &s(), None).complete);
+        assert!(compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2325,7 +3108,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        let compiled = compile_where_clause(&c, &s(), None);
+        let compiled = compile_where_clause(&c, &s(), None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
     }
@@ -2339,7 +3122,7 @@ mod ops_completeness_tests {
                 ..Default::default()
             }),
         )]);
-        assert!(!compile_where_clause(&c, &s(), None).complete);
+        assert!(!compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete);
     }
 
     #[test]
@@ -2355,7 +3138,7 @@ mod ops_completeness_tests {
             }),
         )]);
         assert!(
-            !compile_where_clause(&c, &s(), None).complete,
+            !compile_where_clause(&c, &s(), None, LinkGuard::ANY).complete,
             "a dropped `not` must not be masked by a rendered `gt`",
         );
     }
@@ -2366,8 +3149,279 @@ mod ops_completeness_tests {
         // to "the property exists", which is not what the Rust filter does for the
         // same clause — it matches everything.
         let c = wc(vec![("title", ops(WhereOps::default()))]);
-        let compiled = compile_where_clause(&c, &s(), None);
+        let compiled = compile_where_clause(&c, &s(), None, LinkGuard::ANY);
         assert!(!compiled.complete);
         assert!(compiled.patterns.is_empty());
+    }
+}
+
+/// Bounded traversal: multi-anchor scopes, transitive paths, inbound direction
+/// and the per-anchor limit the executor applies between the two phases.
+#[cfg(test)]
+mod traverse_scope_tests {
+    use super::*;
+    use crate::perspectives::model_query::test_helpers::{flag, prop, shape};
+
+    fn make_pg(sort_key: SortKey, direction: OrderDirection) -> SparqlPagination {
+        SparqlPagination {
+            sort_key,
+            direction,
+            offset: None,
+            limit: Some(10),
+        }
+    }
+    // --- Scope::Traverse ----------------------------------------------------
+    fn traverse_shape() -> ModelShape {
+        shape(
+            "Comment",
+            vec![
+                flag("type", "test://type", "test://comment"),
+                prop("text", "test://text"),
+            ],
+        )
+    }
+
+    fn traverse_query(scope: Scope) -> ModelQueryInput {
+        ModelQueryInput {
+            parent: Some(scope),
+            ..Default::default()
+        }
+    }
+
+    fn traverse(
+        ids: Vec<&str>,
+        transitive: bool,
+        direction: ScopeDirection,
+        limit_per_anchor: Option<usize>,
+    ) -> Scope {
+        Scope::Traverse {
+            ids: ids.into_iter().map(String::from).collect(),
+            predicate: "test://comment".to_string(),
+            transitive,
+            direction,
+            limit_per_anchor,
+            levels: None,
+        }
+    }
+
+    /// A source reachable from two anchors is two rows; the anchor breaks the
+    /// tie the source leaves, so each anchor keeps the same top-N.
+    #[test]
+    fn per_anchor_pages_order_ties_by_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a", "test://b"],
+            false,
+            ScopeDirection::Out,
+            Some(3),
+        ));
+        let pg = make_pg(SortKey::Timestamp, OrderDirection::ASC);
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("expected a paged plan"),
+        };
+        let order = sparql
+            .lines()
+            .find(|l| l.contains("ORDER BY"))
+            .expect("ORDER BY");
+        assert!(order.ends_with(" ASC(?source) ASC(?_anchor)"), "{order}");
+    }
+
+    #[test]
+    fn traverse_scope_walks_outward_from_every_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a", "test://b"],
+            false,
+            ScopeDirection::Out,
+            None,
+        ));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?_anchor <test://comment> ?source ."),
+            "anchor should be the subject when walking out: {conformance}"
+        );
+        assert!(
+            conformance.contains("VALUES ?_anchor { <test://a> <test://b> }"),
+            "both anchors should be bound in one query: {conformance}"
+        );
+        assert!(
+            !conformance.contains("<test://comment>+"),
+            "a non-transitive scope must stay one step: {conformance}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_transitive_emits_a_one_or_more_path() {
+        let q = traverse_query(traverse(vec!["test://a"], true, ScopeDirection::Out, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?_anchor <test://comment>+ ?source ."),
+            "transitive should emit a `+` path: {conformance}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_inward_swaps_the_terms() {
+        let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::In, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("?source <test://comment> ?_anchor ."),
+            "direction `in` should put the result in subject position: {conformance}"
+        );
+    }
+
+    /// An anchor list that has been filtered down to nothing must answer with
+    /// nothing. The dangerous failure here is the opposite: an unconstrained
+    /// `?_anchor` walks every link in the store.
+    #[test]
+    fn traverse_scope_with_no_valid_anchors_matches_nothing() {
+        let q = traverse_query(traverse(vec![], false, ScopeDirection::Out, None));
+        let (conformance, _) = build_query_patterns(&traverse_shape(), &q, None);
+
+        assert!(
+            conformance.contains("VALUES ?_anchor {  }"),
+            "an empty anchor list should bind an empty VALUES: {conformance}"
+        );
+    }
+
+    #[test]
+    fn per_anchor_limit_projects_and_groups_by_the_anchor() {
+        let q = traverse_query(traverse(
+            vec!["test://a"],
+            false,
+            ScopeDirection::Out,
+            Some(5),
+        ));
+        let pg = make_pg(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        );
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+        };
+
+        assert!(
+            sparql.contains("SELECT DISTINCT ?source ?_anchor"),
+            "the anchor must reach the executor to be sliced by: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source ?_anchor"),
+            "a projected variable must be grouped by: {sparql}"
+        );
+    }
+
+    /// The anchor is a cost on every row, so it is carried only when something
+    /// will read it. This also pins that existing queries are byte-identical.
+    #[test]
+    fn without_a_per_anchor_limit_the_anchor_is_not_projected() {
+        let q = traverse_query(traverse(vec!["test://a"], false, ScopeDirection::Out, None));
+        let pg = make_pg(
+            SortKey::Projection("test://has-like".to_string()),
+            OrderDirection::DESC,
+        );
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+            InstanceQueryPlan::TwoPhase {
+                pagination_subquery,
+                ..
+            } => pagination_subquery,
+            InstanceQueryPlan::Single(_) => panic!("Expected TwoPhase query plan, got Single"),
+        };
+
+        assert!(
+            sparql.contains("SELECT DISTINCT ?source (COUNT"),
+            "the anchor should not be projected when nothing reads it: {sparql}"
+        );
+        assert!(
+            sparql.contains("GROUP BY ?source\n") || sparql.contains("GROUP BY ?source "),
+            "the GROUP BY should be unchanged: {sparql}"
+        );
+    }
+
+    #[test]
+    fn traverse_scope_ids_accept_a_bare_string() {
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "transitive": true,
+        }))
+        .expect("a single anchor should deserialize without a wrapping list");
+
+        match scope {
+            Scope::Traverse {
+                ids, transitive, ..
+            } => {
+                assert_eq!(ids, vec!["test://a".to_string()]);
+                assert!(transitive);
+            }
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+    }
+
+    /// The wire spelling is camelCase: TS spreads its `TraverseScope` verbatim
+    /// into the query JSON, and serde ignores unknown fields on an untagged
+    /// variant — so before the variant-level `rename_all`, `limitPerAnchor`
+    /// deserialized to a scope with *no* limit. A wrong answer, not an error,
+    /// which is why this is pinned.
+    #[test]
+    fn traverse_scope_fields_deserialize_from_the_camel_case_wire_spelling() {
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "limitPerAnchor": 5,
+        }))
+        .expect("camelCase spelling");
+        match scope {
+            Scope::Traverse {
+                limit_per_anchor, ..
+            } => assert_eq!(
+                limit_per_anchor,
+                Some(5),
+                "the TS-spelled field must reach the executor"
+            ),
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+
+        // The snake_case alias keeps Rust-side JSON working.
+        let scope: Scope = serde_json::from_value(serde_json::json!({
+            "ids": "test://a",
+            "predicate": "test://comment",
+            "limit_per_anchor": 3,
+        }))
+        .expect("snake_case alias");
+        match scope {
+            Scope::Traverse {
+                limit_per_anchor, ..
+            } => assert_eq!(limit_per_anchor, Some(3)),
+            other => panic!("expected a Traverse scope, got {other:?}"),
+        }
+    }
+
+    /// The untagged enum picks a variant by the fields present, so the existing
+    /// two spellings must keep winning for payloads that have always meant them.
+    #[test]
+    fn existing_scope_spellings_still_deserialize_to_their_variants() {
+        let raw: Scope = serde_json::from_value(serde_json::json!({
+            "id": "test://a",
+            "predicate": "test://comment",
+        }))
+        .expect("raw scope");
+        assert!(matches!(raw, Scope::Raw { .. }), "got {raw:?}");
+
+        let model: Scope = serde_json::from_value(serde_json::json!({
+            "model": "Comment",
+            "id": "test://a",
+            "field": "comments",
+        }))
+        .expect("model scope");
+        assert!(matches!(model, Scope::Model { .. }), "got {model:?}");
     }
 }

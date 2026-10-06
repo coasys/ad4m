@@ -6,7 +6,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { EventSource } from 'eventsource';
@@ -220,7 +220,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
         await sleep(3000);
 
         // Generate agent via REST (no MCP equivalent yet)
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         const agentStatus = await adminClient.agent.generate("test-passphrase");
         agentDid = agentStatus.did!;
         console.log("Agent generated via REST, DID:", agentDid);
@@ -228,14 +228,12 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
     after(async () => {
         if (executorProcess) {
-            executorProcess.kill('SIGTERM');
-            await sleep(1000);
-            if (!executorProcess.killed) {
-                executorProcess.kill('SIGKILL');
-            }
+            await stopChildProcess(executorProcess);
         }
-        // Port-based kill as safety net
-        killByPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
+        // No killByPorts here: lsof includes this process's own client
+        // connections, so it would SIGTERM mocha itself (exit 143).
+        // cleanup.js between test files handles residual ports, and mocha
+        // runs with --exit, so no process.exit() that would hide failures.
         deregisterPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
     });
 
@@ -1461,7 +1459,7 @@ describe("MCP HTTP Flux Chat Integration Test", function() {
 
         before(async function() {
             // Create a dedicated Ad4mClient for subscriptions (REST + SSE transport)
-            wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+            wakerClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
 
             // Set up a profile so get_mention_waker_config has names to search for
             await callMcpTool(MCP_BASE_URL, 'set_agent_profile', {

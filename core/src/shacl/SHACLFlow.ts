@@ -112,6 +112,50 @@ export interface ModelQuery {
    * §7.4). Ignored when the query is used as a state guard or context.
    */
   or?: ModelQuery[];
+  /**
+   * When this query is used as a `ConsensusRule.fromRole`, require each
+   * matched instance to be a valid output of a completed run of another
+   * flow, and date the grant from that run's quorum instead of from an
+   * assignment link.
+   *
+   * The same name and the same check as the model-query filter
+   * `where: { producedByFlow }`: a receipt filed under `flow`'s index must
+   * verify against this replica's own flow definitions, be for `flow`, have
+   * settled into `state`, and name this instance (as this query's
+   * `className`) among its outputs. Each replica checks this against its
+   * own graph; the read-set carries only the resulting grant date.
+   *
+   * Two things to know before configuring one:
+   * - An instance no verified receipt produced is simply not a member.
+   *   There is no fallback to the assignment link — if there were, writing
+   *   that link would grant the role and this gate would be decorative.
+   * - **A granted role is not un-granted by undoing the flow.** Retracting
+   *   a settling vote moves the live flow back; the receipt keeps
+   *   verifying. The only un-grant is a new signed
+   *   `ad4m://flow/role_grant_revoked` tombstone on the instance, from an
+   *   author this query's own `where.author` accepts — so a query with no
+   *   author condition can be revoked by anyone, and one naming an author
+   *   who is not around cannot be revoked at all.
+   *
+   * Ignored when the query is used as a state guard (`requires`) or
+   * background `context`.
+   */
+  producedByFlow?: ProducedByFlow;
+}
+
+/**
+ * The granting-flow reference on a `fromRole` query's `producedByFlow`.
+ *
+ * The same shape as the model-query filter's `{ flow, state? }`, except
+ * that `state` is required here: without it, a run that settled into a
+ * flow's `rejected` state would grant what its `approved` state was meant
+ * to.
+ */
+export interface ProducedByFlow {
+  /** The granting flow's URI — `{namespace}{name}Flow`. */
+  flow: string;
+  /** The state that run must have settled into. */
+  state: string;
 }
 
 /**
@@ -444,10 +488,14 @@ export class SHACLFlow {
   }
 
   /**
-   * Get a transition URI
+   * Get a transition URI: `{namespace}{name}.transition/{from}/{to}/{action}`.
+   * Each part is RFC 3986-encoded, so the URI is unique per transition. The
+   * executor's flow writer (`parse_flow_to_links`) builds the same URI.
    */
-  transitionUri(fromState: string, toState: string): string {
-    return `${this.namespace}${this.name}.${fromState}To${toState}`;
+  transitionUri(fromState: string, toState: string, actionName: string): string {
+    const part = (s: string) =>
+      encodeURIComponent(s).replace(/[!'()*]/g, c => `%${c.charCodeAt(0).toString(16).toUpperCase()}`);
+    return `${this.namespace}${this.name}.transition/${part(fromState)}/${part(toState)}/${part(actionName)}`;
   }
 
   /**
@@ -616,7 +664,7 @@ export class SHACLFlow {
 
     // Transitions
     for (const transition of this._transitions) {
-      const transitionUri = this.transitionUri(transition.fromState, transition.toState);
+      const transitionUri = this.transitionUri(transition.fromState, transition.toState, transition.actionName);
       const fromStateUri = this.stateUri(transition.fromState);
       const toStateUri = this.stateUri(transition.toState);
 
@@ -720,7 +768,7 @@ export class SHACLFlow {
     if (inputTypesLink) {
       try {
         const jsonStr = inputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -738,7 +786,7 @@ export class SHACLFlow {
     if (outputTypesLink) {
       try {
         const jsonStr = outputTypesLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -775,7 +823,7 @@ export class SHACLFlow {
     if (contextLink) {
       try {
         const jsonStr = contextLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -796,7 +844,7 @@ export class SHACLFlow {
     if (consensusRuleLink) {
       try {
         const jsonStr = consensusRuleLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/,
+          /^literal:string:/,
           ""
         );
         const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -862,7 +910,7 @@ export class SHACLFlow {
       if (requiresLink) {
         try {
           const jsonStr = requiresLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -900,7 +948,7 @@ export class SHACLFlow {
       if (stateConsensusLink) {
         try {
           const jsonStr = stateConsensusLink.target.replace(
-            /^literal:\/\/string:|^literal:string:/,
+            /^literal:string:/,
             ""
           );
           const parsed = JSON.parse(decodeURIComponent(jsonStr));
@@ -965,7 +1013,7 @@ export class SHACLFlow {
       let actions: AD4MAction[] = [];
       if (actionsLink) {
         try {
-          const jsonStr = actionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
+          const jsonStr = actionsLink.target.replace(/^literal:string:/, '');
           actions = JSON.parse(decodeURIComponent(jsonStr));
         } catch {
           // Ignore parse errors
@@ -1063,6 +1111,8 @@ export class SHACLFlow {
       }
       flow.addState(sanitized);
     }
+    // Same "states[0] is the initial state" ordering as fromLinks.
+    flow._states.sort((a, b) => a.value - b.value);
     for (const transition of json.transitions || []) {
       flow.addTransition(transition);
     }

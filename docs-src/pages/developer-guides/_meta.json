@@ -1,5 +1,6 @@
 {
     "model-classes": "Defining and using Model Classes",
+    "writing-a-flow": "Writing a flow: a role granted by a flow",
     "sparql-queries": "SPARQL Queries",
     "hooks": "Hooking up models to the UI",
     "batch-operations": "Using Batch Operations",

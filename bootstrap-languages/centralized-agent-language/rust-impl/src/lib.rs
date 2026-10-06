@@ -67,7 +67,7 @@ impl ExpressionCapability for CentralizedAgentLanguage {
             ));
         }
 
-        let my_did = rt::agent_did();
+        let my_did = rt::agent_did()?;
         if did != my_did {
             error(&format!("[centralized-agent-language] expressionCreate: DID mismatch. content.did={}, agentDid()={}", did, my_did));
             return Err(LanguageError::permission_denied(
@@ -94,7 +94,7 @@ impl ExpressionCapability for CentralizedAgentLanguage {
         }
 
         let signed: serde_json::Value =
-            serde_wasm_bindgen::from_value(rt::agent_create_signed_expression_typed(&content))
+            serde_wasm_bindgen::from_value(rt::agent_create_signed_expression_typed(&content)?)
                 .map_err(|e| {
                     error(&format!("[centralized-agent-language] expressionCreate: signed expression serialization failed: {}", e));
                     LanguageError::internal(format!(

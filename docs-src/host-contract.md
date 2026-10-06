@@ -56,7 +56,7 @@ any language is loaded.
 | `signStringHex(payload)` | `(string) => string` | Signs a string payload and returns the hex-encoded signature. |
 | `createSignedExpression(data)` | `(any) => object` | Wraps `data` in an Expression envelope with `author`, `timestamp`, `data`, and `proof` fields. Returns the signed expression object. |
 | `getAllLocalUserDIDs()` | `() => string[]` | Returns DIDs of all local managed users. |
-| `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a specific managed user's key. |
+| `createSignedExpressionForUser(email, data)` | `(string, any) => object` | Like `createSignedExpression` but signs with a managed user's key. Only the user that the current call runs for: any other email, and any call that runs for the node, throws. |
 | `didForUser(email)` | `(string) => string` | Returns the DID for a managed user identified by email. |
 
 ### Notes

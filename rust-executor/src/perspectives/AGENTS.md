@@ -48,3 +48,9 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 - Don't decode `literal://` payloads by hand: several copies exist (spec item 8 unifies them);
   reuse `model_query::utils::parse_literal_value` until then.
 - Tests that need a real instance: `interpretation_test_support.rs` (`pub(crate)`, `cfg(test)`).
+- `parse_shacl_to_links` is the only SHACL shape writer: the SDK's `addShacl` and `@Model`
+  registration both send `SHACLShape.toJSON()` through `add_sdna`. A new shape field needs the
+  Rust field, a link here, and `SHACLShape.fromLinks` in core; `fixtures/shacl_writer_golden.json`
+  pins the links and the SDK test decodes the same file, so update it in the same change.
+- Flow transition URIs are `{ns}{flow}.transition/{from}/{to}/{action}`, each part
+  percent-encoded; `SHACLFlow.transitionUri` in core builds the same string.

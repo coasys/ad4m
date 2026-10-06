@@ -281,7 +281,7 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
 
         await sleep(3000);
 
-        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential, false);
+        const adminClient = new Ad4mClient(`http://127.0.0.1:${apiPort}`, adminCredential);
         await adminClient.agent.generate("test-passphrase");
     });
 

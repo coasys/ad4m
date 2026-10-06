@@ -56,6 +56,18 @@ pub struct FlowProposalParams {
     pub proposal_uri: String,
 }
 
+/// Parameters for listing a flow's valid outputs
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+pub struct FlowValidOutputsParams {
+    /// Perspective UUID
+    pub perspective_id: String,
+    /// Flow name or canonical flow URI
+    pub flow_name: String,
+    /// Optional terminal state filter — only outputs of runs that settled
+    /// into this state
+    pub state: Option<String>,
+}
+
 // ============================================================================
 // Tool Implementations
 // ============================================================================
@@ -413,6 +425,39 @@ impl Ad4mMcpHandler {
                 }
             }
             Err(e) => e,
+        }
+    }
+
+    #[tool(
+        description = "List the instances that are, as they stand, valid outputs of a flow: instances named by a cryptographically verified receipt of a completed run (optionally filtered to runs that settled into a given terminal state), whose live content still matches what the run's quorum committed to. A forged or unverifiable receipt contributes nothing; an instance edited since the run completed is not listed. The same predicate is available in instance queries as where: { producedByFlow: { flow, state? } }. Errors when the flow is not on the perspective — 'no such flow here' and 'no valid outputs' are different answers."
+    )]
+    pub async fn flow_valid_outputs(&self, params: Parameters<FlowValidOutputsParams>) -> String {
+        let p = &params.0;
+
+        let perspective = match self.get_readable_perspective(&p.perspective_id).await {
+            Ok(perspective) => perspective,
+            Err(e) => return e,
+        };
+
+        let (flow_uri, _) = match Self::resolve_flow(&perspective, &p.flow_name).await {
+            Ok(resolved) => resolved,
+            Err(e) => return format!("Error listing valid outputs: {:#}", e),
+        };
+
+        match crate::perspectives::flow_instance::produced::flow_valid_outputs(
+            &perspective,
+            &flow_uri,
+            p.state.as_deref(),
+        )
+        .await
+        {
+            Ok(outputs) => serde_json::to_string_pretty(&json!({
+                "flow": flow_uri,
+                "state": p.state,
+                "valid_outputs": outputs,
+            }))
+            .unwrap_or_else(|e| format!("Error: {}", e)),
+            Err(e) => format!("Error listing valid outputs: {:#}", e),
         }
     }
 }

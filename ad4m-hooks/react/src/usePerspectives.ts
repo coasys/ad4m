@@ -78,21 +78,13 @@ export function usePerspectives(client: Ad4mClient) {
 
         fetchPerspectives();
 
-        // @ts-ignore
-        client.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedListener);
-         // @ts-ignore
-        client.perspective.addPerspectiveAddedListener(perspectiveAddedListener);
-         // @ts-ignore
-        client.perspective.addPerspectiveRemovedListener(perspectiveRemovedListener);
+        const releases = [
+            client.perspective.addPerspectiveUpdatedListener(perspectiveUpdatedListener),
+            client.perspective.addPerspectiveAddedListener(perspectiveAddedListener),
+            client.perspective.addPerspectiveRemovedListener(perspectiveRemovedListener),
+        ];
 
-        return () => {
-             // @ts-ignore
-            client.perspective.removePerspectiveUpdatedListener(perspectiveUpdatedListener);
-             // @ts-ignore
-            client.perspective.removePerspectiveAddedListener(perspectiveAddedListener);
-             // @ts-ignore
-            client.perspective.removePerspectiveRemovedListener(perspectiveRemovedListener);
-        };
+        return () => releases.forEach((release) => release());
     }, []);
 
     useEffect(() => {

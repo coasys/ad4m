@@ -617,7 +617,7 @@ async function setupExternalModeViaHttp(
   logger.info(`[ad4m-setup] Creating API client for ${executorUrl}...`);
 
   try {
-    const client = new Ad4mClient(executorUrl, undefined, false);
+    const client = new Ad4mClient(executorUrl);
     logger.info("[ad4m-setup] Ad4mClient created successfully");
 
     // Step 1: Request capability — triggers the verification popup in the launcher

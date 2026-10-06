@@ -60,6 +60,24 @@ export function buildWhereCondition(
     condition: WhereCondition,
     opts?: { isDeterministicLiteral?: boolean; varIndex?: number },
 ): string {
+    // `{ eq: X }` is the bare `X`. A nested `author` is a per-link condition
+    // the executor answers in model queries; a getter's SPARQL has no reifier
+    // join to answer it with, so it is refused rather than dropped (#1114).
+    if (typeof condition === 'object' && condition !== null && !Array.isArray(condition)) {
+        const ops = condition as any;
+        if (ops.author !== undefined) {
+            throw new Error(
+                `buildWhereCondition: a nested \`author\` on <${predicate}> is a per-link condition ` +
+                'that only the model query path can answer',
+            );
+        }
+        if (ops.eq !== undefined) {
+            if (Object.keys(ops).some((k) => k !== 'eq')) {
+                throw new Error(`buildWhereCondition: \`eq\` on <${predicate}> cannot be combined with another operator`);
+            }
+            condition = ops.eq;
+        }
+    }
     const escapedPredicate = escapeQueryString(predicate);
     // For deterministic-literal properties, values are stored as typed
     // literals like `"X"^^xsd:string` (or the legacy `<literal:string:VALUE>`

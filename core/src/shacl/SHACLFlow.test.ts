@@ -19,7 +19,15 @@ describe('SHACLFlow', () => {
 
     it('generates correct transition URIs', () => {
       const flow = new SHACLFlow('TODO', 'todo://');
-      expect(flow.transitionUri('ready', 'doing')).toBe('todo://TODO.readyTodoing');
+      expect(flow.transitionUri('ready', 'doing', 'Start')).toBe('todo://TODO.transition/ready/doing/Start');
+    });
+
+    it('encodes transition URI parts like the executor flow writer', () => {
+      // Same fixture as `transition_uri_encodes_parts_like_the_sdk` in
+      // rust-executor/src/perspectives/shacl_parser.rs.
+      const flow = new SHACLFlow('TODO', 'todo://');
+      expect(flow.transitionUri("in review", "a/b", "Fast-track!*'()~._"))
+        .toBe("todo://TODO.transition/in%20review/a%2Fb/Fast-track%21%2A%27%28%29~._");
     });
   });
 
@@ -959,6 +967,46 @@ describe('SHACLFlow', () => {
       const roundTripped = SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
       expect(roundTripped.consensusRule?.fromRole?.didProperty).toBeUndefined();
       expect(roundTripped.consensusRule?.fromRole?.where?.agent).toBe('$did');
+    });
+  });
+
+  describe('transition URIs', () => {
+    const byKey = (ts: FlowTransition[]) =>
+      ts.map(t => `${t.fromState}->${t.toState}:${t.actionName}:${JSON.stringify(t.actions)}`).sort();
+
+    const roundTrip = (flow: SHACLFlow) => SHACLFlow.fromLinks(flow.toLinks(), flow.flowUri);
+
+    it('keeps two transitions between the same states after toLinks -> fromLinks', () => {
+      const flow = new SHACLFlow('Review', 'review://');
+      flow.addState({ name: 'review', value: 0 });
+      flow.addState({ name: 'done', value: 1 });
+      flow.addTransition({ actionName: 'Approve', fromState: 'review', toState: 'done', actions: [{ action: 'addLink', source: 'this', predicate: 'review://by', target: 'approver' }] });
+      flow.addTransition({ actionName: 'Fast-track', fromState: 'review', toState: 'done', actions: [] });
+
+      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
+    });
+
+    it('does not collide "a" -> "Tob" with "aTo" -> "b"', () => {
+      const flow = new SHACLFlow('F', 'f://');
+      for (const [name, value] of [['a', 0], ['Tob', 1], ['aTo', 2], ['b', 3]] as const) {
+        flow.addState({ name, value });
+      }
+      flow.addTransition({ actionName: 'Go', fromState: 'a', toState: 'Tob', actions: [] });
+      flow.addTransition({ actionName: 'Go', fromState: 'aTo', toState: 'b', actions: [] });
+
+      expect(byKey(roundTrip(flow).transitions)).toEqual(byKey(flow.transitions));
+    });
+  });
+
+  describe('initial state ordering', () => {
+    it('fromJSON sorts states by value', () => {
+      const flow = new SHACLFlow('TODO', 'todo://');
+      flow.addState({ name: 'done', value: 1 });
+      flow.addState({ name: 'ready', value: 0 });
+      flow.addState({ name: 'doing', value: 0.5 });
+
+      const fromJSON = SHACLFlow.fromJSON(flow.toJSON());
+      expect(fromJSON.states.map(s => s.name)).toEqual(['ready', 'doing', 'done']);
     });
   });
 });

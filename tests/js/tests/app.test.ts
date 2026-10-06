@@ -4,7 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, startExecutor, quitExecutor } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from "child_process";
 
@@ -42,10 +42,10 @@ describe("Apps integration tests", () => {
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
       apiPort, hcAdminPort, hcAppPort , false, "123");
 
-    adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123", false)
+    adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123")
     await adminAd4mClient.agent.generate("passphrase")
     
-    unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+    unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort))
   })
 
   after(async () => {
@@ -74,7 +74,7 @@ describe("Apps integration tests", () => {
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain": "test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
   
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();
@@ -113,7 +113,7 @@ describe("Apps integration tests", () => {
       let rand = await adminAd4mClient!.agent.permitCapability(`{"requestId":"${requestId}","auth":{"appName":"demo-app","appDesc":"demo-desc","appDomain":"test.ad4m.org","appUrl":"https://demo-link","capabilities":[{"with":{"domain":"agent","pointers":["*"]},"can":["*"]}]}}`)
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
-      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
   
       const call = async () => {
         return await authenticatedAppAd4mClient!.agent.getApps();
@@ -151,7 +151,7 @@ describe("Apps integration tests", () => {
       let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
       // @ts-ignore
-      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+      let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
 
       const call = async () => {
           return await authenticatedAppAd4mClient!.agent.getApps();

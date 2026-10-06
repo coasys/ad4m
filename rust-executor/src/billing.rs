@@ -248,15 +248,7 @@ pub fn bill_compute(
     });
 
     match result {
-        Ok((row_id, credits_after)) => {
-            crate::pubsub::push_compute_log_entry(
-                row_id,
-                email,
-                operation,
-                summary,
-                amount,
-                credits_after,
-            );
+        Ok(_) => {
             mark_credits_dirty(email);
             Ok(())
         }

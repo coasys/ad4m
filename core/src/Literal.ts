@@ -27,9 +27,9 @@ export class Literal {
     }
 
     toUrl(): string {
-        if(this.#url && !this.#literal)
+        if(this.#url && this.#literal === undefined)
             return this.#url
-        if(!this.#url && (this.#literal === undefined || this.#literal === "" || this.#literal === null))
+        if(this.#literal === undefined)
             throw new Error("Can't turn empty Literal into URL")
 
         let encoded
@@ -52,7 +52,7 @@ export class Literal {
     }
 
     get(): any {
-        if(this.#literal)
+        if(this.#literal !== undefined)
             return this.#literal
             
         if(!this.#url)

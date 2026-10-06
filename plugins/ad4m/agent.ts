@@ -45,7 +45,7 @@ export async function ensureAgentReady(
       try {
         if (!_testClient) {
           const { Ad4mClient } = require("@coasys/ad4m");
-          client = new Ad4mClient(executorUrl, adminCredential, false);
+          client = new Ad4mClient(executorUrl, adminCredential);
         }
         agentStatus = await client.agent.status();
         logger.info(

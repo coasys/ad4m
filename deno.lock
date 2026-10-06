@@ -571,6 +571,7 @@
             "npm:svelte-preprocess@4",
             "npm:svelte@3",
             "npm:tslib@2",
+            "npm:tsx@4",
             "npm:typescript@^4.5.5"
           ]
         }

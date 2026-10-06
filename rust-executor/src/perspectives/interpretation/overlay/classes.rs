@@ -158,12 +158,12 @@ pub(crate) async fn mint_interpretation_run(
         "promptVersion": meta.prompt_version,
         "ranAt": meta.ran_at,
     });
-    let mut rest_sources: Vec<String> = Vec::new();
     if let Some(c) = cursor {
         values["processor"] = c.processor.clone().into();
-        if let Some((first, rest)) = c.sources.split_first() {
-            values["sources"] = first.clone().into();
-            rest_sources.extend(rest.iter().cloned());
+        // `sources`' setter is a single `addLink`, so `create_subject` writes one
+        // link per element of an array.
+        if !c.sources.is_empty() {
+            values["sources"] = c.sources.clone().into();
         }
     }
     // Debug-mode: persist raw LLM I/O onto the run so a UI can look it up
@@ -189,27 +189,6 @@ pub(crate) async fn mint_interpretation_run(
         )
         .await
         .map_err(|e| anyhow::anyhow!("mint_interpretation_run: create_subject failed: {e:#}"))?;
-    // `create_subject` applies one value per property; remaining collection
-    // members go through the same `addLink` setter one at a time. Threaded on
-    // the same `batch_id` so the whole run mint (initial values + follow-on
-    // source-id bumps) commits atomically with the pass's overlay writes.
-    for id in rest_sources {
-        perspective
-            .update_subject(
-                SubjectClassOption {
-                    class_name: Some(INTERP_RUN_CLASS.to_string()),
-                    query: None,
-                },
-                run_uri.clone(),
-                serde_json::json!({ "sources": id }),
-                batch_id.clone(),
-                context,
-            )
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("mint_interpretation_run: update_subject(sources) failed: {e:#}")
-            })?;
-    }
     Ok(run_uri)
 }
 

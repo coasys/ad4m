@@ -1,4 +1,5 @@
-import { ApiClient, CallOptions, RpcError } from "../apiClient";
+import { ApiClient, WsEvent, CallOptions, RpcError, longCall } from "../apiClient";
+import { addListener, notifyListeners } from "../notifyListeners"
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
 import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
@@ -16,12 +17,20 @@ import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbour
 // `proposeTransition()` API they describe. `import type` keeps this out of the
 // runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
 // would otherwise be a cycle).
-import type { FlowFireOutcome, FlowProposeResult } from "./FlowInstance";
+import type {
+    FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
+    FlowReceiptVerdict, FlowValidOutput,
+} from "./FlowInstance";
 
-export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => null
-export type UuidCallback = (uuid: string) => null
-export type LinkCallback = (link: LinkExpression) => null
-export type SyncStateChangeCallback = (state: PerspectiveState) => null
+export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => void
+export type UuidCallback = (uuid: string) => void
+export type LinkCallback = (link: LinkExpression) => void
+export interface LinkUpdate {
+    oldLink: LinkExpression
+    newLink: LinkExpression
+}
+export type LinkUpdatedCallback = (update: LinkUpdate) => void
+export type SyncStateChangeCallback = (state: PerspectiveState) => void
 
 function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw
@@ -42,29 +51,15 @@ export class PerspectiveClient {
     #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
     #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
     #perspectiveRemovedCallbacks: UuidCallback[]
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[]
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
-    #unsubscribers: (() => void)[]
-    #linkUnsubscribers: Map<string, (() => void)[]>
-    #querySubscriptionUnsubscribers: Map<string, () => void>
 
-    constructor(baseUrl: string, token?: string, subscribe: boolean = true, sharedApiClient?: ApiClient) {
+    constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
         this.#perspectiveAddedCallbacks = []
         this.#perspectiveUpdatedCallbacks = []
         this.#perspectiveRemovedCallbacks = []
-        this.#perspectiveSyncStateChangeCallbacks = []
-        this.#unsubscribers = []
-        this.#linkUnsubscribers = new Map()
-        this.#querySubscriptionUnsubscribers = new Map()
-
-        if(subscribe) {
-            this.subscribePerspectiveAdded()
-            this.subscribePerspectiveUpdated()
-            this.subscribePerspectiveRemoved()
-        }
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -150,7 +145,7 @@ export class PerspectiveClient {
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        const unsub = this.#apiClient.subscribe(
+        return this.#apiClient.subscribe(
             (data) => {
                 const event = data as Record<string, unknown>
                 if (event.type !== 'query-subscription-update') return
@@ -162,8 +157,6 @@ export class PerspectiveClient {
                 onData(parsed)
             }
         )
-        this.#querySubscriptionUnsubscribers.set(subscriptionId, unsub)
-        return unsub
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
@@ -172,12 +165,9 @@ export class PerspectiveClient {
         )
     }
 
+    /** Ends the subscription on the executor. The caller releases its local listener
+     *  with the function `subscribeToQueryUpdates` returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        const unsub = this.#querySubscriptionUnsubscribers.get(subscriptionId)
-        if (unsub) {
-            unsub()
-            this.#querySubscriptionUnsubscribers.delete(subscriptionId)
-        }
         return this.#apiClient.call<boolean>(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
@@ -270,8 +260,7 @@ export class PerspectiveClient {
      *
      * The server-side call prompts an LLM (up to `INTERPRETATION_MAX_ATTEMPTS`
      * retries on parse failure), so it can legitimately take minutes on slower
-     * or CPU-only models. We raise the default 30s RPC timeout here to 20 min
-     * (matches the CI `--timeout 1200000` for the interpretation tests).
+     * or CPU-only models, so it defaults to {@link LONG_TIMEOUT_MS}.
      *
      * `existingScope` and `mintScope` match the AutoProcessor semantics:
      * `existingScope` constrains the dedup lookup to instances under a
@@ -287,22 +276,16 @@ export class PerspectiveClient {
         existingScope?: RawScope,
         mintScope?: RawScope,
         observe?: RunInterpretationObserveOptions,
+        options?: CallOptions,
     ): Promise<string[]> {
-        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretation',
             {
                 uuid, transcript, basePrefix, classes, existingScope, mintScope,
-                // Spread rather than always-present, so a client talking to a pre-#903
-                // executor sends exactly the params it sent before. `serde` would ignore
-                // the extra keys anyway; keeping the wire identical means a bug report
-                // from an older node cannot be about these.
-                ...(observe ? {
-                    observationId: observe.observationId,
-                    emitDebugEvents: observe.emitDebugEvents ?? false,
-                } : {}),
+                observationId: observe?.observationId,
+                emitDebugEvents: observe?.emitDebugEvents,
             },
-            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
+            longCall(options),
         )
     }
 
@@ -317,9 +300,7 @@ export class PerspectiveClient {
      * the harness to a no-op final-answer step; use {@link runInterpretation}
      * for the classic single-shot path.
      *
-     * Same 20-minute RPC timeout as the single-shot path — an LLM loop
-     * that calls several tools can legitimately take longer than one plain
-     * generation.
+     * Defaults to {@link LONG_TIMEOUT_MS}, like the single-shot path.
      */
     async runInterpretationWithHarness(
         uuid: string,
@@ -337,8 +318,8 @@ export class PerspectiveClient {
         // (nothing to key against); the server gates on both.
         observationId?: string,
         emitDebugEvents?: boolean,
+        options?: CallOptions,
     ): Promise<string[]> {
-        const RUN_INTERPRETATION_TIMEOUT_MS = 20 * 60 * 1000
         return this.#apiClient.call<string[]>(
             'perspective.runInterpretationWithHarness',
             {
@@ -352,7 +333,7 @@ export class PerspectiveClient {
                 observationId,
                 emitDebugEvents,
             },
-            { timeoutMs: RUN_INTERPRETATION_TIMEOUT_MS },
+            longCall(options),
         )
     }
 
@@ -405,9 +386,10 @@ export class PerspectiveClient {
         instanceUri: string,
         toState: string,
         rationale?: string,
+        outputs?: FlowOutputRef[],
     ): Promise<FlowProposeResult> {
         return this.#apiClient.call<FlowProposeResult>(
-            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale },
+            'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
         )
     }
 
@@ -429,28 +411,45 @@ export class PerspectiveClient {
         return result.retractedLinks
     }
 
+    /** Re-decide a flow receipt under this perspective's own flow catalogue. */
+    async verifyFlowReceipt(uuid: string, receipt: object): Promise<FlowReceiptVerdict> {
+        return this.#apiClient.call<FlowReceiptVerdict>(
+            'perspective.verifyFlowReceipt', { uuid, receipt },
+        )
+    }
+
+    /** The instances that are, as they stand, valid outputs of `flow`
+     *  (optionally: of runs settled into terminal state `state`). */
+    async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
+        return this.#apiClient.call<FlowValidOutput[]>(
+            'perspective.flowValidOutputs', { uuid, flow, state },
+        )
+    }
+
+    /** Mint and store the receipt for a completed flow run. Fails while the
+     *  run has not settled into a terminal state, and when an output's
+     *  content no longer matches what the quorum committed to. */
+    async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
+        return this.#apiClient.call<FlowMintedReceipt>(
+            'perspective.mintFlowReceipt', { uuid, instanceUri },
+        )
+    }
+
     /**
      * Subscribe to auto-processor step signals. `cb` fires for every
      * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
      * Processed), letting a UI show progress and await the next batch.
      *
-     * Registered on the per-uuid `#linkUnsubscribers` map so
-     * `PerspectiveProxy.dispose()` → `removeAllListeners(uuid)` cleans the
-     * subscription up; using the global `#unsubscribers` array would leak
-     * callbacks across repeated view lifecycles (CodeRabbit #881 review).
+     * Returns a function that removes this listener.
      */
-    async addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorEvent)
                 }
             }
         )
-        let existing = this.#linkUnsubscribers.get(uuid as string) || []
-        existing.push(unsub)
-        this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#apiClient.waitForSubscription()
     }
 
     /**
@@ -458,24 +457,19 @@ export class PerspectiveClient {
      * when THIS executor claims / finishes / abandons a batch for any
      * processor on `uuid` — perspective-scoped observability so a UI can
      * render "someone is auto-processing this" without receiving the batch
-     * payload or LLM I/O. Registered on the per-uuid `#linkUnsubscribers`
-     * map so `PerspectiveProxy.dispose()` sweeps it up.
+     * payload or LLM I/O. Returns a function that removes this listener.
      */
-    async addAutoProcessorNeighbourhoodStateListener(
+    addAutoProcessorNeighbourhoodStateListener(
         uuid: String,
         cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    ): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
                     cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
                 }
             }
         )
-        let existing = this.#linkUnsubscribers.get(uuid as string) || []
-        existing.push(unsub)
-        this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#apiClient.waitForSubscription()
     }
 
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
@@ -590,95 +584,79 @@ export class PerspectiveClient {
     }
 
     // Subscriptions:
-    addPerspectiveAddedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveAddedCallbacks.push(cb)
+    /** Returns a function that removes the listener. */
+    addPerspectiveAddedListener(cb: PerspectiveHandleCallback): () => void {
+        this.#listen()
+        return addListener(this.#perspectiveAddedCallbacks, cb)
     }
 
-    subscribePerspectiveAdded() {
-        const unsub = this.#apiClient.subscribe((data) => {
-            if (data.type === 'perspective-added') {
-                this.#perspectiveAddedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
-            }
-        })
-        this.#unsubscribers.push(unsub)
+    /** Returns a function that removes the listener. */
+    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback): () => void {
+        this.#listen()
+        return addListener(this.#perspectiveUpdatedCallbacks, cb)
     }
 
-    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback) {
-        this.#perspectiveUpdatedCallbacks.push(cb)
+    /** Returns a function that removes the listener. */
+    addPerspectiveRemovedListener(cb: UuidCallback): () => void {
+        this.#listen()
+        return addListener(this.#perspectiveRemovedCallbacks, cb)
     }
 
-    subscribePerspectiveUpdated() {
-        const unsub = this.#apiClient.subscribe((data) => {
-            if (data.type === 'perspective-updated') {
-                this.#perspectiveUpdatedCallbacks.forEach(cb => cb(data.perspective as PerspectiveHandle))
-            }
-        })
-        this.#unsubscribers.push(unsub)
+    /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
+    #listen(): void {
+        this.#apiClient.subscribe(this.#onEvent)
     }
 
-    addPerspectiveSyncedListener(cb: SyncStateChangeCallback) {
-        this.#perspectiveSyncStateChangeCallbacks.push(cb)
+    #onEvent = (data: WsEvent): void => {
+        switch (data.type) {
+            case 'perspective-added':
+                notifyListeners(this.#perspectiveAddedCallbacks, data.perspective as PerspectiveHandle)
+                break
+            case 'perspective-updated':
+                notifyListeners(this.#perspectiveUpdatedCallbacks, data.perspective as PerspectiveHandle)
+                break
+            case 'perspective-removed':
+                notifyListeners(this.#perspectiveRemovedCallbacks, data.uuid as string)
+                break
+        }
     }
 
-    async addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'sync-state-change' && data.uuid === uuid) {
-                    cb.forEach(c => c(data.state as PerspectiveState))
+                    notifyListeners(cb, data.state as PerspectiveState)
                 }
             }
         )
-        this.#unsubscribers.push(unsub)
-        await new Promise<void>(resolve => setTimeout(resolve, 500))
     }
 
-    addPerspectiveRemovedListener(cb: UuidCallback) {
-        this.#perspectiveRemovedCallbacks.push(cb)
-    }
-
-    subscribePerspectiveRemoved() {
-        const unsub = this.#apiClient.subscribe((data) => {
-            if (data.type === 'perspective-removed') {
-                this.#perspectiveRemovedCallbacks.forEach(cb => cb(data.uuid as string))
-            }
-        })
-        this.#unsubscribers.push(unsub)
-    }
-
-    async addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
-                    cb.forEach(c => c(data.link as LinkExpression))
+                    notifyListeners(cb, data.link as LinkExpression)
                 }
             }
         )
-        let existing = this.#linkUnsubscribers.get(uuid as string) || []
-        existing.push(unsub)
-        this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#apiClient.waitForSubscription()
     }
 
-    async addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'link-removed' && data.perspectiveUuid === uuid) {
                     const link = data.link as LinkExpression & { status?: unknown }
                     if (!link.status) {
                         delete link.status
                     }
-                    cb.forEach(c => c(link))
+                    notifyListeners(cb, link)
                 }
             }
         )
-        let existing = this.#linkUnsubscribers.get(uuid as string) || []
-        existing.push(unsub)
-        this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#apiClient.waitForSubscription()
     }
 
-    async addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkCallback[]): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
+    addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkUpdatedCallback[]): () => void {
+        return this.#apiClient.subscribe(
             (data) => {
                 if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
                     const newLink = data.newLink as LinkExpression & { status?: unknown }
@@ -689,26 +667,10 @@ export class PerspectiveClient {
                     if (!oldLink.status) {
                         delete oldLink.status
                     }
-                    cb.forEach(c => c(data as unknown as LinkExpression))
+                    notifyListeners(cb, data as unknown as LinkUpdate)
                 }
             }
         )
-        let existing = this.#linkUnsubscribers.get(uuid as string) || []
-        existing.push(unsub)
-        this.#linkUnsubscribers.set(uuid as string, existing)
-        await this.#apiClient.waitForSubscription()
-    }
-
-    /** Unsubscribe all link/sync-state listeners registered for the given perspective UUID.
-     *  Called by PerspectiveProxy.dispose() to prevent subscription leaks. */
-    removeAllListeners(uuid: string): void {
-        const unsubs = this.#linkUnsubscribers.get(uuid)
-        if (unsubs) {
-            for (const fn of unsubs) {
-                try { fn() } catch {}
-            }
-            this.#linkUnsubscribers.delete(uuid)
-        }
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {

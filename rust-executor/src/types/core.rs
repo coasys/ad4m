@@ -575,6 +575,15 @@ pub struct ModelApi {
     pub api_key: String,
     pub model: String,
     pub api_type: ModelApiType,
+    /// Ceiling for the context window requested from the provider, in tokens.
+    ///
+    /// Only the Ollama provider reads this today: `num_ctx` sizes the KV
+    /// cache at model load, so the right ceiling depends on how much VRAM
+    /// the operator of that Ollama host can spend — a per-model decision,
+    /// not a compile-time one. Unset falls back to the provider's built-in
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_ctx: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]

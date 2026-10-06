@@ -59,7 +59,7 @@
     "turbo": "latest"
   },
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=22"
   },
   "nohoist": [
     "core"

@@ -1,9 +1,9 @@
-import { TestContext } from './integration.test'
+import { TestContext } from './test-context'
 import fs from "fs";
 import { expect } from "chai";
 import { NotificationInput, TriggeredNotification } from '@coasys/ad4m';
 import sinon from 'sinon';
-import { sleep } from '../utils/utils';
+import { pollUntil, assertStaysFalse } from '../utils/utils';
 import { ExceptionType, Link } from '@coasys/ad4m';
 // Imports needed for webhook tests:
 // (deactivated for now because these imports break the test suite on CI)
@@ -16,7 +16,8 @@ const PERSPECT3VISM_AGENT = "did:key:zQ3shkkuZLvqeFgHdgZgFMUx8VGkgVWsLA83w2oekhZ
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 const PUBLISHING_AGENT = JSON.parse(fs.readFileSync("./tst-tmp/agents/p/ad4m/agent.json").toString())["did"];
 
-export default function runtimeTests(testContext: TestContext) {
+export default function runtimeTests(testContext: TestContext, options?: { hasHolochain?: boolean }) {
+    const hasHolochain = options?.hasHolochain ?? true;
     return () => {
         it('Trusted Agents CRUD', async () => {
             const ad4mClient = testContext.ad4mClient!
@@ -133,7 +134,7 @@ export default function runtimeTests(testContext: TestContext) {
             expect(postDeleteAgents).to.eql([ did, PERSPECT3VISM_AGENT, PUBLISHING_AGENT, 'agentPubKey', 'agentPubKey2' ].sort())
         })
 
-        it("can deal with Holochain's agent_infos", async () => {
+        ;(hasHolochain ? it : it.skip)("can deal with Holochain's agent_infos", async () => {
             const ad4mClient = testContext.ad4mClient!
             const agentInfos = await ad4mClient.runtime.hcAgentInfos()
             expect(agentInfos).to.be.an('array')
@@ -193,7 +194,7 @@ export default function runtimeTests(testContext: TestContext) {
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
 
-            await sleep(2000)
+            await pollUntil(() => mockFunction.calledOnce, { timeoutMs: 5000, label: "notification install request callback fires" });
 
             // Use sinon's assertions to wait for the stub to be called
             await sinon.assert.calledOnce(mockFunction);
@@ -257,7 +258,6 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
-            sleep(1000)
             // Grant the notification
             const granted = await ad4mClient.runtime.grantNotification(notificationId)
             expect(granted).to.be.true
@@ -265,19 +265,17 @@ export default function runtimeTests(testContext: TestContext) {
             const mockFunction = sinon.stub();
             await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
 
-            // Ensuring no false positives
+            // Negative: ensuring no false positives — control link should NOT trigger
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
-            await sleep(1000)
-            expect(mockFunction.called).to.be.false
+            await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "no false positive on control link" });
 
-            // Ensuring only selected perspectives will trigger
+            // Negative: ensuring only selected perspectives trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
-            await sleep(1000)
-            expect(mockFunction.called).to.be.false
+            await assertStaysFalse(() => mockFunction.called, { waitMs: 1000, label: "other perspective should not trigger" });
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
-            await sleep(7000)
+            await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "notification trigger fires for target1" });
             expect(mockFunction.called).to.be.true
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
             expect(triggeredNotification.notification.description).to.equal(notification.description)
@@ -291,7 +289,9 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Ensuring we don't get old data on a new trigger
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
-            await sleep(7000)
+            await pollUntil(() => mockFunction.callCount >= 2, { timeoutMs: 15000, label: "notification trigger fires for target2" });
+            // No third, stale trigger may follow
+            await assertStaysFalse(() => mockFunction.callCount > 2, { waitMs: 2000, label: "stale third notification trigger" });
             expect(mockFunction.callCount).to.equal(2)
             triggeredNotification = mockFunction.getCall(1).args[0] as TriggeredNotification
             triggerMatch = JSON.parse(triggeredNotification.triggerMatch)
@@ -328,14 +328,13 @@ export default function runtimeTests(testContext: TestContext) {
             }
 
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
-            await sleep(1000)
             const granted = await ad4mClient.runtime.grantNotification(notificationId)
             expect(granted).to.be.true
 
             const mockFunction = sinon.stub();
             await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
 
-            // Create a message expression that doesn't mention the agent
+            // Negative: message without mention should NOT trigger
             const noMentionContent = "Hello world, nice day!"
             const noMentionExprUrl = await ad4mClient.expression.create(noMentionContent, "literal")
             await notificationPerspective.add(new Link({
@@ -343,8 +342,7 @@ export default function runtimeTests(testContext: TestContext) {
                 predicate: "flux://has_message",
                 target: noMentionExprUrl
             }))
-            await sleep(2000)
-            expect(mockFunction.called).to.be.false
+            await assertStaysFalse(() => mockFunction.called, { waitMs: 2000, label: "no-mention message should not trigger" });
 
             // Create a message expression that mentions the agent (with HTML formatting like Flux)
             const mentionContent = `Hey <strong>${agentDid!}</strong>, check this out!`
@@ -354,7 +352,7 @@ export default function runtimeTests(testContext: TestContext) {
                 predicate: "flux://has_message",
                 target: mentionExprUrl
             }))
-            await sleep(7000)
+            await pollUntil(() => mockFunction.called, { timeoutMs: 15000, label: "mention notification trigger fires" });
             expect(mockFunction.called).to.be.true
 
             let triggeredNotification = mockFunction.getCall(0).args[0] as TriggeredNotification
@@ -487,24 +485,23 @@ export default function runtimeTests(testContext: TestContext) {
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
-            sleep(1000)
+            // Original code did not await sleep() here — install completes
+            // synchronously enough that granting works without a delay.
             // Grant the notification
             const granted = await ad4mClient.runtime.grantNotification(notificationId)
             expect(granted).to.be.true
 
             // Ensuring no false positives
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
-            await sleep(1000)
-            expect(webhookCalled).to.be.false
+            await assertStaysFalse(() => webhookCalled, { waitMs: 1000, intervalMs: 100, label: "webhook not called for non-matching link" });
 
             // Ensuring only selected perspectives will trigger
             await otherPerspective.add(new Link({source: "control://source", predicate: triggerPredicate, target: "control://target"}))
-            await sleep(1000)
-            expect(webhookCalled).to.be.false
+            await assertStaysFalse(() => webhookCalled, { waitMs: 1000, intervalMs: 100, label: "webhook not called for wrong perspective" });
 
             // Happy path
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target1"}))
-            await sleep(1000)
+            await pollUntil(() => webhookCalled, { timeoutMs: 5000, intervalMs: 100, label: "webhook called for matching link" });
             expect(webhookCalled).to.be.true
             expect(webhookGotAuth).to.equal(webhookAuth)
             expect(webhookGotBody).to.be.not.be.null
@@ -523,7 +520,7 @@ export default function runtimeTests(testContext: TestContext) {
             webhookGotBody = null
 
             await notificationPerspective.add(new Link({source: "test://source", predicate: triggerPredicate, target: "test://target2"}))
-            await sleep(1000)
+            await pollUntil(() => webhookCalled, { timeoutMs: 5000, intervalMs: 100, label: "webhook called for second matching link" });
             expect(webhookCalled).to.be.true
             expect(webhookGotAuth).to.equal(webhookAuth)
             triggeredNotification = webhookGotBody as unknown as TriggeredNotification

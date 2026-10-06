@@ -1,0 +1,550 @@
+import { Callout } from "nextra/components";
+
+# Writing a flow: a role granted by a flow
+
+This guide builds one thing, step by step: a task flow whose final edge only a *reviewer* can settle, where "reviewer" is not a label somebody typed but the output of a second flow the group ran. One flow gates on what another flow produced. That is the "fractal" case, and it is the most complex thing the flow engine does today.
+
+Every step is taken from `tests/js/tests/model/flow-task-handover.test.ts`. The code blocks are copied from that file, re-indented, and trimmed where noted. Read this page and you can rebuild Part 3 of that test without opening it. For what each API call means in general, see [Flows](/flows); this page only repeats what the walkthrough needs.
+
+```text
+  ReviewerRoleGrant flow                  TaskFlow (gated)
+  ─────────────────────                   ────────────────
+  subject: a ReviewerRole instance        subject: a Task
+                                          Done needs n:1 vote from a DID that
+  Proposed ──Grant (n:2)──▶ Granted       holds a ReviewerRole instance which
+            names output:                 is a verified OUTPUT of a Granted
+            (HandoverReviewerRole, role)  ReviewerRoleGrant run
+                  │                                   ▲
+                  │ mintFlowReceipt(run)              │
+                  ▼                                   │
+  handover://ReviewerRoleGrantFlow ──ad4m://flow/flow_receipt──▶ receipt
+                  (the per-flow index the gate reads)
+```
+
+## What you will build
+
+1. A four-state `TaskFlow`: Ready → InProgress → InReview → Done.
+2. A `Done` edge gated by `fromRole`, so only a reviewer's vote counts.
+3. A two-state `ReviewerRoleGrant` flow that runs over a role instance.
+4. The hole: plain `fromRole` accepts the role instance before the grant flow has moved.
+5. The fix: `producedByFlow` on the role query, which counts only a *minted receipt* of the grant.
+
+The test uses two DIDs on one executor: Alice (a managed user) and Bob (the admin). They share one perspective. Everything below runs on that perspective.
+
+## The models
+
+A flow points *at* data. The data are ordinary model classes.
+
+```typescript
+@Model({ name: "HandoverTask" })
+class Task extends Ad4mModel {
+  @Property({ through: "handover://task_title", required: true })
+  title: string = "";
+}
+
+/** A role as plain data. `fromRole` is a ModelQuery over exactly this. */
+@Model({ name: "HandoverReviewerRole" })
+class ReviewerRole extends Ad4mModel {
+  @Property({ through: "handover://role_agent", required: true })
+  agent: string = "";
+
+  @Property({ through: "handover://role_domain", required: true })
+  domain: string = "";
+}
+
+/** What the grant flow's `Granted` state requires — an on-graph endorsement. */
+@Model({ name: "HandoverGrantEndorsement" })
+class GrantEndorsement extends Ad4mModel {
+  @Property({ through: "handover://endorsement_reason", required: true })
+  reason: string = "";
+}
+```
+
+That block is trimmed. Three more classes carry the task's evidence and are shaped the same way: `WorkLog` (`HandoverWorkLog`, one `note`), `Deliverable` (`HandoverDeliverable`, one `title`) and `ReviewNote` (`HandoverReviewNote`, one `body`). All six are registered on the perspective before any flow runs.
+
+Two things to notice:
+
+- **A role is a class, not a special object.** `ReviewerRole` has an `agent` property that holds a DID, and a `domain`. The gate will query it like any other class.
+- **The endorsement is the grant flow's guard evidence.** `Granted` requires one `GrantEndorsement` linked to the role instance. Without it nobody can even propose the grant.
+
+Evidence is created under its subject with a `parent` link. The test wraps that in a helper, with `HAS_CHILD` set to `"ad4m://has_child"`:
+
+```typescript
+async function createUnder<T extends Ad4mModel>(
+  model: any,
+  p: PerspectiveProxy,
+  parentUri: string,
+  data: Record<string, any>,
+): Promise<T> {
+  return (await model.create(p, data, {
+    parent: { id: parentUri, predicate: HAS_CHILD },
+  })) as T;
+}
+```
+
+## Step 1: the task flow
+
+`makeTaskFlow` builds the four-state flow. It takes the `Done` state's consensus rule as a parameter, because every step below changes only that rule.
+
+```typescript
+function makeTaskFlow(doneRule: ConsensusRule, name = "TaskFlow"): SHACLFlow {
+  const flow = new SHACLFlow(name, "handover://");
+  flow.inputTypes = ["HandoverTask"];
+  flow.consensusRule = { n: 1 };
+  flow.interpretationHint =
+    "Advance a Task: Ready → InProgress → InReview → Done.";
+
+  flow.addState({
+    name: "Ready",
+    value: 0,
+    interpretationHint: "Named, not yet started.",
+  });
+  flow.addState({
+    name: "InProgress",
+    value: 1,
+    interpretationHint: "Someone is working on it.",
+    requires: [{ className: "HandoverWorkLog", linkedTo: "base", count: { min: 1 } }],
+  });
+  flow.addState({
+    name: "InReview",
+    value: 2,
+    interpretationHint: "A deliverable exists and is waiting on review.",
+    requires: [{ className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } }],
+  });
+  flow.addState({
+    name: "Done",
+    value: 3,
+    interpretationHint: "Accepted.",
+    requires: [
+      { className: "HandoverDeliverable", linkedTo: "base", count: { min: 1 } },
+      { className: "HandoverReviewNote", linkedTo: "base", count: { min: 1 } },
+    ],
+    consensusRule: doneRule,
+  });
+
+  flow.addTransition({ actionName: "Start", fromState: "Ready", toState: "InProgress", actions: [] });
+  flow.addTransition({ actionName: "SubmitForReview", fromState: "InProgress", toState: "InReview", actions: [] });
+  flow.addTransition({ actionName: "Accept", fromState: "InReview", toState: "Done", actions: [] });
+  return flow;
+}
+```
+
+The `name` parameter matters later. A flow's identity is `${namespace}${name}Flow`, so `makeTaskFlow(rule)` is `handover://TaskFlowFlow` and `makeTaskFlow(rule, "GatedTaskFlow")` is `handover://GatedTaskFlowFlow`. Two definitions with the same name on one perspective would collide.
+
+Part 1 of the test drives this flow with `doneRule = { n: 2 }` and no role. Register it, create a task, start a run:
+
+```typescript
+await aliceP.addFlow("TaskFlow", makeTaskFlow({ n: 2 }));
+
+const task = (await (Task as any).create(aliceP, { title: "Ship the handover" })) as Task;
+const started = await FlowInstance.start(aliceP, "TaskFlow", task.id);
+
+expect(started.currentStateName, "lowest-valued state is where every run begins").to.equal("Ready");
+```
+
+The run reaches `InReview` through a helper the later steps reuse. Bob writes a work log and presses Start, then writes a deliverable and presses SubmitForReview. Both edges are `n: 1`, so each press fires:
+
+```typescript
+async function advanceToInReview(
+  aliceP: PerspectiveProxy,
+  bobP: PerspectiveProxy,
+  taskId: string,
+): Promise<void> {
+  await createUnder<WorkLog>(WorkLog, bobP, taskId, { note: "Picked up." });
+  const started = await (await instanceOn(bobP, taskId)).proposeTransition(
+    "InProgress",
+    "I've started — see the log",
+  );
+  expect(started.outcomes, "n:1 Start fires on proposeTransition").to.have.lengthOf(1);
+  expect(started.recordedVote).to.be.true;
+  expect(started.derivedState).to.equal("InProgress");
+
+  await createUnder<Deliverable>(Deliverable, bobP, taskId, { title: "patch.ts" });
+  const submitted = await (await instanceOn(bobP, taskId)).proposeTransition("InReview");
+  expect(submitted.outcomes).to.have.lengthOf(1);
+  expect(submitted.derivedState).to.equal("InReview");
+
+  const aliceView = await instanceOn(aliceP, taskId);
+  expect(aliceView.currentStateName).to.equal("InReview");
+}
+```
+
+`instanceOn(p, subject)` is `FlowInstance.findAll(p, { subject })` with an assertion that exactly one run exists. The test re-fetches the instance before every press because `FlowInstance` is a snapshot, not a live object.
+
+With `{ n: 2 }` on Done, Alice's press records a vote and fires nothing. Bob presses the same button and co-signs her proposal; two distinct DIDs is quorum and the edge fires. Part 1 then shows that Bob withdrawing his vote moves the run back to `InReview`. The [Flows](/flows#proposing-and-voting) page covers that in full. What this guide needs from Part 1 is only the shape: **press, count, fire**.
+
+## Step 2: gate Done on a role
+
+Part 2 replaces `{ n: 2 }` with a rule that counts one vote, but only from a DID that holds a `ReviewerRole` for the `frontend` domain:
+
+```typescript
+await aliceP.addFlow(
+  "TaskFlow",
+  makeTaskFlow({
+    n: 1,
+    fromRole: {
+      className: "HandoverReviewerRole",
+      where: { domain: "frontend" },
+      didProperty: "agent",
+    },
+  }),
+);
+```
+
+`fromRole` is a model query. `didProperty` names the property whose value is the voter's DID. For each voter the engine asks: is there a `HandoverReviewerRole` with `domain = "frontend"` and `agent = <this DID>`?
+
+Bob gets a role instance. Alice does not:
+
+```typescript
+const role = await createUnder<ReviewerRole>(ReviewerRole, aliceP, task.id, {
+  agent: bobDid,
+  domain: "frontend",
+});
+```
+
+Alice presses Accept first. Her vote lands, but the derivation does not count it, so the `n: 1` edge does not fire. Bob presses next and the edge fires with Bob alone as the voter:
+
+```typescript
+const alicePress = await (await instanceOn(aliceP, task.id)).proposeTransition("Done");
+expect(
+  alicePress.outcomes,
+  "a non-reviewer click must not settle Done — if this fires, fromRole is being ignored",
+).to.have.lengthOf(0);
+expect(alicePress.recordedVote, "the click still wrote a vote; it just does not count").to.be.true;
+expect((await instanceOn(aliceP, task.id)).currentStateName).to.equal("InReview");
+
+const bobPress = await (await instanceOn(bobP, task.id)).proposeTransition("Done");
+expect(bobPress.outcomes, "the reviewer DID is the one fromRole counts").to.have.lengthOf(1);
+expect(bobPress.outcomes[0].toState).to.equal("Done");
+expect(bobPress.outcomes[0].voters).to.include(bobDid);
+expect(bobPress.outcomes[0].voters).to.not.include(aliceDid);
+```
+
+Notice what made Bob a reviewer: **Alice created a link.** Nothing else. Any member who can write a `ReviewerRole` instance can make anyone a reviewer. Part 3 turns that into a process.
+
+## Step 3: the grant flow
+
+A role grant is itself a flow. It runs over the role instance as its subject:
+
+```typescript
+function makeGrantFlow(): SHACLFlow {
+  const flow = new SHACLFlow("ReviewerRoleGrant", "handover://");
+  flow.inputTypes = ["HandoverReviewerRole"];
+  flow.consensusRule = { n: 1 };
+  flow.interpretationHint =
+    "Grant a ReviewerRole: Proposed → Granted. Completing this flow is what producedByFlow binds to.";
+
+  flow.addState({
+    name: "Proposed",
+    value: 0,
+    interpretationHint: "This agent has been nominated as a reviewer.",
+  });
+  flow.addState({
+    name: "Granted",
+    value: 1,
+    interpretationHint: "The group agreed this agent holds the role.",
+    requires: [{ className: "HandoverGrantEndorsement", linkedTo: "base", count: { min: 1 } }],
+    consensusRule: { n: 2 },
+  });
+  flow.addTransition({
+    actionName: "Grant",
+    fromState: "Proposed",
+    toState: "Granted",
+    actions: [],
+  });
+  return flow;
+}
+```
+
+Its URI is `handover://ReviewerRoleGrantFlow`. The test keeps that in a constant, `GRANT_FLOW_URI`, because the gate in Step 6 has to name it exactly.
+
+**Nominating is creating the role instance.** The instance is the grant flow's base expression. Creating it says "Bob is proposed as a frontend reviewer". Starting the grant flow over it opens the group's decision:
+
+```typescript
+await aliceP.addFlow("ReviewerRoleGrant", makeGrantFlow());
+
+const role = (await (ReviewerRole as any).create(aliceP, {
+  agent: bobDid,
+  domain: "frontend",
+})) as ReviewerRole;
+
+const grant = await FlowInstance.start(aliceP, "ReviewerRoleGrant", role.id);
+expect(grant.currentStateName).to.equal("Proposed");
+expect(grant.availableTransitions.map((t) => t.actionName)).to.deep.equal(["Grant"]);
+expect(grant.subject).to.equal(role.id);
+```
+
+At this point Bob's role instance exists and the grant sits in `Proposed`. Nobody has agreed to anything yet.
+
+## Step 4: the hole
+
+Now register the Part 2 task flow, with plain `fromRole`, next to the grant flow. Create a task, advance it to `InReview`, add a review note. Then, with the grant still in `Proposed`, Bob presses Accept:
+
+```typescript
+expect((await instanceOn(aliceP, role.id)).currentStateName, "grant still Proposed").to.equal(
+  "Proposed",
+);
+const openDone = await (await instanceOn(bobP, openTask.id)).proposeTransition("Done");
+expect(
+  openDone.outcomes,
+  "HOLE: fromRole matched the ReviewerRole instance while its grant flow was still Proposed",
+).to.have.lengthOf(1);
+expect(openDone.derivedState).to.equal("Done");
+```
+
+**It fires.** Plain `fromRole` asks whether a matching instance exists. It does. The grant flow running over that instance is invisible to the query. The group has a nomination process and the gate ignores it.
+
+This is a hole, not a bug. `fromRole` does exactly what it says: match an instance. The test asserts the behaviour so that nobody mistakes it for a guarantee. To bind the gate to the *process*, the role query needs one more condition.
+
+## Step 5: complete the grant, naming its output
+
+The grant flow's `Granted` state is `n: 2`, so Alice and Bob both press Grant. First the guard evidence:
+
+```typescript
+const grantOutputs = [{ className: "HandoverReviewerRole", id: role.id }];
+await createUnder<GrantEndorsement>(GrantEndorsement, aliceP, role.id, {
+  reason: "Bob reviewed the last three frontend tasks.",
+});
+```
+
+Then two presses, each naming the role instance as the run's output:
+
+```typescript
+const aliceGrant = await (await instanceOn(aliceP, role.id)).proposeTransition(
+  "Granted",
+  undefined,
+  grantOutputs,
+);
+expect(aliceGrant.outcomes, "grant is n:2 — Alice alone does not grant").to.have.lengthOf(0);
+expect(aliceGrant.recordedVote).to.be.true;
+expect(aliceGrant.derivedState).to.equal("Proposed");
+
+const bobGrant = await (await instanceOn(bobP, role.id)).proposeTransition(
+  "Granted",
+  undefined,
+  grantOutputs,
+);
+expect(bobGrant.outcomes, "two DIDs settle the grant flow").to.have.lengthOf(1);
+expect(bobGrant.minted, "Bob co-signed Alice's proposal, outputs and all").to.be.false;
+expect(bobGrant.derivedState).to.equal("Granted");
+expect((await instanceOn(aliceP, role.id)).currentStateName).to.equal("Granted");
+const grantRunUri = bobGrant.outcomes[0].instanceUri;
+```
+
+The third argument to `proposeTransition` is the list of outputs. Three rules apply, each enforced by the executor:
+
+- **The subject is never an output by default.** The run's subject is the role instance, but a receipt speaks only for what the quorum *named*. Leave `outputs` empty and the receipt grants nothing.
+- **Outputs are only accepted on a proposal into a terminal state.** `Granted` has no outgoing edge, so the run ends there. Naming outputs on a non-terminal edge is refused.
+- **Every co-signer must name the same outputs.** The proposal signs a hash over each output's class, id and content. Bob's press with the same `grantOutputs` joins Alice's proposal, which is why `minted` is `false`. A press naming different outputs is refused rather than joined: joining would sign something the presser did not name.
+
+Why the content is in the hash, and not just the id, is explained under [Outputs](/flows#outputs-what-a-final-step-names).
+
+Keep `grantRunUri`. It is the completed run, and the next step mints its receipt. Note that completing the grant did **not** close the hole from Step 4. The plain `fromRole` gate still matches the instance, exactly as before.
+
+## Step 6: `producedByFlow`, fail-closed before a receipt exists
+
+Register a second task flow under a different name, whose `Done` rule adds `producedByFlow` to the role query:
+
+```typescript
+await aliceP.addFlow(
+  "GatedTaskFlow",
+  makeTaskFlow(
+    {
+      n: 1,
+      fromRole: {
+        className: "HandoverReviewerRole",
+        where: { domain: "frontend" },
+        didProperty: "agent",
+        producedByFlow: { flow: GRANT_FLOW_URI, state: "Granted" },
+      },
+    },
+    "GatedTaskFlow",
+  ),
+);
+```
+
+`producedByFlow` adds one condition: the matched role instance must be a verified output of a run of `handover://ReviewerRoleGrantFlow` that settled into `Granted`. Both `flow` and `state` are required on a role. Without `state`, a run that settled into a rejecting terminal state would grant too, so the rule refuses to decode instead.
+
+Create a fresh task on `GatedTaskFlow`, advance it, add a review note, and let Bob press Accept. His grant run has settled. Nobody has minted its receipt:
+
+```typescript
+const gatedDone = await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
+expect(
+  gatedDone.outcomes,
+  "producedByFlow without a receipt must not count Bob — if this fires, the field is being ignored",
+).to.have.lengthOf(0);
+expect(gatedDone.recordedVote, "the click still wrote; the fold did not count it").to.be.true;
+expect(gatedDone.derivedState).to.equal("InReview");
+expect((await instanceOn(aliceP, gatedTask.id)).currentStateName).to.equal("InReview");
+expect(
+  await aliceP.flowValidOutputs(GRANT_FLOW_URI, "Granted"),
+  "no receipt yet, so the grant flow has no valid outputs",
+).to.be.empty;
+```
+
+Bob does not count. The run completed is not evidence. A receipt is. The gate reads receipts from the granting flow's index and verifies each one; with no receipt there is nothing to verify, and an unverified grant is not a grant. `flowValidOutputs` asks the same question from the outside and gives the same empty answer.
+
+<Callout type="warning" emoji="⚠️">
+  Spell `producedByFlow` exactly. The role query drops keys it does not know,
+  so a misspelt key, or the pre-rename `grantedByFlow`, silently degrades to
+  plain `fromRole` and the edge fires the way the hole did. The assertion
+  above is the test that catches it. Tracked in
+  [#1144](https://github.com/coasys/ad4m/issues/1144).
+</Callout>
+
+## Step 7: mint the receipt
+
+Any member mints once the run has settled. Nothing mints automatically.
+
+```typescript
+const minted = await aliceP.mintFlowReceipt(grantRunUri);
+expect(minted.receiptUri).to.match(/^ad4m:\/\/flow\/receipt\//);
+```
+
+The mint re-derives the grant run's state, collects the outputs the final edge's quorum named, checks their hash against what the quorum signed, and writes the receipt plus its discovery links:
+
+```text
+  receipt ──ad4m://flow/receipt_content──▶ (the receipt body, as a literal)
+  run     ──ad4m://flow/receipt──────────▶ receipt
+  flow    ──ad4m://flow/flow_receipt─────▶ receipt   ◀── the gate reads this index
+  output  ──ad4m://flow/granted_by───────▶ receipt   (one per named output)
+```
+
+The third link is the one that matters here. `handover://ReviewerRoleGrantFlow` now has one entry in its receipt index. When the gate evaluates `producedByFlow` it loads every receipt under that index, verifies each against this replica's own copy of the flow definition, and keeps the ones that were minted for this flow, settled into `Granted`, and name the instance as `(HandoverReviewerRole, role.id)`.
+
+Ask the same question through the SDK:
+
+```typescript
+const granted = await aliceP.flowValidOutputs(GRANT_FLOW_URI, "Granted");
+expect(granted).to.have.lengthOf(1);
+expect(granted[0].output).to.deep.equal({ className: "HandoverReviewerRole", id: role.id });
+expect(granted[0].receiptUri).to.equal(minted.receiptUri);
+const verdict = await bobP.verifyFlowReceipt(minted.receipt);
+expect(verdict.outcome, verdict.detail).to.equal("verified");
+expect(verdict.voters).to.have.members([aliceDid, bobDid]);
+```
+
+Now the gated task from Step 6. Bob's vote is still on the graph, unchanged. The grant is dated from the receipt's `settled_at`, the moment Bob's Grant press reached quorum, and Bob voted on the gated task after that. So the same vote counts now, and the run derives `Done` with nothing new written.
+
+There is no read that re-derives without voting, so the test probes with the button. The refusal names the derived state:
+
+```typescript
+let reDerived = "";
+try {
+  await (await instanceOn(bobP, gatedTask.id)).proposeTransition("Done");
+} catch (e: any) {
+  reDerived = String(e?.message ?? e);
+}
+expect(
+  reDerived,
+  "the vote Bob cast before the mint counts once the receipt exists — the fold is already in Done",
+).to.match(/`Done` is not reachable from `Done`/);
+```
+
+That is [the one rule](/flows#the-one-rule) in action. State is derived from the links present now. The links now include a receipt, so the derivation changed. Nobody re-voted.
+
+## Step 8: a holder and a nominee
+
+The last part sharpens the negative case. Alice creates her *own* `ReviewerRole` instance, same class, same domain, and nominates herself through the same grant flow. Her run stays in `Proposed`, so there is nothing to mint:
+
+```typescript
+const aliceRole = (await (ReviewerRole as any).create(aliceP, {
+  agent: aliceDid,
+  domain: "frontend",
+})) as ReviewerRole;
+const aliceNomination = await FlowInstance.start(aliceP, "ReviewerRoleGrant", aliceRole.id);
+expect(aliceNomination.currentStateName).to.equal("Proposed");
+let unminted = "";
+try {
+  await aliceP.mintFlowReceipt(aliceNomination.uri);
+} catch (e: any) {
+  unminted = String(e?.message ?? e);
+}
+expect(unminted, "a run that has not settled has nothing to mint").to.match(/no settled edge/);
+```
+
+On a fresh `GatedTaskFlow` task, Alice presses first. She matches the where-clause through her own instance. Only the receipt binding keeps her out, because Bob's receipt names Bob's instance, not hers:
+
+```typescript
+const aliceDone = await (await instanceOn(aliceP, positiveTask.id)).proposeTransition("Done");
+expect(
+  aliceDone.outcomes,
+  "Alice's instance was never granted — if this fires, the receipt is not bound to its instance",
+).to.have.lengthOf(0);
+expect(aliceDone.recordedVote).to.be.true;
+expect(aliceDone.derivedState).to.equal("InReview");
+
+const bobDone = await (await instanceOn(bobP, positiveTask.id)).proposeTransition("Done");
+expect(
+  bobDone.outcomes,
+  "Bob's role instance is a verified output of a completed grant run — he counts",
+).to.have.lengthOf(1);
+expect(bobDone.outcomes[0].toState).to.equal("Done");
+expect(bobDone.outcomes[0].voters).to.include(bobDid);
+expect(bobDone.outcomes[0].voters, "Alice's earlier click still does not count").to.not.include(
+  aliceDid,
+);
+```
+
+A receipt never says "flow F completed". It says "flow F produced *this* `(className, id)`". That is why Alice's instance, identical in every property the query looks at, does not pass.
+
+## The whole sequence
+
+```text
+  Alice                          graph                              Bob
+  ─────                          ─────                              ───
+  create ReviewerRole(bob) ────▶ role                    (nomination)
+  start ReviewerRoleGrant ─────▶ run G [Proposed]
+  create GrantEndorsement ─────▶ under role              (guard evidence)
+  Grant, outputs=[role] ───────▶ proposal P (1/2)
+                                 proposal P (2/2) ◀──── Grant, outputs=[role]
+                                 run G derives Granted, settled_at = t1
+
+  addFlow GatedTaskFlow ───────▶ Done: fromRole + producedByFlow(G, Granted)
+  ... task to InReview ...
+                                 vote on Done at t2 ◀── Accept
+                                 gate: index of G is empty → Bob not a member
+                                 run T stays InReview
+
+  mintFlowReceipt(G) ──────────▶ receipt R; G ──flow_receipt──▶ R
+
+                                 next derivation of T:
+                                 R verifies, names (ReviewerRole, role),
+                                 grant dated t1 < t2 → Bob's vote counts
+                                 run T derives Done
+```
+
+## What each replica checks
+
+This is the part that decides what a receipt of the *gated* task flow means to someone else. It is verified against the executor on this branch (`rust-executor/src/perspectives/flow_instance/grant.rs`, `roles/mod.rs`, `read_set.rs`).
+
+- **Eligibility is decided inside the neighbourhood, per replica, against its own graph.** While a replica collects the evidence for a derivation, it loads the granting flow's receipt index, verifies every receipt under its own flow catalogue, and computes, per matched role instance, the earliest `settled_at` of a verifying receipt that names it. That date is `produced_at`.
+- **Only the date travels.** The read-set carries `produced_at` for each role instance, next to the grant and revocation links. The granting receipt itself is not carried, and verifying a receipt of the gated flow never recurses into the granting flow's receipts.
+- **There is no fallback.** With `producedByFlow` on the role, an instance with no `produced_at` contributes no membership window at all. The assignment link's timestamp and the instance's own timestamp are never consulted. If they were, writing one link would grant the role and the gate would be decorative.
+- **The rule comes from the reader's flow definition, never from the evidence.** Which flow grants, and which class name binds, are read from the definition the verifying replica holds. A minter cannot name the rule its own receipt is judged by.
+- **Cannot decide is an error, not "no".** A granting flow this replica does not hold, or a receipt index over its budget, aborts the derivation of every flow gated on it. "I could not check" is neither "granted" nor "not granted".
+
+So a receipt minted for a *gated* flow proves that n people signed and when. It does not, on its own, prove to a reader outside the neighbourhood that those people were eligible. The reader takes the carried `produced_at` on the same footing as the carried grant links. Referencing the granting receipt by hash, carrying it, and transitive verification are follow-up work in [#1140](https://github.com/coasys/ad4m/issues/1140).
+
+## What can go wrong
+
+Each of these maps to a row in [Errors and limits](/flows#errors-and-limits) on the Flows page.
+
+- **You named `Done` from `Ready`.** Error: `` `Done` is not reachable from `Ready` ``. Only render `availableTransitions`. The same error, with `Done` on both sides, is the probe in Step 7.
+- **You pressed Grant before writing the endorsement.** Error naming the unmet guard. Write the `GrantEndorsement` under the role instance first.
+- **You left `outputs` empty on the Grant press.** No error. The run settles, the receipt mints, and it names nothing. `flowValidOutputs` stays empty and the gate never counts the holder. Name the role instance.
+- **You named outputs on `Start` or `SubmitForReview`.** Refused: those states are not terminal.
+- **Bob's press named different outputs than Alice's.** Refused, neither joined nor twinned. Agree on the outputs, or reject the open proposal.
+- **You forgot to mint.** Nothing fires. A settled grant without a receipt does not grant. Call `mintFlowReceipt` after the grant settles.
+- **You minted a run in `Proposed`.** Error: `no settled edge`. Reach quorum on Grant first.
+- **You wrote `grantedByFlow`, or misspelt the key.** Silently plain `fromRole`, and the hole is back. See [#1144](https://github.com/coasys/ad4m/issues/1144).
+- **You omitted `state` from `producedByFlow`.** The rule does not decode and the edge is refused for everyone.
+- **The replica does not hold `ReviewerRoleGrant`.** Error, never an empty result. Sync the Social DNA first.
+- **Someone flooded the grant flow's receipt index past 256 entries.** Error: `ReceiptBudgetExceeded`. The gate refuses rather than truncates. Remove the junk links.
+- **You gated with `count: { max: 0 }`.** Refused outright. That would make every failed verification a reason to grant.
+
+<Callout type="info" emoji="📄">
+  The executable form of this page is
+  [`tests/js/tests/model/flow-task-handover.test.ts`](https://github.com/coasys/ad4m/blob/dev/tests/js/tests/model/flow-task-handover.test.ts).
+  Parts 1 and 2 are Steps 1 and 2. Part 3 is Steps 3 to 8, in order.
+</Callout>

@@ -6,11 +6,11 @@
  */
 
 import type { Ad4mModel } from "./Ad4mModel";
-import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
-  TypedWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
+  TypedQueryWhere, TypedOrder, TypedIncludeMap, PropertyKeysOf,
 } from "./types";
 
 /** Query builder for Ad4mModel queries.
@@ -81,7 +81,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * })
    * ```
    */
-  where(conditions: TypedWhere<T>): ModelQueryBuilder<T> {
+  where(conditions: TypedQueryWhere<T>): ModelQueryBuilder<T> {
     this.queryParams.where = conditions as Where;
     return this;
   }
@@ -225,6 +225,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Asks for the individual links behind each instance — author, timestamp
+   * and proof per link — under `instance.__links`. See `Query.links`.
+   *
+   * @param keys - Property / relation names, or absolute predicate IRIs
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const [post] = await Post.query(perspective).links(["comments"]).get();
+   * post.__links!.comments.map((l) => l.timestamp); // when each comment was attached
+   * ```
+   */
+  links(keys: string[]): ModelQueryBuilder<T> {
+    this.queryParams.links = keys;
+    return this;
+  }
+
+  /**
    * Controls whether SPARQL property getters are evaluated during hydration.
    *
    * By default, collection queries evaluate property getters (deepQuery=true).
@@ -244,6 +262,44 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   deepQuery(enabled: boolean = true): ModelQueryBuilder<T> {
     this.queryParams.deepQuery = enabled;
+    return this;
+  }
+
+  /**
+   * Reads instances as they exist in links of one status only.
+   *
+   * `'shared'` leaves out every Local link, both from the values returned and
+   * from what decides which instances are returned. Use it when the data is
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
+   *
+   * @param status - `'shared'` or `'local'`
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const cards = await Card.query(perspective).linkStatus('shared').get();
+   * ```
+   */
+  linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
+    this.queryParams.linkStatus = status;
+    return this;
+  }
+
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * Off by default: the executor withholds unverified links. Turn it on only
+   * to *display* an unverified claim, never for data you act on. See
+   * {@link Query.includeUnverified}.
+   *
+   * @param enabled - Whether to include unverified links (default: true)
+   * @returns The query builder for chaining
+   */
+  includeUnverified(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.includeUnverified = enabled;
     return this;
   }
 
@@ -708,22 +764,48 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       count: true,
     };
 
-    // Each server dispatch triggers an independent async re-fetch, and those
-    // re-fetches resolve in completion order, not dispatch order. A re-fetch
-    // dispatched *before* a write committed can resolve *after* the re-fetch
-    // that saw the write, silently rolling the consumer back to a stale page —
-    // and no later dispatch ever corrects it. The generation counter drops any
-    // fetch that is no longer the newest one started; the newest fetch always
-    // delivers, so the callback is monotone in dispatch order.
-    let fetchGeneration = 0;
-    const processResults = async () => {
-      const generation = ++fetchGeneration;
-      const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
-      if (generation !== fetchGeneration) {
-        console.debug(`[ModelQueryBuilder.paginateSubscribe] Dropping stale re-fetch result (generation ${generation}, newest ${fetchGeneration})`);
+    // One read in flight. A dispatch while a read is running sets `pending`
+    // so a fetch always completes after the last dispatch. The generation
+    // counter from #1020 dropped superseded fetches, but ordered them by
+    // start time rather than by how fresh the data they read was — two
+    // back-to-back dispatches could keep the fetch that saw 1 model and
+    // drop the one that saw 2, after which the server has nothing further
+    // to say (issue #1051 / CI: "Paginate callback did not see second model save").
+    // After dispose() no read starts and no result is delivered, including
+    // a read that was already in flight when dispose() ran.
+    let disposed = false;
+    let fetching = false;
+    let pending = false;
+    let coalesced = 0;
+    const processResults = async (): Promise<void> => {
+      if (disposed) return;
+      if (fetching) {
+        pending = true;
+        coalesced++;
         return;
       }
-      callback({ results, totalCount, pageSize, pageNumber });
+      fetching = true;
+      try {
+        const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+        if (!disposed) callback({ results, totalCount, pageSize, pageNumber });
+      } finally {
+        fetching = false;
+        if (pending) {
+          const dispatches = coalesced;
+          pending = false;
+          coalesced = 0;
+          // Whether a trailing fetch actually starts is decided by the entry
+          // guard at the top of processResults, which returns when disposed.
+          // Log only what that guard will let through, or the dispose path
+          // announces a fetch it then drops.
+          if (!disposed) {
+            console.debug(`[ModelQueryBuilder.paginateSubscribe] ${dispatches} dispatch(es) during read for ${subscriptionId}, coalesced into one trailing fetch`);
+          }
+          // Detached from the caller's promise: needs its own handler, or a
+          // rejection here is unhandled.
+          processResults().catch(e => console.error('Paginate subscription error:', e));
+        }
+      }
     };
 
     const unsubscribe = this.perspective.client.subscribeToQueryUpdates(
@@ -734,7 +816,6 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       },
     );
 
-    let disposed = false;
     let keepaliveTimer: ReturnType<typeof setTimeout> | undefined;
     let resubscribeAttempts = 0;
     const MAX_RESUBSCRIBE_ATTEMPTS = 5;

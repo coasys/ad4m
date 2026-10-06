@@ -5,10 +5,6 @@ import { SHACLShape } from '../shacl/SHACLShape';
 
 function createMockClient(overrides: Record<string, jest.Mock> = {}): any {
   return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
     getShaclNames: jest.fn().mockResolvedValue([]),
     // Client contract (post r3897752023): getShaclTargetClass returns
     // `undefined` on "not found", not `null`. Mock the same shape.
@@ -188,37 +184,36 @@ describe('PerspectiveProxy SHACL RPC delegation', () => {
       expect(shapes.map(s => s.name).sort()).toEqual(['Empty', 'Good']);
     });
 
-    it('drops entries when SHACLShape.fromLinks returns null', async () => {
-      // Exercises the actual filter in `PerspectiveProxy.getAllShacl`:
-      // `SHACLShape.fromLinks` doesn't currently return null for any
-      // input, but the filter is defensive against a future change (or a
-      // subclass override), so we pin it by mocking `fromLinks` to
-      // simulate that case for one of two entries.
-      const goodLinks = buildShapeLinks('app://GoodShape', 'app://Good', [{ name: 'x', path: 'app://x' }]);
-      const badLinks = buildShapeLinks('app://BadShape', 'app://Bad', [{ name: 'y', path: 'app://y' }]);
+    it('skips a shape that cannot be decoded and returns the others', async () => {
+      // An unknown transform variant makes SHACLShape.fromLinks throw for that one shape.
+      const brokenLinks = [
+        ...buildShapeLinks('app://BrokenShape', 'app://Broken', [{ name: 'img', path: 'app://img' }]),
+        { source: 'app://BrokenShape.img', predicate: 'ad4m://transform', target: 'literal:string:{"type":"fromTheFuture"}' },
+      ];
+      const good = (n: string) => ({
+        name: n,
+        shapeUri: `app://${n}Shape`,
+        links: buildShapeLinks(`app://${n}Shape`, `app://${n}`, [{ name: 'x', path: 'app://x' }]),
+      });
 
       const client = createMockClient({
         getAllShacl: jest.fn().mockResolvedValue([
-          { name: 'Good', shapeUri: 'app://GoodShape', links: goodLinks },
-          { name: 'Bad', shapeUri: 'app://BadShape', links: badLinks },
+          good('A'),
+          { name: 'Broken', shapeUri: 'app://BrokenShape', links: brokenLinks },
+          good('B'),
+          good('C'),
         ]),
       });
       const proxy = createProxy(client);
-
-      const fromLinksSpy = jest
-        .spyOn(SHACLShape, 'fromLinks')
-        .mockImplementation((_links: any, shapeUri: string) => {
-          if (shapeUri === 'app://BadShape') return null as unknown as SHACLShape;
-          const shape = new SHACLShape(shapeUri, 'app://Good');
-          return shape;
-        });
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
 
       try {
         const shapes = await proxy.getAllShacl();
-        expect(shapes.length).toBe(1);
-        expect(shapes[0].name).toBe('Good');
+        expect(shapes.map(s => s.name)).toEqual(['A', 'B', 'C']);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toContain('"Broken"');
       } finally {
-        fromLinksSpy.mockRestore();
+        warn.mockRestore();
       }
     });
   });
@@ -232,8 +227,8 @@ describe('SHACLShape.fromLinks round-trip with RPC link format', () => {
       { source: shapeUri, predicate: 'sh://property', target: `${shapeUri}.title` },
       { source: `${shapeUri}.title`, predicate: 'sh://path', target: 'recipe://title' },
       { source: `${shapeUri}.title`, predicate: 'sh://datatype', target: 'xsd:string' },
-      { source: `${shapeUri}.title`, predicate: 'sh://minCount', target: 'literal:number:1' },
-      { source: `${shapeUri}.title`, predicate: 'sh://maxCount', target: 'literal:number:1' },
+      { source: `${shapeUri}.title`, predicate: 'sh://minCount', target: 'literal:1^^xsd:integer' },
+      { source: `${shapeUri}.title`, predicate: 'sh://maxCount', target: 'literal:1^^xsd:integer' },
       { source: shapeUri, predicate: 'sh://property', target: `${shapeUri}.servings` },
       { source: `${shapeUri}.servings`, predicate: 'sh://path', target: 'recipe://servings' },
       { source: `${shapeUri}.servings`, predicate: 'sh://datatype', target: 'xsd:integer' },
