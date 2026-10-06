@@ -530,8 +530,11 @@ jobs:
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
+          # The wrapper runs prepare-test first, as the per-push
+          # integration-tests-multi-node-holochain job does. Bare
+          # `test-integration` needs the publishing agent in tst-tmp/.
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm run test-integration
+            cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
   integration-tests-cli:
