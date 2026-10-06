@@ -1272,7 +1272,7 @@ Notes:
 
     logger.info(`[ad4m-waker] Connecting to ${httpUrl}...`);
 
-    const client = new Ad4mClient(httpUrl, _authToken, true);
+    const client = new Ad4mClient(httpUrl, _authToken);
     if (stale()) {
       closeWakerClient(client, logger);
       return true; // superseded — the new attempt owns the waker now

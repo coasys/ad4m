@@ -7,7 +7,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
   const mockAgent = {
     isLocked: vi.fn().mockResolvedValue(false),
     status: vi.fn(),
-    startSubscriptions: vi.fn(),
     requestCapability: vi.fn().mockResolvedValue('req-123'),
     generateJwt: vi.fn().mockResolvedValue('jwt-token'),
     hostingUserInfo: vi.fn().mockResolvedValue({
@@ -22,9 +21,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
     createUser: vi.fn().mockResolvedValue({ success: true }),
     signMessage: vi.fn().mockResolvedValue({ signature: 'sig', publicKey: 'pk' }),
     addHostingUserInfoChangedListener: vi.fn(),
-    subscribeHostingUserInfoChanged: vi.fn(),
-    addComputeLogUpdatedListener: vi.fn(),
-    subscribeComputeLogUpdated: vi.fn(),
     computeLog: vi.fn().mockResolvedValue([]),
     requestPayment: vi.fn().mockResolvedValue({ success: true, message: 'OK' }),
   };
@@ -36,7 +32,6 @@ const { mockAgent, mockRuntime, mockClientInstance } = vi.hoisted(() => {
 
   const mockClientInstance = {
     close: vi.fn(),
-    startSubscriptions: vi.fn(),
     agent: mockAgent,
     runtime: mockRuntime,
   };
@@ -88,7 +83,6 @@ describe('Ad4mConnect', () => {
     mockAgent.createUser.mockClear();
     mockClientInstance.close.mockClear();
     (Ad4mClient as any).mockClear();
-    mockClientInstance.startSubscriptions.mockClear();
     mockRuntime.info.mockClear();
     mockRuntime.multiUserEnabled.mockClear();
     // Restore default implementations
@@ -295,7 +289,7 @@ describe('Ad4mConnect', () => {
 
       releaseHealth();
       await connecting;
-      expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'remote-jwt', false);
+      expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'remote-jwt');
       expect(getLocal('ad4m-url')).toBe('http://localhost:12000');
       expect(conn.authState).toBe('authenticated');
     });
@@ -320,7 +314,7 @@ describe('Ad4mConnect', () => {
       const conn = new Ad4mConnect(defaultOptions);
 
       const connecting = conn.connect();
-      await vi.waitFor(() => expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'local-jwt', false));
+      await vi.waitFor(() => expect(Ad4mClient).toHaveBeenCalledWith('http://localhost:12000', 'local-jwt'));
       releaseHealth();
       await connecting;
       expect(conn.authState).toBe('authenticated');
@@ -478,6 +472,20 @@ describe('Ad4mConnect', () => {
 
       expect(events.length).toBeGreaterThan(0);
       expect(events[0]).toMatchObject({ email: 'test@test.com', remainingCredits: 100 });
+    });
+
+    it('startCreditSubscription() keeps one credit listener however often it runs', async () => {
+      const conn = new Ad4mConnect(defaultOptions);
+      await conn.connect();
+      const release = vi.fn();
+      mockAgent.addHostingUserInfoChangedListener.mockClear().mockReturnValue(release);
+
+      conn.startCreditSubscription();
+      conn.startCreditSubscription();
+      conn.stopCreditPolling();
+
+      expect(mockAgent.addHostingUserInfoChangedListener).toHaveBeenCalledTimes(2);
+      expect(release).toHaveBeenCalledTimes(1);
     });
 
     it('stopCreditPolling clears interval', async () => {
