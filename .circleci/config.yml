@@ -35,11 +35,21 @@ commands:
             fi
             # A .git that opens but lacks objects passes the check above, then fails checkout with
             # "pack has N unresolved deltas": GitHub sends a thin pack against bases the cache does
-            # not hold. Fetch the commit under test the way checkout will; if that fails, clone fresh.
-            if [ -d .git ] && ! timeout 600 git fetch -q --no-tags \
-                "https://github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git" "$CIRCLE_SHA1"; then
+            # not hold. Fetch the commit under test the way checkout will; if that fails, start over.
+            # The public https form of the repository URL: the project variables name the GitHub App
+            # project, not the repository, and an https fetch of a wrong URL asks for a password.
+            REPO_HTTPS=$(echo "$CIRCLE_REPOSITORY_URL" | sed -E 's#^git@github\.com:#https://github.com/#')
+            if [ -d .git ] && ! GIT_TERMINAL_PROMPT=0 timeout 600 git fetch -q --no-tags "$REPO_HTTPS" "$CIRCLE_SHA1"; then
               echo "Cached .git cannot fetch $CIRCLE_SHA1, removing for fresh clone..."
               rm -rf .git
+            fi
+            # Checkout refuses a non-empty directory that is not a repository, and these runners keep
+            # untracked caches (target/) beside the checkout. An empty repository with origin set lets
+            # checkout fetch everything and check out over the old files, keeping the caches.
+            if [ ! -d .git ] && [ -n "$(ls -A)" ]; then
+              echo "Working directory has files but no .git, initialising an empty repository..."
+              git init -q
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
             fi
 
   setup_env:
