@@ -206,7 +206,11 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
             "Holochain is disabled on this executor (run_holochain=false)",
         ));
     }
-    let _ = get_holochain_service().await;
+    // Shuts the running conductor down, waits for its port, and starts it again
+    // from the stored config. The same path the Unyt space override uses.
+    crate::holochain_service::HolochainService::restart_service()
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Holochain restart failed: {e}")))?;
     Ok(Value::Bool(true))
 }
 

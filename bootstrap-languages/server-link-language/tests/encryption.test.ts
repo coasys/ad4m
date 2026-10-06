@@ -370,8 +370,12 @@ describe("encryption: verifyX25519Ownership", () => {
 
     it("rejects a wrong signature", async () => {
         const id = await makeTestIdentity();
-        // Flip a byte in the signature
-        const badSig = "ff" + id.x25519SigHex.slice(2);
+        // Flip the first byte in the signature. XOR (not an overwrite to a fixed
+        // value like "ff") guarantees the byte always changes, even when the
+        // real signature's first byte already happens to be 0xff.
+        const firstByte = parseInt(id.x25519SigHex.slice(0, 2), 16);
+        const flippedByte = (firstByte ^ 0xff).toString(16).padStart(2, "0");
+        const badSig = flippedByte + id.x25519SigHex.slice(2);
         assert.equal(verifyX25519Ownership(id.did, id.x25519Hex, badSig), false);
     });
 

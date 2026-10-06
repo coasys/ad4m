@@ -208,6 +208,13 @@ export interface AddAutoProcessorConfig {
    */
   mintScope?: RawScope;
   /**
+   * Tool-call budget for the interpretation-pass harness this processor
+   * runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
+   * tool-calling harness with a cap of N calls per pass. Round-tripped
+   * through the SDNA via `AutoProcessorConfig.maxToolCalls`.
+   */
+  maxToolCalls?: number;
+  /**
    * Enable full debug observability: persists the raw LLM prompt + response
    * on the pass's `InterpretationRun` (`debugPrompt` / `debugResponse`) AND
    * emits `LlmRequestSent` / `LlmResponseReceived` mid-pass events so a
