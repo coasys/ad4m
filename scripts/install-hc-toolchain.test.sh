@@ -59,7 +59,8 @@ EOF
 }
 
 install_toolchain() {
-    PATH="$TMP/bin:$PATH" bash "$WORKSPACE/scripts/install-hc-toolchain.sh" > "$TMP/install.log" 2>&1 || {
+    # CI exports BASH_ENV, which would put the real cargo back in front.
+    env -u BASH_ENV PATH="$TMP/bin:$PATH" bash "$WORKSPACE/scripts/install-hc-toolchain.sh" > "$TMP/install.log" 2>&1 || {
         tail -n 20 "$TMP/install.log" | sed 's/^/    /'
         return 1
     }
