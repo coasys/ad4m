@@ -33,7 +33,14 @@ impl Socket {
     async fn open_as(did: &str) -> Self {
         let (tx, out) = mpsc::unbounded_channel();
         let (input, incoming) = mpsc::unbounded_channel();
-        let events = build_event_stream_for(String::new(), Some(did.into()), None, false).await;
+        let events = build_event_stream_for(
+            String::new(),
+            Some(did.into()),
+            None,
+            false,
+            vec![crate::agent::capabilities::defs::ALL_CAPABILITY.clone()],
+        )
+        .await;
         let conn = Connection::new(
             Arc::new(build_handler_map()),
             admin_ctx(),

@@ -750,6 +750,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
                         Err(WsRpcError {
                             code: 499,
                             message: "Request cancelled by client".to_string(),
+                            data: None,
                         })
                     } else {
                         Err(WsRpcError::internal(msg))
@@ -766,6 +767,7 @@ async fn query_sparql(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
                             "SPARQL query timed out after {}s",
                             SPARQL_QUERY_TIMEOUT_SECS
                         ),
+                        data: None,
                     })
                 }
             }
@@ -1133,6 +1135,7 @@ async fn subject_classes_of_handler(
                     "Subject classification timed out after {}s",
                     SPARQL_QUERY_TIMEOUT_SECS
                 ),
+                data: None,
             })
         }
     }
@@ -1166,6 +1169,7 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
             Err(WsRpcError {
                 code: 408,
                 message: format!("Model query timed out after {}s", SPARQL_QUERY_TIMEOUT_SECS),
+                data: None,
             })
         }
     }
@@ -1232,6 +1236,7 @@ async fn evaluate_getters_handler(
                     "Getter evaluation timed out after {}s",
                     SPARQL_QUERY_TIMEOUT_SECS
                 ),
+                data: None,
             })
         }
     }
@@ -1466,6 +1471,7 @@ async fn run_interpretation_handler(
                     "runInterpretation timed out after {}s",
                     RUN_INTERPRETATION_TIMEOUT_SECS
                 ),
+                data: None,
             });
         }
     };
@@ -1698,6 +1704,7 @@ async fn run_interpretation_with_harness_handler(
                     "runInterpretationWithHarness timed out after {}s",
                     RUN_INTERPRETATION_HARNESS_TIMEOUT_SECS
                 ),
+                data: None,
             });
         }
     };

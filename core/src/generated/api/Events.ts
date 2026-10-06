@@ -18,6 +18,7 @@ import type { PerspectiveQuerySubscriptionFilter } from "./PerspectiveQuerySubsc
 import type { PerspectiveRemovedWithOwner } from "./PerspectiveRemovedWithOwner";
 import type { PerspectiveStateFilter } from "./PerspectiveStateFilter";
 import type { PerspectiveWithOwner } from "./PerspectiveWithOwner";
+import type { ServiceStreamEnd } from "./ServiceStreamEnd";
 import type { TranscriptionTextFilter } from "./TranscriptionTextFilter";
 
 /** Every event the executor emits: its payload (the message without `type`). */
@@ -42,6 +43,7 @@ export interface EventMap {
   "query-subscription-update": PerspectiveQuerySubscriptionFilter;
   "auto-processor-event": AutoProcessorEvent;
   "auto-processor-neighbourhood-state": AutoProcessorNeighbourhoodState;
+  "service-stream-end": ServiceStreamEnd;
 }
 
 export type EventName = keyof EventMap;
@@ -64,3 +66,8 @@ export const SCOPED_EVENTS: ReadonlySet<EventName> = new Set<EventName>([
   "auto-processor-event",
   "auto-processor-neighbourhood-state",
 ]);
+
+/** Events scoped by another payload field: event → that field. */
+export const EVENT_SCOPE_FIELDS: Partial<Record<EventName, string>> = {
+  "service-stream-end": "streamId",
+};

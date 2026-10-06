@@ -21,43 +21,70 @@ use crate::types::RequestContext;
 pub struct WsRpcError {
     pub code: u16,
     pub message: String,
+    /// Typed error detail (service method errors carry `{ name, … }`).
+    pub data: Option<Value>,
 }
 
 impl WsRpcError {
+    pub fn new(code: u16, msg: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: msg.into(),
+            data: None,
+        }
+    }
+    pub fn with_data(mut self, data: Value) -> Self {
+        self.data = Some(data);
+        self
+    }
+    /// The wire form: `{ "code", "message", "data"? }`.
+    pub fn to_json(&self) -> Value {
+        let mut e = serde_json::json!({ "code": self.code, "message": self.message });
+        if let Some(d) = &self.data {
+            e["data"] = d.clone();
+        }
+        e
+    }
     pub fn bad_request(msg: impl Into<String>) -> Self {
         Self {
             code: 400,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn unauthorized(msg: impl Into<String>) -> Self {
         Self {
             code: 401,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn forbidden(msg: impl Into<String>) -> Self {
         Self {
             code: 403,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self {
             code: 404,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
             code: 500,
             message: msg.into(),
+            data: None,
         }
     }
     pub fn not_implemented(msg: impl Into<String>) -> Self {
         Self {
             code: 501,
             message: msg.into(),
+            data: None,
         }
     }
 }
@@ -339,10 +366,16 @@ impl HandlerMap {
         params: Value,
         ctx: Arc<RequestContext>,
     ) -> Result<Value, WsRpcError> {
-        let entry = self
-            .handlers
-            .get(msg_type)
-            .ok_or_else(|| WsRpcError::not_found(format!("Unknown type: {}", msg_type)))?;
+        let Some(entry) = self.handlers.get(msg_type) else {
+            // `<hash>.<method>` addresses a service method, not a core one.
+            if crate::services::is_service_method(msg_type) {
+                let call = crate::services::ServiceHost::context_for_request(&ctx);
+                return crate::services::host()
+                    .dispatch(msg_type, params, call)
+                    .await;
+            }
+            return Err(WsRpcError::not_found(format!("Unknown type: {}", msg_type)));
+        };
         (entry.params)(&params).map_err(|e| {
             WsRpcError::bad_request(format!("Invalid params for {}: {}", msg_type, e))
         })?;
@@ -376,6 +409,7 @@ pub fn build_handler_map() -> HandlerMap {
     super::neighbourhoods_ws::register_ws_handlers(&mut map);
     super::users_ws::register_ws_handlers(&mut map);
     super::hosting_ws::register_ws_handlers(&mut map);
+    crate::services::ws::register_ws_handlers(&mut map);
     // Event type → the perspectives wanted (`null`: all); replaces the socket's interest.
     map.inline::<super::event_interest::WatchParams, bool>(super::event_interest::WATCH);
     map.inline::<NoParams, bool>(super::event_interest::UNWATCH);

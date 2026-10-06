@@ -111,6 +111,8 @@ axum = { version = "0.8", features = ["ws", "multipart"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.6", features = ["cors", "set-header", "catch-panic"] }
 schemars = "1.0"
+jsonschema = { version = "0.58", default-features = false }
+serde_json_canonicalizer = "0.3"
 clap = { version = "4.0.8", features = ["derive"] }
 fs_extra = "1.3.0"
 os_info = "3.7.0"

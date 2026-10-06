@@ -9,7 +9,7 @@ use tokio::sync::{
 };
 
 use crate::agent::AgentContext;
-use crate::languages::capability::{parse_capability_list, Capability};
+use crate::languages::feature::{parse_feature_list, LanguageFeature};
 use crate::languages::LanguageContext;
 
 use super::language_runtime::{LanguageOperation, LanguageRuntime, LanguageRuntimeRequest};
@@ -133,9 +133,9 @@ impl LanguageRuntimeHandle {
             .map(|_| ())
     }
 
-    pub async fn register_callbacks(&self) -> Result<HashSet<Capability>, String> {
+    pub async fn register_callbacks(&self) -> Result<HashSet<LanguageFeature>, String> {
         let result_str = self.send(LanguageOperation::RegisterCallbacks).await?;
-        Ok(parse_capability_list(result_str.trim()))
+        Ok(parse_feature_list(result_str.trim()))
     }
 
     pub async fn teardown(&self) -> Result<(), String> {

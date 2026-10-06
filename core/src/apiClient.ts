@@ -2,6 +2,7 @@ import { callSafely } from './notifyListeners'
 import { LONG_METHODS, READ_METHODS } from './generated/api/RpcMethods'
 import type { RpcMethod, RpcMethods } from './generated/api/RpcMethods'
 import type { EventMap, EventName } from './generated/api/Events'
+import { EVENT_SCOPE_FIELDS } from './generated/api/Events'
 
 /** Shape of event data pushed via WebSocket. Callers can narrow via generics. */
 export interface WsEvent {
@@ -15,12 +16,15 @@ export class RpcError extends Error {
     readonly status: number
     /** Raw error message from server. */
     readonly body: string
+    /** Typed error detail, e.g. a service method error's `{ name, … }`. */
+    readonly data?: unknown
 
-    constructor(status: number, body: string) {
+    constructor(status: number, body: string, data?: unknown) {
         super(`RPC error ${status}: ${body}`)
         this.name = "RpcError"
         this.status = status
         this.body = body
+        this.data = data
     }
 }
 
@@ -43,7 +47,16 @@ export interface EventFilter {
 
 interface Registration {
     handler: (event: never) => void
+    /** The scope value wanted: a perspective UUID for core events. */
     perspective?: string
+}
+
+/** Per-method flags of a call outside the executor's own table (a service method). */
+export interface MethodFlags {
+    /** Idempotent: resent once after a reconnect. */
+    read?: boolean
+    /** May run for minutes: uses {@link LONG_TIMEOUT_MS}. */
+    long?: boolean
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000
@@ -116,6 +129,8 @@ export class ApiClient {
     private _wsOpen: Promise<void> | null = null
     /** `on()` handlers by event type; a type with none has no entry. */
     private _handlers = new Map<string, Set<Registration>>()
+    /** Service event type → the payload field `events.watch` narrows on. */
+    private _scopeFields = new Map<string, string>()
     private _reconnectCallbacks = new Set<() => void>()
     private _hasConnectedOnce = false
     private _pendingCalls = new Map<string, PendingCall>()
@@ -168,13 +183,16 @@ export class ApiClient {
             if (parsed.type === undefined) {
                 const pending = this._pendingCalls.get(parsed.id as string)
                 if (!pending) return // late reply to a timed-out or aborted call, or a cancel ack
-                const error = parsed.error as { code?: number; message?: string } | undefined
-                if (error) pending.reject(new RpcError(error.code ?? 500, error.message ?? 'Unknown error'))
+                const error = parsed.error as { code?: number; message?: string; data?: unknown } | undefined
+                if (error) pending.reject(new RpcError(error.code ?? 500, error.message ?? 'Unknown error', error.data))
                 else pending.resolve(parsed.result)
                 return
             }
             if (parsed.type === 'pong') return
-            const perspective = parsed.perspectiveUuid
+            // Most core events narrow on `perspectiveUuid`; the others, and
+            // service events, on the field their table names.
+            const type = parsed.type as string
+            const perspective = parsed[this._scopeFields.get(type) ?? EVENT_SCOPE_FIELDS[type as EventName] ?? 'perspectiveUuid']
             const regs = this._handlers.get(parsed.type as string)
             // Like DOM events: a handler added during dispatch waits for the
             // next event, and a handler removed during dispatch gets no more.
@@ -276,12 +294,22 @@ export class ApiClient {
         return this._request(method, params, options) as Promise<RpcMethods[M]['result']>
     }
 
-    private _request(type: string, params?: unknown, options?: CallOptions): Promise<unknown> {
+    /**
+     * Call a method that is not in the executor's table: a service method
+     * `<hash>.<method>`. Typed wrappers (`ServiceClient`) sit on top.
+     */
+    callMethod(method: string, params: unknown, flags: MethodFlags, options?: CallOptions): Promise<unknown> {
+        this._flushWatch()
+        return this._request(method, params, options, flags)
+    }
+
+    private _request(type: string, params?: unknown, options?: CallOptions, flags?: MethodFlags): Promise<unknown> {
         const signal = options?.signal
         if (signal?.aborted) {
             return Promise.reject(new DOMException('Aborted', 'AbortError'))
         }
-        const timeoutMs = options?.timeoutMs ?? ((LONG_METHODS as ReadonlySet<string>).has(type) ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
+        const long = flags?.long ?? (LONG_METHODS as ReadonlySet<string>).has(type)
+        const timeoutMs = options?.timeoutMs ?? (long ? LONG_TIMEOUT_MS : DEFAULT_TIMEOUT_MS)
         const id = nextId()
         // Params go under "params" so they cannot clash with "id" and "type".
         const message = JSON.stringify({ id, type, params: params || {} })
@@ -312,7 +340,7 @@ export class ApiClient {
                 message,
                 sent: false,
                 failedConnects: 0,
-                retry: (READ_METHODS as ReadonlySet<string>).has(type),
+                retry: flags?.read ?? (READ_METHODS as ReadonlySet<string>).has(type),
                 watch: type === 'events.watch',
                 resolve: (value) => settle(() => resolve(value)),
                 reject: (reason) => settle(() => reject(reason)),
@@ -343,7 +371,20 @@ export class ApiClient {
      * same type and perspective again changes nothing.
      */
     on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
-        const perspective = filter?.perspective
+        return this._on(type, handler as (event: never) => void, filter?.perspective)
+    }
+
+    /**
+     * Listen to an event outside the executor's own table: a service event
+     * `<hash>.<event>`. `scopeField` is the payload field the interface
+     * narrows on; `scope` keeps only events whose field has that value.
+     */
+    onEvent(type: string, handler: (event: never) => void, scopeField?: string, scope?: string): () => void {
+        if (scopeField) this._scopeFields.set(type, scopeField)
+        return this._on(type, handler, scope)
+    }
+
+    private _on(type: string, handler: (event: never) => void, perspective?: string): () => void {
         let regs = this._handlers.get(type)
         if (!regs) this._handlers.set(type, regs = new Set())
         let reg = [...regs].find(r => r.handler === handler && r.perspective === perspective)
