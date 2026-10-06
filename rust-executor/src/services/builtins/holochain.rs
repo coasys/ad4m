@@ -72,7 +72,7 @@ pub fn conductor_interface() -> Value {
     .method::<NoParams, bool>(
         "restart",
         "ADMIN",
-        "Wait until the conductor is up. Needs the admin credential.",
+        "Restart the conductor from its stored configuration. Needs the admin credential.",
         MethodOptions {
             long: true,
             ..Default::default()
@@ -144,7 +144,11 @@ impl ServiceImplementation for Holochain {
             ),
             "restart" => {
                 require_admin(&ctx)?;
-                let _ = get_holochain_service().await;
+                // Shuts the running conductor down, waits for its port, and
+                // starts it again from the stored config.
+                crate::holochain_service::HolochainService::restart_service()
+                    .await
+                    .map_err(|e| internal(format!("Holochain restart failed: {e}")))?;
                 to_value(true)
             }
             other => Err(internal(format!("holochain has no method {}", other))),

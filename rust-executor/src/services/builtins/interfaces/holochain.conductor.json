@@ -57,7 +57,7 @@
       "read": true
     },
     "restart": {
-      "description": "Wait until the conductor is up. Needs the admin credential.",
+      "description": "Restart the conductor from its stored configuration. Needs the admin credential.",
       "params": {
         "type": "object",
         "additionalProperties": false,
