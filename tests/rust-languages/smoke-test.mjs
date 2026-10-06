@@ -143,6 +143,20 @@ assert.ok(recorded.some(([k]) => k === "put"), "storage_put was called");
 assert.ok(recorded.some(([k]) => k === "get"), "storage_get was called");
 assert.ok(recorded.some(([k]) => k === "signal"), "emit_signal was called");
 
+// A host import that throws fails only its own call. The exception comes back
+// to Rust as an error (`catch` imports), so the call releases the instance
+// lock. Before, it unwound the module and every later call waited forever.
+const sign = globalThis.agentCreateSignedExpression;
+globalThis.agentCreateSignedExpression = () => { throw new Error("main key not found"); };
+const settles = (p) => Promise.race([
+    p.then(() => "resolved", (e) => `rejected: ${e?.message ?? JSON.stringify(e)}`),
+    new Promise((r) => setTimeout(() => r("still waiting"), 2000)),
+]);
+const failed = await settles(mod.expressionCreate({ note: "no key" }));
+assert.match(failed, /^rejected: .*main key not found/, "the throwing call rejects with the host error");
+globalThis.agentCreateSignedExpression = sign;
+assert.equal(await settles(mod.expressionCreate({ note: "after" })), "resolved", "the next call runs");
+
 await mod.teardown();
 rmSync(tmp, { recursive: true });
 
