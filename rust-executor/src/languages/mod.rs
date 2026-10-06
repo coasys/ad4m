@@ -7,6 +7,8 @@ pub mod language_context;
 pub mod language_runtime;
 pub mod language_runtime_handle;
 pub mod literal;
+#[cfg(test)]
+mod signing_reach_tests;
 pub mod wasm_delegate;
 
 pub use literal::{literal_decode, literal_encode};
