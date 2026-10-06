@@ -96,6 +96,7 @@ async fn send_friend_message_is_not_implemented_and_stores_nothing() {
         user_email: None,
         user_did: None,
         cancel_token: None,
+        connection_id: None,
     });
     let message = json!({ "did": "did:key:friend", "message": { "links": [] } });
     let err = map
