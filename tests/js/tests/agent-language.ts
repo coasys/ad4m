@@ -1,10 +1,15 @@
-import { TestContext } from './integration.test'
-import { sleep } from '../utils/utils'
+import { TestContext } from './test-context'
+import { pollUntil } from '../utils/utils'
 import { expect } from "chai";
 
-export default function agentLanguageTests(testContext: TestContext) {
+// `crossAgentLookup`: run the cross-agent profile lookup. The local suite
+// passes true: its agent-language is the local one in shared storagePath mode
+// (utils/sharedStores.ts), so Bob reading Alice's profile is deterministic.
+// The Holochain suite passes false: over the DHT the lookup depends on gossip
+// timing and was flaky, which is why it was skipped there (21df0114a).
+export default function agentLanguageTests(testContext: TestContext, crossAgentLookup: boolean = false) {
     return () => {
-        it.skip("works across remote agents", async function() {
+        (crossAgentLookup ? it : it.skip)("works across remote agents", async function() {
             this.retries(2)
             const alice = testContext.alice!
             const didAlice = (await alice.agent.status()).did!
@@ -14,32 +19,20 @@ export default function agentLanguageTests(testContext: TestContext) {
             const aliceHerself = await alice.agent.me()
             const bobHimself = await bob.agent.me()
 
-            // Helper function to retry agent lookup with logging
             async function retryAgentLookup(
                 client: typeof alice,
                 targetDid: string,
                 clientName: string,
                 targetName: string,
-                maxAttempts: number = 20
             ) {
-                let result = await client.agent.byDID(targetDid)
-                let attempts = 0
-                while (!result && attempts < maxAttempts) {
-                    if (attempts % 10 === 0) {
-                        console.log(`${clientName} looking up ${targetName}... attempt ${attempts}/${maxAttempts}`)
-                    }
-                    await sleep(1000)
-                    result = await client.agent.byDID(targetDid)
-                    attempts++
-                }
-                if (!result) {
-                    console.error(`${clientName} failed to find ${targetName} after ${maxAttempts} attempts`)
-                    console.error(`Target DID: ${targetDid}`)
-                }
-                return result
+                let result: any = null;
+                await pollUntil(async () => {
+                    result = await client.agent.byDID(targetDid);
+                    if (!result) console.log(`${clientName} looking up ${targetName}...`);
+                    return !!result;
+                }, { timeoutMs: 25000, intervalMs: 1000, label: `${clientName} finds ${targetName}` });
+                return result;
             }
-
-            await sleep(5000)
 
             // Both lookups now have retry logic
             const bobSeenFromAlice = await retryAgentLookup(alice, didBob, "Alice", "Bob")

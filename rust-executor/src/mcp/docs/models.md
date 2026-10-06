@@ -224,10 +224,9 @@ Line by line, the parts that are easy to get wrong:
   `"ns://Post"`. `add_model` rejects the mismatch, because registering under
   the URI form used to produce a class whose every property was silently
   read-only.
-- `constructor_actions` is **not optional in practice**. It is what mints the
-  instance's links. A shape registered without it registers fine and then
-  fails every `instance_create` with *"No SHACL constructor found for class:
-  Post"*.
+- `constructor_actions` is what mints the instance's links. It may be empty
+  (or omitted) for a class whose properties are all optional, but then
+  nothing but the supplied property values marks an instance as a `Post`.
 - `title` and `name` carry `min_count: 1`, so they are the conformance
   predicates as well as the required fields. That is not a coincidence — make
   the property that every instance genuinely has the required one.
@@ -340,7 +339,7 @@ announce breaking ones.
 ## Checklist before you call it done
 
 - [ ] `class_name` is the bare local name of `target_class`.
-- [ ] `constructor_actions` is non-empty.
+- [ ] `constructor_actions` writes the class marker or the required values.
 - [ ] At least one property is `min_count: 1`, or there is a class marker.
 - [ ] Every scalar you expect to write has a `setter`.
 - [ ] Every non-relation collection has `"collection": true` (not just a
