@@ -72,7 +72,11 @@ service user without root.
    coasys/ad4m#1179 lands, they make the executor see every proxied request
    as a network caller; until then it ignores them, which does not matter
    here because the admin credential is set), returns 404 for `/internal/`,
-   sends `X-Robots-Tag: noindex`, and does not expose MCP. Check:
+   sends `X-Robots-Tag: noindex`, and does not expose MCP. It sets
+   `client_max_body_size 50m`, so the executor enforces its own body limits
+   (10 MB, 50 MB for audio transcriptions); at nginx's 1 MB default nginx
+   would refuse larger bodies itself with a 413 that carries no CORS
+   headers, which a browser reports only as `Failed to fetch`. Check:
 
    ```bash
    curl -fsS https://staging.ad4m.dev/status.json

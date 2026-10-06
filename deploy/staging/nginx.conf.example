@@ -1,7 +1,8 @@
 # The vhost of /etc/nginx/sites-available/staging-ad4m-dev on marvin (enabled
 # via sites-enabled). Installing it needs root; see docs-src/headless-executor.md.
 # Below this header the live file matches this one line for line, the
-# /internal/ block included (applied 2026-09-30).
+# /internal/ block (applied 2026-09-30) and client_max_body_size (applied
+# 2026-10-06) included.
 # staging.ad4m.dev: staging ad4m executor for the team (coasys/ad4m #1215). Tracks origin/staging,
 # redeployed by the ad4m-staging-update.timer (systemd --user, marvin). The executor listens on
 # 127.0.0.1:12400 only; MCP is not exposed. The admin credential is required.
@@ -22,6 +23,9 @@ server {
     ssl_certificate     /etc/letsencrypt/live/ad4m.dev-wildcard/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/ad4m.dev-wildcard/privkey.pem;
     add_header X-Robots-Tag "noindex, nofollow" always;
+    # Let the executor enforce its own limits: 10 MB default, 50 MB for audio transcriptions
+    # (rust-executor/src/api/mod.rs DefaultBodyLimit, openai_compat/router.rs). nginx default is 1 MB.
+    client_max_body_size 50m;
 
     location = /status.json {
         root /var/www/ad4m-staging;
