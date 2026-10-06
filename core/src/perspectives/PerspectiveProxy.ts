@@ -1864,27 +1864,25 @@ export class PerspectiveProxy {
      * Uses SHACL-based lookup (Prolog-free implementation).
      */
     async subjectClasses(): Promise<string[]> {
-        try {
-            // Query SHACL class links directly — no need for a separate RPC endpoint
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const classNames = classLinks
-                .map(l => {
-                    const source = l.data.source;
-                    // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-                    const parts = source.split("://");
-                    const lastPart = parts[parts.length - 1];
-                    return lastPart.split('/').pop() || '';
-                })
-                .filter(name => name.length > 0);
-            // Deduplicate
-            return [...new Set(classNames)];
-        } catch (e) {
-            console.warn('subjectClasses: SHACL lookup failed:', e);
-            return [];
-        }
+        // A failed lookup rejects. Answering `[]` would read as "no classes are
+        // registered", which a caller deciding whether to register its own
+        // classes acts on.
+        // Query SHACL class links directly — no need for a separate RPC endpoint
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const classNames = classLinks
+            .map(l => {
+                const source = l.data.source;
+                // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+                const parts = source.split("://");
+                const lastPart = parts[parts.length - 1];
+                return lastPart.split('/').pop() || '';
+            })
+            .filter(name => name.length > 0);
+        // Deduplicate
+        return [...new Set(classNames)];
     }
 
     /**
@@ -1901,22 +1899,19 @@ export class PerspectiveProxy {
      * registered should call this once and test membership against the returned
      * set, rather than issuing one `queryLinks` per model.
      *
-     * One `queryLinks` round trip, no executor-side changes.
+     * One `queryLinks` round trip, no executor-side changes. A failed lookup
+     * rejects rather than answering `[]`, which would read as "nothing is
+     * registered" and lead such a caller to register everything again.
      */
     async subjectClassTargetClasses(): Promise<string[]> {
-        try {
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const uris = classLinks
-                .map(l => l.data.source)
-                .filter(source => source.length > 0);
-            return [...new Set(uris)];
-        } catch (e) {
-            console.warn('subjectClassTargetClasses: lookup failed:', e);
-            return [];
-        }
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const uris = classLinks
+            .map(l => l.data.source)
+            .filter(source => source.length > 0);
+        return [...new Set(uris)];
     }
 
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
