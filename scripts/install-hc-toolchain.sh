@@ -178,8 +178,21 @@ if [[ "$HC_INSTALL_NEEDED" == "1" ]]; then
             cd "$SRC_DIR"
         fi
     fi
-    git checkout -- Cargo.toml 2>/dev/null || true
-    git checkout "$REV"
+    # Force the work tree to exactly $REV. A plain `git checkout` keeps
+    # tracked files that went missing from the work tree deleted: a runner
+    # workdir that lost everything in src/ but .git then fails the build on
+    # crates/*/Cargo.toml (#1313). `reset --hard` restores them and drops the
+    # previous patch overlay on Cargo.toml; untracked target/ (the build
+    # cache) stays. If the object store cannot do that, start from a fresh
+    # clone.
+    if ! { git checkout --quiet --force --detach "$REV" && git reset --quiet --hard "$REV"; }; then
+        echo "install-hc-toolchain: cannot restore $SRC_DIR at $REV; re-cloning $SRC_DIR fresh"
+        cd "$REPO_ROOT"
+        rm -rf "$SRC_DIR"
+        git clone "$GIT_URL" "$SRC_DIR"
+        cd "$SRC_DIR"
+        git checkout --quiet --detach "$REV"
+    fi
 
     AD4M_PATCH_MARKER="# BEGIN AD4M PATCH OVERLAY"
     AD4M_PATCH_END="# END AD4M PATCH OVERLAY"
