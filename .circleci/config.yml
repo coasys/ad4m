@@ -33,6 +33,14 @@ commands:
               echo "Corrupted .git directory detected, removing for fresh clone..."
               rm -rf .git
             fi
+            # A .git that opens but lacks objects passes the check above, then fails checkout with
+            # "pack has N unresolved deltas": GitHub sends a thin pack against bases the cache does
+            # not hold. Fetch the commit under test the way checkout will; if that fails, clone fresh.
+            if [ -d .git ] && ! timeout 600 git fetch -q --no-tags \
+                "https://github.com/${CIRCLE_PROJECT_USERNAME}/${CIRCLE_PROJECT_REPONAME}.git" "$CIRCLE_SHA1"; then
+              echo "Cached .git cannot fetch $CIRCLE_SHA1, removing for fresh clone..."
+              rm -rf .git
+            fi
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
