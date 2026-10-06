@@ -176,6 +176,7 @@ pub(super) async fn attach_links(
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
     instances: &mut [Value],
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     if keys.is_empty() || instances.is_empty() {
         return Ok(());
@@ -215,7 +216,8 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
 {link_status}{proof_valid}{local_status}}}"#
         );
-        let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
+        let rows: Vec<Value> =
+            serde_json::from_str(&store.query_with_graphs_async(&sparql, graph_iris).await?)?;
         let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();
         for row in &rows {
             let source = s(row, "source");

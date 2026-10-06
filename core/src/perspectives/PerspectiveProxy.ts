@@ -518,6 +518,14 @@ export interface LinkListeners {
 }
 
 export type LinkStatus = "shared" | "local"
+
+/**
+ * Names the caller's own Local graph wherever a graph goes: on writes
+ * (`add`, `addLinks`, `linkMutations`, `Ad4mModel.create(..., { graph })`) and in
+ * graph-scoped reads. The executor stores it per agent as `ad4m://local/<did>`.
+ * Links in a Local graph never sync, and only their agent reads them.
+ */
+export const LOCAL_GRAPH = "ad4m://local"
 interface Parameter {
     name: string
     value: string
@@ -1218,10 +1226,11 @@ export class PerspectiveProxy {
      * 
      * @param mutations - Object containing links to add and remove
      * @param status - Whether new links should be shared
+     * @param graph - Named graph for the added links; {@link LOCAL_GRAPH} for the caller's Local graph
      * @returns Object containing results of the mutations
      */
-    async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared'): Promise<LinkExpressionMutations> {
-        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status)
+    async linkMutations(mutations: LinkMutations, status: LinkStatus = 'shared', graph?: string): Promise<LinkExpressionMutations> {
+        const result = await this.#client.linkMutations(this.#handle.uuid, mutations, status, graph)
         invalidatePerspectiveCache(this.#handle.uuid);
         return result;
     }

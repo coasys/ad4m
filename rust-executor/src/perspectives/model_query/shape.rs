@@ -58,7 +58,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let result_json = store.query(&query)?;
+    let result_json = store.query_shared(&query)?;
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
@@ -116,7 +116,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
 
-    let props_json = store.query(&props_query)?;
+    let props_json = store.query_shared(&props_query)?;
     let prop_results: Vec<Value> = serde_json::from_str(&props_json)?;
 
     // Property shapes can fan into multiple rows because their `rdf://type`
@@ -336,7 +336,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         "#
     );
     let class_hint = store
-        .query(&class_hint_query)
+        .query_shared(&class_hint_query)
         .ok()
         .and_then(|json| serde_json::from_str::<Vec<Value>>(&json).ok())
         .and_then(|rows| {

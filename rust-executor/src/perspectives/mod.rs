@@ -22,6 +22,8 @@ mod interpretation_harness_e2e;
 // so it never reaches a release build.
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
+#[cfg(test)]
+mod local_graph_tests;
 pub mod memory_diagnostics;
 pub mod migration;
 pub mod model_query;

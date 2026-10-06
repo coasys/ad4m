@@ -915,6 +915,7 @@ pub(super) async fn execute_model_query_inner(
         query_input.link_status.as_ref(),
         query_input.include_unverified,
         &mut final_instances,
+        graph_iris,
     )
     .await?;
 

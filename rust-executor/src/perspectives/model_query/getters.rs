@@ -59,6 +59,7 @@ pub fn evaluate_getters_batch(
     shape: &ModelShape,
     instance_ids: &[String],
     property_names: Option<&[String]>,
+    graph_iris: Option<&[String]>,
 ) -> Result<Value, Error> {
     if instance_ids.is_empty() {
         return Ok(Value::Object(Map::new()));
@@ -112,7 +113,7 @@ pub fn evaluate_getters_batch(
         true,
         None,
         None,
-        None,
+        graph_iris,
     )?;
 
     let mut result = Map::new();
@@ -476,6 +477,7 @@ pub(super) fn evaluate_getters(
             wp,
             link_status,
             include_unverified,
+            graph_iris,
         )?;
     }
 
@@ -527,6 +529,7 @@ pub(super) fn apply_where_filter_to_relation(
     where_predicates: &HashMap<String, String>,
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     let all_targets: Vec<String> = instances
         .iter()
@@ -592,7 +595,7 @@ pub(super) fn apply_where_filter_to_relation(
             )
         );
 
-        let result_json = store.query(&query)?;
+        let result_json = store.query_with_graphs(&query, graph_iris)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
         let mut target_vals: HashMap<String, Value> = HashMap::new();

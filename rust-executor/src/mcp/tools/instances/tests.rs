@@ -2254,3 +2254,58 @@ async fn add_to_collection_failing_leaves_the_collection_unchanged() {
         "a failed add_to_collection must not leave the item linked: {got}"
     );
 }
+
+/// Flows and interpretation runs read through these tools, so they read as
+/// the agent the run acts for: a user's Local graph stays out of a run on
+/// behalf of another agent, here the admin.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_call_does_not_read_another_agents_local_graph() {
+    use crate::agent::AgentContext;
+    use crate::mcp::tools::perspectives::QueryLinksParams;
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    use crate::types::{Link, LinkStatus};
+
+    let (handler, uuid, _guard) = setup(false).await;
+    let email = format!("alice.{}@example.org", uuid::Uuid::new_v4());
+    crate::agent::AgentService::ensure_user_key_exists(&email).unwrap();
+    let alice = AgentContext::for_user_email(email);
+    let mut raw = crate::perspectives::get_perspective(&uuid).unwrap();
+    let link = |name: &str| Link {
+        source: "ad4m://notes".to_string(),
+        predicate: Some("ad4m://note".to_string()),
+        target: format!("ad4m://note/{name}"),
+    };
+    raw.add_link(
+        link("private"),
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    raw.add_link(
+        link("shared"),
+        LinkStatus::Shared,
+        None,
+        &AgentContext::main_agent(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let out = handler
+        .query_links(Parameters(QueryLinksParams {
+            perspective_id: uuid.clone(),
+            source: Some("ad4m://notes".to_string()),
+            predicate: None,
+            target: None,
+            graph: None,
+        }))
+        .await;
+    assert!(out.contains("ad4m://note/shared"), "{out}");
+    assert!(
+        !out.contains("ad4m://note/private"),
+        "a Local link leaked: {out}"
+    );
+}

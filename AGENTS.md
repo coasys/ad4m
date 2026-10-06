@@ -40,6 +40,33 @@ it in older docs.
 - Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
   contains only `@AGENTS.md`.
 
+## Named graphs and Local graphs
+
+- A link's `graph` names an Oxigraph named graph (`ad4m://graph/<base>` for
+  `@Model({ graph: true })` instances). No graph = the default graph.
+- `ad4m://local` (`LOCAL_GRAPH` in core) is an alias. The executor resolves it
+  per caller to `ad4m://local/<did>` (`resolve_graph_for` in `sparql_store.rs`).
+  Links there get `LinkStatus::Local` and never reach the link language: every
+  `link_language.commit` call takes `shareable(diff)`, and
+  `diff_from_link_language` drops incoming ones. A new path into the link
+  language must filter the same way.
+- Request handlers (WS, MCP) read through `PerspectiveInstance::for_viewer(did)`.
+  That view hides other agents' Local graphs from links, model and SPARQL
+  queries, subscriptions, removals and `namedGraphs`. A query that names a
+  foreign Local graph (scope, `FROM`) errors. The un-stamped instance keeps the
+  full view for executor-internal work. Reads that act for every agent (SHACL
+  shapes and actions) use `SparqlStore::query_shared`, which skips Local graphs.
+  Notification triggers read as their notification's user.
+- Write paths resolve graphs in `resolve_write_graph` (by context) or
+  `add_link_expression` (by viewer). Removals use the stored link's graph and
+  status, never the caller's copy.
+- `execute_commands` without a graph writes where the subject's links live. A
+  subject in a Local graph stays there even when the command names a graph. A
+  write into `ad4m://graph/<S>` for a Local subject S with no own graph goes to
+  S's Local graph (`follow_local_subject`).
+- SDK graph precedence on create: `options.graph` > `@Model({ graph: true })` >
+  parent graph (`Scope.graph`, else a graph-rooted parent model) > default.
+
 ## Holochain DHT and GetStrategy
 
 **Important**: Holochain currently only implements **full-arc (full-sync) DHT mode** where every node gossips and stores all data. This means:

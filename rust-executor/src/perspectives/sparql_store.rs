@@ -356,6 +356,121 @@ pub fn make_graph_iri(base_expression: &str) -> String {
     format!("ad4m://graph/{}", base_expression)
 }
 
+/// What a writer or reader names to mean "my own Local graph". The executor
+/// resolves it per caller to [`local_graph_iri`].
+pub const LOCAL_GRAPH_ALIAS: &str = "ad4m://local";
+
+/// Prefix of every agent's Local graph: `ad4m://local/<did>`.
+const LOCAL_GRAPH_PREFIX: &str = "ad4m://local/";
+
+/// Stands for the store's default graph in a graph list, so a scope can name
+/// it next to named graphs (see [`SparqlStore::visible_scope`]).
+pub const DEFAULT_GRAPH: &str = "ad4m://graph-default";
+
+/// The Local graph of the agent `did`. Links in it never sync, and only that
+/// agent reads them.
+pub fn local_graph_iri(did: &str) -> String {
+    format!("{}{}", LOCAL_GRAPH_PREFIX, did)
+}
+
+/// The agent whose Local graph `iri` names, or `None` for any other graph.
+pub fn local_graph_owner(iri: &str) -> Option<&str> {
+    iri.strip_prefix(LOCAL_GRAPH_PREFIX)
+        .filter(|did| !did.is_empty())
+}
+
+/// Whether `iri` names a Local graph (the alias or a concrete one).
+pub fn is_local_graph(iri: &str) -> bool {
+    iri == LOCAL_GRAPH_ALIAS || local_graph_owner(iri).is_some()
+}
+
+/// Whether `viewer` reads graph `iri`: false only for another agent's Local graph.
+pub fn graph_visible_to(iri: &str, viewer: &str) -> bool {
+    local_graph_owner(iri).is_none_or(|owner| owner == viewer)
+}
+
+/// Whether `viewer` reads `link`: false only for a link in another agent's
+/// Local graph.
+pub fn link_visible_to(link: &DecoratedLinkExpression, viewer: &str) -> bool {
+    link.graph
+        .as_deref()
+        .is_none_or(|g| graph_visible_to(g, viewer))
+}
+
+/// Resolve a graph named by `viewer`: the alias becomes the viewer's own Local
+/// graph, and another agent's Local graph is refused. `viewer: None` is the
+/// executor itself, which may name any graph but has no alias to resolve.
+pub fn resolve_graph_for(iri: &str, viewer: Option<&str>) -> Result<String, Error> {
+    if iri == LOCAL_GRAPH_ALIAS {
+        return viewer
+            .map(local_graph_iri)
+            .ok_or_else(|| anyhow!("{} needs a calling agent", LOCAL_GRAPH_ALIAS));
+    }
+    match (local_graph_owner(iri), viewer) {
+        (Some(owner), Some(did)) if owner != did => {
+            Err(anyhow!("Graph {} belongs to another agent", iri))
+        }
+        _ => Ok(iri.to_string()),
+    }
+}
+
+/// A scope entry as a dataset graph: [`DEFAULT_GRAPH`] is the store's default
+/// graph, anything else a named graph.
+fn scope_graph_name(iri: &str) -> GraphName {
+    if iri == DEFAULT_GRAPH {
+        GraphName::DefaultGraph
+    } else {
+        GraphName::NamedNode(NamedNode::new_unchecked(iri))
+    }
+}
+
+/// Keep a query that declares its own dataset (`FROM`, `FROM NAMED`) or uses
+/// `GRAPH` out of the Local graphs outside `scope`. The query keeps its own
+/// dataset otherwise: `GRAPH ?g` ranges over every other named graph of the
+/// store (`named`), and a declared Local graph outside the scope is refused.
+fn restrict_dataset_to_scope(
+    dataset: &mut oxigraph::sparql::QueryDataset,
+    scope: &[String],
+    named: &[String],
+) -> Result<(), Error> {
+    let hidden: HashSet<&str> = named
+        .iter()
+        .filter(|g| local_graph_owner(g).is_some() && !scope.contains(g))
+        .map(String::as_str)
+        .collect();
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    let is_hidden = |g: &str| hidden.contains(g.trim_start_matches('<').trim_end_matches('>'));
+    let declared = dataset
+        .default_graph_graphs()
+        .into_iter()
+        .flatten()
+        .map(|g| g.to_string())
+        .chain(
+            dataset
+                .available_named_graphs()
+                .into_iter()
+                .flatten()
+                .map(|g| g.to_string()),
+        );
+    for g in declared {
+        if is_hidden(&g) {
+            return Err(anyhow!("The query reads graph {} outside its scope", g));
+        }
+    }
+    if dataset.available_named_graphs().is_none() {
+        dataset.set_available_named_graphs(
+            named
+                .iter()
+                .filter(|g| !hidden.contains(g.as_str()))
+                .map(|g| NamedNode::new_unchecked(g).into())
+                .collect(),
+        );
+    }
+    Ok(())
+}
+
 /// Validates that a SPARQL query is read-only by parsing it with the SPARQL parser.
 /// Only SELECT, ASK, CONSTRUCT, and DESCRIBE queries are accepted.
 /// UPDATE operations (INSERT, DELETE, DROP, etc.) will fail to parse as a Query.
@@ -1208,7 +1323,22 @@ impl SparqlStore {
         Ok(links
             .into_iter()
             .filter(|l| l.data.source.ends_with(source_suffix))
+            // Shapes and their actions act for every agent: a Local graph never defines them.
+            .filter(|l| !l.graph.as_deref().is_some_and(is_local_graph))
             .collect())
+    }
+
+    /// [`Self::query`] over the graphs every agent shares: Local graphs left
+    /// out. For reads that shape behaviour for all agents, such as SHACL shapes.
+    pub fn query_shared(&self, query_string: &str) -> Result<String, Error> {
+        let named = self.named_graphs()?;
+        if !named.iter().any(|g| is_local_graph(g)) {
+            return self.query(query_string);
+        }
+        let scope: Vec<String> = std::iter::once(DEFAULT_GRAPH.to_string())
+            .chain(named.into_iter().filter(|g| !is_local_graph(g)))
+            .collect();
+        self.query_with_graphs(query_string, Some(&scope))
     }
 
     fn sparql_evaluator(&self) -> SparqlEvaluator {
@@ -1379,25 +1509,28 @@ impl SparqlStore {
             .unwrap()
             .is_match(query_string);
 
+        let scope = graph_iris.filter(|i| !i.is_empty());
         let results = if query_has_dataset || query_has_graph_keyword {
             // Query is self-describing — respect its dataset declarations.
             // This supports FROM clauses (model-generated), GRAPH patterns
             // (cross-graph queries), and FROM NAMED (federated patterns).
+            // A scope still keeps it out of the Local graphs it leaves out.
+            let mut q = parsed_query;
+            if let Some(scope) = scope {
+                restrict_dataset_to_scope(q.dataset_mut(), scope, &self.named_graphs()?)?;
+            }
             #[allow(deprecated)]
             self.store
-                .query_opt(parsed_query, self.sparql_evaluator())
+                .query_opt(q, self.sparql_evaluator())
                 .map_err(|e| {
                     let truncated = &query_string[..query_string.len().min(500)];
                     anyhow!("SPARQL query failed: {}\nQuery: {}", e, truncated)
                 })?
-        } else if let Some(iris) = graph_iris.filter(|i| !i.is_empty()) {
+        } else if let Some(iris) = scope {
             // External graph scoping — override the default graph
             let mut q = parsed_query;
-            let graph_names: Vec<GraphName> = iris
-                .iter()
-                .map(|iri| GraphName::NamedNode(NamedNode::new_unchecked(iri)))
-                .collect();
-            q.dataset_mut().set_default_graph(graph_names);
+            q.dataset_mut()
+                .set_default_graph(iris.iter().map(|iri| scope_graph_name(iri)).collect());
 
             #[allow(deprecated)]
             self.store
@@ -1524,6 +1657,53 @@ impl SparqlStore {
             }
         }
         Ok(graphs)
+    }
+
+    /// Whether the store holds a Local graph of an agent other than `viewer`.
+    pub fn has_hidden_graphs(&self, viewer: &str) -> Result<bool, Error> {
+        Ok(self
+            .named_graphs()?
+            .iter()
+            .any(|iri| !graph_visible_to(iri, viewer)))
+    }
+
+    /// The graph scope a read by `viewer` runs in.
+    ///
+    /// - `requested` graphs: each resolved for the viewer ([`resolve_graph_for`]),
+    ///   so the Local alias works and another agent's Local graph is refused.
+    /// - Nothing requested: the default graph plus every named graph except other
+    ///   agents' Local graphs. `None` when nothing is hidden, so the read keeps
+    ///   its unscoped fast path.
+    ///
+    /// `viewer: None` is the executor itself, which sees everything.
+    pub fn visible_scope(
+        &self,
+        viewer: Option<&str>,
+        requested: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, Error> {
+        if let Some(requested) = requested.filter(|r| !r.is_empty()) {
+            return requested
+                .iter()
+                .map(|iri| resolve_graph_for(iri, viewer))
+                .collect::<Result<Vec<_>, _>>()
+                .map(Some);
+        }
+        let Some(viewer) = viewer else {
+            return Ok(None);
+        };
+        let named = self.named_graphs()?;
+        if named.iter().all(|iri| graph_visible_to(iri, viewer)) {
+            return Ok(None);
+        }
+        Ok(Some(
+            std::iter::once(DEFAULT_GRAPH.to_string())
+                .chain(
+                    named
+                        .into_iter()
+                        .filter(|iri| graph_visible_to(iri, viewer)),
+                )
+                .collect(),
+        ))
     }
 
     /// Check whether a named graph exists.
@@ -1678,9 +1858,14 @@ impl SparqlStore {
         self.flush()?;
         Ok(())
     }
-    /// Batch-remove all links (across all graphs) that target any of the given IRIs.
+    /// Batch-remove all links (across all graphs `viewer` reads) that target any
+    /// of the given IRIs. Other agents' Local graphs stay untouched.
     /// Uses a single SPARQL query with VALUES clause instead of N individual queries.
-    pub fn remove_links_targeting_subjects(&self, subject_iris: &[String]) -> Result<(), Error> {
+    pub fn remove_links_targeting_subjects(
+        &self,
+        subject_iris: &[String],
+        viewer: Option<&str>,
+    ) -> Result<(), Error> {
         if subject_iris.is_empty() {
             return Ok(());
         }
@@ -1723,6 +1908,9 @@ impl SparqlStore {
                 if let (Some(Term::NamedNode(reifier)), Some(Term::NamedNode(graph))) =
                     (solution.get("reifier").cloned(), solution.get("g").cloned())
                 {
+                    if viewer.is_some_and(|v| !graph_visible_to(graph.as_str(), v)) {
+                        continue;
+                    }
                     // Remove all quads where reifier is subject in that graph
                     let graph_ref = GraphNameRef::NamedNode(graph.as_ref());
                     let quads: Vec<_> = self

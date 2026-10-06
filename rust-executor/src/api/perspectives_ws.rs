@@ -9,6 +9,7 @@ use crate::agent::capabilities::*;
 use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::helpers::can_access_perspective_with_did;
+use crate::perspectives::sparql_store::resolve_graph_for;
 use crate::perspectives::{
     add_perspective, get_perspective,
     perspective_instance::{PerspectiveInstance, SdnaType},
@@ -120,7 +121,8 @@ async fn get_perspective_with_access(
         }
     }
 
-    Ok(perspective)
+    // The request reads as its caller: other agents' Local graphs stay out.
+    Ok(perspective.for_viewer(viewer_did(ctx)?))
 }
 
 fn check_credits(user_email: &Option<String>) -> Result<(), WsRpcError> {
@@ -284,6 +286,13 @@ async fn get_perspective_handler(
     };
     let handle = perspective.persisted.lock().await.clone();
     Ok(serde_json::to_value(handle)?)
+}
+
+/// The agent whose view of a perspective a request reads: other agents' Local
+/// graphs stay out of it.
+pub(crate) fn viewer_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    crate::agent::did_for_context(&AgentContext::from_auth_token(ctx.auth_token.clone()))
+        .map_err(|e| WsRpcError::internal(e.to_string()))
 }
 
 async fn get_snapshot(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
@@ -536,7 +545,7 @@ async fn remove_links_bulk(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     };
 
     let diff = perspective
-        .link_mutations(mutations, LinkStatus::Shared, &agent_context)
+        .link_mutations(mutations, LinkStatus::Shared, &agent_context, None)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -561,7 +570,7 @@ async fn link_mutations(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     let status = parse_link_status(body.status.as_deref());
 
     let diff = perspective
-        .link_mutations(body.mutations, status, &agent_context)
+        .link_mutations(body.mutations, status, &agent_context, body.graph)
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -816,6 +825,9 @@ async fn remove_named_graph(params: Value, ctx: Arc<RequestContext>) -> Result<V
     .map_err(|e| WsRpcError::forbidden(e))?;
 
     let graph_iri = params.require_str("graphIri")?;
+    // The Local alias names the caller's own Local graph; another agent's is refused.
+    let graph_iri = resolve_graph_for(&graph_iri, Some(&viewer_did(&ctx)?))
+        .map_err(|e| WsRpcError::forbidden(e.to_string()))?;
     let perspective = get_perspective_with_access(&uuid, &ctx).await?;
     // remove_graph does a subject-enumeration query, a graph delete, and a
     // batched cross-graph link cleanup query — run it on a blocking thread
@@ -1269,7 +1281,12 @@ async fn evaluate_getters_handler(
     let result = tokio::time::timeout(
         Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
         tokio::task::spawn_blocking(move || {
-            perspective.evaluate_getters(&class_name, &instance_ids, property_names.as_deref())
+            perspective.evaluate_getters(
+                &class_name,
+                &instance_ids,
+                property_names.as_deref(),
+                None,
+            )
         }),
     )
     .await;

@@ -572,7 +572,9 @@ impl Ad4mMcpHandler {
             return Err(format!("Capability error: {}", e));
         }
 
-        Ok((perspective, agent_context))
+        // The tool reads as its caller: other agents' Local graphs stay out.
+        let viewer = crate::agent::did_for_context(&agent_context).map_err(|e| e.to_string())?;
+        Ok((perspective.for_viewer(viewer), agent_context))
     }
 
     /// Convenience wrapper for read operations — checks perspective access but no write capability.
@@ -591,11 +593,15 @@ impl Ad4mMcpHandler {
         // Defense in depth: in multi-user/admin mode, require a valid auth token before
         // checking perspective ownership. call_tool() should already have blocked
         // unauthenticated requests, but we enforce this here too to be safe.
-        if self.context.admin_credential.is_some() {
-            self.get_agent_context()
-                .await
-                .map_err(|e| json!({"error": e}).to_string())?;
-        }
+        // A caller without a token gets past this only on a node without an
+        // admin credential, where it acts as the main agent.
+        let agent_context = match self.get_agent_context().await {
+            Ok(context) => context,
+            Err(e) if self.context.admin_credential.is_some() => {
+                return Err(json!({"error": e}).to_string())
+            }
+            Err(_) => AgentContext::main_agent(),
+        };
 
         let perspective = get_perspective(perspective_id).ok_or_else(|| {
             json!({"error": format!("Perspective not found: {}", perspective_id)}).to_string()
@@ -608,7 +614,9 @@ impl Ad4mMcpHandler {
             );
         }
 
-        Ok(perspective)
+        // The tool reads as its caller: other agents' Local graphs stay out.
+        let viewer = crate::agent::did_for_context(&agent_context).map_err(|e| e.to_string())?;
+        Ok(perspective.for_viewer(viewer))
     }
 
     /// Convenience wrapper for write operations (most common case)

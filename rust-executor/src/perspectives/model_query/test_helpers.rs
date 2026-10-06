@@ -186,7 +186,7 @@ pub fn evaluate_getters_batch_from_json(
     shape_json: &str,
 ) -> Result<serde_json::Value, Error> {
     let shape = parse_shape_from_json(shape_json, class_name)?;
-    super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names)
+    super::getters::evaluate_getters_batch(store, &shape, instance_ids, property_names, None)
 }
 
 /// Helper: build an InstanceLinks entry with explicit per-link timestamps.

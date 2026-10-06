@@ -1183,10 +1183,8 @@ export class Ad4mModel {
     let graphIris: string[] | undefined;
     const parent = query.parent;
     if (parent && 'id' in parent && 'model' in parent && parent.model && !metadata.graph) {
-      const parentMeta = (parent.model as typeof Ad4mModel).getModelMetadata?.();
-      if (parentMeta?.graph) {
-        graphIris = [`ad4m://graph/${parent.id}`];
-      }
+      const parentGraph = resolveParentGraph(parent);
+      if (parentGraph) graphIris = [parentGraph];
     }
 
     const result = await perspective.modelQuery(className, queryJson, graphIris, options);
@@ -1496,6 +1494,10 @@ export class Ad4mModel {
    * refreshes from the perspective.
    * 
    * @param batchId - Optional batch ID for batch operations
+   * @param graph - Named graph for a new instance's links. Overrides
+   *   `@Model({ graph: true })`. `LOCAL_GRAPH` keeps the instance in the
+   *   caller's Local graph, which never syncs. An existing instance keeps its
+   *   graph, so passing one for it throws.
    * @throws Will throw if instance creation, linking, or updating fails
    * 
    * @example
@@ -1510,9 +1512,14 @@ export class Ad4mModel {
    * await recipe.save();
    * ```
    */
-  async save(batchId?: string) {
+  async save(batchId?: string, graph?: string) {
     // Existing instance → update path (has been fetched / hydrated before)
     if (this._snapshot) {
+      if (graph !== undefined) {
+        throw new Error(
+          'save(): the graph argument places a new instance. An existing instance keeps its graph.',
+        );
+      }
       await this.innerUpdate(true, batchId);
       if (batchId) {
         // Batch hasn't been committed yet — getData() would fetch stale data
@@ -1526,6 +1533,7 @@ export class Ad4mModel {
     }
 
     // New instance → create path
+    if (graph !== undefined) this._resolvedGraphIri = graph;
     let batchCreatedHere = false;
     if(!batchId) {
       batchId = await this.perspective.createBatch()
@@ -1858,8 +1866,12 @@ export class Ad4mModel {
     // Fast path: graph-rooted models can drop the entire named graph.
     // The executor's removeGraph handles cross-graph reference cleanup atomically
     // (removes incoming links from other graphs that target subjects in this graph).
-    if (metadata.graph && this.graphIri) {
-      await this._perspective.removeGraph(this.graphIri);
+    // Only when that graph exists: an instance created with an explicit `graph`
+    // (e.g. the Local graph) shares it with others, and the destructor below
+    // removes just its links.
+    const ownGraph = Ad4mModel.graphIriFor(this._baseExpression);
+    if (metadata.graph && (await this._perspective.graphs()).includes(ownGraph)) {
+      await this._perspective.removeGraph(ownGraph);
       return;
     }
 
@@ -1930,6 +1942,14 @@ export class Ad4mModel {
    *     be used to create an incoming link from the parent to the new instance.
    *   - `batchId` — an existing batch id; when provided the link write and
    *     `save()` are added to the batch instead of committed immediately.
+   *   - `graph` — the named graph for the instance's links, and for the
+   *     parent→child link. Overrides `@Model({ graph: true })` and the parent's
+   *     graph. `LOCAL_GRAPH` keeps the instance in the caller's Local graph:
+   *     it never syncs, and only the caller reads it.
+   *
+   * Graph precedence: `options.graph`, then this model's own graph
+   * (`@Model({ graph: true })`), then the parent's graph (`parent.graph`, or a
+   * graph-rooted parent model), then the default graph.
    * @returns The saved model instance
    *
    * @example
@@ -1955,38 +1975,21 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     data: Record<string, any> = {},
-    options?: { parent?: Scope; batchId?: string },
+    options?: { parent?: Scope; batchId?: string; graph?: string },
   ): Promise<T> {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
-
-    // Resolve the graph IRI for this instance's links.
-    // Priority: model is graph-rooted → own graph; parent is graph-rooted → parent's graph.
     const metadata = (this as typeof Ad4mModel).getModelMetadata();
-    if (metadata.graph) {
-      // This model roots its own graph — use own base expression
-      instance._resolvedGraphIri = Ad4mModel.graphIriFor(instance._baseExpression);
-    } else if (options?.parent && 'model' in options.parent && 'id' in options.parent) {
-      // Check if the parent model is graph-rooted
-      const parentMeta = (options.parent.model as typeof Ad4mModel).getModelMetadata?.();
-      if (parentMeta?.graph) {
-        instance._resolvedGraphIri = Ad4mModel.graphIriFor(options.parent.id);
-      }
-    }
-
-    // Resolve the graph for the parent→child link (uses PARENT's graph, not child's).
-    let parentGraphIri: string | undefined;
-    if (options?.parent && 'model' in options.parent && 'id' in options.parent) {
-      const parentMeta = (options.parent.model as typeof Ad4mModel).getModelMetadata?.();
-      if (parentMeta?.graph) {
-        parentGraphIri = Ad4mModel.graphIriFor(options.parent.id);
-      }
-    } else if (options?.parent && 'id' in options.parent) {
-      // Raw parent scope (`{ id }` without `model`) — the parent's graph-rootedness
-      // can't be determined from an id alone, so `parentGraphIri` (and, unless this
-      // model is itself graph-rooted, `_resolvedGraphIri`) silently stay undefined
-      // and the parent→child link falls back to the default graph. Warn so a
-      // graph-rooted parent doesn't silently lose scoping.
+    const parentGraphIri = resolveParentGraph(options?.parent);
+    instance._resolvedGraphIri =
+      options?.graph ??
+      (metadata.graph ? Ad4mModel.graphIriFor(instance._baseExpression) : parentGraphIri);
+    // The parent→child link follows an explicit graph, so a private child under
+    // a shared parent leaves no shared trace; otherwise it sits in the parent's graph.
+    const parentLinkGraph = options?.graph ?? parentGraphIri;
+    if (options?.parent && !('model' in options.parent) && 'id' in options.parent && !options.graph) {
+      // A raw `{ id }` parent names no model, so its graph stays unknown and
+      // the parent→child link falls back to the default graph.
       console.warn(
         `${this.name}.create(): 'options.parent' was provided without 'model' — graph ` +
         `scoping can't be resolved from a raw id. If the parent model is graph-rooted, ` +
@@ -2009,7 +2012,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', batchId, parentGraphIri);
+      await perspective.add(link, 'shared', batchId, parentLinkGraph);
       await perspective.commitBatch(batchId);
       // Hydrate the instance now that the batch has been committed (mirrors the
       // behaviour of save() when it manages its own batch).
@@ -2028,7 +2031,7 @@ export class Ad4mModel {
         predicate,
         target: instance.id,
       });
-      await perspective.add(link, 'shared', options?.batchId, parentGraphIri);
+      await perspective.add(link, 'shared', options?.batchId, parentLinkGraph);
     }
 
     return instance;
@@ -2397,3 +2400,14 @@ export class Ad4mModel {
   }
 }
 
+/**
+ * The named graph a parent scope passes to records created under it: the
+ * scope's explicit `graph`, else the parent's own graph when its model is
+ * graph-rooted. Raw `{ id, predicate }` scopes name no graph.
+ */
+function resolveParentGraph(parent?: Scope): string | undefined {
+  if (!parent || !('model' in parent) || !('id' in parent)) return undefined;
+  if (parent.graph) return parent.graph;
+  const parentMeta = (parent.model as typeof Ad4mModel).getModelMetadata?.();
+  return parentMeta?.graph ? Ad4mModel.graphIriFor(parent.id) : undefined;
+}

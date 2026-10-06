@@ -105,7 +105,13 @@ export type Order = { [propertyName: string]: "ASC" | "DESC" };
  * scopes reject it, because it names no single parent to write under.
  */
 export type Scope =
-  | { model: typeof Ad4mModel; id: string; field?: string }
+  /**
+   * `graph` names the parent's named graph when it was created with an
+   * explicit one (`create(..., { graph })`). A child created under it then
+   * lands there too; without it, only a graph-rooted parent model passes its
+   * graph down.
+   */
+  | { model: typeof Ad4mModel; id: string; field?: string; graph?: string }
   | { id: string; predicate: string }
   | TraverseScope;
 

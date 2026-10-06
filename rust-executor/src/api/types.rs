@@ -786,6 +786,8 @@ pub struct InterpretationOverlaysRequest {
 pub struct LinkMutationsRequest {
     pub mutations: LinkMutations,
     pub status: Option<String>,
+    /// Named graph for the additions; `ad4m://local` is the caller's Local graph.
+    pub graph: Option<String>,
 }
 
 #[derive(Deserialize, TS)]

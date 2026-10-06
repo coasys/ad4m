@@ -44,7 +44,7 @@ pub fn resolve_reverse_relations(
     relations: &[(String, String, bool)], // (name, predicate, is_single)
     link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
-    _graph_iris: Option<&[String]>,
+    graph_iris: Option<&[String]>,
 ) -> Result<(), Error> {
     if relations.is_empty() || instances.is_empty() {
         return Ok(());
@@ -79,7 +79,7 @@ pub fn resolve_reverse_relations(
             "SELECT ?source ?target WHERE {{ {} ?source <{safe_pred}> ?target .{filter} }}",
             target_constraint
         );
-        let result_json = store.query(&sparql)?;
+        let result_json = store.query_with_graphs(&sparql, graph_iris)?;
         let rows: Vec<Value> = serde_json::from_str(&result_json)?;
 
         let mut target_to_sources: HashMap<String, Vec<String>> = HashMap::new();

@@ -3566,3 +3566,110 @@ describe("includeUnverified — wire format", () => {
     expect((builder as any).queryParams.includeUnverified).toBe(true);
   });
 });
+
+describe("Ad4mModel named-graph placement", () => {
+  const LOCAL = "ad4m://local";
+
+  @Model({ name: "GraphNote" })
+  class Note extends Ad4mModel {
+    @Optional({ through: "test://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "GraphChannel", graph: true })
+  class Channel extends Ad4mModel {
+    @Optional({ through: "test://name" })
+    name: string = "";
+
+    @HasMany(() => Note, { through: "test://note" })
+    notes: Note[] = [];
+  }
+
+  function perspective(graphs: string[] = []) {
+    return {
+      createBatch: jest.fn().mockResolvedValue("b1"),
+      commitBatch: jest.fn().mockResolvedValue(undefined),
+      createSubject: jest.fn().mockResolvedValue(undefined),
+      executeAction: jest.fn().mockResolvedValue(undefined),
+      add: jest.fn().mockResolvedValue(undefined),
+      graphs: jest.fn().mockResolvedValue(graphs),
+      removeGraph: jest.fn().mockResolvedValue(true),
+      removeSubject: jest.fn().mockResolvedValue(undefined),
+      get: jest.fn().mockResolvedValue([]),
+      removeLinks: jest.fn().mockResolvedValue(undefined),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+      stringOrTemplateObjectToSubjectClassName: jest.fn(async (i: any) => i.constructor.name),
+    } as any;
+  }
+  const createdIn = (p: any) => p.createSubject.mock.calls[0][4];
+  const parentLinkIn = (p: any) => p.add.mock.calls[0][3];
+
+  it("places a decorated model in its own graph by default", async () => {
+    const p = perspective();
+    const channel = await Channel.create(p, { name: "general" }, { batchId: "b" });
+    expect(createdIn(p)).toBe(`ad4m://graph/${channel.id}`);
+  });
+
+  it("lets an explicit graph override the decorator", async () => {
+    const p = perspective();
+    const channel = await Channel.create(p, { name: "mine" }, { batchId: "b", graph: LOCAL });
+    expect(createdIn(p)).toBe(LOCAL);
+    expect(channel.graphIri).toBe(LOCAL);
+  });
+
+  it("puts a child and its parent link in a graph-rooted parent's graph", async () => {
+    const p = perspective();
+    await Note.create(p, { text: "hi" }, { batchId: "b", parent: { model: Channel, id: "c1" } });
+    expect(createdIn(p)).toBe("ad4m://graph/c1");
+    expect(parentLinkIn(p)).toBe("ad4m://graph/c1");
+  });
+
+  it("follows a parent scope's explicit graph", async () => {
+    const p = perspective();
+    await Note.create(p, { text: "hi" }, { batchId: "b", parent: { model: Channel, id: "c1", graph: LOCAL } });
+    expect(createdIn(p)).toBe(LOCAL);
+    expect(parentLinkIn(p)).toBe(LOCAL);
+  });
+
+  it("puts a private child and its parent link in the override graph, not the parent's", async () => {
+    const p = perspective();
+    await Note.create(p, { text: "hi" }, { batchId: "b", parent: { model: Channel, id: "c1" }, graph: LOCAL });
+    expect(createdIn(p)).toBe(LOCAL);
+    expect(parentLinkIn(p)).toBe(LOCAL);
+  });
+
+  it("places a new instance through save(batchId, graph)", async () => {
+    const p = perspective();
+    const note = new Note(p);
+    note.text = "draft";
+    await note.save("b", LOCAL);
+    expect(createdIn(p)).toBe(LOCAL);
+  });
+
+  it("refuses a graph when saving an existing instance", async () => {
+    const p = perspective();
+    const note = new Note(p);
+    await note.save("b");
+    await expect(note.save("b", LOCAL)).rejects.toThrow(/existing instance keeps its graph/);
+  });
+
+  it("scopes a parent query to the parent scope's explicit graph", async () => {
+    const p = perspective();
+    await Note.findAll(p, { parent: { model: Channel, id: "c1", graph: LOCAL } });
+    expect(p.modelQuery.mock.calls[0][2]).toEqual([LOCAL]);
+  });
+
+  it("drops a graph-rooted instance's own graph on delete", async () => {
+    const p = perspective(["ad4m://graph/c1"]);
+    const channel = new Channel(p, "c1");
+    await channel.delete();
+    expect(p.removeGraph).toHaveBeenCalledWith("ad4m://graph/c1");
+  });
+
+  it("removes only the links of a graph-rooted instance kept in a shared graph", async () => {
+    const p = perspective([]);
+    const channel = new Channel(p, "c1");
+    await channel.delete();
+    expect(p.removeGraph).not.toHaveBeenCalled();
+  });
+});

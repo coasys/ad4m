@@ -250,9 +250,9 @@ export class PerspectiveClient {
         )
     }
 
-    async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
+    async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus, graph?: string): Promise<LinkExpressionMutations> {
         return this.#apiClient.call<LinkExpressionMutations>(
-            'perspective.linkMutations', { uuid, mutations, status }
+            'perspective.linkMutations', { uuid, mutations, status, graph }
         )
     }
 
