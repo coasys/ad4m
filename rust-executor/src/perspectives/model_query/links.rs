@@ -48,10 +48,11 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 
-use super::sparql_builder::{local_status_filter, proof_valid_filter};
+use super::sparql_builder::{link_status_filter, local_status_filter, proof_valid_filter};
 use super::types::{IncludeValue, ModelQueryInput, ModelShape, ShapeResolver};
 use super::utils::{emittable_iri, values_or_str_filter};
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Instance key carrying the requested per-link rows. Reserved as a property
 /// name in `shacl_parser`, so a class cannot declare a property it would
@@ -138,7 +139,8 @@ pub(super) fn resolve_link_keys(
 ///
 /// `local: true` properties get the same `LinkStatus::Local` restriction the
 /// instance query applies, so a gossiped Shared link on a local predicate is not
-/// reintroduced through this side door.
+/// reintroduced through this side door. The query's `linkStatus` (#1116)
+/// applies here too, so a Shared-only read lists only Shared links.
 ///
 /// Links whose signature did not verify are withheld by default, the same
 /// [`proof_valid_filter`] the instance query applies (#1113), so a forged
@@ -171,6 +173,7 @@ pub(super) async fn attach_links(
     store: &SparqlStore,
     shape: &ModelShape,
     keys: &[(String, String)],
+    link_status: Option<&LinkStatus>,
     include_unverified: Option<bool>,
     instances: &mut [Value],
 ) -> Result<(), Error> {
@@ -196,6 +199,7 @@ pub(super) async fn attach_links(
             .collect::<Vec<_>>()
             .join(" ");
         let local_status = local_status_filter(shape);
+        let link_status = link_status_filter(link_status);
         let proof_valid = proof_valid_filter(include_unverified);
         let sparql = format!(
             r#"SELECT ?source ?predicate ?target ?wireTarget ?author ?timestamp ?proofKey ?proofSig ?proofValid WHERE {{
@@ -209,7 +213,7 @@ pub(super) async fn attach_links(
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofSignature> ?proofSig . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/proofValid> ?proofValid . }}
     OPTIONAL {{ ?_reifier <ad4m://ontology/wireTarget> ?wireTarget . }}
-{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{local_status}}}"#
         );
         let rows: Vec<Value> = serde_json::from_str(&store.query_async(&sparql).await?)?;
         let s = |row: &Value, var: &str| row[var].as_str().unwrap_or("").to_string();

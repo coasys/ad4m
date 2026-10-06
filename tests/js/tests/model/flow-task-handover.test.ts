@@ -294,7 +294,7 @@ describe("flow task handover — WE-facing API with roles", function () {
     await admin.agent.createUser("alice@handover.local", "pass");
     await admin.runtime.setUserFreeAccess("alice@handover.local", true);
     const aliceToken = await admin.agent.loginUser("alice@handover.local", "pass");
-    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken, false);
+    alice = new Ad4mClient(baseUrl(agent.apiPort), aliceToken);
     aliceDid = (await alice.agent.me()).did;
 
     // Admin is the second signer: ALL_CAPABILITY lets it read Alice's
@@ -346,9 +346,11 @@ describe("flow task handover — WE-facing API with roles", function () {
     } catch (e: any) {
       unreachable = String(e?.message ?? e);
     }
-    // Exact wording from `flow_instance/propose.rs`: the reachability check
-    // runs before the guard, and each message names only its own cause, so
-    // neither assertion can pass on the other refusal.
+    // Exact wording from `flow_instance/propose.rs`. A loose pattern such as
+    // `/not reachable|Done/i` or `/guard/i` also passes on an unrelated error
+    // that merely mentions `Done` or a guard, including one thrown before
+    // these checks run. The reachability check runs before the guard, so each
+    // call produces one deterministic message and exact matching cannot flake.
     expect(unreachable).to.match(/`Done` is not reachable from `Ready`/);
 
     // Unmet guard is an error. Fail-on-old-code: InProgress requires a WorkLog.

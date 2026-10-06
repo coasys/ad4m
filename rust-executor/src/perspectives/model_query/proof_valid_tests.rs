@@ -277,15 +277,14 @@ async fn proof_valid_applies_to_links_rows() {
     );
 }
 
-/// Instance *selection* still matches unverified links — #1120.
+/// Instance *selection* reads verified links only, like hydration (#1120).
 ///
-/// #1113 filters the rows that hydrate an instance, not the patterns that
-/// select it. `where: {name: "forged"}` is pushed into SPARQL and matches the
-/// bare triple, which the forged link asserts, so the query returns the recipe
-/// — hydrated as `name: "real"`, contradicting the condition it was selected
-/// by — and a `limit: 0` count reports it. Remove the `#[ignore]` with the fix.
+/// `where: {name: "forged"}` is pushed into SPARQL. Were it to match the bare
+/// triple, which the forged link asserts, the query would return the recipe
+/// hydrated as `name: "real"`, contradicting the condition it was selected by,
+/// and a `limit: 0` count would report it. More selection cases are in
+/// `selection_guard_tests`.
 #[tokio::test]
-#[ignore = "#1120: where/conformance/count still match unverified links"]
 async fn proof_valid_where_does_not_select_on_a_forged_value() {
     let store = SparqlStore::new(None).unwrap();
     pv_seed(&store);

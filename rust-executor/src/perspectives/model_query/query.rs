@@ -16,7 +16,8 @@ use super::projection::resolve_projections;
 use super::relations::{resolve_includes_recursive, resolve_reverse_relations};
 use super::sparql_builder::{
     all_where_pushable, build_count_sparql, build_instance_sparql, level_limits,
-    local_status_filter, per_anchor_limit, proof_valid_filter, ANCHOR_VAR,
+    link_status_filter, local_status_filter, per_anchor_limit, proof_valid_filter, LinkGuard,
+    ANCHOR_VAR,
 };
 use super::types::{
     InstanceQueryPlan, ModelQueryInput, ModelQueryResult, ModelShape, OrderDirection, Scope,
@@ -42,6 +43,72 @@ fn walk_roots(query: &ModelQueryInput) -> Option<(Vec<String>, String, ScopeDire
         }) => Some((ids.clone(), predicate.clone(), *direction)),
         _ => None,
     }
+}
+
+/// Everything each of `starts` reaches over `<predicate>` in one or more steps,
+/// following only links `guard` admits, as `(start, reached)` pairs without
+/// duplicates.
+///
+/// A property path (`<p>+`) is a reachability test over triples and has no
+/// link per hop whose status or verdict it could read, so a transitive walk
+/// that must honour `linkStatus` / `includeUnverified` is done here (#1120):
+/// one guarded single-step query per depth for the whole frontier, until no
+/// new node turns up. `Out` follows `start -> node`, `In` follows
+/// `node -> start`. As with `+`, a start on a cycle reaches itself.
+pub(super) fn guarded_reach(
+    store: &SparqlStore,
+    starts: &[String],
+    predicate: &str,
+    direction: ScopeDirection,
+    guard: LinkGuard,
+) -> Result<Vec<(String, String)>, Error> {
+    let pred = format!("<{predicate}>");
+    // `?s` is always the frontier end of the step, `?o` the node it reaches.
+    let (subject, object) = match direction {
+        ScopeDirection::Out => ("?s", "?o"),
+        ScopeDirection::In => ("?o", "?s"),
+    };
+    let step = format!(
+        "{subject} {pred} {object} .{}",
+        guard.join("?_wr", subject, &pred, object)
+    );
+    let mut edges: HashMap<String, Vec<String>> = HashMap::new();
+    // Every node queued so far, so each is expanded once.
+    let mut discovered: HashSet<String> = starts.iter().cloned().collect();
+    let mut frontier: Vec<String> = starts.to_vec();
+    while !frontier.is_empty() {
+        let sparql = format!(
+            "SELECT ?s ?o WHERE {{ {step} {} }}",
+            values_or_str_filter("s", &frontier)
+        );
+        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let mut next: Vec<String> = Vec::new();
+        for row in &rows {
+            let (Some(s), Some(o)) = (row["s"].as_str(), row["o"].as_str()) else {
+                continue;
+            };
+            edges.entry(s.to_string()).or_default().push(o.to_string());
+            if discovered.insert(o.to_string()) {
+                next.push(o.to_string());
+            }
+        }
+        frontier = next;
+    }
+
+    let mut pairs = Vec::new();
+    for start in starts {
+        let mut seen: HashSet<&str> = HashSet::new();
+        let mut stack: Vec<&str> = vec![start.as_str()];
+        while let Some(node) = stack.pop() {
+            for next in edges.get(node).into_iter().flatten() {
+                if seen.insert(next.as_str()) {
+                    pairs.push((start.clone(), next.clone()));
+                    stack.push(next.as_str());
+                }
+            }
+        }
+    }
+    Ok(pairs)
 }
 
 /// Keep the first `n` rows of each anchor, discarding the rest.
@@ -260,6 +327,45 @@ pub(super) async fn execute_model_query_inner(
             ));
         }
     }
+
+    // A transitive scope under a guard that restricts links is walked here and
+    // handed to the builder as pairs (see `ModelQueryInput::walked`), so the
+    // rows, the page and the count all read the same guarded walk.
+    let walked_input;
+    let query_input = match &query_input.parent {
+        Some(Scope::Traverse {
+            ids,
+            predicate,
+            transitive: true,
+            direction,
+            ..
+        }) if query_input.walked.is_none() && !LinkGuard::of(query_input).is_open() => {
+            match validate_iri(predicate) {
+                Ok(safe_pred) => {
+                    let anchors: Vec<String> = ids
+                        .iter()
+                        .filter(|id| validate_iri(id).is_ok())
+                        .cloned()
+                        .collect();
+                    let pairs = guarded_reach(
+                        store,
+                        &anchors,
+                        safe_pred,
+                        *direction,
+                        LinkGuard::of(query_input),
+                    )?;
+                    walked_input = ModelQueryInput {
+                        walked: Some(pairs),
+                        ..query_input.clone()
+                    };
+                    &walked_input
+                }
+                // The builder answers an invalid predicate with nothing.
+                Err(_) => query_input,
+            }
+        }
+        _ => query_input,
+    };
 
     // A per-link `author` condition is answered in the store or not at all.
     // The post-hydration fallback only knows the earliest link's author, so a
@@ -587,6 +693,7 @@ pub(super) async fn execute_model_query_inner(
                 } else {
                     let source_constraint = values_or_str_filter("source", &source_ids);
                     let local_status = local_status_filter(shape);
+                    let link_status = link_status_filter(query_input.link_status.as_ref());
                     let proof_valid = proof_valid_filter(query_input.include_unverified);
                     let property_sparql = format!(
                         r#"SELECT ?source ?predicate ?target ?author ?timestamp WHERE {{
@@ -596,7 +703,7 @@ pub(super) async fn execute_model_query_inner(
     FILTER(isIRI(?predicate))
     ?_reifier <ad4m://ontology/author> ?author .
     ?_reifier <ad4m://ontology/timestamp> ?timestamp .
-{proof_valid}{local_status}}}"#
+{link_status}{proof_valid}{local_status}}}"#
                     );
                     let result_json = store.query_async(&property_sparql).await?;
                     serde_json::from_str(&result_json)?
@@ -643,6 +750,7 @@ pub(super) async fn execute_model_query_inner(
             store,
             &mut instances,
             &reverse_rels,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
     }
@@ -743,6 +851,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             query_input.include.as_ref(),
             deep_query,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )?;
     }
@@ -757,6 +866,7 @@ pub(super) async fn execute_model_query_inner(
                 shape,
                 resolver,
                 depth,
+                query_input.link_status.as_ref(),
                 query_input.include_unverified,
             )
             .await?;
@@ -786,6 +896,7 @@ pub(super) async fn execute_model_query_inner(
         store,
         shape,
         &link_keys,
+        query_input.link_status.as_ref(),
         query_input.include_unverified,
         &mut final_instances,
     )
@@ -800,6 +911,7 @@ pub(super) async fn execute_model_query_inner(
             shape,
             resolver,
             depth,
+            query_input.link_status.as_ref(),
             query_input.include_unverified,
         )
         .await?;

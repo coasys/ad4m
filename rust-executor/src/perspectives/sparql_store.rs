@@ -172,7 +172,9 @@ fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
 
-fn status_str(status: &LinkStatus) -> &'static str {
+/// The stored spelling of a link's status. `model_query`'s `link_status_filter`
+/// matches with this too, so the read side cannot disagree with the write side.
+pub(crate) fn status_str(status: &LinkStatus) -> &'static str {
     match status {
         LinkStatus::Shared => "Shared",
         LinkStatus::Local => "Local",

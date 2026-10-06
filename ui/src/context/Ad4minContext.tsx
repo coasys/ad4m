@@ -189,10 +189,8 @@ export function Ad4minProvider({ children }: any) {
           });
           console.log(exception);
           invoke("show_main_window");
-          return null;
         });
 
-        // @ts-ignore
         client.runtime.addNotificationTriggeredCallback((notification) => {
           console.log("Notification triggered: ", notification);
           const match = notification.triggerMatch;

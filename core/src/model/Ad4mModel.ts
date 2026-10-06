@@ -1072,6 +1072,7 @@ export class Ad4mModel {
     if (query.count !== undefined) queryInput.count = query.count;
     if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
     if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes
@@ -1468,62 +1469,47 @@ export class Ad4mModel {
       batchId = await this.perspective.createBatch()
       batchCreatedHere = true;
     }
-    
 
-    // Check if the model has any constructor actions (required properties,
-    // flags, or properties with initial values).  Models whose properties are
-    // all optional, have no @Flag, and have no initial values produce an empty
-    // SHACL constructor, so calling createSubject would fail on the Rust side
-    // ("No SHACL constructor found").  In that case we skip createSubject
-    // entirely and let innerUpdate write the links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasConstructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag || p.initial !== undefined
-    );
 
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
     // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
-    if (hasConstructor) {
-      const initialValues = {};
-      for (const [key, value] of Object.entries(this)) {
-        if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          const propMeta = metadata.properties[key];
-          // Only offer keys with a declared, settable model property. This
-          // excludes ORM bookkeeping fields (_baseExpression, _perspective —
-          // enumerable instance fields, not model properties), HasMany
-          // relations (tracked in a separate registry, never in
-          // `metadata.properties`), and read-only properties/flags
-          // (readOnly: true). None of these have an `ad4m://setter` on the
-          // Rust side, which otherwise logs a "declares no setter" warning
-          // per key on every save().
-          if (!propMeta || propMeta.readOnly) {
-            continue;
-          }
-          if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
-            deferredExpressionProps.push(key);
-            continue;
-          }
-          initialValues[key] = value;
+    const initialValues = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+        const propMeta = metadata.properties[key];
+        // Only offer keys with a declared, settable model property. This
+        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
+        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
+          continue;
         }
+        if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+          deferredExpressionProps.push(key);
+          continue;
+        }
+        initialValues[key] = value;
       }
-
-      const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-      await this.perspective.createSubject(
-        className,
-        this._baseExpression,
-        initialValues,
-        batchId
-      );
     }
 
-    // Set properties and relations via innerUpdate.
-    // When createSubject was skipped (no constructor actions), we must enable
-    // property writing so that scalar values are persisted as links.
-    await this.innerUpdate(!hasConstructor, batchId)
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+    await this.perspective.createSubject(
+      className,
+      this._baseExpression,
+      initialValues,
+      batchId
+    );
+
+    // Relations via innerUpdate; createSubject wrote the scalar properties.
+    await this.innerUpdate(false, batchId)
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];

@@ -539,6 +539,19 @@ pub struct ModelQueryInput {
     /// Only meaningful alongside `polymorphic`.
     #[serde(default)]
     pub prefer_classes: Option<Vec<String>>,
+    /// Read the instance as it exists in links of this status only (#1116).
+    ///
+    /// `Some(Shared)` hydrates from Shared links only, which is what a
+    /// multi-user read needs (#1024): a Local link is executor-private and must
+    /// not reach another user. `Some(Local)` is the converse. The restriction
+    /// applies to every predicate, not only those a class declares `local`.
+    /// `None` (the default) reads both, subject to the class's `local` flags.
+    /// Combines with `include_unverified` on the same link: a link is read
+    /// only when it has the status and verified, or the query opted in.
+    ///
+    /// See [`link_status_filter`](super::sparql_builder::link_status_filter).
+    #[serde(default)]
+    pub link_status: Option<crate::types::LinkStatus>,
     /// Hydrate from links whose signature did not verify as well.
     ///
     /// By default a row whose link does not carry a stored `proofValid` of
@@ -556,6 +569,13 @@ pub struct ModelQueryInput {
     /// attributes each link separately rather than the instance as a whole.
     #[serde(default)]
     pub links: Option<Vec<String>>,
+    /// The `(anchor, node)` pairs a transitive [`Scope::Traverse`] reaches
+    /// over links the query's `linkStatus` / `includeUnverified` admit, one
+    /// guarded step at a time. Filled by the executor before the query is
+    /// built, because a property path cannot be restricted per hop (#1120).
+    /// Never on the wire.
+    #[serde(skip)]
+    pub(super) walked: Option<Vec<(String, String)>>,
 }
 
 /// Result returned by the model query endpoint.
