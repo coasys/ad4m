@@ -49,6 +49,10 @@ lazy_static! {
         Arc::new(RwLock::new(None));
 }
 
+// Held for the whole of `restart_service`. Two restarts at once would both shut the
+// same conductor down and each start a new one on the same data path and ports.
+static RESTART_IN_FLIGHT: Mutex<()> = Mutex::const_new(());
+
 //const COASYS_BOOTSTRAP_AGENT_INFO: &str = r#" ["g6VhZ2VudMQkeWyy+u7ziOZEejqRGCHVSjWuNDGCkHSFWpkp/DsXJFVDyWYdqXNpZ25hdHVyZcRAlYaUoegA0DB+U8F2cONLcoORjqz7WqW4dBSfvWyQ4AixLLB3h0jsvqGUo0UfowjUP1ntBhMjA8xo/oQateooDaphZ2VudF9pbmZvxPuGpXNwYWNlxCReuo1fprVD9jjsQWRglwEzVlWFiYB+4BEA7BQIwOpYgUgezPGlYWdlbnTEJHlssvru84jmRHo6kRgh1Uo1rjQxgpB0hVqZKfw7FyRVQ8lmHaR1cmxzkdlJd3NzOi8vc2lnbmFsLmhvbG8uaG9zdC90eDUtd3MvNEFNaGNWNHhpdFdPMHI2YUR1NjFwcW5jMW5LNjBmdkRfYTRyZUJmUFdTMKxzaWduZWRfYXRfbXPPAAABk/NOnPewZXhwaXJlc19hZnRlcl9tc84AEk+AqW1ldGFfaW5mb8QZgahhcnFfc2l6ZYKlcG93ZXIRpWNvdW50CA=="]"#;
 #[derive(Clone)]
 pub struct HolochainService {
@@ -211,6 +215,7 @@ impl HolochainService {
     }
 
     pub async fn restart_service() -> Result<(), AnyError> {
+        let _restart_guard = RESTART_IN_FLIGHT.lock().await;
         log::info!("Restarting Holochain service...");
 
         // Get the stored config

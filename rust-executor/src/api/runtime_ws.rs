@@ -200,7 +200,17 @@ async fn restart_holochain(_params: Value, ctx: Arc<RequestContext>) -> Result<V
     if !ctx.is_admin_credential {
         return Err(WsRpcError::forbidden("Admin credential required"));
     }
-    let _ = get_holochain_service().await;
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+    // Shuts the running conductor down, waits for its port, and starts it again
+    // from the stored config. The same path the Unyt space override uses.
+    crate::holochain_service::HolochainService::restart_service()
+        .await
+        .map_err(|e| WsRpcError::internal(format!("Holochain restart failed: {e}")))?;
     Ok(Value::Bool(true))
 }
 
@@ -487,6 +497,13 @@ async fn get_hc_agent_infos(_params: Value, ctx: Arc<RequestContext>) -> Result<
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
+
     let hc = get_holochain_service().await;
     let infos = hc
         .agent_infos()
@@ -500,6 +517,13 @@ async fn add_hc_agent_infos(params: Value, ctx: Arc<RequestContext>) -> Result<V
         .map_err(|e| WsRpcError::forbidden(e))?;
     // Injects peer records into the node's Holochain conductor.
     refuse_user_session(&ctx, "runtime.addHcAgentInfos")?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
 
     let body: AddAgentInfosRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -518,6 +542,13 @@ async fn get_network_metrics(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &RUNTIME_HC_AGENT_INFO_READ_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let config = crate::config::get_global_config();
+    if !config.run_holochain.unwrap_or(true) {
+        return Err(WsRpcError::bad_request(
+            "Holochain is disabled on this executor (run_holochain=false)",
+        ));
+    }
 
     let hc = get_holochain_service().await;
     let metrics = hc

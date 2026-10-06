@@ -138,12 +138,12 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
     let app = api_router(state);
 
-    if let Some(tls_config) = &config.tls {
+    // With TLS, remote clients use the HTTPS listener, so cleartext stays on loopback.
+    let ip: [u8; 4] = if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
         let cert_path = tls_config.cert_file_path.clone();
         let key_path = tls_config.key_file_path.clone();
 
-        log::info!("Starting API server (HTTP) on 127.0.0.1:{}", port);
         log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
 
         let tls_state = AppState {
@@ -175,23 +175,20 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                     )
                 });
         });
-
-        let listener =
-            tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], port))).await?;
-        axum::serve(listener, app.into_make_service()).await?;
+        [127, 0, 0, 1]
+    } else if config.localhost.unwrap_or(true) {
+        [127, 0, 0, 1]
     } else {
-        let address: [u8; 4] = if config.localhost.unwrap_or(true) {
-            [127, 0, 0, 1]
-        } else {
-            [0, 0, 0, 0]
-        };
+        [0, 0, 0, 0]
+    };
 
-        let addr = SocketAddr::from((address, port));
-        log::info!("API server starting on http://{}/api/v1", addr);
-
-        let listener = tokio::net::TcpListener::bind(addr).await?;
-        axum::serve(listener, app.into_make_service()).await?;
-    }
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((ip, port))).await?;
+    // Log only once bound: test harnesses (tests/js startExecutor) connect on this line.
+    log::info!(
+        "API server starting on http://{}/api/v1",
+        listener.local_addr()?
+    );
+    axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())
 }
