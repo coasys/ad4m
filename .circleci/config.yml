@@ -195,6 +195,10 @@ jobs:
             CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
             find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
       - run:
+          # Local git repo + fake cargo, no network; about a second.
+          name: Test install-hc-toolchain.sh
+          command: bash scripts/install-hc-toolchain.test.sh
+      - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
           # Cargo.lock. Needed here (in build) because the bootstrap-languages
           # build.sh files pack DNAs with `hc`, and downstream integration
