@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use super::{holochain_service_once_started, HolochainServiceInterface};
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
+use crate::js_core::languages_extension::try_with_isolate_state;
 
 /// Convert an rmpv::Value (full-fidelity msgpack) to serde_json::Value.
 /// Binary data is represented as a JSON object `{"__binary": [byte, byte, ...]}` so
@@ -379,12 +380,31 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
 /// cells even when they bundle the same DNA + network seed. See
 /// `HolochainServiceInterface::agent_key_for_language` for the resolution
 /// rules (stored mapping → adoption of an existing install → fresh key).
+///
+/// `language_address` is read from the isolate's own thread-local state, not
+/// a JS argument: every extension global is reachable from any language's
+/// code (see `languages::signing_reach_tests`), so a caller-supplied address
+/// would let one language pre-bind — and mint a lair key and a DB row for —
+/// another language's mapping before that language ever loads. `app_id` is
+/// still caller-supplied (the DNA nick is a per-call choice), but is checked
+/// against the real address below.
 #[op2(async(lazy), fast)]
 #[serde]
 async fn get_agent_key_for_language(
-    #[string] language_address: String,
     #[string] app_id: String,
 ) -> Result<HoloHash<Agent>, AnyhowWrapperError> {
+    let language_address = try_with_isolate_state(|state| state.language_address.clone())
+        .flatten()
+        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("languageAddress not set yet")))?;
+
+    if !app_id.starts_with(&format!("{}-", language_address)) {
+        return Err(AnyhowWrapperError::from(anyhow!(
+            "app id {} does not belong to language {}",
+            app_id,
+            language_address
+        )));
+    }
+
     let interface = holochain_service_once_started()
         .await
         .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;

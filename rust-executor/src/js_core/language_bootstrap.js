@@ -213,7 +213,7 @@ function createHolochainDelegate(languageAddress) {
                 }
             }
             const agentKey = keyAppId !== null
-                ? await HOLOCHAIN_SERVICE.getAgentKeyForLanguage(languageAddress, keyAppId)
+                ? await HOLOCHAIN_SERVICE.getAgentKeyForLanguage(keyAppId)
                 : null;
             for (const dna of dnas) {
                 const appId = `${languageAddress}-${dna.nick}`;
