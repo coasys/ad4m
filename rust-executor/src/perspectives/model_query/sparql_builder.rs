@@ -3300,7 +3300,7 @@ mod traverse_scope_tests {
             Some(3),
         ));
         let pg = make_pg(SortKey::Timestamp, OrderDirection::ASC);
-        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None) {
+        let sparql = match build_instance_sparql(&traverse_shape(), &q, Some(&pg), None, None) {
             InstanceQueryPlan::TwoPhase {
                 pagination_subquery,
                 ..
