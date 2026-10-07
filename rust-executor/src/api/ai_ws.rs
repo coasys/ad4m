@@ -19,13 +19,18 @@ use super::guards::refuse_user_session;
 use super::types::*;
 use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
-fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
+/// The credit check before a paid call. Takes the session's user as the
+/// connection resolved it (`RequestContext::user_email`) and does not look at
+/// the token: a token that expired after the connection opened still names
+/// the user it was issued to, and re-decoding it would let that user through
+/// unchecked (#1175). `None` is the node operator, who is not billed.
+fn check_compute_credits_ws(user_email: Option<&str>) -> Result<(), WsRpcError> {
     let global_free =
         Ad4mDb::with_global_instance(|db| db.get_free_hosting_enabled()).unwrap_or(true);
     if global_free {
         return Ok(());
     }
-    if let Some(ref email) = user_email_from_token(auth_token.to_string()) {
+    if let Some(email) = user_email {
         let free = Ad4mDb::with_global_instance(|db| db.get_user_free_access(email))
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
         if !free {
@@ -361,7 +366,7 @@ async fn remove_task(params: Value, ctx: Arc<RequestContext>) -> Result<Value, W
 async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: PromptRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -371,7 +376,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let result = service
-        .prompt(body.task_id, body.prompt, Some(ctx.auth_token.clone()))
+        .prompt(body.task_id, body.prompt, ctx.user_email.clone())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -381,7 +386,7 @@ async fn ai_prompt(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_PROMPT_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: EmbedRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -391,7 +396,7 @@ async fn ai_embed(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRp
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
     let embedding = service
-        .embed(body.model_id, body.text, Some(ctx.auth_token.clone()))
+        .embed(body.model_id, body.text, ctx.user_email.clone())
         .await
         .map_err(|e| WsRpcError::internal(e.to_string()))?;
 
@@ -411,7 +416,7 @@ async fn open_transcription_stream(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
-    check_compute_credits_ws(&ctx.auth_token)?;
+    check_compute_credits_ws(ctx.user_email.as_deref())?;
 
     let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
@@ -518,7 +523,8 @@ pub async fn feed_transcription_stream(
     let context = auth.to_request_context();
     check_capability(&context.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| ApiError::Forbidden(e))?;
-    check_compute_credits_ws(&context.auth_token).map_err(|e| ApiError::Forbidden(e.message))?;
+    check_compute_credits_ws(context.user_email.as_deref())
+        .map_err(|e| ApiError::Forbidden(e.message))?;
 
     let stream_ids_header = headers
         .get("x-stream-ids")
@@ -778,5 +784,74 @@ mod model_key_tests {
     fn operator_sessions_see_the_keys() {
         let model = model_for_session(remote_model(), &ctx(None));
         assert_eq!(model.api.as_ref().unwrap().api_key, "sk-provider-secret");
+    }
+}
+
+#[cfg(test)]
+mod credit_check_tests {
+    use super::*;
+    use crate::test_utils::{expired_user_token, setup_agent, setup_wallet, MultiUserMode};
+
+    /// A user session as the WS dispatcher builds it: the user was resolved from the
+    /// token when the connection opened, and the token has expired since.
+    fn session_with_expired_token(email: &str) -> Arc<RequestContext> {
+        let token = expired_user_token(email);
+        assert!(
+            user_email_from_token(token.clone()).is_none(),
+            "the premise of these tests is a token that no longer decodes"
+        );
+        Arc::new(RequestContext {
+            capabilities: Ok(vec![AI_PROMPT_CAPABILITY.clone()]),
+            auto_permit_cap_requests: false,
+            auth_token: token,
+            is_admin_credential: false,
+            user_email: Some(email.to_string()),
+            user_did: None,
+            cancel_token: None,
+        })
+    }
+
+    fn paid_user_with_credits(email: &str, credits: f64) {
+        Ad4mDb::with_global_instance(|db| {
+            db.set_free_hosting_enabled(false)?;
+            db.add_user(email, "did:key:test", "password")?;
+            db.set_user_credits(email, credits)
+        })
+        .unwrap();
+    }
+
+    // The credit check used to decode the token again and, when that failed, let the
+    // call through as if nobody was paying.
+    #[tokio::test]
+    async fn a_session_whose_token_expired_is_still_credit_checked() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = "broke@example.org";
+        paid_user_with_credits(email, 0.0);
+
+        let params = serde_json::json!({ "taskId": "task-1", "prompt": "hello" });
+        let err = ai_prompt(params, session_with_expired_token(email))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, 403, "got {}: {}", err.code, err.message);
+        assert!(err.message.contains("Insufficient compute credits"));
+    }
+
+    // The control: the same session with credits passes the check. The call then fails
+    // further on, at the AI service, which no test initialises.
+    #[tokio::test]
+    async fn a_session_with_credits_passes_the_check() {
+        setup_wallet();
+        setup_agent();
+        let _multi_user = MultiUserMode::on();
+        let email = "funded@example.org";
+        paid_user_with_credits(email, 10.0);
+
+        let params = serde_json::json!({ "taskId": "task-1", "prompt": "hello" });
+        let err = ai_prompt(params, session_with_expired_token(email))
+            .await
+            .unwrap_err();
+        assert_ne!(err.code, 403, "{}", err.message);
     }
 }

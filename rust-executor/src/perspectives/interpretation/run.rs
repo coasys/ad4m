@@ -1175,10 +1175,16 @@ pub async fn run_interpretation_with_harness_and_model(
     let service = crate::ai_service::AIService::global_instance()
         .await
         .map_err(|e| anyhow::anyhow!("run_interpretation_harness: AIService not ready: {e:#}"))?;
+    // The pass owner pays for its completions. The bridge takes the user, not
+    // the token: the billing hooks run after each model call, when a token
+    // may have expired (#1175), and `context` already carries the user the
+    // token was issued to. A pass without a token (the auto-processor) bills
+    // nobody, as before.
+    let billed_user = auth_token.as_ref().and(context.user_email.clone());
     let bridge = Arc::new(
         crate::api::openai_compat::harness_bridge::OpenAiCompatBridge::new(
             Arc::new(service),
-            auth_token,
+            billed_user,
         ),
     );
 

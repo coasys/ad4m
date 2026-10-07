@@ -1377,11 +1377,15 @@ impl AIService {
     /// Run a chat-style prompt on `model_id` with a stateless message
     /// list and return the full response text + token counts.  Backs
     /// `POST /v1/chat/completions`.
+    ///
+    /// `user_email` is the user the call is billed to, as the caller's
+    /// session resolved it; `None` bills nobody (the node operator, or an
+    /// internal caller). Same on every prompt/embed method below.
     pub async fn prompt_messages(
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        user_email: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<PromptResult> {
         let resolved = Self::replace_model_variables(&model_id)?;
@@ -1448,7 +1452,7 @@ impl AIService {
         // a no-op. InsufficientCredits is returned to the caller so /v1
         // can propagate 429; other errors are logged and swallowed.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            user_email.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1499,7 +1503,7 @@ impl AIService {
         model_id: String,
         turns: Vec<ChatTurn>,
         tools: Vec<ToolSpec>,
-        auth_token: Option<String>,
+        user_email: Option<String>,
     ) -> Result<ChatReply> {
         let resolved = Self::replace_model_variables(&model_id)?;
 
@@ -1542,7 +1546,7 @@ impl AIService {
         );
 
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            user_email.as_deref(),
             &resolved,
             prompt_tokens,
             completion_tokens,
@@ -1563,7 +1567,7 @@ impl AIService {
         &self,
         model_id: String,
         messages: Vec<(String, String)>,
-        auth_token: Option<String>,
+        user_email: Option<String>,
         constraint: Option<ArcParser<()>>,
     ) -> Result<(
         mpsc::UnboundedReceiver<String>,
@@ -1614,7 +1618,7 @@ impl AIService {
                 Ok(inner) => inner,
                 Err(_) => Err(anyhow!("LLM stream ended without a final result")),
             };
-            Self::bill_and_forward_stream_result(auth_token, &billing_model_id, result, done_tx)
+            Self::bill_and_forward_stream_result(user_email, &billing_model_id, result, done_tx)
                 .await;
         });
 
@@ -1649,7 +1653,7 @@ impl AIService {
         &self,
         task_id: String,
         prompt: String,
-        auth_token: Option<String>,
+        user_email: Option<String>,
     ) -> Result<PromptResult> {
         let (result_sender, rx) = oneshot::channel();
 
@@ -1734,7 +1738,7 @@ impl AIService {
 
         // Bill via the shared host_rates helper. See prompt_messages.
         Self::bill_prompt_if_authed(
-            auth_token.as_deref(),
+            user_email.as_deref(),
             &model_id,
             prompt_tokens,
             completion_tokens,
@@ -1756,14 +1760,14 @@ impl AIService {
     /// so the streaming billing behaviour is unit-testable without a live
     /// LLM channel.
     pub(crate) async fn bill_and_forward_stream_result(
-        auth_token: Option<String>,
+        user_email: Option<String>,
         model_id: &str,
         result: Result<PromptResult>,
         done_tx: oneshot::Sender<Result<PromptResult>>,
     ) {
         if let Ok(pr) = &result {
             Self::bill_prompt_if_authed(
-                auth_token.as_deref(),
+                user_email.as_deref(),
                 model_id,
                 pr.prompt_tokens,
                 pr.completion_tokens,
@@ -1778,43 +1782,36 @@ impl AIService {
     /// length estimate that estimate_token_count() computes (chars/4).
     /// This mirrors what the transcription worker does with word_count,
     /// so every AI billing path routes through the same shape.
+    ///
+    /// Takes the user, not the token. This hook runs after the model call,
+    /// and a token that expired during a long prompt no longer decodes; the
+    /// session resolved its user when it was authenticated, and that is who
+    /// pays (#1175).
     fn bill_prompt_if_authed(
-        auth_token: Option<&str>,
+        user_email: Option<&str>,
         model_id: &str,
         prompt_tokens: usize,
         completion_tokens: usize,
     ) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+        let Some(email) = user_email else {
             return;
         };
         let total_tokens = prompt_tokens.saturating_add(completion_tokens);
         // Ignore result: rate=0 no-ops, InsufficientCredits is logged
         // inside bill_ai_operation. Prompt has already run so we don't
         // want to fail the caller on a bookkeeping-only issue.
-        let _ = crate::billing::bill_ai_operation(
-            &email,
-            model_id,
-            "ai_prompt",
-            total_tokens,
-            "tokens",
-        );
+        let _ =
+            crate::billing::bill_ai_operation(email, model_id, "ai_prompt", total_tokens, "tokens");
     }
 
-    /// Shared post-compute billing hook for embed paths.
-    fn bill_embed_if_authed(auth_token: Option<&str>, model_id: &str, token_count: usize) {
-        let Some(token) = auth_token else {
-            return;
-        };
-        let Some(email) = crate::agent::capabilities::user_email_from_token(token.to_string())
-        else {
+    /// Shared post-compute billing hook for embed paths. Takes the user for
+    /// the same reason as [`Self::bill_prompt_if_authed`].
+    fn bill_embed_if_authed(user_email: Option<&str>, model_id: &str, token_count: usize) {
+        let Some(email) = user_email else {
             return;
         };
         let _ = crate::billing::bill_ai_operation(
-            &email,
+            email,
             model_id,
             "ai_embedding",
             token_count,
@@ -1880,7 +1877,7 @@ impl AIService {
         &self,
         model_id: String,
         text: String,
-        auth_token: Option<String>,
+        user_email: Option<String>,
     ) -> Result<EmbedResult> {
         let token_count = estimate_token_count(&text);
         let text_chars = text.chars().count();
@@ -1920,7 +1917,7 @@ impl AIService {
         );
 
         // Bill via the shared host_rates helper.
-        Self::bill_embed_if_authed(auth_token.as_deref(), &model_id, token_count);
+        Self::bill_embed_if_authed(user_email.as_deref(), &model_id, token_count);
 
         Ok(EmbedResult {
             embeddings,

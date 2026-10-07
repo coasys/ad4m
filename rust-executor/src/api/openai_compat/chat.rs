@@ -139,8 +139,8 @@ pub async fn completions(
         .map_err(OpenAIError::invalid_request)?;
     let messages = vec![("user".to_string(), prompt)];
 
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(email) = auth.user_email.as_deref() {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -148,7 +148,7 @@ pub async fn completions(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(model_id, messages, Some(auth.auth_token.clone()), None)
+        .prompt_messages(model_id, messages, auth.user_email.clone(), None)
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -184,8 +184,8 @@ async fn chat_oneshot(
     // NOTE: WS-RPC `ai.prompt` on dev does not bill today (only pre-checks).
     // /v1 billing is correct for the public API surface; the WS-RPC gap
     // should be aligned in a separate PR against dev.
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(email) = auth.user_email.as_deref() {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -193,12 +193,7 @@ async fn chat_oneshot(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let result = service
-        .prompt_messages(
-            model_id,
-            messages,
-            Some(auth.auth_token.clone()),
-            constraint,
-        )
+        .prompt_messages(model_id, messages, auth.user_email.clone(), constraint)
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -257,8 +252,8 @@ async fn chat_stream(
     constraint: Option<ArcParser<()>>,
     tools_active: bool,
 ) -> Result<axum::response::Response, OpenAIError> {
-    if let Some(email) = user_email(&auth) {
-        check_compute_credits(&email)
+    if let Some(email) = auth.user_email.as_deref() {
+        check_compute_credits(email)
             .map_err(|_| OpenAIError::insufficient_quota("Insufficient compute credits"))?;
     }
 
@@ -266,12 +261,7 @@ async fn chat_stream(
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
     let (token_rx, done_rx) = service
-        .prompt_messages_stream(
-            model_id,
-            messages,
-            Some(auth.auth_token.clone()),
-            constraint,
-        )
+        .prompt_messages_stream(model_id, messages, auth.user_email.clone(), constraint)
         .await
         .map_err(|e| OpenAIError::internal(e.to_string()))?;
 
@@ -536,10 +526,6 @@ pub(super) fn epoch_seconds() -> i64 {
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-pub(super) fn user_email(auth: &AuthContext) -> Option<String> {
-    crate::agent::capabilities::user_email_from_token(auth.auth_token.clone())
 }
 
 // Re-export a Stream alias for documentation purposes.
