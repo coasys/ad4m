@@ -178,7 +178,7 @@ to call a Holochain import without the delegate present.
 
 | Method | Signature | Description |
 |--------|-----------|-------------|
-| `registerDNAs(dnas, signalCallback)` | `(object[], any) => Promise<object[]>` | Installs Holochain DNAs and returns the resulting app info. `dnas` is an array of `{ path, nick }` objects (or `{ bundle, nick }` for inline bundles). `signalCallback` is currently unused (pass `undefined`). |
+| `registerDNAs(dnas, signalCallback)` | `(object[], any) => Promise<object[]>` | Installs Holochain DNAs and returns the resulting app info. `dnas` is an array of `{ path, nick }` objects (or `{ bundle, nick }` for inline bundles). Every DNA is installed under the calling language's own agent key, not the node's global key, so two languages bundling the same DNA and network seed get distinct cells instead of colliding on one; the key is resolved once per language (an app already installed under this language's own app id keeps that key, otherwise a fresh one is minted) and stays stable across restarts. `signalCallback` is currently unused (pass `undefined`). |
 | `call(dnaNick, zome, fnName, params)` | `(string, string, string, any) => Promise<any>` | Calls a Holochain zome function. Returns the deserialized result. |
 | `callAsync(calls, callback)` | `(object[], any) => Promise<any>` | Batch zome call. `calls` is an array of `{ dnaNick, zomeName, fnName, params }`. Returns array of results. |
 
