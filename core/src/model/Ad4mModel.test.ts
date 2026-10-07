@@ -3641,6 +3641,34 @@ describe("Ad4mModel named-graph placement", () => {
     expect(parentLinkIn(p)).toBe(LOCAL);
   });
 
+  it("keeps a graph-rooted child of a graph-rooted Local parent Local without parent.graph", async () => {
+    const p = perspective();
+    const aliceLocal = "ad4m://local/did:key:alice";
+    p.get.mockResolvedValue([
+      { data: { source: "c1", predicate: "test://name", target: "literal:string:mine" }, graph: aliceLocal },
+    ]);
+    await Channel.create(p, { name: "sub" }, {
+      batchId: "b",
+      parent: { model: Channel, id: "c1", field: "notes" },
+    });
+    expect(createdIn(p)).toBe(aliceLocal);
+    expect(parentLinkIn(p)).toBe(aliceLocal);
+  });
+
+  it("keeps a graph-rooted child of a shared parent in its own graph", async () => {
+    const p = perspective();
+    p.get.mockResolvedValue([
+      { data: { source: "c1", predicate: "test://name", target: "literal:string:ours" }, graph: "ad4m://graph/c1" },
+      { data: { source: "c1", predicate: "test://read", target: "test://marker" }, graph: "ad4m://local/did:key:alice" },
+    ]);
+    const sub = await Channel.create(p, { name: "sub" }, {
+      batchId: "b",
+      parent: { model: Channel, id: "c1", field: "notes" },
+    });
+    expect(createdIn(p)).toBe(`ad4m://graph/${sub.id}`);
+    expect(parentLinkIn(p)).toBe("ad4m://graph/c1");
+  });
+
   it("puts a private child and its parent link in the override graph, not the parent's", async () => {
     const p = perspective();
     await Note.create(p, { text: "hi" }, { batchId: "b", parent: { model: Channel, id: "c1" }, graph: LOCAL });
