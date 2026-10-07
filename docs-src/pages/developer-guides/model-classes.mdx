@@ -926,6 +926,8 @@ const comments = await Comment.query(perspective)
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
 
+A link that arrives from a Neighbourhood is checked before it is stored. If its signature does not verify against its `author`, the executor drops it, so no query returns it, not even with `includeUnverified`. A copy of a link this agent holds as Local is dropped too, and so is a removal of one. Once a link is stored with a signature that verifies, a later copy of it (same author, source, predicate, target and timestamp) does not replace its signature, key or signed target bytes, whichever way it arrives ([#1146](https://github.com/coasys/ad4m/issues/1146)).
+
 This includes a typed relation such as `@HasMany(() => Comment, { through: "recipe://comment" })`, whose generated conformance getter the executor filters too. A relation `where`, as in `@HasMany(() => Comment, { through: "recipe://comment", where: { status: "approved" } })`, reads each target's values through the same filter, so an unverified `status` link neither admits a comment nor drops one. A `getter` you write yourself is different: the executor runs it as written, so `includeUnverified` does not apply to it and it reads unverified links too. To skip them, join the link's verdict in the getter:
 
 ```typescript
@@ -959,7 +961,7 @@ Included relations inherit the setting unless their own sub-query sets `includeU
 
 With `includeUnverified: true`, selection reads unverified links as well, the same as hydration. The one exception is a hand-written `getter` (see above).
 
-> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners withhold it unless the query sets `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
+> **Links stored before [#1141](https://github.com/coasys/ad4m/pull/1141):** a link whose literal target was not encoded the way the SDK encodes it (a raw space as in `literal:string:Write the guide`, raw `literal:json:{"a":1}`, or `-_.~` escaped by `expression.create(_, "literal")`) and that was stored before #1141 reads back in the canonical encoding. The node that signed it still returns it, but the copy it publishes to a Neighbourhood does not verify, so joiners drop it when it arrives and do not return it even with `includeUnverified`. Literals written by the SDK (`Literal.from(v).toUrl()`) and links written after #1141 are not affected.
 
 ### Reading by Link Status
 
