@@ -3098,8 +3098,13 @@ mod tests {
         let signer = TestSigner::generate();
         let mut link = signed_link_without_verdict(&signer, "ad4m://derive-bad");
         // Same length, still valid hex, wrong bytes: this reaches the crypto
-        // and fails there, rather than erroring out of `hex::decode`.
-        link.proof.signature = link.proof.signature.replace('a', "b");
+        // and fails there, rather than erroring out of `hex::decode`. Flip
+        // the first byte with XOR: it always changes. A character replace
+        // such as 'a' -> 'b' is a no-op when the random signature happens
+        // to contain no 'a' (about 1 run in 3870).
+        let mut sig = hex::decode(&link.proof.signature).unwrap();
+        sig[0] ^= 0xff;
+        link.proof.signature = hex::encode(sig);
         svc.add_link(&link).unwrap();
 
         let links = svc.get_all_links().unwrap();

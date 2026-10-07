@@ -133,7 +133,8 @@ pub(super) async fn resolve_projections(
                  `where`; use its top-level `author` for the projected link's author"
             ));
         }
-        let where_patterns = build_projection_where_patterns(proj, resolver, guard);
+        let where_patterns =
+            build_projection_where_patterns(&with_where_target(proj, shape), resolver, guard);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
         let verified = projection_verified_pattern(
             proj.transitive,
@@ -395,6 +396,38 @@ pub(super) async fn resolve_projections(
     }
 
     Ok(())
+}
+
+/// The projection to read a `where` against: `proj` itself, or, when it names
+/// no target class, a copy naming the target `shape` declares for `from`.
+///
+/// The SDK leaves a projection under a polymorphic include untagged, because
+/// the members are of several classes. `hydrate_polymorphic` runs each class's
+/// members with that class's own shape, so `shape` here is the member's class
+/// and its relation names the right target. Without one, every property
+/// condition matched no predicate and was dropped: a count came back too high
+/// and said nothing.
+///
+/// Only the `where` reads it. A list projection without a target stays a list
+/// of IRIs rather than becoming hydrated records.
+fn with_where_target<'a>(
+    proj: &'a ProjectionInput,
+    shape: &ModelShape,
+) -> std::borrow::Cow<'a, ProjectionInput> {
+    if proj.target_class_name.is_some() || proj.where_clause.is_none() {
+        return std::borrow::Cow::Borrowed(proj);
+    }
+    match shape
+        .include_relations
+        .iter()
+        .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
+    {
+        Some(rel) => std::borrow::Cow::Owned(ProjectionInput {
+            target_class_name: Some(rel.target_class_name.clone()),
+            ..proj.clone()
+        }),
+        None => std::borrow::Cow::Borrowed(proj),
+    }
 }
 
 /// Build SPARQL where-clause patterns for a projection's `where` filter.
