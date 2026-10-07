@@ -68,7 +68,10 @@
 //! current state, not that their history is recorded. The cost is that a
 //! user's first pass over an instance another user of this replica already
 //! derived is silent too, and that the same DID minting on one replica
-//! counts as caught up on every other replica it runs on. See
+//! counts as caught up on every other replica it runs on. That includes a
+//! new executor the user restores their agent on: the synced `flowUri`
+//! link counts there too, so the first pass on it reports the instance's
+//! settled history as new instead of catching up silently. See
 //! `first_pass_here` in [`run_flow_consensus_pass`].
 //!
 //! **A known gap**, in what is reported (outcomes go to logs and to

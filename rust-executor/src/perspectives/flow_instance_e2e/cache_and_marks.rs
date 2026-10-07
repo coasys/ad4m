@@ -567,7 +567,7 @@ async fn a_co_owners_planted_cache_does_not_switch_off_the_catch_up() {
 /// must still report that edge, because Mallory's mark records what she
 /// derived, not what the main agent has seen.
 ///
-/// Ignored: this is the first known gap in the `pass` module doc. The pass
+/// Ignored: this is the known gap in the `pass` module doc. The pass
 /// counts any user's Local mark, so today `for_main` is `[]`. The fix
 /// (count only the acting user's own marks) changes what a user's
 /// propose/accept `outcomes` contain, and is open in #1152.
@@ -780,6 +780,13 @@ async fn a_minters_first_settle_is_reported_without_a_catch_up() {
     let bob = TestSigner::generate();
     let seal = seal_for(&f, "scoped").await;
     let bobs = sync_proposal_from(&mut f, &bob, "bob-1", "identified", "scoped", &seal).await;
+    assert!(
+        !links_of(&f, &f.instance_uri)
+            .await
+            .iter()
+            .any(|l| l.data.predicate.as_deref() == Some(CAUGHT_UP_PREDICATE)),
+        "the minter's flowUri link says they have caught up, so no pass ran a catch-up"
+    );
 
     let outcomes = consensus_pass(&mut f).await;
     assert_eq!(
