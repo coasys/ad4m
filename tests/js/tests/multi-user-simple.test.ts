@@ -589,7 +589,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user1
             for (const link of links1) {
-                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.predicate} should be authored by user1`);
+                expect(link.author).to.equal(user1Me.did, `Link with predicate ${link.data.predicate} should be authored by user1`);
                 expect(link.proof.valid).to.be.true;
             }
 
@@ -610,7 +610,7 @@ describe("Multi-User Simple integration tests", () => {
             
             // Verify all links are authored by user2
             for (const link of links2) {
-                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.predicate} should be authored by user2`);
+                expect(link.author).to.equal(user2Me.did, `Link with predicate ${link.data.predicate} should be authored by user2`);
                 expect(link.proof.valid).to.be.true;
             }
 
@@ -1793,7 +1793,7 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal listener for User 2
             const user2ReceivedSignals: any[] = [];
-            const user2SignalSubscription = user2Neighbourhood!.addSignalHandler((signal: any) => {
+            await user2Neighbourhood!.addSignalHandler((signal: any) => {
                 //console.log("User 2 received signal:", signal);
                 user2ReceivedSignals.push(signal);
             });
@@ -1806,16 +1806,14 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal listener for User 1 to verify they DON'T receive User 2's signals
             const user1ReceivedSignals: any[] = [];
-            const user1SignalSubscription = user1Neighbourhood!.addSignalHandler((signal) => {
+            await user1Neighbourhood!.addSignalHandler((signal) => {
                 //console.log("User 1 received signal:", signal);
                 user1ReceivedSignals.push(signal);
             });
 
+            // addSignalHandler resolves once the executor applied the watch, so no
+            // signal sent from here on is missed.
             console.log("User 1 signal listener set up");
-
-            // Subscription-init delay: addSignalHandler() does not wait for the
-            // server to register the subscription, and signals are not redelivered.
-            await sleep(500);
 
             // User 1 sends a signal to User 2
             const testSignalPayload = new PerspectiveUnsignedInput([
@@ -1978,21 +1976,17 @@ describe("Multi-User Simple integration tests", () => {
             const user1ReceivedSignals: any[] = [];
             const user2ReceivedSignals: any[] = [];
 
-            const user1SignalHandler = user1Neighbourhood!.addSignalHandler((signal) => {
+            await user1Neighbourhood!.addSignalHandler((signal) => {
                 console.log("✉️ User 1 received signal:", JSON.stringify(signal, null, 2));
                 user1ReceivedSignals.push(signal);
             });
 
-            const user2SignalHandler = user2Neighbourhood!.addSignalHandler((signal) => {
+            await user2Neighbourhood!.addSignalHandler((signal) => {
                 console.log("✉️ User 2 received signal:", JSON.stringify(signal, null, 2));
                 user2ReceivedSignals.push(signal);
             });
 
             console.log("Signal handlers set up for both users");
-
-            // Subscription-init delay: addSignalHandler() does not wait for the
-            // server to register the subscription, and signals are not redelivered.
-            await sleep(1000);
 
             // Check if users can see each other in otherAgents
             console.log("\n=== Checking otherAgents() ===");
@@ -2123,18 +2117,14 @@ describe("Multi-User Simple integration tests", () => {
             const mainAgentReceivedSignals: any[] = [];
             const userReceivedSignals: any[] = [];
 
-            mainAgentNH!.addSignalHandler((signal: any) => {
+            await mainAgentNH!.addSignalHandler((signal: any) => {
                 console.log("✉️ Main agent received signal:", JSON.stringify(signal));
                 mainAgentReceivedSignals.push(signal);
             });
-            userNH!.addSignalHandler((signal: any) => {
+            await userNH!.addSignalHandler((signal: any) => {
                 console.log("✉️ Managed user received signal:", JSON.stringify(signal));
                 userReceivedSignals.push(signal);
             });
-
-            // Subscription-init delay: addSignalHandler() does not wait for the
-            // server to register the subscription, and signals are not redelivered.
-            await sleep(1000);
 
             // --- Test 1: main agent sends signal to managed user ---
             console.log("\n--- Main agent sending signal to managed user ---");
@@ -2464,20 +2454,23 @@ describe("Multi-User Simple integration tests", () => {
 
             // Set up signal handlers
             const node2User1ReceivedSignals: any[] = [];
-            node2User1Proxy!.addSignalHandler((signal) => {
+            await node2User1Proxy!.addSignalHandler((signal) => {
                 console.log("Node 2 User 1 received signal from:", signal.author);
                 node2User1ReceivedSignals.push(signal);
             });
 
             const node2User2ReceivedSignals: any[] = [];
-            node2User2Proxy!.addSignalHandler((signal) => {
+            await node2User2Proxy!.addSignalHandler((signal) => {
                 console.log("Node 2 User 2 received signal from:", signal.author);
                 node2User2ReceivedSignals.push(signal);
             });
 
-            // Subscription-init delay: signal handlers register asynchronously
-            // and the DHT needs time to propagate AgentPubKeys across peers.
-            await sleep(3000);
+            // The handlers are registered (addSignalHandler waited for the executor).
+            // The cross-node signal below also needs node 1 to know node 2's user.
+            await pollUntil(
+                async () => (await node1User1Proxy!.otherAgents()).includes(node2User1Did),
+                { timeoutMs: 30000, intervalMs: 500, label: "node 1 sees node 2 user 1" },
+            );
 
             // Node 2 User 1 sends a signal to Node 2 User 2 (both on same node - local routing)
             console.log(`\nNode 2 User 1 (${node2User1Did.substring(0, 20)}...) sending signal to Node 2 User 2 (${node2User2Did.substring(0, 20)}...)`);
@@ -2767,12 +2760,12 @@ describe("Multi-User Simple integration tests", () => {
             // Subscribe both users to perspectiveAdded
             console.log("Subscribing users to perspectiveAdded...");
             
-            client1.perspective.addPerspectiveAddedListener((perspective) => {
+            client1.on('perspective-added', ({ perspective }) => {
                 console.log(`User 1 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1Events.push(perspective);
             });
 
-            client2.perspective.addPerspectiveAddedListener((perspective) => {
+            client2.on('perspective-added', ({ perspective }) => {
                 console.log(`User 2 received perspectiveAdded event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2Events.push(perspective);
             });
@@ -2834,12 +2827,12 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspectiveUpdated
             console.log("Subscribing users to perspectiveUpdated...");
-            client1.perspective.addPerspectiveUpdatedListener((perspective) => {
+            client1.on('perspective-updated', ({ perspective }) => {
                 console.log(`User 1 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user1UpdateEvents.push(perspective);
             });
 
-            client2.perspective.addPerspectiveUpdatedListener((perspective) => {
+            client2.on('perspective-updated', ({ perspective }) => {
                 console.log(`User 2 received perspectiveUpdated event: ${perspective.name} (UUID: ${perspective.uuid})`);
                 user2UpdateEvents.push(perspective);
             });
@@ -2903,15 +2896,15 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspective_link_added for each user's perspective
             console.log("Subscribing users to perspective_link_added...");
-            client1.perspective.addPerspectiveLinkAddedListener(user1Perspective.uuid, [(link) => {
+            client1.on('link-added', ({ link }) => {
                 console.log(`User 1 received link added event in perspective ${user1Perspective.uuid}`);
                 user1LinkEvents.push(link);
-            }]);
+            }, { perspective: user1Perspective.uuid });
 
-            client2.perspective.addPerspectiveLinkAddedListener(user2Perspective.uuid, [(link) => {
+            client2.on('link-added', ({ link }) => {
                 console.log(`User 2 received link added event in perspective ${user2Perspective.uuid}`);
                 user2LinkEvents.push(link);
-            }]);
+            }, { perspective: user2Perspective.uuid });
 
             // Subscription-init delay (see comment above this describe)
             await sleep(1000);
@@ -2999,12 +2992,12 @@ describe("Multi-User Simple integration tests", () => {
 
             // Subscribe to perspectiveRemoved
             console.log("Subscribing users to perspectiveRemoved...");
-            client1.perspective.addPerspectiveRemovedListener((uuid) => {
+            client1.on('perspective-removed', ({ perspectiveUuid: uuid }) => {
                 console.log(`User 1 received perspectiveRemoved event: ${uuid}`);
                 user1RemoveEvents.push(uuid);
             });
 
-            client2.perspective.addPerspectiveRemovedListener((uuid) => {
+            client2.on('perspective-removed', ({ perspectiveUuid: uuid }) => {
                 console.log(`User 2 received perspectiveRemoved event: ${uuid}`);
                 user2RemoveEvents.push(uuid);
             });
