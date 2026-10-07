@@ -439,8 +439,12 @@ mod tests {
 
         // Equality, not only inclusion: a key the types no longer serialise
         // (a stale name left behind by a rename) must leave its list too.
+        // A level that does not serialise (`Null` after a rename) reads as no
+        // keys, so the assertion below names the stale key instead of a panic.
         let keys = |v: &Value| -> BTreeSet<String> {
-            v.as_object().expect("object").keys().cloned().collect()
+            v.as_object()
+                .map(|o| o.keys().cloned().collect())
+                .unwrap_or_default()
         };
         let list = |l: &[&str]| -> BTreeSet<String> { l.iter().map(|k| k.to_string()).collect() };
         let from_role = &wire["fromRole"];
