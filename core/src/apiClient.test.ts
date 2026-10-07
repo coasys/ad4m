@@ -48,7 +48,7 @@ const socket = (i: number) => TestSocket.instances[i]
 const flush = () => new Promise((r) => setTimeout(r, 0))
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 /** Starts a connection the way an event subscriber does. */
-const open = () => { client.subscribe(() => {}) }
+const open = () => { client.on('agent-updated', () => {}) }
 
 let client: ApiClient
 beforeEach(() => {
@@ -59,9 +59,12 @@ beforeEach(() => {
 })
 afterEach(() => client.closeAll())
 
+/** Transport tests send arbitrary method names, outside the typed table. */
+type UntypedCall = (type: string, params?: unknown, options?: object) => Promise<unknown>
+
 /** A call whose rejection counts as handled until the test awaits it. */
 function call<T = unknown>(type: string, params?: Record<string, unknown>, options?: object): Promise<T> {
-    const promise = client.call<T>(type, params, options)
+    const promise = (client.call as UntypedCall)(type, params ?? {}, options) as Promise<T>
     promise.catch(() => {})
     return promise
 }
@@ -102,8 +105,8 @@ describe('ApiClient calls', () => {
     })
 
     it('drops a late reply to an aborted call and the cancel ack', async () => {
-        const events: AnyMsg[] = []
-        client.subscribe((m) => events.push(m as AnyMsg))
+        const events: unknown[] = []
+        client.on('agent-updated', (e) => { events.push(e) })
         const controller = new AbortController()
         const promise = call('perspective.querySparql', { uuid: 'u' }, { signal: controller.signal })
         await flush()
@@ -232,7 +235,7 @@ describe('ApiClient connect-phase failures', () => {
     })
 
     it('redials for subscribers when a stuck connect is dropped', async () => {
-        client.subscribe(() => {})
+        open()
         await expect(call('agent.get', {}, { timeoutMs: 20 })).rejects.toMatchObject({ status: 408 })
         expect(socket(0).readyState).toBe(3)
         expect(TestSocket.instances).toHaveLength(2)
@@ -250,7 +253,7 @@ describe('ApiClient connect-phase failures', () => {
 
     it('keeps the socket for a call still connecting when the last subscriber leaves', async () => {
         TestSocket.asyncClose = true
-        const unsubscribe = client.subscribe(() => {})
+        const unsubscribe = client.on('agent-updated', () => {})
         const promise = call<number>('agent.get', {}, { timeoutMs: 1_000 })
         unsubscribe()
         socket(0).open()
@@ -387,38 +390,266 @@ describe('long calls', () => {
     })
 })
 
-describe('ApiClient event dispatch', () => {
-    it('keeps delivering an event to later subscribers when one subscriber throws', async () => {
-        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
-        const received: string[] = []
-        client.subscribe(() => { received.push('first') })
-        client.subscribe(() => { throw new Error('boom') })
-        client.subscribe(() => { received.push('third') })
+/** A `link-added` event exactly as the executor sends it. */
+function linkAdded(perspectiveUuid: string, target = 'literal://x') {
+    return {
+        type: 'link-added',
+        perspectiveUuid,
+        owner: 'did:test:owner',
+        link: {
+            author: 'did:test:alice',
+            timestamp: '2026-01-01T00:00:00Z',
+            data: { source: 'ad4m://self', predicate: 'ad4m://has', target },
+            proof: { key: 'key', signature: 'sig', valid: true, invalid: false },
+            status: 'SHARED',
+        },
+    }
+}
+
+/** An `agent-updated` event exactly as the executor sends it. */
+const agentUpdated = { type: 'agent-updated', agent: { did: 'did:test:alice', directMessageLanguage: null, perspective: null } }
+
+describe('ApiClient.on', () => {
+    it('delivers an event, as sent, to the handlers of its type only', async () => {
+        const added: unknown[] = []
+        const updated: unknown[] = []
+        client.on('link-added', (e) => { added.push(e) })
+        client.on('agent-updated', (e) => { updated.push(e) })
         await flush()
 
-        socket(0).reply({ type: 'perspective-added', perspective: { uuid: 'u' } })
+        socket(0).reply(linkAdded('p1'))
+
+        expect(added).toEqual([linkAdded('p1')])
+        expect(updated).toEqual([])
+    })
+
+    it('delivers a scoped event only to handlers of its perspective or of every perspective', async () => {
+        const p1: string[] = []
+        const p2: string[] = []
+        const all: string[] = []
+        client.on('link-added', (e) => { p1.push(e.link.data.target) }, { perspective: 'p1' })
+        client.on('link-added', (e) => { p2.push(e.link.data.target) }, { perspective: 'p2' })
+        client.on('link-added', (e) => { all.push(e.link.data.target) })
+        await flush()
+
+        socket(0).reply(linkAdded('p1', 'literal://a'))
+        socket(0).reply(linkAdded('p2', 'literal://b'))
+
+        expect(p1).toEqual(['literal://a'])
+        expect(p2).toEqual(['literal://b'])
+        expect(all).toEqual(['literal://a', 'literal://b'])
+    })
+
+    it('stops delivery once unsubscribed and keeps the other handlers', async () => {
+        const first = jest.fn()
+        const second = jest.fn()
+        const off = client.on('link-added', first)
+        client.on('link-added', second)
+        await flush()
+
+        off()
+        socket(0).reply(linkAdded('p1'))
+
+        expect(first).not.toHaveBeenCalled()
+        expect(second).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips a handler removed during dispatch and delivers to one added during dispatch from the next event', async () => {
+        const received: string[] = []
+        let offSecond = () => {}
+        client.on('link-added', () => {
+            received.push('first')
+            offSecond()
+            client.on('link-added', () => { received.push('added') })
+        })
+        offSecond = client.on('link-added', () => { received.push('second') })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first'])
+
+        socket(0).reply(linkAdded('p1'))
+        expect(received).toEqual(['first', 'first', 'added'])
+    })
+
+    it('removes a type from watchedEvents() with its last unsubscribe', () => {
+        const offAll = client.on('link-added', () => {})
+        const offP1 = client.on('link-added', () => {}, { perspective: 'p1' })
+        const offP2 = client.on('link-added', () => {}, { perspective: 'p2' })
+        client.on('agent-updated', () => {})
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': null })
+
+        offAll()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': ['p1', 'p2'] })
+        offP1()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null, 'link-added': ['p2'] })
+        offP2()
+        expect(client.watchedEvents()).toEqual({ 'agent-updated': null })
+    })
+
+    it('sends the executor the watched events on open', async () => {
+        TestSocket.autoOpen = false
+        client.on('link-added', () => {}, { perspective: 'p1' })
+        client.on('agent-updated', () => {})
+        await flush()
+        socket(0).open()
+
+        expect(socket(0).sent).toEqual([
+            expect.objectContaining({ type: 'events.watch', params: { 'agent-updated': null, 'link-added': ['p1'] } }),
+        ])
+    })
+
+    it('clears the watch when the last handler goes while a call keeps the socket open', async () => {
+        TestSocket.autoOpen = false
+        const off = client.on('link-added', () => {})
+        await flush()
+        socket(0).open()
+        const pending = call('agent.get', {})
+        off()
+        await flush()
+
+        const watches = socket(0).sent.filter(m => m.type === 'events.watch').map(m => m.params)
+        expect(watches).toEqual([{ 'link-added': null }, {}])
+        expect(socket(0).readyState).toBe(1)
+        socket(0).reply({ id: socket(0).sent.find(m => m.type === 'agent.get')!.id, result: null })
+        await pending
+    })
+
+    it('ignores a second registration of the same handler for the same type and perspective', async () => {
+        const handler = jest.fn()
+        const off = client.on('link-added', handler, { perspective: 'p1' })
+        const offAgain = client.on('link-added', handler, { perspective: 'p1' })
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
+
+        // Both returned functions release the one registration.
+        offAgain()
+        expect(client.watchedEvents()).toEqual({})
+        off()
+        socket(0).reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
+    })
+
+    it('treats one handler under two perspectives as two registrations', async () => {
+        const handler = jest.fn()
+        client.on('link-added', handler, { perspective: 'p1' })
+        const offP2 = client.on('link-added', handler, { perspective: 'p2' })
+        await flush()
+
+        offP2()
+        socket(0).reply(linkAdded('p1'))
+        socket(0).reply(linkAdded('p2'))
+        expect(handler).toHaveBeenCalledTimes(1)
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+    })
+
+    it('keeps delivering an event to later handlers when one handler throws', async () => {
+        const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
+        const received: string[] = []
+        client.on('agent-updated', () => { received.push('first') })
+        client.on('agent-updated', () => { throw new Error('boom') })
+        client.on('agent-updated', () => { received.push('third') })
+        await flush()
+
+        socket(0).reply(agentUpdated)
 
         expect(received).toEqual(['first', 'third'])
-        expect(errorSpy).toHaveBeenCalledWith('Error in WebSocket event callback:', expect.objectContaining({ message: 'boom' }))
+        expect(errorSpy).toHaveBeenCalledWith("Error in 'agent-updated' handler:", expect.objectContaining({ message: 'boom' }))
         errorSpy.mockRestore()
     })
 
-    it('logs a rejection from an async subscriber instead of leaving it unhandled', async () => {
+    it('logs a rejection from an async handler instead of leaving it unhandled', async () => {
         const errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {})
         const unhandled = jest.fn()
         process.on('unhandledRejection', unhandled)
         const received: string[] = []
-        client.subscribe(async () => { throw new Error('async boom') })
-        client.subscribe(() => { received.push('second') })
+        client.on('agent-updated', async () => { throw new Error('async boom') })
+        client.on('agent-updated', () => { received.push('second') })
         await flush()
 
-        socket(0).reply({ type: 'perspective-added', perspective: { uuid: 'u' } })
+        socket(0).reply(agentUpdated)
         await flush()
 
         expect(received).toEqual(['second'])
-        expect(errorSpy).toHaveBeenCalledWith('Error in WebSocket event callback:', expect.objectContaining({ message: 'async boom' }))
+        expect(errorSpy).toHaveBeenCalledWith("Error in 'agent-updated' handler:", expect.objectContaining({ message: 'async boom' }))
         expect(unhandled).not.toHaveBeenCalled()
         process.off('unhandledRejection', unhandled)
         errorSpy.mockRestore()
+    })
+
+    it('opens no socket until the first handler, and closes it after the last unsubscribe', () => {
+        expect(TestSocket.instances).toHaveLength(0)
+        const off = client.on('agent-updated', () => {})
+        expect(TestSocket.instances).toHaveLength(1)
+
+        off()
+        expect(socket(0).readyState).toBe(3)
+    })
+})
+
+describe('PerspectiveProxy.on', () => {
+    const proxyFor = (uuid: string) => new PerspectiveProxy(
+        new PerspectiveHandle(uuid, uuid),
+        new PerspectiveClient(url, undefined, client),
+    )
+
+    it("delivers only the proxy's perspective's events", async () => {
+        const received: string[] = []
+        proxyFor('p1').on('link-added', ({ link }) => { received.push(link.data.target) })
+        await flush()
+
+        socket(0).reply(linkAdded('p2', 'literal://other'))
+        socket(0).reply(linkAdded('p1', 'literal://mine'))
+
+        expect(received).toEqual(['literal://mine'])
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+    })
+
+    it('releases every handler it registered on dispose() and leaves other proxies\' handlers', async () => {
+        const mine = jest.fn()
+        const other = jest.fn()
+        const proxy = proxyFor('p1')
+        const sibling = proxyFor('p1')
+        proxy.on('link-added', mine)
+        proxy.on('link-removed', mine)
+        proxy.on('sync-state-change', mine)
+        sibling.on('link-added', other)
+        await flush()
+
+        proxy.dispose()
+        expect(client.watchedEvents()).toEqual({ 'link-added': ['p1'] })
+
+        socket(0).reply(linkAdded('p1'))
+        expect(mine).not.toHaveBeenCalled()
+        expect(other).toHaveBeenCalledTimes(1)
+    })
+
+    it("a proxy's dispose() leaves another proxy's registration of the same function", async () => {
+        const shared = jest.fn()
+        const proxy = proxyFor('p1')
+        const sibling = proxyFor('p1')
+        proxy.on('link-added', shared)
+        sibling.on('link-added', shared)
+        await flush()
+
+        proxy.dispose()
+        socket(0).reply(linkAdded('p1'))
+        expect(shared).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not release a handler twice when its function runs before dispose()', async () => {
+        const proxy = proxyFor('p1')
+        const handler = jest.fn()
+        const off = proxy.on('link-added', handler)
+        off()
+        // The client now holds a new registration of the same handler; dispose() must not drop it.
+        client.on('link-added', handler, { perspective: 'p1' })
+        proxy.dispose()
+        await flush()
+
+        socket(0).reply(linkAdded('p1'))
+        expect(handler).toHaveBeenCalledTimes(1)
     })
 })

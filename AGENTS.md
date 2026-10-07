@@ -11,13 +11,13 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `rust-executor/` | The AD4M runtime: WS RPC server, perspectives/graph store, languages runtime (Deno), Holochain conductor, AI service, MCP server. **Start at `rust-executor/AGENTS.md`.** | Rust |
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
-| `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC types | TS |
+| `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
 | `ad4m-ldk/` | ALDK = AD4M Language Development Kit (Rust + JS crates for writing Languages) | Rust/TS |
 | `ad4m-hooks/`, `hooks/` | React/Vue hooks for the SDK | TS |
 | `ui/` | Launcher UI (Tauri) | TS/Rust |
-| `dapp/` | Web dapp bundled into the executor (`dapp_server.rs`) | TS |
+| `dapp/` | Web dapp bundled into the executor (`dapp_server.rs`). Builds against the **published** `@coasys/ad4m` from npm, not `core/`: SDK changes reach it only after a release | TS |
 | `tests/js/` | Integration test suites run against a built `ad4m-executor` binary | TS |
 | `test-runner/` | Language test harness | TS |
 | `docs-src/` | Docs site sources + language interface specs (`language-interface-spec.md`, `host-contract.md`) | MD |
@@ -35,10 +35,34 @@ it in older docs.
   and extension `.js` files) must be pure ASCII: non-ASCII fails const-eval in
   `ascii_str_include!`.
 - Commit messages: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`).
+- **Do not edit `CHANGELOG` in a PR.** The changelog is written once, at release
+  time, from the merged PRs. Every PR that edits it conflicts with the next one
+  that does. Resolving that conflict is a push, and a push dismisses the PR's
+  approvals, so it costs a full CI run and a new review for a one-line text clash.
+  Put the release note in the PR description instead, under a `### Changelog`
+  heading: what changes for users, apps or operators, and **Breaking:** first
+  when it is. Internal-only PRs (tests, CI, refactors with no visible change)
+  write "none". If a branch already carries a `CHANGELOG` entry, leave it; do not
+  push only to remove it.
 - Design docs go to `planning/<topic>-<yyyy-mm-dd>.md`; delete stale ones rather
   than leaving them beside current ones.
 - Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
   contains only `@AGENTS.md`.
+- **RPC contracts are generated.** Every executor method registers
+  `map.method::<Params, Result>(name, handler)` (`.read()` for idempotent reads,
+  `.long()` for calls that run for minutes); dispatch rejects params outside the
+  contract. `core`'s `ApiClient.call` takes its types from
+  `core/src/generated/api/RpcMethods.ts`. After changing a method or a type it
+  reaches, regenerate: `cd core && pnpm run generate:api-types`. A unit test fails
+  when the committed files are stale.
+- **Events are typed and opt-in.** Every pushed event has a name in
+  `events_ws::events` and a payload type in `event_specs()` (generates
+  `Events.ts`); SDK code listens with `ApiClient.on(name, handler)`. A socket
+  gets no event until it sends `events.watch` naming it, so a raw-WebSocket test
+  client must send the watch and wait for its reply before it triggers the
+  event (see `tests/js/helpers/sfu/events.ts`).
+- `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
+  undefined); run them under Node 24.
 
 ## Holochain DHT and GetStrategy
 

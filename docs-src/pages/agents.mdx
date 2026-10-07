@@ -72,10 +72,10 @@ Agents can communicate directly with each other through AD4M's messaging system.
 // Send a message to another agent
 await ad4m.runtime.sendMessage(recipientDID, "Hello!");
 
-// Listen for incoming messages
-ad4m.runtime.addMessageCallback((message) => {
-  console.log("Message from:", message.from);
-  console.log("Content:", message.content);
+// Listen for incoming messages (call the returned function to stop)
+const stop = ad4m.on("message-received", ({ message }) => {
+  console.log("Message from:", message.author);
+  console.log("Content:", message.data);
 });
 ```
 

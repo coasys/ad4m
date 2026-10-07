@@ -104,7 +104,7 @@ impl Ad4mMcpHandler {
 
     /// Request a capability token (local connect flow - step 1)
     #[tool(
-        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) for callers that are already authenticated; otherwise the executor admin must approve the request and provide the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
+        description = "Request a capability token (step 1/2 of local auth flow). This is the primary way to authenticate with a local/single-user AD4M executor. Returns request_id and code — pass both to generate_jwt to get a JWT token. On an executor started with --admin-credential, the request is only auto-permitted (code returned inline) when the caller's session holds the PERMIT capability: the admin credential, or a token with full rights. Any other caller, a multi-user user token included, gets only the request_id; the executor admin approves the request and provides the code out-of-band. For multi-user executors, use login_email or signup instead. Note: when using the ad4m-executor CLI, the verification code is logged to stdout."
     )]
     pub async fn request_capability(
         &self,
@@ -112,37 +112,52 @@ impl Ad4mMcpHandler {
         context: rmcp::service::RequestContext<rmcp::RoleServer>,
     ) -> String {
         // `request_capability` is in AUTH_TOOLS, so `call_tool` never rejects it —
-        // it must stay reachable to *create* a request. Whether the request is
-        // auto-permitted is decided here, by the same check every gated tool uses.
-        let caller_authenticated = self.check_auth("request_capability", &context).await;
-        self.handle_capability_request(params.0, caller_authenticated)
+        // it must stay reachable to *create* a request.
+        self.request_capability_with_header(super::bearer_credential(&context), params.0)
+            .await
+    }
+
+    /// Context-free body of [`Self::request_capability`], split out for the same reason as
+    /// `check_auth_with_header`: tests cannot build an rmcp `RequestContext`. Creating the
+    /// request needs only that the tool stay reachable; auto-permitting it (the inline code
+    /// that generate_jwt mints into an ALL_CAPABILITY token) needs the PERMIT capability,
+    /// which a multi-user user token does not hold. A valid header credential joins the
+    /// session first, as `call_tool` does for the other auth tools.
+    pub(crate) async fn request_capability_with_header(
+        &self,
+        header_token: Option<String>,
+        params: RequestCapabilityParams,
+    ) -> String {
+        self.adopt_credential(header_token).await;
+        let caller_can_permit = self.caller_can_permit().await;
+        self.handle_capability_request(params, caller_can_permit)
             .await
     }
 
     /// Body of [`Self::request_capability`], split from the transport wrapper so
-    /// tests can drive both authentication verdicts: a `RequestContext<RoleServer>`
+    /// tests can drive both permit verdicts: a `RequestContext<RoleServer>`
     /// cannot be fabricated outside rmcp (its `Peer` constructor is `pub(crate)`,
-    /// see `harness_bridge.rs`), so the wrapper stays a shim around `check_auth`
-    /// and everything decidable lives here.
+    /// see `harness_bridge.rs`), so the wrapper only adopts the header credential
+    /// and asks whether the session may permit; everything decidable lives here.
     ///
     /// The request itself is always created — that publishes the capability-request
     /// exception the ADAM Launcher listens for, which is the legitimate pairing
-    /// flow. What an unauthenticated caller must NOT get is the auto-permit and the
+    /// flow. What a caller whose session lacks PERMIT must NOT get is the auto-permit and the
     /// inline code: the code is the mint secret (`generate_jwt` exchanges it for a
     /// signed ALL_CAPABILITY JWT valid on every executor surface), and returning it
     /// to any caller that could reach the MCP port made `--admin-credential`
     /// decorative (issue #851, sub-problem 3).
     ///
     /// Scope: this gate protects executors that SET an admin credential.
-    /// Without one, `check_auth` reports every caller as authenticated — it
-    /// has no peer-address check, and the MCP server binds 0.0.0.0 by
-    /// default — so on a credential-less executor the mint stays reachable
-    /// from the LAN. Making no-credential mode genuinely loopback-only is
-    /// #1033.
+    /// Without one, the empty token holds ALL_CAPABILITY, PERMIT included, so
+    /// any caller that reaches the MCP port still gets the inline code. On a
+    /// multi-user node that includes a user who drops their token or opens a
+    /// new session (#1059). The MCP server binds 0.0.0.0 by default; making
+    /// no-credential mode loopback-only is #1033.
     pub(crate) async fn handle_capability_request(
         &self,
         p: RequestCapabilityParams,
-        caller_authenticated: bool,
+        caller_can_permit: bool,
     ) -> String {
         let auth_info = AuthInfo {
             app_name: p.app_name.clone(),
@@ -156,14 +171,14 @@ impl Ad4mMcpHandler {
 
         let request_id = cap_request_capability(auth_info.clone()).await;
 
-        if !caller_authenticated {
+        if !caller_can_permit {
             return json!({
                 "request_id": request_id,
-                "message": "Capability request created but NOT auto-permitted: this session is \
-                    not authenticated. The executor admin must approve the request (ADAM \
+                "message": "Capability request created but NOT auto-permitted: this session may \
+                    not grant capabilities. The executor admin must approve the request (ADAM \
                     Launcher), then call generate_jwt with this request_id and the code shown \
-                    to the admin. To auto-permit instead, authenticate first — send the admin \
-                    credential or an existing JWT in the Authorization header."
+                    to the admin. Only the admin credential, or a token that holds the PERMIT \
+                    capability, auto-permits; a user token never does."
             })
             .to_string();
         }
@@ -527,14 +542,12 @@ mod capability_mint_tests {
     }
 
     /// The no-credential convenience must survive the gate: on an executor
-    /// started WITHOUT --admin-credential, `check_auth` reports a bare
-    /// caller (no session token, no Authorization header) as authenticated,
-    /// so the auto-permit and inline code behave exactly as before this fix.
-    /// Note that this is NOT localhost-scoped: `check_auth` has no
-    /// peer-address check, so with the default 0.0.0.0 bind any LAN caller
-    /// gets the same treatment — see #1033. Composes the same two halves the
-    /// transport wrapper does: verdict from `check_auth_with_header`, then
-    /// the request body.
+    /// started WITHOUT --admin-credential, the empty token holds ALL_CAPABILITY,
+    /// so a bare caller (no session token, no Authorization header) still gets
+    /// the auto-permit and the inline code. Note that this is NOT
+    /// localhost-scoped: with the default 0.0.0.0 bind any LAN caller gets the
+    /// same treatment — see #1033 and #1059. Runs the tool's real path,
+    /// `request_capability_with_header`, with no header.
     #[tokio::test]
     async fn without_admin_credential_an_unauthenticated_caller_is_still_auto_permitted() {
         let handler = Ad4mMcpHandler::new(McpContext {
@@ -543,19 +556,63 @@ mod capability_mint_tests {
             dynamic_class_tools: false,
         });
 
-        let verdict = handler.check_auth_with_header(None).await;
-        assert!(
-            verdict,
-            "a no-admin-credential executor should authenticate a bare caller"
-        );
-
         let resp = handler
-            .handle_capability_request(mint_params(), verdict)
+            .request_capability_with_header(None, mint_params())
             .await;
         let v: serde_json::Value = serde_json::from_str(&resp).expect("valid JSON");
         assert!(
             v["code"].as_str().is_some(),
             "no-credential flow should still return the code inline: {resp}"
         );
+    }
+
+    /// The escalation of issue #851 sub-problem 3, through the capability layer: a
+    /// multi-user user token authenticates but holds no PERMIT capability, so it must
+    /// not auto-permit an ALL_CAPABILITY mint. A token that does hold PERMIT still may.
+    #[tokio::test]
+    async fn a_token_without_permit_may_not_auto_permit() {
+        use crate::agent::capabilities::{
+            get_user_default_capabilities, token::generate_jwt, types::AuthInfo, Capability,
+            ALL_CAPABILITY, DEFAULT_TOKEN_VALID_PERIOD,
+        };
+        crate::test_utils::setup_wallet();
+        crate::test_utils::setup_agent();
+
+        let jwt_with = |caps: Vec<Capability>| {
+            generate_jwt(
+                "test-app".to_string(),
+                DEFAULT_TOKEN_VALID_PERIOD,
+                AuthInfo {
+                    app_name: "test-app".to_string(),
+                    app_desc: String::new(),
+                    app_domain: None,
+                    app_url: None,
+                    app_icon_path: None,
+                    capabilities: Some(caps),
+                    user_email: None,
+                },
+            )
+            .expect("the wallet is unlocked in tests")
+        };
+
+        // Through the tool's own path: the header credential joins a fresh session, then
+        // the permit check decides. Returns whether the reply carries a mint code.
+        let gets_code = |header: String| async move {
+            let resp = handler_with_admin_credential()
+                .request_capability_with_header(Some(header), mint_params())
+                .await;
+            let v: serde_json::Value = serde_json::from_str(&resp).unwrap();
+            v.get("code").is_some()
+        };
+
+        // A user-capability token authenticates but cannot auto-permit.
+        assert!(
+            !gets_code(jwt_with(get_user_default_capabilities())).await,
+            "a user token without PERMIT received a mint code"
+        );
+        // A token that holds PERMIT (here, ALL_CAPABILITY) still auto-permits.
+        assert!(gets_code(jwt_with(vec![ALL_CAPABILITY.clone()])).await);
+        // The admin credential auto-permits.
+        assert!(gets_code("test-admin-credential".to_string()).await);
     }
 }

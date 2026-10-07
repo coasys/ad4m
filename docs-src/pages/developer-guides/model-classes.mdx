@@ -1057,6 +1057,24 @@ builder.dispose();
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
 
+#### Subscription sharing and `dispose()`
+
+The executor keeps one live subscription per distinct query and agent. Two
+builders that subscribe to the same query (two components showing the same
+list, for example) share that subscription: the executor re-evaluates the
+query once per change and pushes one update that both builders receive.
+
+`dispose()` releases only the calling builder's hold. Other subscribers of the
+same query keep receiving updates, and the executor drops the subscription
+when the last holder disposes, or when no holder has sent a keepalive for a
+while (a page that was closed without disposing).
+
+The local cleanup, stopping the keepalive and the update listener, happens
+synchronously, so a plain `builder.dispose()` is sufficient. The method also
+returns a promise that resolves once the executor has acknowledged the release;
+await it when a following step depends on that, as `subscribe()` itself does
+before registering a replacement subscription.
+
 ## Transactions
 
 Group multiple operations into an atomic batch:

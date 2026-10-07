@@ -7,7 +7,7 @@ REST/WS shim. Split plan: spec item 6.
 
 | Route | Handler | Notes |
 |---|---|---|
-| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also inlines the full event stream** from `events_ws::build_event_stream` |
+| `GET /api/v1/ws` | `ws_rpc.rs` | JSON-RPC-ish: `{type, id, ...params}` → `HandlerMap::dispatch`. Auth once at upgrade (`auth.rs`). Per-request cancel token (`request.cancel`). **Also carries events** (`events_ws::build_event_stream`, filtered by `events.watch`) |
 | `GET /api/v1/ws/events` | `events_ws.rs` | Standalone event stream (same content as above; candidate for removal, spec D3) |
 | `GET /health`, `POST /internal/shutdown` | `internal.rs` | `INTERNAL_API_TOKEN` |
 | `/v1/*`, `/api/v1/openai/v1/*` | `openai_compat/router.rs` | chat/completions, embeddings, audio, realtime WS |
@@ -40,9 +40,28 @@ Until then: **every new handler must check a capability** (or be registered with
 explicit comment saying why not) and take `AgentContext` from the token for
 anything that signs, bills or writes.
 
+## Protocol
+
+- Clients (core SDK, rust-client) ship with the executor from the same revision: no feature
+  discovery and no compatibility modes.
+- Events: a socket gets no events until it sends `events.watch { "<type>": null | [perspective
+  uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
+  inline on both sockets (per-connection state, like `request.cancel`).
+- Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
+  the perspective owner gets them, and the SDK routes them by `subscriptionId`.
+- `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
+  it through channels in place of a WebSocket.
+- Contracts: each handler registers its params and result types (`map.method::<P, R>`), and
+  `event_specs()` in `events_ws.rs` types every event payload. `tests/handler_table_tests.rs`
+  writes `RpcMethods.ts` and `Events.ts` (ts-rs export dir) and fails if the copies in
+  `core/src/generated/api/` or any type they import are stale — regenerate
+  (`pnpm run generate:api-types` in `core/`) after changing a handler or an event.
+
 ## Types
 
 - `types.rs`: request/response structs for WS (`ts-rs` exported for the SDK).
+  `pnpm run generate:api-types` (in `core/`) writes one file per type into
+  `core/src/generated/api/`, but not its `index.ts`: add the export line there by hand.
 - `crate::types::core` (domain) vs `crate::types::domain` (wire/input). Some duplicates,
   see spec item 5. Prefer `crate::types::X` re-exports.
 - `WsRpcError { code, message }` (`ws_handler.rs`): constructors `bad_request`,

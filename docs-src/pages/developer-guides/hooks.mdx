@@ -62,13 +62,13 @@ function AgentProfile({ agentClient, did }) {
 
 ## useMe
 
-Provides access to the current agent's data and status.
+Provides access to the current agent's data and status. It takes the `Ad4mClient` and follows `agent-updated` and `agent-status-changed` events.
 
 ```typescript
 import { useMe } from '@coasys/ad4m-react-hooks';
 
-function MyProfile({ agentClient }) {
-  const { me, status, profile, error } = useMe(agentClient, (links) => ({
+function MyProfile({ client }) {
+  const { me, status, profile, error } = useMe(client, (links) => ({
     name: links.find(l => l.data.predicate === 'name')?.data.target,
     bio: links.find(l => l.data.predicate === 'bio')?.data.target
   }));

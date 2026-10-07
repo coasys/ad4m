@@ -406,7 +406,7 @@ export class Ad4mConnectElement extends LitElement {
     try {
       const result = await this.core.requestTopUp(e.detail.amountHOT);
       if (!result.success) {
-        this.paymentError = result.message;
+        this.paymentError = "Payment request failed";
       }
     } catch (error) {
       this.paymentError = error instanceof Error ? error.message : "Payment request failed";

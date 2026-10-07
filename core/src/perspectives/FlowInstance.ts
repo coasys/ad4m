@@ -59,6 +59,7 @@ import { PerspectiveProxy } from "./PerspectiveProxy";
 import { Ad4mModel } from "../model/Ad4mModel";
 import { FlowInstanceRecord, FlowTransitionProposal } from "./FlowModels";
 import { SHACLFlow, FlowState, FlowTransition } from "../shacl/SHACLFlow";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 /** One fired flow transition, as returned by {@link FlowInstance.acceptProposal}
  *  (and, engine-side, by every consensus pass). */
@@ -171,7 +172,8 @@ export interface FlowReceiptVerdict {
  *  `verifyFlowReceipt`, never by inspection). */
 export interface FlowMintedReceipt {
   receiptUri: string;
-  receipt: object;
+  /** The serialized `FlowReceipt`; pass it back to `verifyFlowReceipt`. */
+  receipt: JsonValue;
 }
 
 /**

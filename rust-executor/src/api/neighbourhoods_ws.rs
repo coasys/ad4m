@@ -1,7 +1,9 @@
 //! Neighbourhood WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::{create_signed_expression, AgentContext};
@@ -218,12 +220,90 @@ async fn other_agents(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("neighbourhood.join", join_neighbourhood);
-    map.register("neighbourhood.publish", publish_neighbourhood);
-    map.register("neighbourhood.sendBroadcast", send_broadcast);
-    map.register("neighbourhood.sendSignal", send_signal);
-    map.register("neighbourhood.setOnlineStatus", set_online_status);
-    map.register("neighbourhood.hasTelepresence", has_telepresence);
-    map.register("neighbourhood.onlineAgents", online_agents);
-    map.register("neighbourhood.otherAgents", other_agents);
+    map.method::<JoinNeighbourhoodRequest, PerspectiveHandle>(
+        "neighbourhood.join",
+        join_neighbourhood,
+    )
+    .long();
+    map.method::<PublishNeighbourhoodRequest, String>(
+        "neighbourhood.publish",
+        publish_neighbourhood,
+    )
+    .long();
+    map.method::<NeighbourhoodBroadcastParams, bool>("neighbourhood.sendBroadcast", send_broadcast);
+    map.method::<NeighbourhoodSignalParams, bool>("neighbourhood.sendSignal", send_signal);
+    map.method::<NeighbourhoodOnlineStatusParams, bool>(
+        "neighbourhood.setOnlineStatus",
+        set_online_status,
+    );
+    map.method::<NeighbourhoodUuidParams, bool>("neighbourhood.hasTelepresence", has_telepresence)
+        .read();
+    map.method::<NeighbourhoodUuidParams, Vec<OnlineAgent>>(
+        "neighbourhood.onlineAgents",
+        online_agents,
+    )
+    .read();
+    map.method::<NeighbourhoodUuidParams, Vec<String>>("neighbourhood.otherAgents", other_agents)
+        .read();
+}
+
+// ── Contracts ──
+
+/// A perspective to sign and send: signed links when `signed` is true or
+/// absent, bare links when `signed` is false.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum NeighbourhoodPerspectivePayload {
+    Signed(NeighbourhoodSignedPerspective),
+    Unsigned(PerspectiveUnsignedInput),
+}
+
+/// Wire shape of `crate::types::PerspectiveInput`, named apart from the
+/// api `PerspectiveInput` so the two TypeScript files do not collide.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodSignedPerspective {
+    pub links: Vec<LinkExpressionInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodUuidParams {
+    pub uuid: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodBroadcastParams {
+    pub uuid: String,
+    pub payload: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
+    #[ts(optional)]
+    pub loopback: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodSignalParams {
+    pub uuid: String,
+    pub remote_agent_did: String,
+    pub payload: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct NeighbourhoodOnlineStatusParams {
+    pub uuid: String,
+    pub status: NeighbourhoodPerspectivePayload,
+    #[ts(optional)]
+    pub signed: Option<bool>,
 }

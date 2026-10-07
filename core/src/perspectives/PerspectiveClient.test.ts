@@ -8,15 +8,15 @@ import { LinkQuery } from "./LinkQuery"
  * Uses a mock ApiClient to isolate from real WebSocket connections.
  */
 
-// Mock ApiClient so we can control call/subscribe behavior
+// Mock ApiClient so we can control call/on behavior
 const mockCall = jest.fn()
-const mockSubscribe = jest.fn().mockReturnValue(() => {})
+const mockOn = jest.fn().mockReturnValue(() => {})
 
 jest.mock('../apiClient', () => {
     return {
         ApiClient: jest.fn().mockImplementation(() => ({
             call: mockCall,
-            subscribe: mockSubscribe,
+            on: mockOn,
         })),
         RpcError: class RpcError extends Error {
             readonly status: number
@@ -39,7 +39,7 @@ function makeHandle(uuid: string, name: string, state = PerspectiveState.Private
 describe('PerspectiveClient RPC operations', () => {
     beforeEach(() => {
         mockCall.mockReset()
-        mockSubscribe.mockReset().mockReturnValue(() => {})
+        mockOn.mockReset().mockReturnValue(() => {})
     })
 
     it('byUUID returns a PerspectiveProxy for a valid UUID', async () => {
@@ -96,7 +96,7 @@ describe('PerspectiveClient RPC operations', () => {
         expect(all[0].name).toBe('A')
         expect(all[1].uuid).toBe('uuid-b')
         expect(all[1].name).toBe('B')
-        expect(mockCall).toHaveBeenCalledWith('perspective.all')
+        expect(mockCall).toHaveBeenCalledWith('perspective.all', {})
     })
 
     it('add() creates a perspective and returns a proxy', async () => {
@@ -136,49 +136,20 @@ describe('PerspectiveClient RPC operations', () => {
     it('constructor opens no event subscription', () => {
         new PerspectiveClient('http://localhost:12000', 'token')
 
-        expect(mockSubscribe).not.toHaveBeenCalled()
+        expect(mockOn).not.toHaveBeenCalled()
     })
 
-    it('adding a lifecycle listener subscribes one shared event handler', () => {
+    it('on() registers with ApiClient.on and returns its release function', () => {
+        const release = jest.fn()
+        mockOn.mockReturnValue(release)
         const client = new PerspectiveClient('http://localhost:12000', 'token')
-        client.addPerspectiveAddedListener(() => {})
-        client.addPerspectiveUpdatedListener(() => {})
-        client.addPerspectiveRemovedListener(() => {})
+        const handler = jest.fn()
 
-        // ApiClient keeps handlers in a Set: the same handler every time adds nothing.
-        const handlers = new Set(mockSubscribe.mock.calls.map(([cb]) => cb))
-        expect(handlers.size).toBe(1)
-    })
+        const off = client.on('link-added', handler, { perspective: 'uuid-l' })
 
-    it('the function a lifecycle listener registration returns removes that listener', () => {
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const added = jest.fn()
-        const release = client.addPerspectiveAddedListener(added)
-        const onEvent = mockSubscribe.mock.calls[0][0]
-
-        release()
-        onEvent({ type: 'perspective-added', perspective: makeHandle('uuid-r', 'R') })
-
-        expect(added).not.toHaveBeenCalled()
-    })
-
-    it('addPerspectiveAddedListener dispatches events to callbacks', () => {
-        const subscriberCallbacks: ((data: any) => void)[] = []
-        mockSubscribe.mockImplementation((cb: any) => {
-            subscriberCallbacks.push(cb)
-            return () => {}
-        })
-
-        const client = new PerspectiveClient('http://localhost:12000', 'token')
-        const received: PerspectiveHandle[] = []
-        client.addPerspectiveAddedListener((h) => { received.push(h) })
-
-        // Simulate server push event to all subscribers (like real WS dispatch)
-        const handle = makeHandle('uuid-event', 'EventPerspective')
-        subscriberCallbacks.forEach(cb => cb({ type: 'perspective-added', perspective: handle }))
-
-        expect(received.length).toBe(1)
-        expect(received[0].uuid).toBe('uuid-event')
+        expect(mockOn).toHaveBeenCalledWith('link-added', handler, { perspective: 'uuid-l' })
+        off()
+        expect(release).toHaveBeenCalledTimes(1)
     })
 
     it('addLink calls perspective.addLink with correct params', async () => {
@@ -335,4 +306,95 @@ describe('PerspectiveProxy getClassShape sh:in URI-decoding', () => {
         const result = parseShInValue('[{"value":"test"}]');
         expect(result).toEqual([{ value: 'test' }]);
     });
+})
+
+describe('PerspectiveClient builds SDK classes from wire data', () => {
+    const wireLink = {
+        author: 'did:test', timestamp: '2026-01-01T00:00:00Z',
+        data: { source: 'a', target: 'b', predicate: null },
+        proof: { key: 'k', signature: 's', valid: true, invalid: false },
+        status: 'SHARED' as const,
+    }
+
+    beforeEach(() => {
+        mockCall.mockReset()
+    })
+
+    it('queryLinks returns LinkExpressions with a working hash()', async () => {
+        mockCall.mockResolvedValue([wireLink])
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const [link] = await client.queryLinks('uuid-q', new LinkQuery({ source: 'a' }))
+
+        expect(typeof link.hash()).toBe('number')
+        expect(link.status).toBe('SHARED')
+        expect(link.proof.valid).toBe(true)
+    })
+
+    it('byUUID gives the neighbourhood meta a Perspective with get()', async () => {
+        mockCall.mockResolvedValue({
+            uuid: 'uuid-n', name: 'N', state: 'SYNCED', sharedUrl: 'neighbourhood://x', owners: ['did:o'],
+            neighbourhood: {
+                author: 'did:test', timestamp: 't', proof: wireLink.proof,
+                data: { linkLanguage: 'lang', meta: { links: [wireLink] } },
+            },
+        })
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const proxy = await client.byUUID('uuid-n')
+
+        expect(proxy!.sharedUrl).toBe('neighbourhood://x')
+        const meta = proxy!.neighbourhood!.data.meta
+        expect(meta.get(new LinkQuery({ source: 'a' }))).toHaveLength(1)
+    })
+
+    it('linkMutations sends wire removals and returns LinkExpressionMutations', async () => {
+        mockCall.mockResolvedValue({ additions: [wireLink], removals: [], updates: [] })
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const removal = { ...wireLink, data: { source: 'a', target: 'b' }, hash: () => 0 }
+        const result = await client.linkMutations('uuid-m', { additions: [], removals: [removal] }, 'local')
+
+        expect(typeof result.additions[0].hash()).toBe('number')
+        expect(mockCall).toHaveBeenCalledWith('perspective.linkMutations', {
+            uuid: 'uuid-m',
+            mutations: {
+                additions: [],
+                removals: [{
+                    author: 'did:test', timestamp: '2026-01-01T00:00:00Z',
+                    data: { source: 'a', target: 'b', predicate: undefined },
+                    proof: { key: 'k', signature: 's', valid: true, invalid: false },
+                    status: 'SHARED',
+                }],
+            },
+            status: 'local',
+        })
+    })
+
+    it('removeLink sends the link without status and leaves the argument intact', async () => {
+        mockCall.mockResolvedValue(true)
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        const link = { ...wireLink, data: { source: 'a', target: 'b' }, hash: () => 0 }
+        await client.removeLink('uuid-r', link)
+
+        expect(mockCall.mock.calls[0][1].link).not.toHaveProperty('status')
+        expect(link.status).toBe('SHARED')
+    })
+
+    it('addSdna narrows the single/batch result union', async () => {
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        mockCall.mockResolvedValueOnce(true)
+        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(true)
+        mockCall.mockResolvedValueOnce([true, false])
+        expect(await client.addSdna('u', 'n', 'code', 'subject_class')).toBe(false)
+        mockCall.mockResolvedValueOnce(true)
+        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true])
+        mockCall.mockResolvedValueOnce([true, false])
+        expect(await client.addSdnaBatch('u', [{ name: 'n', sdnaType: 'flow' }])).toEqual([true, false])
+    })
+
+    it('interpretationOverlays narrows kind to create | update', async () => {
+        mockCall.mockResolvedValue([{ base: 'b', kind: 'create', run: null, inferred: [['p', 1]] }])
+        const client = new PerspectiveClient('http://localhost:12000', 'token')
+        expect(await client.interpretationOverlays('u')).toEqual([
+            { base: 'b', kind: 'create', run: null, inferred: [['p', 1]] },
+        ])
+    })
 })

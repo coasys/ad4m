@@ -141,6 +141,40 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(await ad4mClient.runtime.hcAddAgentInfos(agentInfos)).to.be.true;
         })
 
+        it("can set and read host rates", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const before = await ad4mClient.runtime.hostRates()
+            const rates = [
+                { description: "link write", priceInHOT: 0.25 },
+                { description: "prompt", priceInHOT: 0 },
+            ]
+            try {
+                expect(await ad4mClient.runtime.setHostRates(rates)).to.be.true
+                expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
+
+                const bad = await ad4mClient.runtime.setHostRates([{ description: "x", priceInHOT: -1 }]).catch(e => e)
+                expect(bad.status, bad.message).to.equal(400)
+                expect(await ad4mClient.runtime.hostRates()).to.have.deep.members(rates)
+            } finally {
+                await ad4mClient.runtime.setHostRates(before)
+            }
+        })
+
+        it("setUnytMembraneProof() refuses an empty proof", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            // A non-empty proof starts the Unyt DNA install, so only the
+            // validation path runs here.
+            const error = await ad4mClient.runtime.setUnytMembraneProof("").catch(e => e)
+            expect(error.status, error.message).to.equal(400)
+        })
+
+        it("unytVersionInfo() reports the bundled version and the install state", async () => {
+            const ad4mClient = testContext.ad4mClient!
+            const info = await ad4mClient.runtime.unytVersionInfo()
+            expect(info.bundled).to.be.a('string').that.is.not.empty
+            expect(info).to.have.all.keys('installed', 'bundled', 'installError')
+        })
+
         it("can get runtimeInfo", async () => {
             const ad4mClient = testContext.ad4mClient!
             const runtimeInfo = await ad4mClient.runtime.info();
@@ -189,7 +223,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
                 }
             });
 
-            await ad4mClient.runtime.addExceptionCallback(mockFunction);
+            ad4mClient.on('exception-occurred', ({ exception }) => mockFunction(exception));
 
             // Request to install a new notification
             const notificationId = await ad4mClient.runtime.requestInstallNotification(notification);
@@ -263,7 +297,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(granted).to.be.true
 
             const mockFunction = sinon.stub();
-            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+            ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
             // Negative: ensuring no false positives — control link should NOT trigger
             await notificationPerspective.add(new Link({source: "control://source", target: "control://target"}))
@@ -332,7 +366,7 @@ export default function runtimeTests(testContext: TestContext, options?: { hasHo
             expect(granted).to.be.true
 
             const mockFunction = sinon.stub();
-            await ad4mClient.runtime.addNotificationTriggeredCallback(mockFunction)
+            ad4mClient.on('notification-triggered', ({ notification }) => mockFunction(notification))
 
             // Negative: message without mention should NOT trigger
             const noMentionContent = "Hello world, nice day!"

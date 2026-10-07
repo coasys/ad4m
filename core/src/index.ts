@@ -50,4 +50,4 @@ export * from './shacl/builders'
 export { fileToDataUri } from './shacl/index'
 export * from "./generated/api";
 export { RpcError, LONG_TIMEOUT_MS } from "./apiClient";
-export type { CallOptions } from "./apiClient";
+export type { CallOptions, EventFilter } from "./apiClient";

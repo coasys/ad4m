@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 
 /// One pending overlay, flattened for the query surface / UIs.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub(crate) struct OverlayView {
     /// The base instance the overlay sits on.
     pub base: String,
