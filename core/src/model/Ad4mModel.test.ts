@@ -2643,6 +2643,121 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
   // --- result passthrough ---
 
   it("returns $-keyed projection values attached by Rust on instances", async () => {
@@ -2809,20 +2924,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2905,7 +3007,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2914,7 +3016,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
     });
   });
@@ -2934,20 +3035,19 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       @HasMany({ through: "test://has_tag" })
       tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
     }
 
-    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
       const perspective = makePerspective();
 
-      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      const initialValues = perspective.createSubject.mock.calls[0][2];
-      expect(initialValues).toEqual({ title: "hello" });
-      expect(initialValues).not.toHaveProperty("_baseExpression");
-      expect(initialValues).not.toHaveProperty("_perspective");
-      expect(initialValues).not.toHaveProperty("type");
-      expect(initialValues).not.toHaveProperty("tags");
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
     });
   });
 

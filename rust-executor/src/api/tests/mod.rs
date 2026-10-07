@@ -9,4 +9,6 @@ pub mod flow_ws_tests;
 #[cfg(test)]
 pub mod shacl_ws_tests;
 #[cfg(test)]
+pub mod transcription_feed_tests;
+#[cfg(test)]
 pub mod types_tests;
