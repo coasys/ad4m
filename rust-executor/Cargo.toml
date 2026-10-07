@@ -226,6 +226,11 @@ tempfile = "3"
 # Already in the lockfile as a transitive dependency; test-only certificate
 # fixtures for the MCP TLS end-to-end test.
 rcgen = "0.14"
+# Already in the lockfile as a transitive dependency of `holochain`; not
+# reachable through `holochain::prelude`, needed directly for the canned
+# `AppInfo.installed_at` in the per-language agent key mock-dispatch tests
+# (issue #1099, dispatch/tests.rs).
+holochain_timestamp = { version = "0.7.0", git = "https://github.com/coasys/holochain.git", branch = "0.7.0-space-override-coasys" }
 maplit = "1.0.2"
 lazy_static = "1.4.0"
 itertools = "0.10.1"

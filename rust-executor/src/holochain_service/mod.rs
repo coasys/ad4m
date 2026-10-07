@@ -1269,9 +1269,11 @@ mod tests {
     /// languages must resolve to two distinct, stable agent keys so that
     /// the same DNA + network seed yields two distinct cells.
     ///
-    /// The adoption path (an app already installed under the language's
-    /// own app id keeps its key) needs a real hApp install and is
-    /// exercised by the JS integration suite instead.
+    /// The adoption path (an app already installed under the language's own app id keeps
+    /// its key) needs no real hApp install: `holochain_service::dispatch::tests` covers it,
+    /// against a `MockDispatch` answering `GetAppInfo`, in
+    /// `language_key_adoption_reuses_existing_app_key_without_minting` (and the fresh-key
+    /// and persistence paths next to it).
     #[tokio::test(flavor = "multi_thread")]
     async fn test_agent_key_for_language() {
         use super::*;
