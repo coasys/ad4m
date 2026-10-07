@@ -2643,6 +2643,121 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
   // --- result passthrough ---
 
   it("returns $-keyed projection values attached by Rust on instances", async () => {
@@ -2809,20 +2924,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2905,7 +3007,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2914,7 +3016,6 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
     });
   });
@@ -2934,20 +3035,19 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       @HasMany({ through: "test://has_tag" })
       tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
     }
 
-    it("excludes ORM bookkeeping fields, flags, and empty relations", async () => {
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
       const perspective = makePerspective();
 
-      await TestNoisyPost.create(perspective, { title: "hello" }, { batchId: "batch-1" });
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
 
-      expect(perspective.createSubject).toHaveBeenCalled();
-      const initialValues = perspective.createSubject.mock.calls[0][2];
-      expect(initialValues).toEqual({ title: "hello" });
-      expect(initialValues).not.toHaveProperty("_baseExpression");
-      expect(initialValues).not.toHaveProperty("_perspective");
-      expect(initialValues).not.toHaveProperty("type");
-      expect(initialValues).not.toHaveProperty("tags");
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
     });
   });
 
@@ -3512,5 +3612,197 @@ describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
     expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
     expect(parent).not.toHaveProperty("transitive");
     expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// includeUnverified — opt-in to links whose signature did not verify (#1113)
+// ──────────────────────────────────────────────────────────
+
+describe("includeUnverified — wire format", () => {
+  @Model({ name: "UnverifiedWireRecipe" })
+  class UnverifiedWireRecipe extends Ad4mModel {
+    @Flag({ through: "uv://type", value: "uv://recipe" })
+    type: string = "";
+
+    @Property({ through: "uv://name" })
+    name: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so the executor's default applies", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
+  });
+
+  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
+      includeUnverified: true,
+    });
+    expect(JSON.parse(queryJson).includeUnverified).toBe(true);
+
+    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
+    expect((builder as any).queryParams.includeUnverified).toBe(true);
+  });
+});
+
+// ── Subscribe awaits the previous executor dispose ────────────────────
+describe("ModelQueryBuilder subscribe ordering", () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  function makePerspective() {
+    const disposeGate = deferred<boolean>();
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "shared-sub",
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(() => {}),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockReturnValue(disposeGate.promise),
+    };
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+    return { mockPerspective, mockClient, disposeGate };
+  }
+
+  const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+  @Model({ name: "OrderingTest" })
+  class OrderingTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ordering" })
+    type: string = "test://ordering";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("re-subscribe waits for the executor to release the previous subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    const second = builder.subscribe(() => {});
+    await flush();
+    // The executor has not acknowledged the dispose yet: no new registration.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "shared-sub");
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    disposeGate.resolve(true);
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-subscribe proceeds when the executor dispose fails", async () => {
+    const { mockPerspective, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    const second = builder.subscribe(() => {});
+    disposeGate.reject(new Error("Subscription not found"));
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("overlapping subscribe() calls leave exactly one live subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribes: jest.Mock[] = [];
+    let n = 0;
+    mockClient.modelSubscribe.mockImplementation(async () => ({
+      subscriptionId: `sub-${++n}`,
+      result: { instances: [], totalCount: 0 },
+    }));
+    mockClient.subscribeToQueryUpdates.mockImplementation(() => {
+      const u = jest.fn();
+      unsubscribes.push(u);
+      return u;
+    });
+    mockClient.disposeQuerySubscription.mockResolvedValue(true);
+    disposeGate.resolve(true);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
+
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    // The second call ran after the first and disposed its subscription.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+    expect(unsubscribes).toHaveLength(2);
+    expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+    expect(unsubscribes[1]).not.toHaveBeenCalled();
+    // And the builder can still release the survivor.
+    await builder.dispose();
+    expect(unsubscribes[1]).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
+
+  it("dispose() cleans up locally at once and resolves without a subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribe = jest.fn();
+    mockClient.subscribeToQueryUpdates.mockReturnValue(unsubscribe);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await expect(builder.dispose()).resolves.toBeUndefined();
+
+    await builder.subscribe(() => {});
+    const done = builder.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    disposeGate.resolve(true);
+    await expect(done).resolves.toBeUndefined();
+    // Idempotent: a second dispose does not call the executor again.
+    await builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
   });
 });

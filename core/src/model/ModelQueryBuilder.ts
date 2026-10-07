@@ -6,7 +6,7 @@
  */
 
 import type { Ad4mModel } from "./Ad4mModel";
-import type { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import type { LinkStatus, PerspectiveProxy } from "../perspectives/PerspectiveProxy";
 import type {
   Where, Order, IncludeMap, Query,
   ResultsWithTotalCount, PaginationResult,
@@ -38,7 +38,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   private queryParams: Query = {};
   private modelClassName: string | null = null;
   private ctor: typeof Ad4mModel;
-  private currentSubscription?: any;
+  private currentSubscription?: { dispose: () => Promise<void> };
+  /** Tail of the subscribe/dispose chain; see `serialize()`. */
+  private subscriptionChain: Promise<void> = Promise.resolve();
 
   constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
     this.perspective = perspective;
@@ -55,14 +57,34 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * 3. Notifies the backend to clean up subscription resources
    * 4. Clears the subscription reference
    * 
+   * Steps 1, 2 and 4 happen synchronously, so `builder.dispose()` without
+   * `await` is still a complete local cleanup. The returned promise resolves
+   * once the executor has released this subscriber's hold on the subscription
+   * (it never rejects). The executor shares one subscription between all
+   * subscribers of the same query and only drops it when the last one
+   * disposes, so disposing here does not interrupt another builder's updates.
+   *
    * You should call this method when you're done with a subscription
    * to prevent memory leaks and ensure proper cleanup.
    */
-  dispose() {
-    if (this.currentSubscription) {
-      this.currentSubscription.dispose();
-      this.currentSubscription = undefined;
-    }
+  dispose(): Promise<void> {
+    const current = this.currentSubscription;
+    this.currentSubscription = undefined;
+    return current ? current.dispose() : Promise.resolve();
+  }
+
+  /**
+   * Runs one subscribe variant after every earlier one on this builder has
+   * finished. Each variant disposes the previous subscription (awaiting the
+   * executor) and then registers its own; two overlapping calls would both
+   * find no current subscription, both register, and the builder could only
+   * ever dispose the last one. Serializing keeps exactly one subscription
+   * per builder.
+   */
+  private serialize<R>(run: () => Promise<R>): Promise<R> {
+    const result = this.subscriptionChain.then(run, run);
+    this.subscriptionChain = result.then(() => {}, () => {});
+    return result;
   }
 
   /**
@@ -266,6 +288,44 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   }
 
   /**
+   * Reads instances as they exist in links of one status only.
+   *
+   * `'shared'` leaves out every Local link, both from the values returned and
+   * from what decides which instances are returned. Use it when the data is
+   * shown to another user. `'local'` is the converse: it returns only
+   * instances flagged in a Local link, so a Local note on a card flagged only
+   * in a Shared link is read without `linkStatus`, not under `'local'`.
+   * See {@link Query.linkStatus}.
+   *
+   * @param status - `'shared'` or `'local'`
+   * @returns The query builder for chaining
+   *
+   * @example
+   * ```typescript
+   * const cards = await Card.query(perspective).linkStatus('shared').get();
+   * ```
+   */
+  linkStatus(status: LinkStatus): ModelQueryBuilder<T> {
+    this.queryParams.linkStatus = status;
+    return this;
+  }
+
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * Off by default: the executor withholds unverified links. Turn it on only
+   * to *display* an unverified claim, never for data you act on. See
+   * {@link Query.includeUnverified}.
+   *
+   * @param enabled - Whether to include unverified links (default: true)
+   * @returns The query builder for chaining
+   */
+  includeUnverified(enabled: boolean = true): ModelQueryBuilder<T> {
+    this.queryParams.includeUnverified = enabled;
+    return this;
+  }
+
+  /**
    * Specifies which relations to eager-load (hydrate into model instances).
    *
    * Without `include`, relation fields contain raw expression URIs (strings).
@@ -382,9 +442,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async subscribe(callback: (results: T[]) => void): Promise<T[]> {
-    // Clean up any existing subscription
-    this.dispose();
+  subscribe(callback: (results: T[]) => void): Promise<T[]> {
+    return this.serialize(() => this.subscribeNow(callback));
+  }
+
+  private async subscribeNow(callback: (results: T[]) => void): Promise<T[]> {
+    // Clean up any existing subscription. Awaited so the executor has
+    // released the previous hold before the new registration arrives: the
+    // executor hands out one shared id per query, and a dispose landing after
+    // the re-subscribe would otherwise release the id just handed back.
+    await this.dispose();
 
     const ctor = this.ctor;
 
@@ -478,7 +545,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         disposed = true;
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
-        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
       },
     };
 
@@ -551,9 +618,16 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async countSubscribe(callback: (count: number) => void): Promise<number> {
-    // Clean up any existing subscription
-    this.dispose();
+  countSubscribe(callback: (count: number) => void): Promise<number> {
+    return this.serialize(() => this.countSubscribeNow(callback));
+  }
+
+  private async countSubscribeNow(callback: (count: number) => void): Promise<number> {
+    // Clean up any existing subscription. Awaited so the executor has
+    // released the previous hold before the new registration arrives: the
+    // executor hands out one shared id per query, and a dispose landing after
+    // the re-subscribe would otherwise release the id just handed back.
+    await this.dispose();
 
     const countParams = { ...this.queryParams, limit: 0 };
     const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(
@@ -620,7 +694,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         disposed = true;
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
-        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
       },
     };
 
@@ -694,13 +768,24 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    *
    */
-  async paginateSubscribe(
+  paginateSubscribe(
     pageSize: number, 
     pageNumber: number, 
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
-    // Clean up any existing subscription
-    this.dispose();
+    return this.serialize(() => this.paginateSubscribeNow(pageSize, pageNumber, callback));
+  }
+
+  private async paginateSubscribeNow(
+    pageSize: number,
+    pageNumber: number,
+    callback: (results: PaginationResult<T>) => void
+  ): Promise<PaginationResult<T>> {
+    // Clean up any existing subscription. Awaited so the executor has
+    // released the previous hold before the new registration arrives: the
+    // executor hands out one shared id per query, and a dispose landing after
+    // the re-subscribe would otherwise release the id just handed back.
+    await this.dispose();
 
     const ctor = this.ctor;
 
@@ -815,7 +900,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
         disposed = true;
         if (keepaliveTimer) clearTimeout(keepaliveTimer);
         unsubscribe();
-        this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).catch(() => {});
+        return this.perspective.client.disposeQuerySubscription(this.perspective.uuid, subscriptionId).then(() => {}, () => {});
       },
     };
 

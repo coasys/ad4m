@@ -93,12 +93,20 @@ mod integration_tests;
 mod link_author;
 #[cfg(test)]
 mod link_author_tests;
+#[cfg(test)]
+mod link_status_relation_tests;
+#[cfg(test)]
+mod link_status_tests;
 mod links;
 mod projection;
+#[cfg(test)]
+mod proof_valid_tests;
 mod query;
 mod relations;
 #[cfg(test)]
 mod round_trip_tests;
+#[cfg(test)]
+mod selection_guard_tests;
 pub(crate) mod shape;
 mod sparql_builder;
 #[cfg(test)]

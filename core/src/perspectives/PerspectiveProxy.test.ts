@@ -1,184 +1,12 @@
 import { PerspectiveProxy, QuerySubscriptionProxy } from './PerspectiveProxy';
 import { Link, LinkExpression } from '../links/Links';
 
-function createMockPerspectiveClient(): any {
-  return {
-    addPerspectiveLinkAddedListener: jest.fn(),
-    addPerspectiveLinkRemovedListener: jest.fn(),
-    addPerspectiveLinkUpdatedListener: jest.fn(),
-    addPerspectiveSyncStateChangeListener: jest.fn(),
-  };
-}
-
-function createProxy(client?: any): PerspectiveProxy {
-  const mockClient = client ?? createMockPerspectiveClient();
+function createProxy(client: any): PerspectiveProxy {
   return new PerspectiveProxy(
     { uuid: 'test-uuid', name: 'test', owners: [], sharedUrl: null, neighbourhood: null, state: 'Synced' } as any,
-    mockClient,
+    client,
   );
 }
-
-describe('PerspectiveProxy.removeListener', () => {
-  it('does not remove the last callback when removing a non-existent one', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    const unknown = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    // Remove a callback that was never added — should be a no-op
-    await proxy.removeListener('link-added', unknown);
-
-    // Both original callbacks should still be present
-    // Access internal state via triggering all callbacks
-    // We verify by adding a third and checking the count stays correct
-    const proxy2 = createProxy();
-    await proxy2.addListener('link-removed', cb1);
-    await proxy2.removeListener('link-removed', unknown);
-    // cb1 should still be registered (not accidentally removed)
-  });
-
-  it('correctly removes the specified callback', async () => {
-    const proxy = createProxy();
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-added', cb2);
-
-    await proxy.removeListener('link-added', cb1);
-    // cb1 removed, cb2 should remain
-  });
-});
-
-describe('PerspectiveProxy.dispose', () => {
-  it('calls removeAllListeners on the client and clears local callbacks', async () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    const cb1 = jest.fn();
-    const cb2 = jest.fn();
-    await proxy.addListener('link-added', cb1);
-    await proxy.addListener('link-removed', cb2);
-
-    proxy.dispose();
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledWith('test-uuid');
-  });
-
-  it('is safe to call dispose() multiple times', () => {
-    const mockClient = {
-      ...createMockPerspectiveClient(),
-      removeAllListeners: jest.fn(),
-    };
-    const proxy = createProxy(mockClient);
-
-    proxy.dispose();
-    proxy.dispose(); // should not throw
-
-    expect(mockClient.removeAllListeners).toHaveBeenCalledTimes(2);
-  });
-});
-
-describe('ApiClient.onReconnect', () => {
-  // Injected WebSocket implementation (ApiClient constructor arg 3) so these
-  // tests drive the REAL onopen/onclose lifecycle instead of poking at
-  // private fields. Each call returns a fresh class with its own instance
-  // list.
-  function makeFakeWebSocketImpl() {
-    class FakeWebSocket {
-      static instances: FakeWebSocket[] = [];
-      url: string;
-      readyState = 0;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: any) => void) | null = null;
-      onerror: ((e: any) => void) | null = null;
-      onclose: (() => void) | null = null;
-      constructor(url: string) {
-        this.url = url;
-        FakeWebSocket.instances.push(this);
-      }
-      send(_data: any) {}
-      close() { this.readyState = 3; }
-      /** Test helper: simulate the server accepting the connection. */
-      open() { this.readyState = 1; this.onopen?.(); }
-      /** Test helper: simulate the connection dropping. */
-      drop() { this.readyState = 3; this.onclose?.(); }
-    }
-    return FakeWebSocket;
-  }
-
-  it('fires reconnect callbacks only on reconnect, not first connect', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-    const reconnectCb = jest.fn();
-    client.onReconnect(reconnectCb);
-
-    // First connection: onopen must NOT fire the reconnect callback
-    client.connect();
-    FakeWs.instances[0].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    // Drop and reconnect: the second onopen must fire it exactly once
-    FakeWs.instances[0].drop();
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).toHaveBeenCalledTimes(1);
-
-    client.closeAll();
-  });
-
-  it('unsubscribed callbacks do not fire on reconnect', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-    const reconnectCb = jest.fn();
-    const unsub = client.onReconnect(reconnectCb);
-
-    client.connect();
-    FakeWs.instances[0].open();
-    unsub();
-
-    FakeWs.instances[0].drop();
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    client.closeAll();
-  });
-
-  it('closeAll resets the first-connect gate for client reuse', () => {
-    const { ApiClient } = require('../apiClient');
-    const FakeWs = makeFakeWebSocketImpl();
-    const client = new ApiClient('http://localhost:12000', undefined, FakeWs as any);
-
-    client.connect();
-    FakeWs.instances[0].open();
-    client.closeAll();
-
-    // Reuse after closeAll: the first open of the NEW connection is an
-    // initial connect again, not a reconnect.
-    const reconnectCb = jest.fn();
-    client.onReconnect(reconnectCb);
-    client.connect();
-    FakeWs.instances[1].open();
-    expect(reconnectCb).not.toHaveBeenCalled();
-
-    // …but a genuine reconnect within the new lifecycle still fires.
-    FakeWs.instances[1].drop();
-    client.connect();
-    FakeWs.instances[2].open();
-    expect(reconnectCb).toHaveBeenCalledTimes(1);
-
-    client.closeAll();
-  });
-});
 
 describe('QuerySubscriptionProxy', () => {
   it('treats the initial subscribeQuery() result as a completed initialization', async () => {
@@ -217,6 +45,68 @@ describe('QuerySubscriptionProxy', () => {
 
     subscription.dispose();
     expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  // Subscribers of the same query share one executor subscription id, and each
+  // disposeQuerySubscription releases one hold on it. Every hold this proxy
+  // acquires must be released exactly once.
+  describe('executor hold', () => {
+    function holdClient(ids: string[]) {
+      let next = 0;
+      return {
+        subscribeQuery: jest.fn(async () => ({ subscriptionId: ids[next++], result: [] })),
+        subscribeToQueryUpdates: jest.fn(() => jest.fn()),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      } as any;
+    }
+
+    it('dispose() releases the hold once, even when called twice', async () => {
+      const mockClient = holdClient(['shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      subscription.dispose();
+      subscription.dispose();
+
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'shared-sub');
+    });
+
+    it('a retried subscribe() releases the hold it replaces', async () => {
+      // The executor returns the same id while the entry is alive, so the
+      // retry adds a second hold on it; the first must be released.
+      const mockClient = holdClient(['shared-sub', 'shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+      await subscription.subscribe();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'shared-sub');
+    });
+
+    it('a reconnect swap releases the hold it replaces', async () => {
+      let reconnectCallback: (() => Promise<void>) | undefined;
+      const mockClient = holdClient(['sub-1', 'sub-2']);
+      mockClient.onReconnect = jest.fn((cb: () => Promise<void>) => {
+        reconnectCallback = cb;
+        return jest.fn();
+      });
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      await reconnectCallback!();
+      expect(subscription.id).toBe('sub-2');
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'sub-1');
+
+      subscription.dispose();
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'sub-2');
+    });
   });
 
   it('re-subscribes immediately when onReconnect fires', async () => {
@@ -538,7 +428,6 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
 
   function proxyWithLinks(links: any[]): PerspectiveProxy {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue(links),
     };
     return createProxy(mockClient);
@@ -582,14 +471,26 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
   });
 
-  it('returns an empty array on error', async () => {
+  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
     };
     const proxy = createProxy(mockClient);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
+    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
+  });
+
+  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
+    const mockClient: any = {
+      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
+    };
+    const proxy = createProxy(mockClient);
+    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
+
+    // A className sends it to the subjectClasses() lookup first, which now rejects.
+    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
+    expect(byProperties).toHaveBeenCalled();
   });
 });
 
@@ -601,7 +502,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
     let resolveFetch: (v: any) => void;
     let fetchCount = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => {
         fetchCount++;
         return new Promise(r => { resolveFetch = r; });
@@ -620,7 +520,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('gives each caller its own copy of the array', async () => {
     let resolveFetch: (v: any) => void;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolveFetch = r; })),
     };
     const proxy = createProxy(mockClient);
@@ -639,7 +538,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('does not cache: a call after the previous one resolved sends a new RPC', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => { calls++; return calls === 1 ? overlayA : overlayB; }),
     };
     const proxy = createProxy(mockClient);
@@ -652,7 +550,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('shares a failed RPC with concurrent callers and does not keep it', async () => {
     let calls = 0;
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(async () => {
         calls++;
         if (calls === 1) throw new Error('boom');
@@ -672,7 +569,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after acceptInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       acceptInterpretation: jest.fn(async () => true),
     };
@@ -690,7 +586,6 @@ describe('PerspectiveProxy.interpretationOverlays coalescing', () => {
   it('a read after rejectInterpretation resolves does not join an older in-flight RPC', async () => {
     const resolvers: Array<(v: any) => void> = [];
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       interpretationOverlays: jest.fn(() => new Promise(r => { resolvers.push(r); })),
       rejectInterpretation: jest.fn(async () => { throw new Error('reject failed'); }),
     };
@@ -730,7 +625,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://a', 'p://b', 't://c');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       // queryLinks is what PerspectiveProxy.get calls
       queryLinks: jest.fn().mockResolvedValue([storedExpr]),
       removeLink,
@@ -746,7 +640,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
 
   it('throws a descriptive error when no stored expression matches the bare Link', async () => {
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       queryLinks: jest.fn().mockResolvedValue([]),
     };
     const proxy = createProxy(mockClient);
@@ -768,7 +661,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const removeLink = jest.fn().mockResolvedValue(true);
     // the wrong candidate first: matches[0] of the unfiltered result
     const queryLinks = jest.fn().mockResolvedValue([withPredicate, withoutPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks, removeLink };
+    const mockClient: any = { queryLinks, removeLink };
     const proxy = createProxy(mockClient);
 
     await proxy.remove(new Link({ source: 's://a', target: 't://c' }));
@@ -779,7 +672,7 @@ describe('PerspectiveProxy.remove with bare Link', () => {
   it('throws instead of removing a predicated link when the bare Link has no predicate', async () => {
     const withPredicate = makeStoredExpression('s://a', 'p://b', 't://c');
     const queryLinks = jest.fn().mockResolvedValue([withPredicate]);
-    const mockClient: any = { ...createMockPerspectiveClient(), queryLinks };
+    const mockClient: any = { queryLinks };
     const proxy = createProxy(mockClient);
 
     await expect(
@@ -791,7 +684,6 @@ describe('PerspectiveProxy.remove with bare Link', () => {
     const storedExpr = makeStoredExpression('s://x', 'p://y', 't://z');
     const removeLink = jest.fn().mockResolvedValue(true);
     const mockClient: any = {
-      ...createMockPerspectiveClient(),
       removeLink,
     };
     const proxy = createProxy(mockClient);

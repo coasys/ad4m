@@ -172,7 +172,9 @@ fn literal(val: &str) -> Literal {
     Literal::new_simple_literal(val)
 }
 
-fn status_str(status: &LinkStatus) -> &'static str {
+/// The stored spelling of a link's status. `model_query`'s `link_status_filter`
+/// matches with this too, so the read side cannot disagree with the write side.
+pub(crate) fn status_str(status: &LinkStatus) -> &'static str {
     match status {
         LinkStatus::Shared => "Shared",
         LinkStatus::Local => "Local",
@@ -618,6 +620,48 @@ impl SparqlStore {
     /// Insert triples for a link into the store.
     pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
         self.insert_link_triples(link)
+    }
+
+    /// Test-only: drop the `proofValid` annotation from a stored link's
+    /// reifier, leaving the link and its other metadata in place.
+    /// `insert_link_triples` always writes one, so no production path yields a
+    /// link without it; this lets the model_query tests pin how one reads.
+    #[cfg(test)]
+    pub(crate) fn remove_proof_valid_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_reifier_annotation(link, ONT_PROOF_VALID)
+    }
+
+    /// Drop the `ad4m://ontology/wireTarget` quad from a link's reifier, so
+    /// the store looks like one written before #1141, which kept no signed
+    /// bytes for a non-canonical `literal:*` target.
+    #[cfg(test)]
+    pub(crate) fn remove_wire_target_annotation(&self, link: &LinkExpression) -> Result<(), Error> {
+        self.remove_reifier_annotation(link, ONT_WIRE_TARGET)
+    }
+
+    #[cfg(test)]
+    fn remove_reifier_annotation(
+        &self,
+        link: &LinkExpression,
+        predicate: &str,
+    ) -> Result<(), Error> {
+        let reifier_iri = make_reifier_iri(link);
+        let quads: Vec<_> = self
+            .store
+            .quads_for_pattern(
+                Some(reifier_iri.as_ref().into()),
+                Some(NamedNodeRef::new_unchecked(predicate)),
+                None,
+                Some(GraphNameRef::DefaultGraph),
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        if quads.is_empty() {
+            return Err(anyhow!("link has no {predicate} annotation"));
+        }
+        for quad in &quads {
+            self.store.remove(quad)?;
+        }
+        Ok(())
     }
 
     /// Remove all triples for a link from the store.
@@ -2922,8 +2966,13 @@ mod tests {
         let signer = TestSigner::generate();
         let mut link = signed_link_without_verdict(&signer, "ad4m://derive-bad");
         // Same length, still valid hex, wrong bytes: this reaches the crypto
-        // and fails there, rather than erroring out of `hex::decode`.
-        link.proof.signature = link.proof.signature.replace('a', "b");
+        // and fails there, rather than erroring out of `hex::decode`. Flip
+        // the first byte with XOR: it always changes. A character replace
+        // such as 'a' -> 'b' is a no-op when the random signature happens
+        // to contain no 'a' (about 1 run in 3870).
+        let mut sig = hex::decode(&link.proof.signature).unwrap();
+        sig[0] ^= 0xff;
+        link.proof.signature = hex::encode(sig);
         svc.add_link(&link).unwrap();
 
         let links = svc.get_all_links().unwrap();

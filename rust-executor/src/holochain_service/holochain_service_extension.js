@@ -1,7 +1,7 @@
 import {
     start_holochain_conductor, log_dht_status, install_app, get_app_info,
     call_zome_function, agent_infos, add_agent_infos, remove_app,
-    sign_string, shutdown, get_agent_key, get_agent_key_for_language,
+    shutdown, get_agent_key, get_agent_key_for_language,
     pack_dna, unpack_dna,
     pack_happ, unpack_happ,
 } from 'ext:core/ops';
@@ -88,9 +88,6 @@ import {
         },
         removeApp: async (app_id) => {
             return remove_app(app_id);
-        },
-        signString: async (string) => {
-            return sign_string(string);
         },
         shutdown: async () => {
             return shutdown()

@@ -10,6 +10,7 @@
 // Forward type-only reference to Ad4mModel (no runtime circular dependency)
 // ---------------------------------------------------------------------------
 import type { Ad4mModel } from "./Ad4mModel";
+import type { LinkStatus } from "../perspectives/PerspectiveProxy";
 import type { NodeExpression } from "../shacl/NodeExpression";
 
 // ---------------------------------------------------------------------------
@@ -339,6 +340,62 @@ export type Query = {
    */
   deepQuery?: boolean;
   /**
+   * Read instances as they exist in links of one status only.
+   *
+   * `'shared'` hydrates from Shared links only: every property, relation,
+   * `author` and `updatedAt` comes from links that are gossiped to the
+   * neighbourhood, and none from this executor's Local links. That is the
+   * read to use when showing data to another user (#1024). `'local'` is the
+   * converse. Unset or `null` (the default) reads both, and a property
+   * declared `local: true` still reads only its Local links.
+   *
+   * Relations include typed `@HasMany` / `@HasOne` relations, which are filled
+   * by the conformance getter the SDK generates: the executor adds the status
+   * check to that getter's relation link. A hand-written `getter` is run as
+   * written, so it reads links of any status unless it checks
+   * `<ad4m://ontology/status>` itself.
+   *
+   * Included relations and the instances a `$` projection hydrates inherit
+   * the setting, unless an include's sub-query sets its own. The `__links`
+   * rows (see {@link Query.links}) are restricted the same way.
+   *
+   * Combines with {@link Query.includeUnverified}: a link must have the
+   * requested status **and** pass the signature check, both on the same link.
+   * So a Local link whose signature did not verify is withheld under
+   * `linkStatus: 'local'` too, and comes back only with
+   * `linkStatus: 'local', includeUnverified: true` (or with no `linkStatus`
+   * and `includeUnverified: true`).
+   *
+   * Scope: this restricts the links that hydrate an instance and the links
+   * that *select* it (`where`, the class's flags, `count`/`totalCount`, `$`
+   * projections, `parent` scopes and the order behind `limit`/`offset`). So an
+   * instance is returned under `'local'` only when it is flagged in a Local
+   * link, and under `'shared'` only when it is flagged in a Shared one.
+   */
+  linkStatus?: LinkStatus;
+  /**
+   * Also hydrate from links whose signature did not verify.
+   *
+   * By default the executor withholds every link whose stored signature
+   * verdict is not valid, so a forged or tampered link never becomes a
+   * property value, a relation target, `author` or `updatedAt`. That
+   * includes a typed relation's generated conformance getter. A `getter` you
+   * write yourself runs as written, so it reads unverified links unless it
+   * joins the link's `ad4m://ontology/proofValid` itself. Set this to
+   * `true` only to *display* an unverified claim, e.g. a UI that marks a value
+   * as unverified. Anything that acts on the data, such as a vote counter or a
+   * role check, must leave it off.
+   *
+   * Included relations inherit the setting unless their sub-query sets its own.
+   *
+   * The same applies to the rows under `__links` and to what *selects* an
+   * instance: `where` (including a per-link `author`), the class's flags,
+   * `count`/`totalCount`, the order behind `limit`/`offset`, `parent` scopes
+   * and `$` projections, `transitive` ones included. With `true`, selection
+   * reads unverified links too.
+   */
+  includeUnverified?: boolean;
+  /**
    * Return the individual links behind each instance, with their own author,
    * timestamp, signature and signature verdict, under `instance.__links`. For
    * a collection this is per-item provenance: who added each member, when, and
@@ -547,6 +604,10 @@ export type TypedRelationSubQuery<U extends Ad4mModel> = {
   include?: TypedIncludeMap<U>;
   limit?: number;
   offset?: number;
+  /** See {@link Query.linkStatus}. Inherited from the parent query when unset. */
+  linkStatus?: LinkStatus;
+  /** See {@link Query.includeUnverified}. Inherited from the parent query when unset. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 
@@ -609,6 +670,10 @@ type StrictTypedQuery<T extends Ad4mModel> = {
   limit?: number;
   count?: boolean;
   deepQuery?: boolean;
+  /** See {@link Query.linkStatus}. */
+  linkStatus?: LinkStatus;
+  /** See {@link Query.includeUnverified}. */
+  includeUnverified?: boolean;
   links?: string[];
 };
 

@@ -98,8 +98,20 @@ fn role_instance(store: &SparqlStore, id: &str, creator: &str, links: &[(&str, &
     }
 }
 
+/// `query` as a [`ModelQueryInput`], with the #1113 opt-in set unless the
+/// query sets `includeUnverified` itself.
+///
+/// [`link`] proofs are `key`/`sig`, so no fixture link verifies and the default
+/// `proof_valid_filter` withholds every row. These suites are about which
+/// link's `author` a `where` reads, not signatures, so they read with
+/// `include_unverified`, the same way `integration_tests.rs` does through
+/// `with_unverified`. The default is tested in `proof_valid_tests.rs`.
 fn input(query: Value) -> ModelQueryInput {
-    serde_json::from_value(query).expect("valid ModelQueryInput")
+    let mut input: ModelQueryInput = serde_json::from_value(query).expect("valid ModelQueryInput");
+    if input.include_unverified.is_none() {
+        input.include_unverified = Some(true);
+    }
+    input
 }
 
 fn reviewer() -> (StaticShapeResolver, ModelShape) {

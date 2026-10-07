@@ -278,9 +278,12 @@ describe("Ad4mModel — links option (per-link rows)", function () {
       proof: { key: `${forgedAuthor}#key`, signature: "00".repeat(64) },
     } as any);
 
+    // The forged member link does not verify, so it is withheld unless the
+    // query opts in (#1113); this test is about the row's verdict.
     const [found] = await TestPost.findAll(perspective, {
       where: { id: post.id },
       links: ["comments"],
+      includeUnverified: true,
     });
 
     // The plain array stays as it is.
