@@ -28,6 +28,9 @@ pub mod traits;
 pub mod types;
 
 #[doc(hidden)]
+pub use futures as __futures;
+
+#[doc(hidden)]
 pub mod __serde {
     //! Internal — used by the `ad4m_language!` macro.
     //!
