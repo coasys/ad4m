@@ -858,6 +858,11 @@ impl HolochainService {
         Ok(())
     }
 
+    /// Signs with `list_public_keys().first()` — a well-defined "the node's key" only back
+    /// when lair held one Holochain agent key for the whole node. Since #1099 gave every
+    /// language its own key, this is just whichever key lair created earliest, naming no
+    /// particular language. See `HolochainServiceInterface::sign`: no in-tree caller, not
+    /// exposed to language JS.
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
@@ -878,6 +883,11 @@ impl HolochainService {
         Ok(())
     }
 
+    /// Returns `list_public_keys().first()` — "the node's key" only back when lair held one
+    /// Holochain agent key for the whole node. Since #1099, lair holds one key per language;
+    /// this is just whichever key was created earliest, not the calling language's own. See
+    /// `HolochainServiceInterface::get_agent_key`: no in-tree caller, kept because it is
+    /// exposed to language JS as `getAgentKey()` and a third-party language may call it.
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;

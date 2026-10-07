@@ -283,6 +283,12 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Signs with `HolochainService::sign`, i.e. with whichever key `list_public_keys`
+    /// happens to return first. That was well-defined back when a node had one Holochain
+    /// agent key; since #1099 gave every language its own key, "the first one" names no
+    /// particular language. Has no in-tree caller (`HolochainServiceRequest::Sign` is
+    /// otherwise only ever constructed by `dispatch::tests`'s dispatch-loop checks) and is
+    /// not exposed to language JS at all.
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::Sign(data, response_tx), None)?;
@@ -301,6 +307,13 @@ impl HolochainServiceInterface {
         }
     }
 
+    /// Returns `HolochainService::get_agent_key`'s "first key in lair", not the calling
+    /// language's own agent key. That was well-defined back when a node had one Holochain
+    /// agent key shared by every language; since #1099, lair holds one key per language and
+    /// "the first one" is whichever happened to be created earliest, not this caller's. Has
+    /// no in-tree caller. Kept (not removed) because it is exposed to language JS as
+    /// `getAgentKey()` and a third-party language may call it. Use
+    /// [`Self::agent_key_for_language`] for the calling language's own key.
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let (response_tx, response_rx) = oneshot::channel();
         self.send(HolochainServiceRequest::GetAgentKey(response_tx), None)?;
@@ -350,6 +363,11 @@ impl HolochainServiceInterface {
     ///
     /// The resolved key is persisted, so every path is stable across
     /// restarts.
+    ///
+    /// Removing a language leaves its stored mapping, its lair key, and its
+    /// `LANGUAGE_KEY_LOCKS` entry in place — a reinstall under the same address reuses the
+    /// same key, matching dev's old behaviour with the single global key, but
+    /// `LANGUAGE_KEY_LOCKS` only ever grows.
     pub async fn agent_key_for_language(
         &self,
         language_address: &str,

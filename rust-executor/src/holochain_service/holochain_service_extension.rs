@@ -364,6 +364,10 @@ async fn shutdown() -> Result<(), AnyhowWrapperError> {
         .map_err(AnyhowWrapperError::from)
 }
 
+/// The node's first lair key, not the calling language's own agent key — see
+/// `HolochainServiceInterface::get_agent_key`. Since #1099 gave every language its own
+/// agent key, use `get_agent_key_for_language` instead unless a third-party language
+/// specifically needs this one.
 #[op2(async(lazy), fast)]
 #[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {

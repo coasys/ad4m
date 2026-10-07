@@ -92,6 +92,9 @@ import {
         shutdown: async () => {
             return shutdown()
         },
+        // The node's first lair key, not the calling language's own agent key (that's
+        // getAgentKeyForLanguage below, added for issue #1099). No in-tree caller; kept
+        // for third-party languages that may already call it.
         getAgentKey: async () => {
             return get_agent_key()
         },
