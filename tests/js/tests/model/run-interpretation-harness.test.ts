@@ -24,7 +24,7 @@
  *   INTERPRETATION_E2E_MODEL    (default gemma3:12b)
  *
  * Run with (from tests/js, executor built + `pnpm run prepare-test` once):
- *   pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation-harness.test.ts
+ *   LLM_E2E=1 pnpm ts-mocha -p tsconfig.json --timeout 1200000 --exit tests/model/run-interpretation-harness.test.ts
  */
 
 import { expect } from "chai";
@@ -35,6 +35,14 @@ import { ExtBelief, ExtIntention } from "./interpretation-models.js";
 
 const BASE_URL = process.env.INTERPRETATION_E2E_BASE_URL || "http://localhost:11434/v1";
 const MODEL = process.env.INTERPRETATION_E2E_MODEL || "gemma3:12b";
+
+// LLM E2E gate — these suites drive the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs them
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
 const BASE_PREFIX = "soa://ext/";
 // Harness needs enough headroom for query + propose_create + N propose_link_child
 // plus the final answer. 15 is a comfortable ceiling for this transcript.
@@ -96,7 +104,7 @@ async function purgeGenerated(
   }
 }
 
-describe("perspective.runInterpretationWithHarness (WS + real LLM)", function () {
+describeIfLLM("perspective.runInterpretationWithHarness (WS + real LLM)", function () {
   this.timeout(1_200_000);
 
   let ad4m: Ad4mClient;
@@ -289,7 +297,7 @@ describe("perspective.runInterpretationWithHarness (WS + real LLM)", function ()
  * to reach for (both are `basedOn / contradicts` bare local names, both
  * are HasMany relations to the same target class).
  */
-describe("perspective.runInterpretationWithHarness — relation interpretation hints", function () {
+describeIfLLM("perspective.runInterpretationWithHarness — relation interpretation hints", function () {
   this.timeout(1_200_000);
 
   let ad4m: Ad4mClient;
@@ -478,7 +486,7 @@ describe("perspective.runInterpretationWithHarness — relation interpretation h
  * scenario B so the harness reliably calls at least one tool
  * (`ExtBelief_create` or `ExtBelief_query`).
  */
-describe("perspective.runInterpretationWithHarness — tool-call events", function () {
+describeIfLLM("perspective.runInterpretationWithHarness — tool-call events", function () {
   this.timeout(1_200_000);
 
   let ad4m: Ad4mClient;
