@@ -1281,4 +1281,69 @@ mod tests {
         assert!(!wallet.key_exists("missing"));
         mock.assert();
     }
+
+    /// #1229: no DID document a wallet hands out may contain a private key,
+    /// and it must still describe the agent — the DID and both public keys.
+    fn assert_public_only(document: did_key::Document, public: &[u8], secret: &[u8], what: &str) {
+        let serialized = serde_json::to_string(&document).unwrap();
+        crate::test_utils::assert_no_private_keys(
+            &serialized,
+            &crate::test_utils::private_key_values(public, secret),
+            what,
+        );
+        let expected = did_key::from_existing_key::<Ed25519KeyPair>(public, None)
+            .get_did_document(did_key::CONFIG_LD_PUBLIC);
+        assert_eq!(document, expected, "{what} must still be the agent's public document");
+        assert_eq!(document.verification_method.len(), 2);
+    }
+
+    #[test]
+    fn wallet_did_documents_carry_no_private_keys() {
+        let mut wallet = Wallet::new();
+        wallet.generate_keypair("k".to_string());
+        let (public, secret) = (
+            wallet.get_public_key(&"k".to_string()).unwrap(),
+            wallet.get_secret_key(&"k".to_string()).unwrap(),
+        );
+        assert_public_only(
+            wallet.get_did_document(&"k".to_string()).unwrap(),
+            &public,
+            &secret,
+            "Wallet::get_did_document",
+        );
+
+        let local = LocalWallet::new();
+        local.generate_keypair("k").unwrap();
+        assert_public_only(
+            local.get_did_document("k").unwrap(),
+            &local.get_public_key("k").unwrap(),
+            &local.get_secret_key("k").unwrap(),
+            "LocalWallet::get_did_document",
+        );
+    }
+
+    #[test]
+    fn shared_wallet_did_document_carries_no_private_keys() {
+        let mut server = mockito::Server::new();
+        let kp = did_key::generate::<Ed25519KeyPair>(None);
+        let (public, secret) = (kp.public_key_bytes(), kp.private_key_bytes());
+        let _mock = server
+            .mock("GET", "/keys/shared_doc")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(format!(
+                r#"{{"secret":"{}","public":"{}"}}"#,
+                base64::engine::general_purpose::STANDARD.encode(&secret),
+                base64::engine::general_purpose::STANDARD.encode(&public)
+            ))
+            .create();
+
+        let wallet = SharedWallet::new(server.url(), "tok".to_string());
+        assert_public_only(
+            wallet.get_did_document("shared_doc").unwrap(),
+            &public,
+            &secret,
+            "SharedWallet::get_did_document",
+        );
+    }
 }
