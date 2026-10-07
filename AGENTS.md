@@ -35,6 +35,15 @@ it in older docs.
   and extension `.js` files) must be pure ASCII: non-ASCII fails const-eval in
   `ascii_str_include!`.
 - Commit messages: Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`).
+- **Do not edit `CHANGELOG` in a PR.** The changelog is written once, at release
+  time, from the merged PRs. Every PR that edits it conflicts with the next one
+  that does. Resolving that conflict is a push, and a push dismisses the PR's
+  approvals, so it costs a full CI run and a new review for a one-line text clash.
+  Put the release note in the PR description instead, under a `### Changelog`
+  heading: what changes for users, apps or operators, and **Breaking:** first
+  when it is. Internal-only PRs (tests, CI, refactors with no visible change)
+  write "none". If a branch already carries a `CHANGELOG` entry, leave it; do not
+  push only to remove it.
 - Design docs go to `planning/<topic>-<yyyy-mm-dd>.md`; delete stale ones rather
   than leaving them beside current ones.
 - Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
