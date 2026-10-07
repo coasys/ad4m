@@ -270,6 +270,7 @@ pub async fn add_perspective(
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle.clone(),
                 owner: owner.clone(),
             };
@@ -284,6 +285,7 @@ pub async fn add_perspective(
         // For perspectives without explicit owners (main agent), publish with main agent DID
         let main_agent_did = crate::agent::did();
         let perspective_with_owner = PerspectiveWithOwner {
+            perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
             owner: main_agent_did,
         };
@@ -375,6 +377,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
     if let Some(owners) = owners_list {
         for owner in owners {
             let perspective_with_owner = PerspectiveWithOwner {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle.clone(),
                 owner: owner.clone(),
             };
@@ -389,6 +392,7 @@ pub async fn update_perspective(handle: &PerspectiveHandle) -> Result<(), String
         // For perspectives without explicit owners (main agent), publish with main agent DID
         let main_agent_did = crate::agent::did();
         let perspective_with_owner = PerspectiveWithOwner {
+            perspective_uuid: handle.uuid.clone(),
             perspective: handle.clone(),
             owner: main_agent_did,
         };
@@ -463,6 +467,7 @@ pub async fn remove_perspective(uuid: &str) -> Option<PerspectiveInstance> {
         if let Some(owners) = &handle.owners {
             for owner in owners {
                 let removed_with_owner = PerspectiveRemovedWithOwner {
+                    perspective_uuid: uuid.to_string(),
                     uuid: uuid.to_string(),
                     owner: owner.clone(),
                 };
@@ -608,6 +613,7 @@ pub(crate) async fn publish_telepresence_signal(
             .publish(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle,
                     signal,
                     recipient: Some(recipient),
@@ -622,6 +628,7 @@ pub(crate) async fn publish_telepresence_signal(
                 .publish(
                     &NEIGHBOURHOOD_SIGNAL_TOPIC,
                     &serde_json::to_string(&NeighbourhoodSignalFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle.clone(),
                         signal: signal.clone(),
                         recipient: Some(owner_did.clone()),
@@ -636,6 +643,7 @@ pub(crate) async fn publish_telepresence_signal(
             .publish(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle,
                     signal,
                     recipient: None,
@@ -658,6 +666,7 @@ fn publish_telepresence_signal_sync(
         pubsub.publish_sync(
             &NEIGHBOURHOOD_SIGNAL_TOPIC,
             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle,
                 signal,
                 recipient: Some(recipient),
@@ -669,6 +678,7 @@ fn publish_telepresence_signal_sync(
             pubsub.publish_sync(
                 &NEIGHBOURHOOD_SIGNAL_TOPIC,
                 &serde_json::to_string(&NeighbourhoodSignalFilter {
+                    perspective_uuid: handle.uuid.clone(),
                     perspective: handle.clone(),
                     signal: signal.clone(),
                     recipient: Some(owner_did.clone()),
@@ -680,6 +690,7 @@ fn publish_telepresence_signal_sync(
         pubsub.publish_sync(
             &NEIGHBOURHOOD_SIGNAL_TOPIC,
             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                perspective_uuid: handle.uuid.clone(),
                 perspective: handle,
                 signal,
                 recipient: None,

@@ -65,10 +65,7 @@ const Apps = () => {
   useEffect(() => {
     getApps();
 
-    client?.agent?.addAppChangedListener(() => {
-      console.log("triggered");
-      getApps();
-    });
+    return client?.on("apps-changed", () => getApps());
   }, [client]);
 
   function goToFlux() {
