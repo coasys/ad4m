@@ -156,6 +156,10 @@ export class QuerySubscriptionProxy {
             this.#keepaliveTimer = undefined;
         }
 
+        // A retry (init timeout, failed keepalive) replaces the hold this
+        // proxy already has; release it so the proxy never holds two.
+        this.#releaseHold();
+
         try {
             // Initialize the query subscription
             let initialResult;
@@ -292,6 +296,7 @@ export class QuerySubscriptionProxy {
                     );
                     const oldUnsub = this.#unsubscribe;
                     this.#unsubscribe = newUnsub;
+                    this.#releaseHold();
                     this.#subscriptionId = newSubId;
                     if (oldUnsub) oldUnsub();
 
@@ -478,6 +483,9 @@ export class QuerySubscriptionProxy {
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
+     * Calling it again is a no-op: subscribers of the same query share one
+     * executor subscription, and only the first call releases this proxy's
+     * hold on it.
      */
     dispose() {
         this.#disposed = true;
@@ -498,9 +506,20 @@ export class QuerySubscriptionProxy {
             this.#initTimeoutId = undefined;
         }
 
-        // Tell the backend to dispose of the subscription
-        if (this.#subscriptionId) {
-            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+        this.#releaseHold();
+    }
+
+    /** Release this proxy's hold on its executor subscription, at most once.
+     *
+     *  The executor hands every subscriber of the same query the same
+     *  subscription id and removes the entry when the last holder releases
+     *  it. The id is cleared before the RPC, so a repeated dispose() is a
+     *  local no-op and cannot release another subscriber's hold. */
+    #releaseHold() {
+        const subscriptionId = this.#subscriptionId;
+        this.#subscriptionId = undefined;
+        if (subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, subscriptionId)
                 .catch(e => console.error('Error disposing query subscription:', e));
         }
     }
