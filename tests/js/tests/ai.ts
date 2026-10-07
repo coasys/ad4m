@@ -1,4 +1,5 @@
 import { TestContext } from './test-context'
+import { pollUntil } from '../utils/utils'
 import { expect } from "chai";
 import fs from 'fs';
 //@ts-ignore
@@ -53,16 +54,16 @@ async function streamAudioData(
     }
 }
 
-// Helper function to wait for transcription results
+// Helper function to wait for transcription results — delegates to pollUntil
 async function waitForTranscription<T>(
     condition: () => boolean,
     maxWaitSeconds: number = 60
 ): Promise<void> {
-    let i = 0;
-    while (!condition() && i < maxWaitSeconds) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        i += 1;
-    }
+    await pollUntil(condition, {
+        timeoutMs: maxWaitSeconds * 1000,
+        intervalMs: 1000,
+        label: "transcription result"
+    });
 }
 
 export default function aiTests(testContext: TestContext) {
@@ -254,12 +255,11 @@ export default function aiTests(testContext: TestContext) {
                 const modelId = await ad4mClient.ai.addModel(initialModel)
                 expect(modelId).to.be.a.string
 
-                // Wait for model to be loaded
-                let status;
-                do {
-                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
-                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
-                } while (status.progress < 100);
+                // Poll until model finishes loading
+                await pollUntil(async () => {
+                    const s = await ad4mClient.ai.modelLoadingStatus(modelId);
+                    return s.progress >= 100;
+                }, { timeoutMs: 120000, intervalMs: 1000, label: "initial model loading" });
 
                 testModelId = modelId
 
@@ -288,11 +288,11 @@ export default function aiTests(testContext: TestContext) {
                 const updateResult = await ad4mClient.ai.updateModel(modelId, updatedModel)
                 expect(updateResult).to.be.true
 
-                // Wait for model to be loaded
-                do {
-                    status = await ad4mClient.ai.modelLoadingStatus(modelId);
-                    await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second between checks
-                } while (status.progress < 100);
+                // Poll until updated model finishes loading
+                await pollUntil(async () => {
+                    const s = await ad4mClient.ai.modelLoadingStatus(modelId);
+                    return s.progress >= 100;
+                }, { timeoutMs: 120000, intervalMs: 1000, label: "updated model loading" });
 
                 // Verify model was updated in DB
                 const models = await ad4mClient.ai.getModels()
@@ -346,6 +346,29 @@ export default function aiTests(testContext: TestContext) {
                 await ad4mClient.ai.removeModel(id)
             })
 
+            it('keeps a default for a model type other than LLM', async () => {
+                // Setting a default used to persist only for LLM: for every other type
+                // the call answered true and wrote nothing, so the default read back null.
+                const ad4mClient = testContext.ad4mClient!
+
+                const id = await ad4mClient.ai.addModel({
+                    name: "TestDefaultEmbeddingModel",
+                    api: {
+                        baseUrl: "https://api.example.com/",
+                        apiKey: "test-api-key",
+                        model: "embedder",
+                        apiType: "OPEN_AI"
+                    },
+                    modelType: "EMBEDDING"
+                })
+
+                expect(await ad4mClient.ai.setDefaultModel("EMBEDDING", id)).to.be.true
+                const defaultModel = await ad4mClient.ai.getDefaultModel("EMBEDDING")
+                expect(defaultModel?.id).to.equal(id)
+
+                await ad4mClient.ai.removeModel(id)
+            })
+
             it.skip('can use "default" as model_id in tasks and prompting works', async () => {
                 const ad4mClient = testContext.ad4mClient!
                 await ad4mClient.ai.setDefaultModel("LLM", testModelId)
@@ -374,12 +397,11 @@ export default function aiTests(testContext: TestContext) {
                 }
                 const newModelId = await ad4mClient.ai.addModel(newModelInput)
 
-                // Wait for new model to be loaded
-                let newModelStatus;
-                do {
-                    newModelStatus = await ad4mClient.ai.modelLoadingStatus(newModelId);
-                    await new Promise(resolve => setTimeout(resolve, 1000));
-                } while (newModelStatus.progress < 100);
+                // Poll until new model finishes loading
+                await pollUntil(async () => {
+                    const s = await ad4mClient.ai.modelLoadingStatus(newModelId);
+                    return s.progress >= 100;
+                }, { timeoutMs: 120000, intervalMs: 1000, label: "new default model loading" });
 
                 // Change default model to new one
                 await ad4mClient.ai.setDefaultModel("LLM", newModelId)

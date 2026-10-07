@@ -6484,13 +6484,17 @@ impl PerspectiveInstance {
             let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
             let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             // Signal the batch is ready before the pass runs, so listeners
-            // (tests, the WS layer) can await "processing started".
-            emit(
+            // (tests, the WS layer) can await "processing started". Tagged with
+            // the acting agent like every signal `run_one_pass` emits: the WS
+            // layer delivers an untagged event to admin sessions only.
+            let mut ready =
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
                     .with_items(&item_ids)
-                    .with_batch_key(&batch_id),
-            )
-            .await;
+                    .with_batch_key(&batch_id);
+            if let Ok(me) = did_for_context(context) {
+                ready = ready.with_agent_did(&me);
+            }
+            emit(ready).await;
             let mut perspective_clone = self.clone();
             // Stall-fallback: if this batch has been standing down for its online
             // elected author past `claim_ttl_ms`, escalate past election straight
@@ -7797,6 +7801,60 @@ mod tests {
 
         let links_after = perspective.get_links(&query).await.unwrap();
         assert_eq!(links_after.len(), 2);
+    }
+
+    /// A class whose properties are all optional has empty constructor and
+    /// destructor lists. The writer must still store both links, or
+    /// `create_subject` fails with "No SHACL constructor found".
+    #[tokio::test]
+    async fn create_subject_works_for_a_shape_with_empty_constructor() {
+        let mut perspective = setup().await;
+        let shacl = r#"{
+            "target_class": "t://Memo",
+            "properties": [{
+                "path": "t://body",
+                "name": "body",
+                "max_count": 1,
+                "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://body", "target": "value"}]
+            }],
+            "constructor_actions": [],
+            "destructor_actions": []
+        }"#;
+        let ctx = AgentContext::main_agent();
+        perspective
+            .add_sdna(
+                "Memo".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(shacl.to_string()),
+                &ctx,
+            )
+            .await
+            .expect("add_sdna");
+
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some("Memo".to_string()),
+                    query: None,
+                },
+                "t://memo/1".to_string(),
+                Some(serde_json::json!({ "body": "hi" })),
+                None,
+                &ctx,
+            )
+            .await
+            .expect("create_subject");
+
+        let body = perspective
+            .get_links(&LinkQuery {
+                source: Some("t://memo/1".to_string()),
+                predicate: Some("t://body".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(body.len(), 1);
     }
 
     /// The collection-expansion gate in `create_subject` / `update_subject`:

@@ -56,6 +56,7 @@ export default class Ad4mConnect extends EventTarget {
   hostIndexUrl: string;
   lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
+  private releaseCreditListener?: () => void;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
@@ -172,8 +173,7 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
 
-    // Defer subscriptions until auth is verified to avoid 403 spam
-    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token, false);
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
     this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
@@ -181,7 +181,7 @@ export default class Ad4mConnect extends EventTarget {
 
   private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
     const baseUrl = wsUrlToHttpBase(wsUrl);
-    const client = new Ad4mClient(baseUrl, undefined, false);
+    const client = new Ad4mClient(baseUrl);
     try {
       return await callback(client);
     } finally {
@@ -214,7 +214,6 @@ export default class Ad4mConnect extends EventTarget {
         this.notifyAuthChange("locked");
       } else {
         await this.ad4mClient.agent.status();
-        this.ad4mClient.startSubscriptions();
         this.notifyAuthChange("authenticated");
       }
 
@@ -252,6 +251,7 @@ export default class Ad4mConnect extends EventTarget {
     this.connectedHost = null;
     this.userInfo = null;
     this.stopCreditPolling();
+    this.releaseCreditListener?.();
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -264,43 +264,29 @@ export default class Ad4mConnect extends EventTarget {
 
   /**
    * Subscribe to real-time credit updates.
-   * Falls back to polling if the subscription is not supported by the executor.
+   * Polling runs beside it as a safety net.
    */
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
-    try {
-      this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
-        const userInfo: UserInfo = {
-          email: info.email,
-          remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
-          hotWalletAddress: info.hotWalletAddress || null,
-          freeAccess: info.freeAccess,
-        };
-        this.userInfo = userInfo;
-        this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
+    this.releaseCreditListener?.();
+    this.releaseCreditListener = this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
+      const userInfo: UserInfo = {
+        email: info.email,
+        remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
+        hotWalletAddress: info.hotWalletAddress || null,
+        freeAccess: info.freeAccess,
+      };
+      this.userInfo = userInfo;
+      this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
-        if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
-          this.dispatchEvent(new CustomEvent('creditdepleted'));
-        }
-        if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
-          this.dispatchEvent(new CustomEvent('creditlow'));
-        }
-      });
-      this.ad4mClient.agent.subscribeHostingUserInfoChanged();
-    } catch (e) {
-      console.warn('[Ad4m Connect] Subscription not available, falling back to polling:', e);
-    }
-
-    // Subscribe to compute log updates for real-time activity log
-    try {
-      this.ad4mClient.agent.addComputeLogUpdatedListener((entry) => {
-        this.dispatchEvent(new CustomEvent('computelogentry', { detail: entry }));
-      });
-      this.ad4mClient.agent.subscribeComputeLogUpdated();
-    } catch (e) {
-      console.warn('[Ad4m Connect] Compute log subscription not available:', e);
-    }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
+        this.dispatchEvent(new CustomEvent('creditdepleted'));
+      }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
+        this.dispatchEvent(new CustomEvent('creditlow'));
+      }
+    });
 
     // Always start polling as a safety-net (at a longer 60s interval)
     this.startCreditPolling();
@@ -433,7 +419,6 @@ export default class Ad4mConnect extends EventTarget {
             this.ad4mClient = new Ad4mClient(
               'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
               normalizedToken,
-              false,          // defer subscriptions until auth confirmed
               { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
             );
             this.notifyConnectionChange('connected');
