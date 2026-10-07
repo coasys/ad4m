@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 /// `model_query` returns for that class's shape, and the same node read
 /// through another class is other content. Serialised camelCase
 /// (`{"className", "id"}`), the shape the TS client sends.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export)]
 pub struct OutputRef {
     pub class_name: String,
     pub id: String,
