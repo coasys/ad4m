@@ -529,6 +529,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only hook run once by [`Self::diff_from_link_language`] after
+    /// its ingest filter and before the store write, so a test can land a
+    /// concurrent local write in that gap deterministically (#1146).
+    #[cfg(test)]
+    pub(crate) ingest_gap_hook: Arc<std::sync::Mutex<Option<Box<dyn FnOnce() + Send>>>>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -592,6 +597,8 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            ingest_gap_hook: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -1594,6 +1601,11 @@ impl PerspectiveInstance {
             &mut unique_additions,
             &mut unique_removals,
         );
+
+        #[cfg(test)]
+        if let Some(hook) = self.ingest_gap_hook.lock().unwrap().take() {
+            hook();
+        }
 
         // Links arriving from the link language are shared by definition, but
         // the wire form usually carries `status: None`. Assign it explicitly

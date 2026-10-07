@@ -357,6 +357,36 @@ async fn ingest_leaves_a_local_link_alone() {
     assert_row_is(&row, &local);
 }
 
+/// A local write of the same link that lands between the ingest filter and
+/// the store write is not relabelled `Shared` by the remote addition, nor
+/// deleted by a remote removal: the `Local` check and the remote write are
+/// one store operation.
+#[tokio::test]
+async fn ingest_leaves_a_local_link_written_after_the_filter_alone() {
+    let p = perspective().await;
+    let alice = TestSigner::generate();
+    let shared = signed(&alice, "ingest://race", "ingest://t");
+    let mut local = shared.clone();
+    local.status = Some(LinkStatus::Local);
+
+    for (label, additions, removals) in [
+        ("addition", vec![shared.clone()], vec![]),
+        ("removal", vec![], vec![shared.clone()]),
+    ] {
+        p.sparql_store.clear().unwrap();
+        let store = p.sparql_store.clone();
+        let concurrent = local.clone();
+        *p.ingest_gap_hook.lock().unwrap() = Some(Box::new(move || {
+            store.add_link(&concurrent).unwrap();
+        }));
+
+        ingest(&p, additions, removals).await;
+        let row = only_link(links_from(&p, "ingest://race"));
+        assert_eq!(row.status, Some(LinkStatus::Local), "{label}");
+        assert_row_is(&row, &shared);
+    }
+}
+
 /// Control: removal semantics for Shared links are unchanged here (#1146
 /// PR 2 adds the author check). A remote removal of a Shared link applies.
 #[tokio::test]
