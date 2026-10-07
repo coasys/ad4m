@@ -107,7 +107,9 @@ fn did_document_without_secrets(did_document: &str) -> Option<String> {
                 let removed = map.len() != before;
                 map.values_mut().fold(removed, |acc, v| strip(v) || acc)
             }
-            serde_json::Value::Array(items) => items.iter_mut().fold(false, |acc, v| strip(v) || acc),
+            serde_json::Value::Array(items) => {
+                items.iter_mut().fold(false, |acc, v| strip(v) || acc)
+            }
             _ => false,
         }
     }

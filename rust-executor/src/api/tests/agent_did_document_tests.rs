@@ -38,7 +38,10 @@ fn handlers() -> HandlerMap {
 /// The public half that must survive: the DID and the base58 public key of the
 /// signing method.
 fn assert_public_document_present(serialized: &str, did: &str, what: &str) {
-    assert!(serialized.contains(did), "{what} lost the DID: {serialized}");
+    assert!(
+        serialized.contains(did),
+        "{what} lost the DID: {serialized}"
+    );
     assert!(
         serialized.contains("publicKeyBase58"),
         "{what} lost the public keys: {serialized}"
@@ -109,7 +112,11 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
         .await;
 
     let lock_reply = handlers()
-        .dispatch("agent.lock", json!({ "passphrase": "pw-1229" }), admin_ctx())
+        .dispatch(
+            "agent.lock",
+            json!({ "passphrase": "pw-1229" }),
+            admin_ctx(),
+        )
         .await
         .expect("agent.lock")
         .to_string();
@@ -119,8 +126,8 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
         .expect("event");
     // Unlock before asserting, so a failure here leaves the wallet usable.
     let unlocked = AgentService::with_mutable_global_instance(|s| s.unlock("pw-1229".into()));
-    let unlock_reply = serde_json::to_string(&AgentService::with_global_instance(|s| s.dump()))
-        .unwrap();
+    let unlock_reply =
+        serde_json::to_string(&AgentService::with_global_instance(|s| s.dump())).unwrap();
     setup_agent();
 
     unlocked.expect("unlock with the lock passphrase");
@@ -194,7 +201,11 @@ async fn an_agent_json_written_before_the_fix_is_served_and_rewritten_without_pr
 
     assert_no_private_keys(&on_disk, &secrets, "agent.json after load");
     let stored: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
-    assert_eq!(stored["keystore"], json!(keystore), "keystore must be kept verbatim");
+    assert_eq!(
+        stored["keystore"],
+        json!(keystore),
+        "keystore must be kept verbatim"
+    );
     assert_eq!(stored["did"], json!(did));
     assert_eq!(stored["signingKeyId"], json!(signing_key_id));
     assert_public_document_present(
@@ -235,5 +246,9 @@ async fn agent_status_for_a_managed_user_carries_no_private_key() {
 
     let agent_data = AgentService::get_user_agent_data(email).unwrap();
     assert_no_private_keys(&agent_data.did_document, &secrets, "AgentData.did_document");
-    assert_public_document_present(&agent_data.did_document, &user_did, "AgentData.did_document");
+    assert_public_document_present(
+        &agent_data.did_document,
+        &user_did,
+        "AgentData.did_document",
+    );
 }

@@ -1293,7 +1293,10 @@ mod tests {
         );
         let expected = did_key::from_existing_key::<Ed25519KeyPair>(public, None)
             .get_did_document(did_key::CONFIG_LD_PUBLIC);
-        assert_eq!(document, expected, "{what} must still be the agent's public document");
+        assert_eq!(
+            document, expected,
+            "{what} must still be the agent's public document"
+        );
         assert_eq!(document.verification_method.len(), 2);
     }
 
