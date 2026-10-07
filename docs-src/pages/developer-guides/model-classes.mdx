@@ -67,7 +67,7 @@ This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers 
 
 A `SHACLShape` is not just an in-process JavaScript object. It also has two serialized forms that make a shape portable beyond the app that defined it:
 
-- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` / `addSubjectClass` RPC carries a `shaclJson` string. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
+- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` RPC carries a `shaclJson` string; `addShacl` and model registration send `shape.toJSON()`. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
 - **Turtle** — the standard W3C SHACL serialization (RDF Turtle). Export-only in the client today (no `fromTurtle` round-trip yet), but useful for sharing shapes with non-AD4M tooling and for human-readable review.
 
 Both are produced by the same `SHACLShape`:
@@ -133,18 +133,17 @@ Because the JSON form is exactly what the executor consumes over RPC, an app —
 
 ```typescript
 // shape received over the wire / loaded from a file / fetched from a registry
-const shapeJson = JSON.parse(await readFile("recipe.shacl.json", "utf8"));
+const shape = SHACLShape.fromJSON(JSON.parse(await readFile("recipe.shacl.json", "utf8")));
 
 // Install it directly on a perspective
-await perspective.addSubjectClass("Recipe", JSON.stringify(shapeJson));
+await perspective.addShacl("Recipe", shape);
 
 // Optionally, hydrate a model class from it for ergonomic access
-const shape = SHACLShape.fromJSON(shapeJson);
 const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
 const recipes = await Recipe.findAll(perspective);
 ```
 
-This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addSubjectClass`, and from then on both apps read and write the same Subject Class against the same Perspective.
+This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addShacl`, and from then on both apps read and write the same Subject Class against the same Perspective.
 
 ### Option 3: From JSON Schema (Dynamic)
 
@@ -1059,6 +1058,24 @@ builder.dispose();
 ```
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
+
+#### Subscription sharing and `dispose()`
+
+The executor keeps one live subscription per distinct query and agent. Two
+builders that subscribe to the same query (two components showing the same
+list, for example) share that subscription: the executor re-evaluates the
+query once per change and pushes one update that both builders receive.
+
+`dispose()` releases only the calling builder's hold. Other subscribers of the
+same query keep receiving updates, and the executor drops the subscription
+when the last holder disposes, or when no holder has sent a keepalive for a
+while (a page that was closed without disposing).
+
+The local cleanup, stopping the keepalive and the update listener, happens
+synchronously, so a plain `builder.dispose()` is sufficient. The method also
+returns a promise that resolves once the executor has acknowledged the release;
+await it when a following step depends on that, as `subscribe()` itself does
+before registering a replacement subscription.
 
 ## Transactions
 
