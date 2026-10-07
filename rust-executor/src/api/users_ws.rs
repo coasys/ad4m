@@ -1,14 +1,16 @@
 //! User management WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::db::Ad4mDb;
-use crate::types::RequestContext;
+use crate::types::{RequestContext, UserCreationResult, UserStatistics, VerificationRequestResult};
 
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 async fn get_multi_user_enabled(
     _params: Value,
@@ -171,7 +173,7 @@ async fn login_user(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &RUNTIME_USER_MANAGEMENT_LOGIN_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: LoginUserRequest = serde_json::from_value(params)
+    let body: UsersLoginParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
@@ -189,7 +191,7 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: VerifyEmailRequest = serde_json::from_value(params)
+    let body: UsersVerifyEmailParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
@@ -205,33 +207,33 @@ async fn verify_email(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
 async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &ALL_CAPABILITY).map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EmailTestRequest = serde_json::from_value(params)
+    let body: UsersEmailTestParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    match body.action.as_str() {
-        "send" => Err(WsRpcError::internal(
+    match body.action {
+        UsersEmailTestAction::Send => Err(WsRpcError::internal(
             "send_test_email not available as standalone function",
         )),
-        "enable" => {
+        UsersEmailTestAction::Enable => {
             crate::email_service::enable_test_mode();
             Ok(Value::Bool(true))
         }
-        "disable" => {
+        UsersEmailTestAction::Disable => {
             crate::email_service::disable_test_mode();
             Ok(Value::Bool(true))
         }
-        "get-code" => {
+        UsersEmailTestAction::GetCode => {
             let email = body
                 .email
                 .ok_or_else(|| WsRpcError::bad_request("'email' required"))?;
             let code = crate::email_service::get_test_code(&email);
             Ok(serde_json::to_value(code).unwrap_or_default())
         }
-        "clear" | "clear-codes" => {
+        UsersEmailTestAction::Clear | UsersEmailTestAction::ClearCodes => {
             crate::email_service::clear_test_codes();
             Ok(Value::Bool(true))
         }
-        "set-expiry" => {
+        UsersEmailTestAction::SetExpiry => {
             let email = body
                 .email
                 .ok_or_else(|| WsRpcError::bad_request("'email' required"))?;
@@ -249,10 +251,6 @@ async fn email_test(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
 
             Ok(Value::Bool(true))
         }
-        other => Err(WsRpcError::bad_request(format!(
-            "Unknown action: {}",
-            other
-        ))),
     }
 }
 
@@ -268,7 +266,7 @@ async fn request_verification(
     )
     .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: RequestVerificationRequest = serde_json::from_value(params)
+    let body: UsersRequestVerificationParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let email = body.email.trim().to_lowercase();
@@ -317,8 +315,7 @@ async fn request_verification(
     let app_name = body
         .app_info
         .as_ref()
-        .and_then(|info| info.get("appName"))
-        .and_then(|value| value.as_str())
+        .and_then(|info| info.app_name.as_deref())
         .unwrap_or("ad4m");
 
     match um::request_login_code(&email, Some(app_name)).await {
@@ -347,15 +344,124 @@ async fn users_credits(params: Value, _ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("user.create", create_user);
-    map.register("user.login", login_user);
-    map.register("user.verifyEmail", verify_email);
-    map.register("user.list", list_users);
-    map.register("user.multiUserEnabled", get_multi_user_enabled);
-    map.register("user.setMultiUserEnabled", set_multi_user_enabled);
-    map.register("user.freeAccess", set_user_free_access);
-    map.register("user.credits", users_credits);
-    map.register("user.wallet", get_user_wallet);
-    map.register("user.emailTest", email_test);
-    map.register("user.requestVerification", request_verification);
+    map.method::<CreateUserRequest, UserCreationResult>("user.create", create_user);
+    // The session JWT.
+    map.method::<UsersLoginParams, String>("user.login", login_user);
+    // The session JWT.
+    map.method::<UsersVerifyEmailParams, String>("user.verifyEmail", verify_email);
+    map.method::<NoParams, Vec<UserStatistics>>("user.list", list_users)
+        .read();
+    map.method::<NoParams, bool>("user.multiUserEnabled", get_multi_user_enabled)
+        .read();
+    map.method::<SetMultiUserRequest, bool>("user.setMultiUserEnabled", set_multi_user_enabled);
+    map.method::<SetUserFreeAccessRequest, bool>("user.freeAccess", set_user_free_access);
+    // Always answers 501; the contract is the SDK's call.
+    map.method::<UsersSetCreditsParams, bool>("user.credits", users_credits);
+    // The user's hot-wallet address (404 when none).
+    map.method::<UsersEmailParams, String>("user.wallet", get_user_wallet)
+        .read();
+    map.method::<UsersEmailTestParams, UsersEmailTestResult>("user.emailTest", email_test);
+    map.method::<UsersRequestVerificationParams, VerificationRequestResult>(
+        "user.requestVerification",
+        request_verification,
+    );
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersSetCreditsParams {
+    pub email: String,
+    pub amount: f64,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersEmailParams {
+    pub email: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersLoginParams {
+    pub email: String,
+    pub password: String,
+    /// Defaults to `ad4m`.
+    #[ts(optional)]
+    pub app_name: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersVerifyEmailParams {
+    pub email: String,
+    pub code: String,
+    /// Defaults to `signup`.
+    #[ts(optional)]
+    pub verification_type: Option<String>,
+    /// Defaults to `ad4m`.
+    #[ts(optional)]
+    pub app_name: Option<String>,
+}
+
+/// The part of the caller's app info that login-code requests read.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersAppInfo {
+    #[ts(optional)]
+    pub app_name: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersRequestVerificationParams {
+    pub email: String,
+    #[ts(optional)]
+    pub app_info: Option<UsersAppInfo>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "kebab-case")]
+#[ts(export)]
+pub enum UsersEmailTestAction {
+    Send,
+    Enable,
+    Disable,
+    GetCode,
+    Clear,
+    ClearCodes,
+    SetExpiry,
+}
+
+/// `get-code` and `set-expiry` require `email`; `set-expiry` also requires
+/// `verificationType` and `expiresAt`.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct UsersEmailTestParams {
+    pub action: UsersEmailTestAction,
+    #[ts(optional)]
+    pub email: Option<String>,
+    #[ts(optional)]
+    pub verification_type: Option<String>,
+    /// Unix seconds; a JSON number, well inside `Number.MAX_SAFE_INTEGER`.
+    #[ts(optional, type = "number")]
+    pub expires_at: Option<i64>,
+}
+
+/// `get-code` answers the captured code (`null` when none); every other
+/// action answers `true`.
+#[derive(Deserialize, TS)]
+#[serde(untagged)]
+#[ts(export)]
+pub enum UsersEmailTestResult {
+    Done(bool),
+    Code(Option<String>),
 }

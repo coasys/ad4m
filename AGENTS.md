@@ -11,13 +11,13 @@ file. Edit this file; do not put unique rules in `CLAUDE.md`.
 | `rust-executor/` | The AD4M runtime: WS RPC server, perspectives/graph store, languages runtime (Deno), Holochain conductor, AI service, MCP server. **Start at `rust-executor/AGENTS.md`.** | Rust |
 | `cli/` | `ad4m` CLI binary; wraps `rust-executor` (`ad4m-executor` subcommand) and `rust-client` | Rust |
 | `rust-client/` | Rust client for the executor's WS RPC | Rust |
-| `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC types | TS |
+| `core/` | TypeScript SDK (`@coasys/ad4m`): `Ad4mClient`, types, model/SHACL decorators, generated RPC contracts (`src/generated/api/RpcMethods.ts`) | TS |
 | `connect/` | Browser/Node connection helper (`@coasys/ad4m-connect`) | TS |
 | `bootstrap-languages/` | The system Languages (agent, perspective-diff-sync, etc.) bundled into the executor | TS/Rust |
 | `ad4m-ldk/` | ALDK = AD4M Language Development Kit (Rust + JS crates for writing Languages) | Rust/TS |
 | `ad4m-hooks/`, `hooks/` | React/Vue hooks for the SDK | TS |
 | `ui/` | Launcher UI (Tauri) | TS/Rust |
-| `dapp/` | Web dapp bundled into the executor (`dapp_server.rs`) | TS |
+| `dapp/` | Web dapp bundled into the executor (`dapp_server.rs`). Builds against the **published** `@coasys/ad4m` from npm, not `core/`: SDK changes reach it only after a release | TS |
 | `tests/js/` | Integration test suites run against a built `ad4m-executor` binary | TS |
 | `test-runner/` | Language test harness | TS |
 | `docs-src/` | Docs site sources + language interface specs (`language-interface-spec.md`, `host-contract.md`) | MD |
@@ -39,6 +39,15 @@ it in older docs.
   than leaving them beside current ones.
 - Per-directory agent docs: canonical file is `AGENTS.md`. Sibling `CLAUDE.md`
   contains only `@AGENTS.md`.
+- **RPC contracts are generated.** Every executor method registers
+  `map.method::<Params, Result>(name, handler)` (`.read()` for idempotent reads,
+  `.long()` for calls that run for minutes); dispatch rejects params outside the
+  contract. `core`'s `ApiClient.call` takes its types from
+  `core/src/generated/api/RpcMethods.ts`. After changing a method or a type it
+  reaches, regenerate: `cd core && pnpm run generate:api-types`. A unit test fails
+  when the committed files are stale.
+- `connect/` tests (vitest + happy-dom) fail under Node 26 (`localStorage.clear`
+  undefined); run them under Node 24.
 
 ## Holochain DHT and GetStrategy
 
