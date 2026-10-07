@@ -104,6 +104,7 @@ dependencies = [
  "hkdf 0.12.4",
  "holochain",
  "holochain_cli_bundle",
+ "holochain_timestamp",
  "holochain_types",
  "http-body-util",
  "hyper 0.14.32",
