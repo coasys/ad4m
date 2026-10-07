@@ -121,8 +121,9 @@ use std::collections::{BTreeMap, HashMap};
 /// One instance a verified receipt speaks for. What the "valid outputs of
 /// flow F" query returns, and what the `producedByFlow` model-query filter
 /// admits.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
+#[ts(export)]
 pub struct ValidOutput {
     /// The instance, as `(className, id)` — the pair the quorum committed to.
     pub output: OutputRef,
