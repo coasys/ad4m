@@ -80,9 +80,12 @@ use std::num::NonZeroUsize;
 use std::sync::Mutex;
 
 /// Entries one perspective's memo holds before the least recently used is
-/// evicted. Each is a key of two hashes and a value under
-/// [`MEMO_ENTRY_MAX_BYTES`], so the memo is under a megabyte per
-/// perspective whatever the receipts carried.
+/// evicted. Each is a key of two hashes (the 84-byte receipt URI and the
+/// 64-byte held definition hash) and a value of at most
+/// [`MEMO_ENTRY_MAX_BYTES`]. So whatever the receipts carried, the memo
+/// holds at most 4096 × 404 bytes, about 1.6 MB of string data per
+/// perspective, plus allocation overhead. Honest values are a few dozen
+/// bytes, which keeps an honest memo well under a megabyte.
 pub const VERDICT_MEMO_CAPACITY: usize = 4096;
 
 /// The most a memoised value may weigh. A [`SettledRun`] is a state name
