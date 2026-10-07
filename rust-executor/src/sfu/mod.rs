@@ -31,9 +31,9 @@ pub use gossip::{
 pub use reachability::{is_private_ip, SfuReachability};
 pub use service::{get_sfu_service, SfuService};
 pub use types::{
-    CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuMigrateEvent,
-    SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer, SfuRoomInfo,
-    TrackMapEntry,
+    CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuDataMessage,
+    SfuMigrateEvent, SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer,
+    SfuRoomInfo, TrackMapEntry,
 };
 
 /// Detect the default outbound IP address of this machine.

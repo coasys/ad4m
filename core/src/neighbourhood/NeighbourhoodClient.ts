@@ -1,19 +1,21 @@
-import { ApiClient, CallOptions, longCall } from "../apiClient"
+import {ApiClient, CallOptions } from '../apiClient'
 import { Address } from "../Address"
 import { DID } from "../DID"
 import { OnlineAgent, TelepresenceSignalCallback } from "../language/Language"
-import { Perspective, PerspectiveUnsignedInput } from "../perspectives/Perspective"
+import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "../perspectives/Perspective"
 import { PerspectiveHandle } from "../perspectives/PerspectiveHandle"
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
-import type { JoinNeighbourhoodRequest, PublishNeighbourhoodRequest } from "../generated/api"
 import type {
     CallSessionInfo,
+    SfuCallRenegotiationOffer,
+    SfuCascadeStatus,
     SfuConfig,
     SfuDataMessage,
+    SfuMigrateEvent,
+    SfuParticipantQualityPreference,
     SfuQualityPreference,
     SfuRoomInfo,
     SfuStatus,
-    TrackMapEntry,
 } from "./SfuTypes"
 
 export class NeighbourhoodClient {
@@ -31,60 +33,61 @@ export class NeighbourhoodClient {
         meta: Perspective,
         options?: CallOptions,
     ): Promise<string> {
-        return this.#apiClient.call<string>('neighbourhood.publish', {
-            perspectiveUUID, linkLanguage, meta
-        }, longCall(options))
+        return this.#apiClient.call('neighbourhood.publish', {
+            perspectiveUuid: perspectiveUUID, linkLanguage, meta: Perspective.toWire(meta)
+        }, options)
     }
 
     async joinFromUrl(url: string, options?: CallOptions): Promise<PerspectiveHandle> {
-        return this.#apiClient.call<PerspectiveHandle>('neighbourhood.join', { url }, longCall(options))
+        return PerspectiveHandle.fromWire(await this.#apiClient.call('neighbourhood.join', { url }, options))
     }
 
     async otherAgents(perspectiveUUID: string): Promise<DID[]> {
-        return this.#apiClient.call<DID[]>('neighbourhood.otherAgents', { uuid: perspectiveUUID })
+        return this.#apiClient.call('neighbourhood.otherAgents', { uuid: perspectiveUUID })
     }
 
     async hasTelepresenceAdapter(perspectiveUUID: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
+        return this.#apiClient.call('neighbourhood.hasTelepresence', { uuid: perspectiveUUID })
     }
 
     async onlineAgents(perspectiveUUID: string): Promise<OnlineAgent[]> {
-        return this.#apiClient.call<OnlineAgent[]>('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
+        const agents = await this.#apiClient.call('neighbourhood.onlineAgents', { uuid: perspectiveUUID })
+        return agents.map(({ did, status }) => ({ did, status: PerspectiveExpression.fromWire(status) }))
     }
 
     async setOnlineStatus(perspectiveUUID: string, status: Perspective): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status })
+        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status: Perspective.toWire(status) })
     }
 
     async setOnlineStatusU(perspectiveUUID: string, status: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
+        return this.#apiClient.call('neighbourhood.setOnlineStatus', { uuid: perspectiveUUID, status, signed: false })
     }
 
     async sendSignal(perspectiveUUID: string, remoteAgentDid: string, payload: Perspective): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
-            uuid: perspectiveUUID, remoteAgentDid, payload
+        return this.#apiClient.call('neighbourhood.sendSignal', {
+            uuid: perspectiveUUID, remoteAgentDid, payload: Perspective.toWire(payload)
         })
     }
 
     async sendSignalU(perspectiveUUID: string, remoteAgentDid: string, payload: PerspectiveUnsignedInput): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendSignal', {
+        return this.#apiClient.call('neighbourhood.sendSignal', {
             uuid: perspectiveUUID, remoteAgentDid, payload, signed: false
         })
     }
 
     async sendBroadcast(perspectiveUUID: string, payload: Perspective, loopback: boolean = false): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
-            uuid: perspectiveUUID, payload, loopback
+        return this.#apiClient.call('neighbourhood.sendBroadcast', {
+            uuid: perspectiveUUID, payload: Perspective.toWire(payload), loopback
         })
     }
 
     async sendBroadcastU(perspectiveUUID: string, payload: PerspectiveUnsignedInput, loopback: boolean = false): Promise<boolean> {
-        return this.#apiClient.call<boolean>('neighbourhood.sendBroadcast', {
+        return this.#apiClient.call('neighbourhood.sendBroadcast', {
             uuid: perspectiveUUID, payload, loopback, signed: false
         })
     }
 
-    dispatchSignal(perspectiveUUID: string, signal: unknown) {
+    dispatchSignal(perspectiveUUID: string, signal: PerspectiveExpression) {
         const handlers = this.#signalHandlers.get(perspectiveUUID)
         if (handlers) {
             for (const handler of handlers) {
@@ -98,14 +101,13 @@ export class NeighbourhoodClient {
     }
 
     async subscribeToSignals(perspectiveUUID: string): Promise<void> {
-        const unsub = this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'signal' && (data.perspective as { uuid?: string } | undefined)?.uuid === perspectiveUUID) {
-                    this.dispatchSignal(perspectiveUUID, data.signal)
-                }
-            }
+        const unsub = this.#apiClient.on(
+            'signal',
+            (event) => this.dispatchSignal(perspectiveUUID, PerspectiveExpression.fromWire(event.signal)),
+            { perspective: perspectiveUUID },
         )
         this.#signalUnsubscribers.set(perspectiveUUID, unsub)
+        await this.#apiClient.watchApplied()
     }
 
     async addSignalHandler(perspectiveUUID: string, handler: TelepresenceSignalCallback): Promise<void> {
@@ -147,15 +149,15 @@ export class NeighbourhoodClient {
     // redirect + stream mapping).
 
     async sfuStartRoom(neighbourhoodUrl: string, roomName: string): Promise<SfuRoomInfo> {
-        return this.#apiClient.call<SfuRoomInfo>("sfu.startRoom", { neighbourhoodUrl, roomName })
+        return this.#apiClient.call("sfu.startRoom", { neighbourhoodUrl, roomName })
     }
 
     async sfuStopRoom(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.stopRoom", { neighbourhoodUrl, roomName })
+        return this.#apiClient.call("sfu.stopRoom", { neighbourhoodUrl, roomName })
     }
 
     async sfuListRooms(): Promise<SfuRoomInfo[]> {
-        return this.#apiClient.call<SfuRoomInfo[]>("sfu.listRooms", {})
+        return this.#apiClient.call("sfu.listRooms", {})
     }
 
     async sfuCallJoin(
@@ -163,7 +165,7 @@ export class NeighbourhoodClient {
         roomName: string,
         sdpOffer: string,
     ): Promise<CallSessionInfo> {
-        return this.#apiClient.call<CallSessionInfo>("sfu.callJoin", {
+        return this.#apiClient.call("sfu.callJoin", {
             neighbourhoodUrl,
             roomName,
             sdpOffer,
@@ -171,7 +173,7 @@ export class NeighbourhoodClient {
     }
 
     async sfuCallLeave(neighbourhoodUrl: string, roomName: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.callLeave", { neighbourhoodUrl, roomName })
+        return this.#apiClient.call("sfu.callLeave", { neighbourhoodUrl, roomName })
     }
 
     async sfuCallSetQualityPreference(
@@ -179,7 +181,7 @@ export class NeighbourhoodClient {
         roomName: string,
         preference: SfuQualityPreference,
     ): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.callSetQualityPreference", {
+        return this.#apiClient.call("sfu.callSetQualityPreference", {
             neighbourhoodUrl,
             roomName,
             preference,
@@ -191,7 +193,7 @@ export class NeighbourhoodClient {
         roomName: string,
         sdpAnswer: string,
     ): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.callAnswerServerOffer", {
+        return this.#apiClient.call("sfu.callAnswerServerOffer", {
             neighbourhoodUrl,
             roomName,
             sdpAnswer,
@@ -199,21 +201,19 @@ export class NeighbourhoodClient {
     }
 
     async sfuGetConfig(neighbourhoodUrl: string): Promise<SfuConfig> {
-        return this.#apiClient.call<SfuConfig>("sfu.getConfig", { neighbourhoodUrl })
+        return this.#apiClient.call("sfu.getConfig", { neighbourhoodUrl })
     }
 
     async sfuSetConfig(neighbourhoodUrl: string, config: SfuConfig): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.setConfig", { neighbourhoodUrl, config })
+        return this.#apiClient.call("sfu.setConfig", { neighbourhoodUrl, config })
     }
 
     async sfuPeerForNeighbourhood(neighbourhoodUrl: string): Promise<string | null> {
-        return this.#apiClient.call<string | null>("sfu.sfuPeerForNeighbourhood", {
-            neighbourhoodUrl,
-        })
+        return this.#apiClient.call("sfu.sfuPeerForNeighbourhood", { neighbourhoodUrl })
     }
 
     async sfuPeersForNeighbourhood(neighbourhoodUrl: string): Promise<string[]> {
-        return this.#apiClient.call<string[]>("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
+        return this.#apiClient.call("sfu.sfuPeersForNeighbourhood", { neighbourhoodUrl })
     }
 
     // ── Trickle ICE ───────────────────────────────────────────────────
@@ -231,7 +231,7 @@ export class NeighbourhoodClient {
         roomName: string,
         candidate: string,
     ): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.addIceCandidate", {
+        return this.#apiClient.call("sfu.addIceCandidate", {
             neighbourhoodUrl,
             roomName,
             candidate,
@@ -243,7 +243,7 @@ export class NeighbourhoodClient {
     /**
      * Send data through the SFU to all other participants in the room.
      * The server relays it to their matching data channel and
-     * publishes it on the `sfu-data` events_ws topic.
+     * publishes it as an `sfu-data` event.
      */
     async sfuSendData(
         neighbourhoodUrl: string,
@@ -252,7 +252,7 @@ export class NeighbourhoodClient {
         data: string,
         binary: boolean = false,
     ): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.sendData", {
+        return this.#apiClient.call("sfu.sendData", {
             neighbourhoodUrl,
             roomName,
             channelLabel,
@@ -269,84 +269,55 @@ export class NeighbourhoodClient {
     subscribeSfuDataChannel(
         callback: (message: SfuDataMessage) => void,
     ): () => void {
-        return this.#apiClient.subscribe((data: any) => {
-            if (data?.type !== "sfu-data") return
-            callback(data as SfuDataMessage)
-        })
+        // A fresh handler per call: `on` merges a repeated handler, and
+        // each subscription must own its unsubscribe.
+        return this.#apiClient.on("sfu-data", (message) => callback(message))
     }
 
     /**
      * Subscribe to server-pushed SFU SDP renegotiation offers.  The
-     * server publishes `sfu-call-renegotiation-offer` events on the
-     * events_ws every time the relay's outbound track set changes for
-     * `targetDid`.  Callers apply the offer to their `RTCPeerConnection`,
-     * generate an answer, and post it via `sfuCallAnswerServerOffer`.
+     * server publishes an `sfu-call-renegotiation-offer` event every
+     * time the relay's outbound track set changes for `targetDid`.
+     * Callers apply the offer to their `RTCPeerConnection`, generate an
+     * answer, and post it via `sfuCallAnswerServerOffer`.
      *
-     * The events_ws fanout already filters per-DID; this subscription
-     * additionally double-filters on `targetDid` for safety.  Returns
-     * an unsubscribe function.
+     * The executor already sends each socket only its own DID's offers;
+     * this subscription additionally filters on `targetDid` for safety.
+     * Returns an unsubscribe function.
      */
     subscribeSfuCallRenegotiationOffer(
         targetDid: string,
-        callback: (payload: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            sdpOffer: string
-            trackMapping?: TrackMapEntry[]
-        }) => void,
+        callback: (payload: SfuCallRenegotiationOffer) => void,
     ): () => void {
-        return this.#apiClient.subscribe((data: any) => {
-            if (data?.type !== "sfu-call-renegotiation-offer") return
-            const payload = data as {
-                type: string
-                targetDid: string
-                neighbourhoodUrl: string
-                roomName: string
-                sdpOffer: string
-                trackMapping?: TrackMapEntry[]
-            }
-            if (payload.targetDid !== targetDid) return
+        return this.#apiClient.on("sfu-call-renegotiation-offer", (event) => {
+            if (event.targetDid !== targetDid) return
             callback({
-                targetDid: payload.targetDid,
-                neighbourhoodUrl: payload.neighbourhoodUrl,
-                roomName: payload.roomName,
-                sdpOffer: payload.sdpOffer,
-                trackMapping: payload.trackMapping,
+                targetDid: event.targetDid,
+                neighbourhoodUrl: event.neighbourhoodUrl,
+                roomName: event.roomName,
+                sdpOffer: event.sdpOffer,
+                trackMapping: event.trackMapping,
             })
         })
     }
 
     /**
      * Subscribe to cascade rebalance migration events for `targetDid`.
-     * The server publishes `sfu-migrate` events on the events_ws when
-     * the cascade rebalancer decides a participant should move to a
-     * less-loaded node.  Returns an unsubscribe function.
+     * The server publishes an `sfu-migrate` event when the cascade
+     * rebalancer decides a participant should move to a less-loaded
+     * node.  Returns an unsubscribe function.
      */
     subscribeSfuMigrateEvent(
         targetDid: string,
-        callback: (payload: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            migrateToDid: string
-        }) => void,
+        callback: (payload: SfuMigrateEvent) => void,
     ): () => void {
-        return this.#apiClient.subscribe((data: any) => {
-            if (data?.type !== "sfu-migrate") return
-            const payload = data as {
-                type: string
-                targetDid: string
-                neighbourhoodUrl: string
-                roomName: string
-                migrateToDid: string
-            }
-            if (payload.targetDid !== targetDid) return
+        return this.#apiClient.on("sfu-migrate", (event) => {
+            if (event.targetDid !== targetDid) return
             callback({
-                targetDid: payload.targetDid,
-                neighbourhoodUrl: payload.neighbourhoodUrl,
-                roomName: payload.roomName,
-                migrateToDid: payload.migrateToDid,
+                targetDid: event.targetDid,
+                neighbourhoodUrl: event.neighbourhoodUrl,
+                roomName: event.roomName,
+                migrateToDid: event.migrateToDid,
             })
         })
     }
@@ -370,11 +341,10 @@ export class NeighbourhoodClient {
         const agents = await this.onlineAgents(perspectiveId)
         const nodes: { did: string; bindAddress: string }[] = []
         for (const agent of agents) {
-            const status = agent.status
-            if (!status?.links) continue
-            for (const link of status.links) {
-                const l = (link as any).data ?? link
-                if (l.predicate === SFU_PREDICATE && l.target) {
+            // The status is a signed perspective: its links sit under `data`.
+            for (const link of agent.status?.data?.links ?? []) {
+                const l = link.data
+                if (l?.predicate === SFU_PREDICATE && l.target) {
                     nodes.push({ did: agent.did, bindAddress: l.target })
                 }
             }
@@ -391,7 +361,7 @@ export class NeighbourhoodClient {
      * determine its reachability (unknown).
      */
     async sfuStatus(): Promise<SfuStatus> {
-        return this.#apiClient.call<SfuStatus>("sfu.status", {})
+        return this.#apiClient.call("sfu.status", {})
     }
 
     /**
@@ -399,10 +369,7 @@ export class NeighbourhoodClient {
      * plus the list of pipes.  Useful for diagnostics and wind-tunnel
      * assertions.
      */
-    async sfuCascadeStatus(): Promise<{
-        establishedCount: number
-        pipes: { roomId: string; remoteDid: string }[]
-    }> {
+    async sfuCascadeStatus(): Promise<SfuCascadeStatus> {
         return this.#apiClient.call("sfu.cascadeStatus", {})
     }
 
@@ -410,9 +377,7 @@ export class NeighbourhoodClient {
      * Read-only: per-participant quality preferences the SFU event loop
      * currently holds.  Returns `[{participantId, preference}, ...]`.
      */
-    async sfuQualityPreferences(): Promise<
-        { participantId: string; preference: string }[]
-    > {
+    async sfuQualityPreferences(): Promise<SfuParticipantQualityPreference[]> {
         return this.#apiClient.call("sfu.qualityPreferences", {})
     }
 
@@ -426,7 +391,7 @@ export class NeighbourhoodClient {
         neighbourhoodUrl: string,
         did: string,
     ): Promise<boolean> {
-        return this.#apiClient.call<boolean>("sfu.ensureMembership", {
+        return this.#apiClient.call("sfu.ensureMembership", {
             neighbourhoodUrl,
             did,
         })

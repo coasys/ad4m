@@ -219,16 +219,14 @@ export function createSession(config: SessionImplConfig): Session {
             const inCall: string[] = []
             for (const agent of agents) {
                 if (agent.did === agentDid) continue
-                // Each agent's status carries a perspective with links.
-                // Check for the call-presence link matching this room.
-                const status = agent.status
-                if (status?.links) {
-                    for (const link of status.links) {
-                        const l = link.data ?? link
-                        if (l.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) {
-                            inCall.push(agent.did)
-                            break
-                        }
+                // Each agent's status is a signed perspective: its links
+                // sit under `data`.  Check for the call-presence link
+                // matching this room.
+                for (const link of agent.status?.data?.links ?? []) {
+                    const l = link.data
+                    if (l?.predicate === CALL_PRESENCE_PREDICATE && l.target === roomId) {
+                        inCall.push(agent.did)
+                        break
                     }
                 }
             }

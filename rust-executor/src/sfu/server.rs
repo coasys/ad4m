@@ -559,24 +559,14 @@ impl SfuServer {
 
                         // Publish to events_ws so non-WebRTC clients can
                         // receive data channel messages too.
-                        let payload = serde_json::json!({
-                            "type": "sfu-data",
-                            "senderDid": origin_did,
-                            "neighbourhoodUrl": origin_room.neighbourhood_url,
-                            "roomName": origin_room.room_name,
-                            "channelLabel": channel_label,
-                            "binary": binary,
-                            "data": if binary {
-                                serde_json::Value::String(base64::Engine::encode(
-                                    &base64::engine::general_purpose::STANDARD,
-                                    &data,
-                                ))
-                            } else {
-                                serde_json::Value::String(
-                                    String::from_utf8_lossy(&data).into_owned(),
-                                )
-                            },
-                        });
+                        let payload = crate::sfu::types::SfuDataMessage::new(
+                            origin_did.clone(),
+                            origin_room.neighbourhood_url.clone(),
+                            origin_room.room_name.clone(),
+                            channel_label.clone(),
+                            binary,
+                            &data,
+                        );
                         if let Ok(payload_json) = serde_json::to_string(&payload) {
                             crate::pubsub::get_global_pubsub_sync().publish_sync(
                                 &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,
@@ -721,24 +711,14 @@ impl SfuServer {
                                     // peers mutably), so push for deferred
                                     // relay below.  Simpler: publish via
                                     // pubsub so events_ws fans it out.
-                                    let payload = serde_json::json!({
-                                        "type": "sfu-data",
-                                        "senderDid": origin_did,
-                                        "neighbourhoodUrl": origin_room.neighbourhood_url,
-                                        "roomName": origin_room.room_name,
-                                        "channelLabel": label,
-                                        "binary": relay_binary,
-                                        "data": if relay_binary {
-                                            serde_json::Value::String(base64::Engine::encode(
-                                                &base64::engine::general_purpose::STANDARD,
-                                                &relay_data,
-                                            ))
-                                        } else {
-                                            serde_json::Value::String(
-                                                String::from_utf8_lossy(&relay_data).into_owned(),
-                                            )
-                                        },
-                                    });
+                                    let payload = crate::sfu::types::SfuDataMessage::new(
+                                        origin_did,
+                                        origin_room.neighbourhood_url,
+                                        origin_room.room_name,
+                                        label,
+                                        relay_binary,
+                                        &relay_data,
+                                    );
                                     if let Ok(payload_json) = serde_json::to_string(&payload) {
                                         crate::pubsub::get_global_pubsub_sync().publish_sync(
                                             &crate::pubsub::SFU_DATA_CHANNEL_TOPIC,

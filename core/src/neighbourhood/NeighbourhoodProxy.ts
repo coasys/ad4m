@@ -4,12 +4,15 @@ import { Perspective, PerspectiveExpression, PerspectiveUnsignedInput } from "..
 import { NeighbourhoodClient } from "./NeighbourhoodClient";
 import type {
     CallSessionInfo,
+    SfuCallRenegotiationOffer,
+    SfuCascadeStatus,
     SfuConfig,
     SfuDataMessage,
+    SfuMigrateEvent,
+    SfuParticipantQualityPreference,
     SfuQualityPreference,
     SfuRoomInfo,
     SfuStatus,
-    TrackMapEntry,
 } from "./SfuTypes";
 import { createSession, type Session, type SessionCreateOptions } from "./Session";
 import { createTelepresenceChannel } from "./MeshManager";
@@ -230,13 +233,7 @@ export class NeighbourhoodProxy {
      */
     subscribeCallRenegotiationOffer(
         targetDid: string,
-        callback: (payload: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            sdpOffer: string
-            trackMapping?: TrackMapEntry[]
-        }) => void,
+        callback: (payload: SfuCallRenegotiationOffer) => void,
     ): () => void {
         return this.#client.subscribeSfuCallRenegotiationOffer(targetDid, callback)
     }
@@ -247,12 +244,7 @@ export class NeighbourhoodProxy {
      */
     subscribeMigrateEvent(
         targetDid: string,
-        callback: (event: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            migrateToDid: string
-        }) => void,
+        callback: (event: SfuMigrateEvent) => void,
     ): () => void {
         return this.#client.subscribeSfuMigrateEvent(targetDid, callback)
     }
@@ -293,16 +285,11 @@ export class NeighbourhoodProxy {
 
     // ── SFU diagnostic / test-harness ──────────────────────────────────
 
-    async sfuCascadeStatus(): Promise<{
-        establishedCount: number
-        pipes: { roomId: string; remoteDid: string }[]
-    }> {
+    async sfuCascadeStatus(): Promise<SfuCascadeStatus> {
         return await this.#client.sfuCascadeStatus()
     }
 
-    async sfuQualityPreferences(): Promise<
-        { participantId: string; preference: string }[]
-    > {
+    async sfuQualityPreferences(): Promise<SfuParticipantQualityPreference[]> {
         return await this.#client.sfuQualityPreferences()
     }
 

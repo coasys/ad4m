@@ -221,7 +221,7 @@ portpicker = "0.1.1"
 deno_error = "0.7"
 thiserror = "2.0.12"
 oxigraph = { version = "0.5.7", features = ["rocksdb", "rdf-12"] }
-ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings"] }
+ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

@@ -60,6 +60,8 @@ export async function wireRenegotiation(cfg: RenegotiationWireConfig): Promise<R
       console.error(`[renegotiation:${cfg.peer.id}] apply failed:`, e);
     }));
   });
+  // The executor sends no event until it applied this socket's watch.
+  await events.watchApplied();
 
   async function applyOffer(frame: EventFrame): Promise<void> {
     if (frame.neighbourhoodUrl !== cfg.neighbourhoodUrl) return;

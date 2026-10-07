@@ -274,31 +274,25 @@ describe("mesh path", () => {
     })
 
     it("filters roster to agents in the same call room", async () => {
+        // A status is a signed perspective: its links sit under `data`.
+        const inCall = (did: string, room: string) => ({
+            did,
+            status: {
+                author: did,
+                timestamp: "2026-01-01T00:00:00Z",
+                data: {
+                    links: [{
+                        author: did,
+                        timestamp: "2026-01-01T00:00:00Z",
+                        data: { source: did, predicate: "ad4m://session/in-call", target: room },
+                    }],
+                },
+            },
+        })
         const onlineAgents = jest.fn().mockResolvedValue([
-            {
-                did: "did:bob",
-                status: {
-                    links: [{
-                        data: { predicate: "ad4m://session/in-call", target: "my-room" },
-                    }],
-                },
-            },
-            {
-                did: "did:carol",
-                status: {
-                    links: [{
-                        data: { predicate: "ad4m://session/in-call", target: "other-room" },
-                    }],
-                },
-            },
-            {
-                did: "did:me",
-                status: {
-                    links: [{
-                        data: { predicate: "ad4m://session/in-call", target: "my-room" },
-                    }],
-                },
-            },
+            inCall("did:bob", "my-room"),
+            inCall("did:carol", "other-room"),
+            inCall("did:me", "my-room"),
         ])
 
         const session = createSession(baseConfig({

@@ -15,10 +15,11 @@
 import { NeighbourhoodProxy } from "./NeighbourhoodProxy"
 import type {
     CallSessionInfo,
+    SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
+    SfuMigrateEvent,
     SfuQualityPreference,
-    TrackMapEntry,
 } from "./SfuTypes"
 
 // ── Public types ──────────────────────────────────────────────────
@@ -48,22 +49,11 @@ export interface SfuNeighbourhoodApi {
     ): Promise<boolean>
     subscribeSfuCallRenegotiationOffer(
         targetDid: string,
-        callback: (event: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            sdpOffer: string
-            trackMapping?: TrackMapEntry[]
-        }) => void,
+        callback: (event: SfuCallRenegotiationOffer) => void,
     ): () => void
     subscribeSfuMigrateEvent(
         targetDid: string,
-        callback: (event: {
-            targetDid: string
-            neighbourhoodUrl: string
-            roomName: string
-            migrateToDid: string
-        }) => void,
+        callback: (event: SfuMigrateEvent) => void,
     ): () => void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
@@ -504,18 +494,25 @@ export class SfuManager {
         await pc.setLocalDescription(offer)
 
         const sdpOffer = JSON.stringify(pc.localDescription)
-        const session: CallSessionInfo =
-            await this.neighbourhood.sfuCallJoin(
+        this.subscribeServerEvents(() => joinComplete)
+        let session: CallSessionInfo
+        try {
+            session = await this.neighbourhood.sfuCallJoin(
                 this.neighbourhoodUrl,
                 this.roomId,
                 sdpOffer,
             )
+        } catch (err) {
+            this.releaseServerEvents()
+            throw err
+        }
         this.state.participantId = session.participantId
 
         // Handle cascade redirect — bounded to prevent infinite loops
         if (session.redirectTo) {
             this.redirectCount++
             if (this.redirectCount > SfuManager.MAX_REDIRECTS) {
+                this.releaseServerEvents()
                 pc.close()
                 this.state.peerConnection = null
                 this.redirectCount = 0
@@ -549,8 +546,13 @@ export class SfuManager {
             this.trackDidIndex = 0
         }
 
-        const answer = JSON.parse(session.sdpAnswer)
-        await pc.setRemoteDescription(new RTCSessionDescription(answer))
+        try {
+            const answer = JSON.parse(session.sdpAnswer)
+            await pc.setRemoteDescription(new RTCSessionDescription(answer))
+        } catch (err) {
+            this.releaseServerEvents()
+            throw err
+        }
         this.failoverAttempts = 0
 
         // Flush buffered trickle ICE candidates
@@ -567,17 +569,36 @@ export class SfuManager {
                 )
             })
         }
+    }
 
-        // Release prior subscriptions before subscribing again (join
-        // may be called more than once during cascade redirect/failover).
+    /** Drop the server-event subscriptions of the current join. */
+    private releaseServerEvents(): void {
         this.renegotiationUnsubscribe?.()
+        this.renegotiationUnsubscribe = null
         this.migrateUnsubscribe?.()
+        this.migrateUnsubscribe = null
+    }
+
+    /**
+     * Subscribe to the server-pushed renegotiation offers and migrate
+     * events for this join.  `join` calls this before `sfuCallJoin`: the
+     * executor sends a socket only the events it watches, and a call
+     * carries the pending watch ahead of itself, so no event the join
+     * causes is lost.  Events that arrive before `isJoined()` turns true
+     * are dropped — the peer connection cannot apply them yet.
+     */
+    private subscribeServerEvents(isJoined: () => boolean): void {
+        // Join may run more than once (cascade redirect/failover).  The
+        // prior subscriptions go after the new ones exist, so the event
+        // socket never drops to zero listeners in between.
+        const previous = [this.renegotiationUnsubscribe, this.migrateUnsubscribe]
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =
             this.neighbourhood.subscribeSfuCallRenegotiationOffer(
                 this.agentDid,
                 async (event) => {
+                    if (!isJoined()) return
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
                         return
                     if (event.roomName !== this.roomId) return
@@ -628,6 +649,7 @@ export class SfuManager {
             this.neighbourhood.subscribeSfuMigrateEvent(
                 this.agentDid,
                 async (event) => {
+                    if (!isJoined()) return
                     if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
                         return
                     if (event.roomName !== this.roomId) return
@@ -689,6 +711,8 @@ export class SfuManager {
                     }
                 },
             )
+
+        for (const unsubscribe of previous) unsubscribe?.()
     }
 
     async leave(): Promise<void> {
