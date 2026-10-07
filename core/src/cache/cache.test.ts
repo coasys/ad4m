@@ -15,6 +15,7 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'events.watch': true,
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
     'expression.get': (p: Record<string, unknown>) => ({
@@ -604,7 +605,8 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
 
 describe('AgentClient Cache — additional edge cases', () => {
     test('agent-updated event for unknown DID pre-populates cache', async () => {
-        ad4m.agent.addUpdatedListener(() => {});
+        // The first byDID() starts the cache's agent-updated handler.
+        await ad4m.agent.byDID('did:test:other');
 
         // Emit event for a DID we never fetched
         const ws = lastOf(MockWebSocket.instances);
@@ -622,7 +624,7 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(agent.did).toBe('did:test:preload');
         expect(agent.directMessageLanguage).toBe('lang://pre');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid' && c.params.did === 'did:test:preload');
         expect(byDidCalls).toHaveLength(0);
     });
 

@@ -190,8 +190,15 @@ Query subscriptions provide real-time updates but require proper cleanup:
 4. **Cleanup**: Call `dispose()` when done to:
    - Stop keepalive signals
    - Unsubscribe from updates
-   - Notify the backend to clean up resources
+   - Release this subscriber's hold on the backend subscription
    - Prevent memory leaks
+
+The backend keeps one subscription per distinct query and agent and shares it
+between all subscribers of that query. Disposing one of them does not
+interrupt the others; the backend removes the subscription when the last
+subscriber disposes or when nobody has sent a keepalive for a while. Calling
+`dispose()` again on the same subscription does nothing, so it cannot release
+another subscriber's hold.
 
 Always remember to call `dispose()` when you're done with a subscription.
 
