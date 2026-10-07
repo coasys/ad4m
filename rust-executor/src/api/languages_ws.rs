@@ -1,7 +1,9 @@
 //! Language WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::languages::LanguageController;
@@ -309,12 +311,45 @@ async fn write_settings(params: Value, ctx: Arc<RequestContext>) -> Result<Value
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("language.all", list_languages);
-    map.register("language.get", get_language);
-    map.register("language.meta", get_language_meta);
-    map.register("language.source", get_language_source);
-    map.register("language.publish", publish_language);
-    map.register("language.applyTemplate", apply_template);
-    map.register("language.remove", remove_language);
-    map.register("language.writeSettings", write_settings);
+    map.method::<LanguageListParams, Vec<LanguageHandle>>("language.all", list_languages)
+        .read();
+    map.method::<LanguageAddressParams, LanguageHandle>("language.get", get_language)
+        .read();
+    map.method::<LanguageAddressParams, LanguageMeta>("language.meta", get_language_meta)
+        .read();
+    map.method::<LanguageAddressParams, String>("language.source", get_language_source)
+        .read();
+    map.method::<PublishLanguageRequest, LanguageMeta>("language.publish", publish_language)
+        .long();
+    map.method::<ApplyTemplateRequest, LanguageRef>("language.applyTemplate", apply_template)
+        .long();
+    map.method::<LanguageAddressParams, bool>("language.remove", remove_language);
+    map.method::<LanguageWriteSettingsParams, bool>("language.writeSettings", write_settings);
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageListParams {
+    #[ts(optional)]
+    pub filter: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageAddressParams {
+    pub address: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct LanguageWriteSettingsParams {
+    pub address: String,
+    // Settings schema belongs to each language, so it stays open JSON.
+    #[ts(type = "any")]
+    pub settings: serde_json::Value,
 }
