@@ -17,7 +17,9 @@ use tokio::sync::RwLock;
 
 use crate::db::Ad4mDb;
 use crate::holochain_service::holochain_service_extension::msgpack_value_to_json;
-use crate::holochain_service::interface::{get_holochain_service, maybe_get_holochain_service};
+use crate::holochain_service::interface::{
+    get_holochain_service, maybe_get_holochain_service, HolochainServiceInterface,
+};
 use crate::pubsub::mark_credits_dirty;
 
 // ---------------------------------------------------------------------------
@@ -40,6 +42,12 @@ lazy_static! {
     static ref ALLIANCE_DNA_HASH: Arc<RwLock<Option<String>>> = Arc::new(RwLock::new(None));
     static ref INSTALL_ONCE: Arc<tokio::sync::Mutex<bool>> =
         Arc::new(tokio::sync::Mutex::new(false));
+    /// Held across every alliance zome call (`call_alliance_zome`). Unyt reaches the
+    /// dispatcher from Rust, not through a language runtime, so nothing else serializes it,
+    /// and since #1133 the dispatcher runs zome calls concurrently. Unyt's writes race each
+    /// other on one source chain: the per-signal `handle_signal` tasks and the poll loop
+    /// (`check_pending_payments` / `check_pending_sends`) both commit and accept.
+    static ref ALLIANCE_CALL_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::new(());
 }
 
 /// Check if a cell_id_key (hex dna_hash:hex agent_key) belongs to the alliance DNA.
@@ -804,15 +812,7 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
     ensure_installed().await?;
     let hc = get_holochain_service().await;
 
-    let response = hc
-        .call_zome_function(
-            UNYT_APP_ID.to_string(),
-            UNYT_CELL_NAME.to_string(),
-            UNYT_ZOME.to_string(),
-            fn_name.to_string(),
-            payload,
-        )
-        .await?;
+    let response = call_alliance_zome(&hc, fn_name, payload).await?;
 
     match response {
         ZomeCallResponse::Ok(extern_io) => {
@@ -845,6 +845,25 @@ async fn call_zome(fn_name: &str, payload: Option<ExternIO>) -> Result<JsonValue
             fn_name
         )),
     }
+}
+
+/// Runs one zome call on the alliance cell, after any other Unyt call has finished
+/// (`ALLIANCE_CALL_LOCK`).
+async fn call_alliance_zome(
+    hc: &HolochainServiceInterface,
+    fn_name: &str,
+    payload: Option<ExternIO>,
+) -> Result<ZomeCallResponse, AnyError> {
+    let _one_at_a_time = ALLIANCE_CALL_LOCK.lock().await;
+    hc.call_zome_function(
+        UNYT_APP_ID.to_string(),
+        UNYT_CELL_NAME.to_string(),
+        UNYT_ZOME.to_string(),
+        fn_name.to_string(),
+        payload,
+        None,
+    )
+    .await
 }
 
 fn encode_payload<T: Serialize + std::fmt::Debug>(val: &T) -> Result<ExternIO, AnyError> {
@@ -1542,5 +1561,71 @@ pub async fn check_pending_sends() {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::holochain_service::interface::{
+        Envelope, HolochainServiceRequest, HolochainServiceResponse,
+    };
+    use std::sync::Mutex as StdMutex;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, Mutex};
+
+    /// Two Unyt writes started together must reach the alliance cell one after the other,
+    /// even though the dispatch loop runs zome calls concurrently since #1133: overlapping
+    /// writes to one source chain fail with `HeadMoved` under `Strict` ordering, and the
+    /// signal handler and the poll loop could accept the same commitment twice.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn alliance_zome_calls_run_one_at_a_time() {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<Envelope>();
+        let (_signals, signal_rx) = mpsc::unbounded_channel();
+        let hc = HolochainServiceInterface {
+            sender,
+            stream_receiver: Arc::new(Mutex::new(signal_rx)),
+        };
+
+        // A dispatcher that, like the real loop, runs every zome call concurrently.
+        let events = Arc::new(StdMutex::new(Vec::<String>::new()));
+        let recorded = events.clone();
+        tokio::spawn(async move {
+            while let Some(envelope) = receiver.recv().await {
+                let HolochainServiceRequest::CallZomeFunction {
+                    fn_name, response, ..
+                } = envelope.request
+                else {
+                    panic!("unexpected request {}", envelope.request.name());
+                };
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    recorded.lock().unwrap().push(format!("start:{fn_name}"));
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    recorded.lock().unwrap().push(format!("done:{fn_name}"));
+                    let _ = response.send(HolochainServiceResponse::CallZomeFunction(Ok(
+                        ZomeCallResponse::Ok(ExternIO::encode(()).unwrap()),
+                    )));
+                });
+            }
+        });
+
+        let (commit, accept) = tokio::join!(
+            call_alliance_zome(&hc, "create_commitment", None),
+            call_alliance_zome(&hc, "create_accept", None),
+        );
+        commit.unwrap();
+        accept.unwrap();
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "start:create_commitment",
+                "done:create_commitment",
+                "start:create_accept",
+                "done:create_accept",
+            ],
+            "the second Unyt call must start only after the first one finished"
+        );
     }
 }

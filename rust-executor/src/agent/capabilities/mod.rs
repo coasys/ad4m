@@ -35,6 +35,12 @@ lazy_static! {
 
 const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 
+/// Minimum interval (seconds) between two `users.last_seen` writes for the same
+/// user, so an active user's `last_seen` can be this stale. The auto-processor
+/// supervisor's online window depends on it
+/// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
+pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
+
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
 /// When admin_credential is None (legacy single-user mode), an empty token is treated as admin.
@@ -124,7 +130,7 @@ pub fn user_email_from_token(token: String) -> Option<String> {
 }
 
 /// Update last_seen timestamp for the user from the auth token
-/// This is throttled to only update once every 5 minutes to reduce database writes
+/// Throttled to one write per [`LAST_SEEN_WRITE_THROTTLE_S`] to reduce database writes
 /// Uses an in-memory cache to avoid blocking the async runtime with repeated DB lookups
 pub async fn track_last_seen_from_token(token: String) {
     use crate::db::Ad4mDb;
@@ -140,8 +146,8 @@ pub async fn track_last_seen_from_token(token: String) {
                 if cache_age < CACHE_TTL_SECONDS {
                     // Cache is fresh, check if update is needed based on cached value
                     let time_since_last_seen = now - entry.last_seen_value;
-                    if time_since_last_seen < 300 {
-                        // Last seen was less than 5 minutes ago, no need to update
+                    if time_since_last_seen < LAST_SEEN_WRITE_THROTTLE_S {
+                        // Still inside the throttle period, no need to update
                         log::trace!(
                             "last_seen tracking for {}: cache hit, no update needed (last_seen={}, age={}s)",
                             user_email, entry.last_seen_value, time_since_last_seen
@@ -159,7 +165,7 @@ pub async fn track_last_seen_from_token(token: String) {
             Ad4mDb::with_global_instance(|db| {
                 if let Ok(user) = db.get_user(&user_email_clone) {
                     if let Some(last_seen) = user.last_seen {
-                        let five_min_ago = now.saturating_sub(300);
+                        let throttle_cutoff = now.saturating_sub(LAST_SEEN_WRITE_THROTTLE_S);
 
                         // Handle unrealistic future timestamps by treating them as stale
                         // (allow some clock skew tolerance of 1 minute)
@@ -170,11 +176,11 @@ pub async fn track_last_seen_from_token(token: String) {
                             );
                             true
                         } else {
-                            last_seen < five_min_ago
+                            last_seen < throttle_cutoff
                         };
 
-                        log::trace!("last_seen tracking for {}: last_seen={}, five_min_ago={}, should_update={}", 
-                            user_email_clone, last_seen, five_min_ago, should_update);
+                        log::trace!("last_seen tracking for {}: last_seen={}, throttle_cutoff={}, should_update={}",
+                            user_email_clone, last_seen, throttle_cutoff, should_update);
                         (should_update, Some(last_seen))
                     } else {
                         log::debug!(

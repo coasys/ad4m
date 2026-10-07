@@ -357,6 +357,10 @@ impl Ad4mMcpHandler {
                 Self::flow_proposal_reject_tool_attr(),
                 Self::flow_proposal_reject,
             ))
+            .with_route((
+                Self::flow_valid_outputs_tool_attr(),
+                Self::flow_valid_outputs,
+            ))
             // auth.rs
             .with_route((Self::login_email_tool_attr(), Self::login_email))
             .with_route((

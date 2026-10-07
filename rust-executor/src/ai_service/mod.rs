@@ -558,9 +558,10 @@ impl AIService {
     }
 
     pub async fn set_default_model(&self, model_type: ModelType, model_id: String) -> Result<()> {
-        if ModelType::Llm == model_type {
-            Ad4mDb::with_global_instance(|db| db.set_default_model(model_type, &model_id))?;
+        // Every model type has a default. Only an LLM default has tasks to move.
+        Ad4mDb::with_global_instance(|db| db.set_default_model(model_type.clone(), &model_id))?;
 
+        if ModelType::Llm == model_type {
             // Respawn task on new default model
             let tasks = Ad4mDb::with_global_instance(|db| db.get_tasks())
                 .map_err(|e| AIServiceError::DatabaseError(e.to_string()))?;
@@ -794,6 +795,7 @@ impl AIService {
             ModelApiType::Ollama => Box::new(providers::ollama::OllamaChat::new(
                 &api.api_key,
                 api.base_url,
+                api.max_num_ctx,
             )),
         };
         publish_model_status(model_id.clone(), 100.0, "Initializing", true, false).await;
@@ -2679,6 +2681,7 @@ mod tests {
             api_key: api_key.to_string(),
             model: "claude-test".to_string(),
             api_type: ModelApiType::Anthropic,
+            max_num_ctx: None,
         }
     }
 

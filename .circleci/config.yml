@@ -13,8 +13,14 @@ parameters:
 references:
   ad4m_image: &ad4m_image coasys/ad4m-ci-linux:latest@sha256:16a04358abc4b12ea4cf3a231cfdfea38ac6ae0cc4f937f6c0ed5d98dfb574e7
 
-# Self-hosted machine runner on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04)
-# Resource class: coasys/marvin
+# Self-hosted machine runners on marvin (AMD Ryzen 9 9950X, 60GB RAM, Ubuntu 25.04), two pools:
+# - coasys/marvin: every job that compiles Rust (build, clippy, rust-tests) and llm-e2e
+#   (local Ollama). Few runners, each with a warm ~28GB target/ cache.
+# - coasys/marvin-light: every job that compiles no Rust. These jobs restore the stashed
+#   binaries (integration tests, CLI), run Node only (js-unit-tests, plugin) or only parse
+#   Rust (fmt). More runners, with small working dirs.
+# Only `build` gates the integration tests. clippy and rust-tests start after it and run
+# next to the integration tests. fmt, js-unit-tests and plugin-ad4m-tests start at once.
 
 commands:
   fix_workdir:
@@ -27,6 +33,20 @@ commands:
               echo "Corrupted .git directory detected, removing for fresh clone..."
               rm -rf .git
             fi
+      - run:
+          # tests/js/utils/utils.ts starts each executor in /tmp/ad4m-<hash>
+          # and never deletes it. On marvin /tmp is a 30GB tmpfs shared by
+          # every runner, and a busy hour leaves ~10GB. When it fills, Rust
+          # tests fail with "No space left on device" and then en masse
+          # with PoisonError (#1123, 2026-09-25). Skip dirs that a live
+          # executor still uses; a concurrent job's dir is younger than 60 min.
+          name: Clean up stale test executor dirs in /tmp (older than 60 min)
+          command: |
+            in_use=$(pgrep -a -f 'ad4m-executor run' | grep -oE '/tmp/ad4m-[0-9a-f]+' | sort -u || true)
+            find /tmp -maxdepth 1 -name 'ad4m-*' -user "$(id -u)" -mmin +60 -print 2>/dev/null \
+              | grep -vxF -f <(printf '%s\n' $in_use /nonexistent) \
+              | xargs -r -d '\n' rm -rf || true
+            df -h /tmp | tail -1
 
   setup_env:
     description: "Set up build environment (Node, Rust, Deno, Go, pnpm)"
@@ -52,98 +72,36 @@ commands:
             echo "Node: $(node --version)"
             echo "npm: $(npm --version)"
             echo "Rust: $(rustc --version)"
-            echo "Installing wasm-bindgen-cli for Rust WASM builds..."
-            cargo install wasm-bindgen-cli --version 0.2.118
+            # Only the language build (agent-language rust-impl) needs wasm-bindgen.
+            # Skip the cargo install when it is already there: even a no-op
+            # `cargo install` takes the shared ~/.cargo package-cache lock, which
+            # every job on this host then queues on behind any running build.
+            if wasm-bindgen --version 2>/dev/null | grep -q ' 0.2.118$'; then
+              echo "wasm-bindgen 0.2.118 already installed"
+            else
+              echo "Installing wasm-bindgen-cli for Rust WASM builds..."
+              cargo install wasm-bindgen-cli --version 0.2.118
+            fi
             echo "Deno: $(deno --version | head -1)"
             echo "Go: $(go version)"
             echo "pnpm: $(pnpm --version || echo 'not installed yet')"
 
-  setup_integration_test_environment:
-    description: "Setup common integration test environment"
+  build_adam:
+    description: "Build the dapp, the Deno snapshot and the ADAM binaries (target/release/ad4m, ad4m-executor)"
     steps:
-      - fix_workdir
-      - checkout
-      - run:
-          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
-          command: |
-            # CI_ARTIFACT_DIR: env-driven so the shared self-hosted runner
-            # can be re-imaged / re-owned without editing this file. Default
-            # is a system-level path that does not couple this config to any
-            # particular user account on the runner host. The runner must
-            # `mkdir -p /var/lib/ci-artifacts && chown <ci-user> /var/lib/ci-artifacts`
-            # once at install time. Long-term this should move to GitLab CI
-            # (Nico's 2026-08-27 review); the /var/lib default is the short-term
-            # de-marvin-ification step.
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            mkdir -p target/release
-            # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
-            rm -f target/release/ad4m target/release/ad4m-executor
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
-      - setup_env
-      - run:
-          name: Install dependencies
-          command: pnpm install --no-frozen-lockfile
-      - run:
-          name: Install core dependencies
-          command: cd ./core && pnpm install --no-frozen-lockfile
-      - run:
-          name: Build core package
-          command: cd ./core && pnpm run build
-      - run:
-          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
-          command: |
-            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
-      - run:
-          # Isolate `hc` AND `kitsune2-bootstrap-srv` per CI run so the host's
-          # global copies (shared across branches / other PRs on this
-          # self-hosted runner) don't drift out of sync with Cargo.lock.
-          # The workspace's Cargo.lock is the source of truth; this script
-          # installs matching `hc` (from coasys/holochain rev) and
-          # `kitsune2-bootstrap-srv` (from crates.io version) into
-          # $REPO/.hc-toolchain/bin/. Consumers: prepareTestDirectory.sh,
-          # bootstrap-language build.sh files, tests/js/utils/utils.ts.
-          # Fixes: `Failed to unpack hApp: unknown field 'signal_url'`
-          # (hc mismatch) and multi-user signal-routing timeouts
-          # (kitsune2-bootstrap-srv wire-protocol drift).
-          name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
-          command: bash scripts/install-hc-toolchain.sh
-          no_output_timeout: 30m
-      - run:
-          name: Build bootstrap languages
-          command: pnpm run build-languages
-      - run:
-          name: Build link-server
-          command: pnpm --filter @coasys/link-server install && pnpm --filter @coasys/link-server build
-
-jobs:
-  build-and-test:
-    machine: true
-    resource_class: coasys/marvin
-    steps:
-      - fix_workdir
-      - checkout
-      - setup_env
-      - run:
-          name: Clean up stale local artifact stashes (older than 1 day)
-          command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mtime +1 -exec rm -rf {} + 2>/dev/null || true
       - run:
           # Install per-workspace `hc` + `kitsune2-bootstrap-srv` matching
-          # Cargo.lock. Needed here (in build-and-test) because pnpm
-          # build-libs -> the bootstrap-languages build.sh files pack DNAs
-          # with `hc`, and downstream integration tests spawn
-          # `kitsune2-bootstrap-srv`. Both must match what the executor is
-          # linked against, otherwise packed bundles trip `unknown field
-          # 'signal_url'` at install time and cross-node signals never
-          # route between agents.
+          # Cargo.lock. Needed before build_integration_inputs because the bootstrap-languages
+          # build.sh files pack DNAs with `hc`, and downstream integration
+          # tests spawn `kitsune2-bootstrap-srv`. Both must match what the
+          # executor is linked against, otherwise packed bundles trip
+          # `unknown field 'signal_url'` at install time and cross-node
+          # signals never route between agents. The `build` job stashes the
+          # binaries with the language bundles so the integration jobs do not
+          # each build `hc` from source after a Holochain bump.
           name: Install pinned Holochain + kitsune2 CLIs (matches Cargo.lock)
           command: bash scripts/install-hc-toolchain.sh
           no_output_timeout: 30m
-      - run:
-          name: cargo fmt --check
-          command: cargo fmt --check
       - run:
           name: Install dependencies
           command: pnpm install --no-frozen-lockfile
@@ -164,16 +122,302 @@ jobs:
           name: Build ADAM (without bootstrap languages)
           command: pnpm run build-libs
           no_output_timeout: 30m
+
+  build_integration_inputs:
+    description: "Build the bootstrap languages with the pinned hc (after build_adam)"
+    steps:
+      - run:
+          # Same clear the integration jobs used to do before their own
+          # language build: turbo's cache (.turbo/cache in turbo 2) does not
+          # hash the `hc` binary, so a replayed cache entry could carry a happ
+          # packed by a previous Holochain version.
+          name: Clear stale bootstrap-language build cache (cross-branch shared workdir)
+          command: |
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build
+      - run:
+          # Built ONCE in `build` instead of in every integration job (Nico,
+          # 2026-09-25); the integration jobs restore the outputs. Only the
+          # nightly, which has no `build` job, runs this itself. Rollup
+          # bundles + Holochain wasm DNAs packed with build_adam's pinned `hc`.
+          name: Build bootstrap languages
+          command: pnpm run build-languages
+          no_output_timeout: 30m
+
+  restore_binaries:
+    description: "Restore the ad4m + ad4m-executor binaries that build stashed on this host"
+    steps:
+      - run:
+          name: Restore binaries from local stash (no CircleCI network storage needed — same host)
+          command: |
+            # CI_ARTIFACT_DIR: env-driven so the shared self-hosted runner
+            # can be re-imaged / re-owned without editing this file. Default
+            # is a system-level path that does not couple this config to any
+            # particular user account on the runner host. The runner must
+            # `mkdir -p /var/lib/ci-artifacts && chown <ci-user> /var/lib/ci-artifacts`
+            # once at install time. Long-term this should move to GitLab CI
+            # (Nico's 2026-08-27 review); the /var/lib default is the short-term
+            # de-marvin-ification step.
+            set -eo pipefail
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            for bin in ad4m ad4m-executor; do
+              test -s "$src/$bin" || { echo "missing $src/$bin: rerun build"; exit 1; }
+            done
+            mkdir -p target/release
+            # Remove before copy: unlinking avoids ETXTBSY if a previous executor still holds the binary
+            rm -f target/release/ad4m target/release/ad4m-executor
+            cp "$src/ad4m" "$src/ad4m-executor" target/release/
+
+  restore_integration_inputs:
+    description: "Restore the JS build outputs and hc toolchain that build produced (bootstrap languages, link-server, core, ALDK)"
+    steps:
+      - run:
+          # `build` compiles the bootstrap languages (rollup + Holochain wasm
+          # DNAs) once and stashes every gitignored output the integration
+          # tests read; see "Stash integration inputs" in the build job for
+          # the list. Restoring here replaces the per-job `pnpm run
+          # build-languages`, which put ~8 parallel cargo/wasm builds per
+          # pipeline on this one host and stalled for 10 min on the shared
+          # ~/.cargo package-cache lock (PR #1156, 2026-09-25).
+          name: Restore integration inputs from build
+          command: |
+            set -eo pipefail
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
+            test -s "$src" || { echo "missing $src: rerun build"; exit 1; }
+            # Drop the previous branch's outputs first (cross-branch shared
+            # workdir) so nothing stale survives next to this SHA's files.
+            rm -rf .turbo bootstrap-languages/*/.turbo bootstrap-languages/*/build \
+                   bootstrap-languages/local/dist ad4m-ldk/js/lib core/lib link-server/dist
+            tar -xf "$src"
+            echo "restored $(tar -tf "$src" | wc -l) entries from $src"
+            ls -l bootstrap-languages/*/build/bundle.js bootstrap-languages/local/dist/docker_seed.json \
+                  link-server/dist/index.js .hc-toolchain/bin/
+
+  setup_integration_test_environment:
+    description: "Setup integration test environment from build's stash (Holochain or local-only bootstrap languages)"
+    parameters:
+      local:
+        # true: local-only bootstrap languages, no Holochain conductor (#918).
+        # Both modes restore the same stash; they differ only in LOCAL_MODE,
+        # which the test scripts read to pick the language set.
+        type: boolean
+        default: false
+      build_binaries:
+        description: >-
+          Build ADAM and the integration inputs in this job instead of restoring
+          the `build` job's stash. A scheduled pipeline has no `build` job, and
+          `build` deletes stashes older than 12 hours, so the stash for the SHA
+          may be gone.
+        type: boolean
+        default: false
+    steps:
+      - fix_workdir
+      - checkout
+      - when:
+          condition: << parameters.local >>
+          steps:
+            - run:
+                name: Set LOCAL_MODE for downstream test suites
+                command: echo 'export LOCAL_MODE=true' >> "$BASH_ENV"
+      - unless:
+          condition: << parameters.build_binaries >>
+          steps:
+            - restore_binaries
+      - setup_env
+      - when:
+          condition: << parameters.build_binaries >>
+          steps:
+            - build_adam
+            - build_integration_inputs
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - unless:
+          condition: << parameters.build_binaries >>
+          steps:
+            - restore_integration_inputs
+      - run:
+          # core/lib itself comes from the tarball; this is the remaining
+          # half of core's build script (`patch-package && tsc && bundle`),
+          # which patches core/node_modules, not lib/.
+          name: Apply core's patch-package patches
+          command: cd ./core && pnpm exec patch-package
+      - run:
+          # Tests need `hc` (tests/js/scripts/prepareTestDirectory.sh symlinks
+          # it into tst-tmp/, in local mode too) and `kitsune2-bootstrap-srv`
+          # (spawned by tests/js/utils/utils.ts) at RUNTIME, so the toolchain
+          # stays here. The binaries and the version stamps were just restored
+          # from build's tarball, so this script only compares the stamps
+          # against Cargo.lock and exits in well under a second; it rebuilds
+          # only on drift.
+          name: Verify pinned Holochain + kitsune2 CLIs (restored from build; matches Cargo.lock)
+          command: bash scripts/install-hc-toolchain.sh
+          no_output_timeout: 30m
+
+  restore_rust_compile_inputs:
+    description: "Restore the files build generated that the Rust compile embeds (deno snapshot, dapp)"
+    steps:
+      - run:
+          name: Restore generated Rust compile inputs from build
+          command: |
+            set -eo pipefail
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            src="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
+            test -s "$src" || { echo "missing $src: rerun build"; exit 1; }
+            rm -rf dapp/dist
+            tar -xf "$src"
+
+jobs:
+  build:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Clean up stale local artifact stashes (older than 12 hours)
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            find "$CI_ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -mmin +720 -exec rm -rf {} + 2>/dev/null || true
+      - run:
+          # Local git repo + fake cargo, no network; about a second.
+          name: Test install-hc-toolchain.sh
+          command: bash scripts/install-hc-toolchain.test.sh
+      - build_adam
+      - build_integration_inputs
+      - run:
+          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
+          command: |
+            # Write to a temp name and rename: a rerun of build for the same
+            # SHA must not hand a half-written file to an integration job
+            # that is restoring from the earlier run (mv is atomic on one fs).
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
+            mkdir -p "$dst"
+            for bin in ad4m ad4m-executor; do
+              # `a && b` inside a loop does not stop the step under bash -e.
+              cp "target/release/$bin" "$dst/$bin.tmp" || exit 1
+              mv "$dst/$bin.tmp" "$dst/$bin"
+            done
+      - run:
+          # clippy and rust-tests compile on other runners. These generated files are
+          # embedded by that compile (include_bytes!/include!/include_dir!) and are
+          # not in git.
+          name: Stash generated Rust compile inputs for clippy and rust-tests
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/compile-inputs.tar"
+            tar -cf "$dst.tmp" \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.bin \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.residual_esm.rs \
+              rust-executor/CUSTOM_DENO_SNAPSHOT.residual_js.rs \
+              dapp/dist
+            mv "$dst.tmp" "$dst"
+      - run:
+          # Everything gitignored that the integration jobs read and used to
+          # rebuild themselves (restored by restore_integration_inputs):
+          #   bootstrap-languages/*/build      esbuild/rollup bundles; tests copy
+          #                                    build/bundle.js (get-builtin-test-langs.js)
+          #   hc-dna/workdir/*.dna|*.happ      packed DNAs/hApps (dna.yaml/happ.yaml names)
+          #   ad4m-ldk/js/lib                  ALDK, bundled into the languages
+          #   core/lib                         @coasys/ad4m, linked from tests/js
+          #   link-server/dist                 spawned by tests/js/utils/linkServer.ts
+          #   .hc-toolchain/bin + stamps       `hc` and `kitsune2-bootstrap-srv`,
+          #                                    needed at test runtime
+          #   bootstrap-languages/local/dist   #918's local-language seed + bundles
+          #                                    (generate-seed.mjs); the tests read
+          #                                    local/*.js from git
+          # A branch that adds a language output dir must add it to this list.
+          name: Stash integration inputs (bootstrap languages, link-server, core, hc toolchain)
+          command: |
+            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
+            dst="$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/integration-inputs.tar"
+            tar -cf "$dst.tmp" \
+              bootstrap-languages/*/build \
+              bootstrap-languages/local/dist \
+              bootstrap-languages/*/hc-dna/workdir/*.dna \
+              bootstrap-languages/*/hc-dna/workdir/*.happ \
+              ad4m-ldk/js/lib \
+              core/lib \
+              link-server/dist \
+              .hc-toolchain/bin/hc \
+              .hc-toolchain/bin/kitsune2-bootstrap-srv \
+              .hc-toolchain/.installed_rev \
+              .hc-toolchain/.installed_kitsune_version
+            mv "$dst.tmp" "$dst"
+            ls -l "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
+
+  clippy:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_rust_compile_inputs
       - run:
           name: cargo clippy
           no_output_timeout: 30m
           command: cargo clippy --all --exclude ad4m-launcher
+
+  fmt:
+    # rustfmt only parses the sources, so it needs no build and no warm target/.
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
       - run:
-          name: Stash binaries locally (skip CircleCI network storage — all jobs run on same host)
-          command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            mkdir -p "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}"
-            cp target/release/ad4m target/release/ad4m-executor "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/"
+          name: cargo fmt --check
+          command: cargo fmt --check
+
+  rust-tests:
+    machine: true
+    resource_class: coasys/marvin
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - restore_rust_compile_inputs
+      - run:
+          # Unit tests, the crate's integration tests and doc-tests; the same command as
+          # the crate's `pnpm test` script.
+          name: rust-executor tests
+          command: cd rust-executor && cargo test --release -- --test-threads=1
+          no_output_timeout: 30m
+      - run:
+          name: cli tests
+          command: cd cli && cargo test --release
+          no_output_timeout: 30m
+      - run:
+          # ad4m-ldk/rust is its own workspace, so the commands above skip it. Here
+          # rather than in a separate job because rust-tests is a required check.
+          name: ad4m-ldk (Rust) tests
+          command: cd ad4m-ldk/rust && cargo test
+          no_output_timeout: 30m
+
+  js-unit-tests:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - fix_workdir
+      - checkout
+      - setup_env
+      - run:
+          name: Install dependencies
+          command: pnpm install --no-frozen-lockfile
+      - run:
+          name: Install core dependencies
+          command: cd ./core && pnpm install --no-frozen-lockfile
+      - run:
+          name: Build core package
+          command: cd ./core && pnpm run build
       - run:
           name: Remove pnpm patches
           command: node removePnpm.js
@@ -184,21 +428,95 @@ jobs:
           name: Install core dependencies
           command: cd ./core && pnpm install --no-frozen-lockfile
       - run:
-          name: Root tests
-          command: pnpm test
+          # The root `pnpm test` minus the two cargo packages, which run in rust-tests.
+          name: JS unit tests
+          command: pnpm exec turbo run test --concurrency=1 --filter='!@coasys/rust-ad4m-executor' --filter='!@coasys/ad4m-cli'
           no_output_timeout: 30m
 
+  # The regular JS integration suite: local bootstrap languages only, no
+  # Holochain conductor. Two-executor suites share languages, neighbourhoods
+  # and agent profiles through the shared stores (tests/js/utils/sharedStores.ts).
   integration-tests-js:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run integration tests
+          name: Run JS integration tests (local languages, no Holochain)
           command: |
             mkdir -p /tmp/test-artifacts
             set -o pipefail
-            cd ./tests/js && pnpm run test-main 2>&1 | tee /tmp/test-artifacts/mocha.log
+            cd ./tests/js && pnpm run test-main-local 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suite over the server-link-language: Alice + Bob on local
+  # languages (no Holochain), links syncing through a link-server the suite
+  # starts (tests/js/tests/integration-server-link.test.ts).
+  integration-tests-multi-node-server-link:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment:
+          local: true
+      - run:
+          # link-server/dist comes from build's stash (build-libs builds it);
+          # this only installs the native better-sqlite3 module its runtime needs.
+          name: Install link-server dependencies
+          command: pnpm --filter @coasys/link-server install
+      - run:
+          name: Run multi-node server-link integration tests (Alice + Bob, no Holochain)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-server-link 2>&1 | tee /tmp/test-artifacts/mocha.log
+          no_output_timeout: 30m
+      - run:
+          name: Collect logs on failure
+          when: always
+          command: |
+            mkdir -p /tmp/test-artifacts
+            shopt -s nullglob
+            for ad4m_dir in tests/js/tst-tmp/agents/*/ad4m; do
+              agent_id="$(basename "$(dirname "$ad4m_dir")")"
+              mkdir -p "/tmp/test-artifacts/$agent_id"
+              cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
+            done
+            lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
+      - store_artifacts:
+          when: always
+          path: /tmp/test-artifacts
+          destination: test-logs
+
+  # Multi-node suites that need Holochain: links syncing between executors
+  # through p-diff-sync (tests/js/tests/integration.test.ts).
+  integration-tests-multi-node-holochain:
+    machine: true
+    resource_class: coasys/marvin-light
+    steps:
+      - setup_integration_test_environment
+      - run:
+          name: Run multi-node Holochain integration tests (Alice + Bob)
+          command: |
+            mkdir -p /tmp/test-artifacts
+            set -o pipefail
+            cd ./tests/js && pnpm run test-main-multi-node-holochain 2>&1 | tee /tmp/test-artifacts/mocha.log
           no_output_timeout: 30m
       - run:
           name: Collect logs on failure
@@ -212,7 +530,6 @@ jobs:
               cp -r "$ad4m_dir/logs" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
               cp -r "$ad4m_dir/holochain" "/tmp/test-artifacts/$agent_id/" 2>/dev/null || true
             done
-            # Capture port state for debugging
             lsof -i -P -n 2>/dev/null | grep LISTEN > /tmp/test-artifacts/listening-ports.txt || true
       - store_artifacts:
           when: always
@@ -221,7 +538,7 @@ jobs:
 
   integration-tests-multi-user-simple:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
       - setup_integration_test_environment
       - run:
@@ -231,31 +548,34 @@ jobs:
 
   integration-tests-email-verification:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run email-verification integration tests
-          command: cd ./tests/js && ./email-verification-test-with-setup.sh
+          name: Run email-verification integration tests (local)
+          command: cd ./tests/js && ./email-verification-test-with-setup.sh --local
           no_output_timeout: 30m
 
   integration-tests-mcp:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run MCP integration tests
+          name: Run MCP integration tests (local)
           command: cd ./tests/js && pnpm install && pnpm run test-mcp
           no_output_timeout: 30m
 
   integration-tests-model:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
-      - setup_integration_test_environment
+      - setup_integration_test_environment:
+          local: true
       - run:
-          name: Run Ad4mModel unit + integration tests
+          name: Run Ad4mModel unit + integration tests (local)
           command: cd ./tests/js && pnpm run test-model
           no_output_timeout: 30m
       - run:
@@ -267,6 +587,11 @@ jobs:
   # These hit Marvin's local Ollama; too slow + occasionally flaky for
   # per-push CI, so they run once nightly against `dev` via a scheduled
   # pipeline (`run-nightly-llm: true`).
+  #
+  # The exception is `anthropic_e2e`, which calls api.anthropic.com and
+  # costs real money on every run. It reads `ANTHROPIC_API_KEY`
+  # from the `nightly-llm-e2e` context and skips each test when the key is
+  # unset, so it is inert until the key is added there.
   llm-e2e:
     machine: true
     resource_class: coasys/marvin
@@ -276,32 +601,42 @@ jobs:
       # the job cleanly (green) so the workflow shows no wasted GPU cycles
       # on quiet days. `CIRCLECI_API_TOKEN` comes from the `nightly-llm-e2e`
       # context — set once via the API, org-scoped, read-only calls only.
+      #
+      # The lookup reads v1.1 `tree/dev`: one row per job, newest first, with
+      # `vcs_revision`. (v2 `insights/.../jobs` returns per-job-name metrics
+      # without a status or SHA, so a check built on it never halts.) Any API
+      # failure leaves LAST_SHA empty, and the suite runs.
       - checkout
       - run:
           name: Skip if dev SHA unchanged since last successful llm-e2e
           command: |
-            LAST_SHA=$(curl -sL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
-              "https://circleci.com/api/v2/insights/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/workflows/nightly-llm-e2e/jobs?branch=dev" \
-              | jq -r '.items[]? | select(.status=="success") | .commit_id' \
-              | head -1)
+            LAST_SHA=$(curl -sfL -H "Circle-Token: $CIRCLECI_API_TOKEN" \
+              "https://circleci.com/api/v1.1/project/circleci/VRkXSnZDyBKHhkHKBHTmLj/W84Q4MGGTeZwizersNwxB4/tree/dev?filter=successful&limit=100&shallow=true" \
+              | jq -r 'if type == "array" then first(.[] | select(.workflows.job_name? == "llm-e2e") | .vcs_revision) // "" else "" end') \
+              || LAST_SHA=""
             if [ -n "$LAST_SHA" ] && [ "$LAST_SHA" = "$CIRCLE_SHA1" ]; then
               echo "dev @ $CIRCLE_SHA1 already tested by last nightly — halting"
               circleci-agent step halt
+              exit 0
             fi
             if [ -z "$LAST_SHA" ]; then
               echo "no previous successful llm-e2e run found — proceeding"
             else
               echo "dev @ $CIRCLE_SHA1, last tested $LAST_SHA — proceeding"
             fi
-      - setup_integration_test_environment
+      # Build here: this pipeline has no `build` job, and the stash of an
+      # older `build` for this SHA may already be deleted.
+      - setup_integration_test_environment:
+          build_binaries: true
       - run:
           name: Rust LLM-E2E (interpretation + harness + flow-context suites)
           command: |
-            cargo test --release --lib \
+            cd rust-executor && cargo test --release --lib -- \
               perspectives::interpretation_e2e \
               perspectives::interpretation_harness_e2e \
               perspectives::flow_context::real_llm_e2e \
-              -- --ignored --test-threads=1 --nocapture
+              ai_service::providers::anthropic_e2e \
+              --ignored --test-threads=1 --nocapture
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (auto-processor + interpretation suites)
@@ -310,23 +645,20 @@ jobs:
           no_output_timeout: 60m
       - run:
           name: JS LLM-E2E (integration — includes auto-processor-neighbourhood)
+          # The wrapper runs prepare-test first, as the per-push
+          # integration-tests-multi-node-holochain job does. Bare
+          # `test-integration` needs the publishing agent in tst-tmp/.
           command: |
-            cd ./tests/js && LLM_E2E=1 pnpm run test-integration
+            cd ./tests/js && LLM_E2E=1 pnpm run test-main-multi-node-holochain
           no_output_timeout: 60m
 
   integration-tests-cli:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
       - fix_workdir
       - checkout
-      - run:
-          name: Restore binaries from local stash
-          command: |
-            CI_ARTIFACT_DIR="${CI_ARTIFACT_DIR:-/var/lib/ci-artifacts}"
-            mkdir -p target/release
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m" target/release/ad4m
-            cp "$CI_ARTIFACT_DIR/${CIRCLE_SHA1}/ad4m-executor" target/release/ad4m-executor
+      - restore_binaries
       - setup_env
       - run:
           name: git submodule
@@ -340,7 +672,7 @@ jobs:
 
   plugin-ad4m-tests:
     machine: true
-    resource_class: coasys/marvin
+    resource_class: coasys/marvin-light
     steps:
       - fix_workdir
       - checkout
@@ -359,23 +691,37 @@ workflows:
     when:
       not: << pipeline.parameters.run-nightly-llm >>
     jobs:
-      - build-and-test
+      - build
       - plugin-ad4m-tests
+      - js-unit-tests
+      - fmt
+      - clippy:
+          requires:
+            - build
+      - rust-tests:
+          requires:
+            - build
       - integration-tests-js:
           requires:
-            - build-and-test
+            - build
+      - integration-tests-multi-node-server-link:
+          requires:
+            - build
+      - integration-tests-multi-node-holochain:
+          requires:
+            - build
       - integration-tests-multi-user-simple:
           requires:
-            - build-and-test
+            - build
       - integration-tests-email-verification:
           requires:
-            - build-and-test
+            - build
       - integration-tests-mcp:
           requires:
-            - build-and-test
+            - build
       - integration-tests-model:
           requires:
-            - build-and-test
+            - build
 
   # Nightly against `dev`. Fired by a CircleCI *scheduled pipeline*
   # (visible under Project → Triggers), not by in-config cron.

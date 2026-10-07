@@ -1,5 +1,6 @@
 {
   "$schema": "https://turborepo.org/schema.json",
+  "globalPassThroughEnv": ["CARGO_PROFILE_RELEASE_STRIP"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],
@@ -38,7 +39,8 @@
         "@coasys/centralized-file-storage#build",
         "@coasys/eas#build",
         "@coasys/embedding-vector-language#build",
-        "@coasys/server-link-language#build"
+        "@coasys/server-link-language#build",
+        "@coasys/local-bootstrap-languages#build"
       ],
       "outputs": ["dist/**", "lib/**", "build/**"]
     },
