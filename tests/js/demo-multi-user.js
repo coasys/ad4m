@@ -32,7 +32,7 @@ async function demoMultiUser() {
 
     try {
         // Initialize the main agent (needed for JWT signing)
-        const adminClient = new Ad4mClient(baseUrl(apiPort), undefined, false);
+        const adminClient = new Ad4mClient(baseUrl(apiPort));
         await adminClient.agent.generate("passphrase");
         console.log("✅ Backend initialized");
 

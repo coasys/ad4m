@@ -31,7 +31,7 @@ async function demoWorkingMultiUser() {
 
     try {
         // Initialize the main agent (needed for JWT signing)
-        const adminClient = new Ad4mClient(baseUrl(apiPort), undefined, false);
+        const adminClient = new Ad4mClient(baseUrl(apiPort));
         await adminClient.agent.generate("passphrase");
         console.log("✅ Backend initialized and ready for multi-user connections");
 
@@ -47,7 +47,7 @@ async function demoWorkingMultiUser() {
         console.log("✅ Login token generated");
         
         // Create authenticated client for user 1
-        const user1Client = new Ad4mClient(baseUrl(apiPort), user1Token, false);
+        const user1Client = new Ad4mClient(baseUrl(apiPort), user1Token);
         const user1Agent = await user1Client.agent.me();
         console.log("✅ User 1 authenticated as:", user1Agent.did);
 
@@ -63,7 +63,7 @@ async function demoWorkingMultiUser() {
         console.log("✅ Login token generated");
         
         // Create authenticated client for user 2
-        const user2Client = new Ad4mClient(baseUrl(apiPort), user2Token, false);
+        const user2Client = new Ad4mClient(baseUrl(apiPort), user2Token);
         const user2Agent = await user2Client.agent.me();
         console.log("✅ User 2 authenticated as:", user2Agent.did);
 
@@ -72,7 +72,7 @@ async function demoWorkingMultiUser() {
         
         // Test login persistence
         const user1Token2 = await adminClient.agent.loginUser("alice@example.com", "alice123");
-        const user1Client2 = new Ad4mClient(baseUrl(apiPort), user1Token2, false);
+        const user1Client2 = new Ad4mClient(baseUrl(apiPort), user1Token2);
         const user1Agent2 = await user1Client2.agent.me();
         console.log("✅ User 1 logged in again as:", user1Agent2.did);
 
