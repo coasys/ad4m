@@ -1596,11 +1596,7 @@ impl PerspectiveInstance {
             }
         }
 
-        super::ingest::retain_ingestible(
-            &self.sparql_store,
-            &mut unique_additions,
-            &mut unique_removals,
-        );
+        super::ingest::retain_ingestible(&mut unique_additions);
 
         #[cfg(test)]
         if let Some(hook) = self.ingest_gap_hook.lock().unwrap().take() {
@@ -1619,21 +1615,24 @@ impl PerspectiveInstance {
                     l
                 })
                 .collect(),
-            removals: unique_removals.clone(),
-        };
-        let decorated_diff = DecoratedPerspectiveDiff {
-            additions: unique_additions
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
-            removals: unique_removals
-                .iter()
-                .map(|link| DecoratedLinkExpression::from((link.clone(), LinkStatus::Shared)))
-                .collect(),
+            removals: unique_removals,
         };
 
-        // Write to SPARQL store (primary storage for links)
-        self.persist_link_diff(&store_diff).await?;
+        // Write to SPARQL store (primary storage for links). Only what was
+        // applied is decorated and published.
+        let applied = self.persist_remote_diff(store_diff);
+        let decorated_diff = DecoratedPerspectiveDiff {
+            additions: applied
+                .additions
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+            removals: applied
+                .removals
+                .into_iter()
+                .map(|link| DecoratedLinkExpression::from((link, LinkStatus::Shared)))
+                .collect(),
+        };
 
         // If any of the inbound links change a class's SHACL definition,
         // drop that entry from the in-memory shape cache so the next
@@ -3966,6 +3965,39 @@ impl PerspectiveInstance {
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize evaluate_getters result: {}", e)
         })
+    }
+
+    /// Write a link language's diff, removals first like
+    /// [`Self::persist_link_diff`], skipping every link this store holds as
+    /// `Local` (#1146). Returns what was applied. A link whose write fails,
+    /// or whose stored status cannot be read, is dropped rather than applied
+    /// blind.
+    fn persist_remote_diff(&self, diff: PerspectiveDiff) -> PerspectiveDiff {
+        let applied = |kind: &str, link: &LinkExpression, result: Result<bool, AnyError>| {
+            result.unwrap_or_else(|e| {
+                log::warn!(
+                    "Dropping remote {kind} of {} -[{}]-> {}: {e:?}",
+                    link.data.source,
+                    link.data.predicate.as_deref().unwrap_or(""),
+                    link.data.target
+                );
+                false
+            })
+        };
+        let removals = diff
+            .removals
+            .into_iter()
+            .filter(|l| applied("removal", l, self.sparql_store.remove_remote_link(l)))
+            .collect();
+        let additions = diff
+            .additions
+            .into_iter()
+            .filter(|l| applied("addition", l, self.sparql_store.add_remote_link(l)))
+            .collect();
+        PerspectiveDiff {
+            additions,
+            removals,
+        }
     }
 
     pub(crate) async fn persist_link_diff(&self, diff: &PerspectiveDiff) -> Result<(), AnyError> {

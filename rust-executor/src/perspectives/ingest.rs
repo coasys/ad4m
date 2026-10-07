@@ -2,44 +2,31 @@
 //!
 //! A diff from a neighbourhood is untrusted: the link language does not bind
 //! `LinkExpression.author` to whoever committed it. `diff_from_link_language`
-//! passes every diff through [`retain_ingestible`] before it is persisted,
-//! decorated or published, so no reader (model_query, Prolog, raw SPARQL,
-//! `query_links`, flows) sees what it drops:
+//! passes every diff through [`retain_ingestible`] and then writes it with
+//! [`SparqlStore::add_remote_link`] / [`SparqlStore::remove_remote_link`],
+//! and decorates and publishes only what those applied, so no reader
+//! (model_query, Prolog, raw SPARQL, `query_links`, flows) sees what is
+//! dropped:
 //!
 //! ```text
-//! link language ─► dedup ─► retain_ingestible ─► persist_link_diff ─► prolog / pubsub
-//!                           ├ addition: proof verifies against its author
-//!                           └ addition or removal: link not stored as Local
+//! link language ─► dedup ─► retain_ingestible ─► add/remove_remote_link ─► prolog / pubsub
+//!                           └ addition: proof     └ addition or removal: link not
+//!                             verifies against      stored as Local (checked and
+//!                             its author            written under one store lock)
 //! ```
 //!
 //! Removals of Shared links are not checked for authority here.
 
+#[cfg(doc)]
 use super::sparql_store::SparqlStore;
 use crate::types::LinkExpression;
 
 /// Drop from a remote diff every addition whose proof does not verify
-/// against its own `author`, and every addition or removal of a link this
-/// store holds as `Local`. A status that cannot be read counts as `Local`:
-/// the remote change is dropped rather than applied blind.
-pub(crate) fn retain_ingestible(
-    store: &SparqlStore,
-    additions: &mut Vec<LinkExpression>,
-    removals: &mut Vec<LinkExpression>,
-) {
-    let not_local = |link: &LinkExpression| match store.is_stored_local(link) {
-        Ok(local) => !local,
-        Err(e) => {
-            log::warn!(
-                "Dropping remote change to {} -[{}]-> {}: stored status unreadable: {e:?}",
-                link.data.source,
-                link.data.predicate.as_deref().unwrap_or(""),
-                link.data.target
-            );
-            false
-        }
-    };
+/// against its own `author`.
+pub(crate) fn retain_ingestible(additions: &mut Vec<LinkExpression>) {
     additions.retain(|link| {
-        if !link.compute_proof_valid() {
+        let valid = link.compute_proof_valid();
+        if !valid {
             log::warn!(
                 "Dropping remote link whose proof does not verify against its author {}: {} -[{}]-> {}",
                 link.author,
@@ -47,9 +34,7 @@ pub(crate) fn retain_ingestible(
                 link.data.predicate.as_deref().unwrap_or(""),
                 link.data.target
             );
-            return false;
         }
-        not_local(link)
+        valid
     });
-    removals.retain(|link| not_local(link));
 }

@@ -434,6 +434,9 @@ fn make_direct_triple(link: &LinkExpression) -> (NamedNode, NamedNode, Term) {
 #[derive(Clone)]
 pub struct SparqlStore {
     store: Arc<Store>,
+    /// Serialises link writes, so a remote change's `Local` check and its
+    /// write are one operation that no local write lands between (#1146).
+    write_lock: Arc<std::sync::Mutex<()>>,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -491,6 +494,7 @@ impl SparqlStore {
         };
         Ok(SparqlStore {
             store: Arc::new(store),
+            write_lock: Arc::new(std::sync::Mutex::new(())),
         })
     }
 
@@ -700,9 +704,13 @@ impl SparqlStore {
             .collect()
     }
 
+    fn write_guard(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Whether this store holds `link` (by its reifier) with `Local` status.
     /// A link language's diff must not add to or remove such a link (#1146).
-    pub(crate) fn is_stored_local(&self, link: &LinkExpression) -> Result<bool, Error> {
+    fn is_stored_local(&self, link: &LinkExpression) -> Result<bool, Error> {
         let local = status_str(&LinkStatus::Local);
         Ok(self
             .annotation_values(&make_reifier_iri(link), ONT_STATUS)?
@@ -712,7 +720,32 @@ impl SparqlStore {
 
     /// Insert triples for a link into the store.
     pub fn add_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        let _write = self.write_guard();
         self.insert_link_triples(link)
+    }
+
+    /// A link language's addition: insert `link` unless this store holds it
+    /// as `Local` (#1146). Returns whether it was inserted. The check and the
+    /// insert hold the write lock together.
+    pub(crate) fn add_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+        let _write = self.write_guard();
+        if self.is_stored_local(link)? {
+            return Ok(false);
+        }
+        self.insert_link_triples(link)?;
+        Ok(true)
+    }
+
+    /// A link language's removal: remove `link` unless this store holds it
+    /// as `Local` (#1146). Returns whether it was applied. The check and the
+    /// removal hold the write lock together.
+    pub(crate) fn remove_remote_link(&self, link: &LinkExpression) -> Result<bool, Error> {
+        let _write = self.write_guard();
+        if self.is_stored_local(link)? {
+            return Ok(false);
+        }
+        self.remove_link_triples(link)?;
+        Ok(true)
     }
 
     /// Test-only: drop the `proofValid` annotation from a stored link's
@@ -759,6 +792,11 @@ impl SparqlStore {
 
     /// Remove all triples for a link from the store.
     pub fn remove_link(&self, link: &LinkExpression) -> Result<(), Error> {
+        let _write = self.write_guard();
+        self.remove_link_triples(link)
+    }
+
+    fn remove_link_triples(&self, link: &LinkExpression) -> Result<(), Error> {
         let reifier_iri = make_reifier_iri(link);
 
         // 1. Remove all quads where reifier is subject (metadata + rdf:reifies)
@@ -1471,6 +1509,7 @@ impl SparqlStore {
 
     /// Remove all triples from the store.
     pub fn clear(&self) -> Result<(), Error> {
+        let _write = self.write_guard();
         self.store.clear()?;
         Ok(())
     }
@@ -1486,7 +1525,8 @@ impl SparqlStore {
 
     /// Clear the store and bulk-insert all provided links.
     pub fn reload(&self, links: Vec<LinkExpression>) -> Result<(), Error> {
-        self.clear()?;
+        let _write = self.write_guard();
+        self.store.clear()?;
         for link in &links {
             self.insert_link_triples(link)?;
         }
