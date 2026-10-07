@@ -7,7 +7,7 @@ import chaiAsPromised from "chai-as-promised";
 import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil, waitForExit, stopChildProcess } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { ExceptionInfo } from "@coasys/ad4m";
+import type { EventMap } from "@coasys/ad4m";
 import { callMcpTool, initializeMcp } from './mcp-utils';
 
 const expect = chai.expect;
@@ -431,8 +431,8 @@ describe("Authentication integration tests", () => {
         })
 
         it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
-            let excpetions: ExceptionInfo[] = [];
-            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e) })
+            let excpetions: EventMap['exception-occurred']['exception'][] = [];
+            adminAd4mClient!.on('exception-occurred', ({ exception }) => { excpetions.push(exception) })
             // Subscription-init delay: the subscription registered with the
             // callback does not wait for the server, and exceptions are not redelivered.
             await sleep(1000);
