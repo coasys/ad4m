@@ -619,6 +619,9 @@ export interface ModelConfig {
  * - Generates the necessary SDNA code for the model's properties and relations
  * - Enables the use of other model decorators (@Property, @HasMany, etc.)
  * - Provides static query methods through the Ad4mModel base class
+ *
+ * Schema generation calls the class constructor once, without a perspective, to read
+ * field defaults, so keep constructors free of side effects.
  * 
  * @example
  * ```typescript

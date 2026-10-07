@@ -52,8 +52,23 @@ function escapeTurtleString(value: string): string {
     .replace(/\n/g, '\\n')       // Newlines
     .replace(/\r/g, '\\r')       // Carriage returns
     .replace(/\t/g, '\\t')       // Tabs
-    .replace(/\b/g, '\\b')       // Backspace
+    .replace(/\x08/g, '\\b')     // Backspace (not /\b/, which matches word boundaries)
     .replace(/\f/g, '\\f');      // Form feed
+}
+
+/** Parse a stored `transform`; throws when it is not a valid NodeExpression. */
+function parseTransform(json: string, propShapeId: string): NodeExpression {
+  let parsed: unknown;
+  try { parsed = JSON.parse(json); } catch { parsed = undefined; }
+  if (!isNodeExpression(parsed)) {
+    throw new Error(`Failed to deserialize transform for property ${propShapeId}: not a valid NodeExpression. Payload: ${json}`);
+  }
+  return parsed;
+}
+
+/** Whether the executor stores a property as a collection (`ad4m://CollectionShape`). */
+function isCollection(p: SHACLPropertyShape): boolean {
+  return p.collection ?? (p.relationKind === 'hasMany' || p.relationKind === 'belongsToMany');
 }
 
 /**
@@ -205,6 +220,10 @@ export interface SHACLPropertyShape {
    *  Standard SHACL `sh:in` only defines values; labels are an AD4M extension. */
   in?: Array<{ value: string; label?: string }>;
 
+  /** AD4M-specific: multi-valued property (`ad4m://CollectionShape`).
+   *  `toJSON()` defaults it to true for `hasMany` and `belongsToMany`. */
+  collection?: boolean;
+
   /** AD4M-specific: kind of relation this property describes.
    *  Drives direction (forward/reverse), scalar-vs-collection rendering,
    *  and default max-count. */
@@ -336,87 +355,47 @@ export class SHACLShape {
    * Serialize shape to Turtle (RDF) format
    */
   toTurtle(): string {
-    let turtle = `@prefix sh: <http://www.w3.org/ns/shacl#> .\n`;
-    turtle += `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n`;
-    turtle += `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n`;
-    turtle += `@prefix ad4m: <ad4m://> .\n\n`;
-    
-    turtle += `<${this.nodeShapeUri}>\n`;
-    turtle += `  a sh:NodeShape ;\n`;
-    
-    if (this.targetClass) {
-      turtle += `  sh:targetClass <${this.targetClass}> ;\n`;
-    }
+    const links = this.toLinks();
+    const str = (v: string) => `"${escapeTurtleString(v)}"`;
+    const pred = (p: string) => p === 'rdf://type' ? 'a' : p.replace(/^(sh|ad4m):\/\//, '$1:');
+    const obj = ({ predicate, target: t }: Link): string => {
+      if (predicate === 'ad4m://identity') return 'true';
+      if (predicate === 'sh://pattern') return str(t.slice('literal:'.length));
+      if (predicate === 'sh://hasValue' && t.startsWith('literal:')) {
+        // A literal URL: numbers and booleans bare, anything else a string.
+        let v: unknown; try { v = Literal.fromUrl(t).get(); } catch { v = t; }
+        return typeof v === 'number' || typeof v === 'boolean' ? String(v) : str(typeof v === 'string' ? v : JSON.stringify(v));
+      }
+      if (t.startsWith('literal:string:')) return str(t.slice(15));
+      if (t.startsWith('literal:')) return t.slice(8).replace(/\^\^.*$/, ''); // numbers and booleans
+      if (t.startsWith('sh://')) return pred(t);
+      return `<${t}>`;
+    };
+    // One Turtle statement per link; sh:in becomes a standard RDF list, and
+    // ad4m:in keeps the JSON with labels.
+    const statements = (source: string) => links
+      .filter(l => l.source === source && l.predicate !== 'sh://property')
+      .flatMap(l => l.predicate === 'sh://in'
+        ? [`sh:in ( ${JSON.parse(l.target.slice(15)).map((v: { value: string }) => str(v.value)).join(' ')} )`, `ad4m:in ${obj(l)}`]
+        : [`${pred(l.predicate!)} ${obj(l)}`]);
 
-    // Emit sh:node references for parent shapes (model inheritance)
-    for (const parentUri of this.parentShapes) {
-      turtle += `  sh:node <${parentUri}> ;\n`;
-    }
-    
-    // Add property shapes
-    for (let i = 0; i < this.properties.length; i++) {
-      const prop = this.properties[i];
-      const isLast = i === this.properties.length - 1;
-      
-      turtle += `  sh:property [\n`;
-      turtle += `    sh:path <${prop.path}> ;\n`;
-      
-      if (prop.datatype) {
-        turtle += `    sh:datatype <${prop.datatype}> ;\n`;
-      }
-      
-      if (prop.nodeKind) {
-        turtle += `    sh:nodeKind sh:${prop.nodeKind} ;\n`;
-      }
-      
-      if (prop.minCount !== undefined) {
-        turtle += `    sh:minCount ${prop.minCount} ;\n`;
-      }
-      
-      if (prop.maxCount !== undefined) {
-        turtle += `    sh:maxCount ${prop.maxCount} ;\n`;
-      }
-      
-      if (prop.pattern) {
-        turtle += `    sh:pattern "${escapeTurtleString(prop.pattern)}" ;\n`;
-      }
-      
-      if (prop.minInclusive !== undefined) {
-        turtle += `    sh:minInclusive ${prop.minInclusive} ;\n`;
-      }
-      
-      if (prop.maxInclusive !== undefined) {
-        turtle += `    sh:maxInclusive ${prop.maxInclusive} ;\n`;
-      }
-      
-      if (prop.hasValue) {
-        turtle += `    sh:hasValue "${escapeTurtleString(prop.hasValue)}" ;\n`;
-      }
-      
-      // AD4M-specific metadata
-      if (prop.local !== undefined) {
-        turtle += `    ad4m:local ${prop.local} ;\n`;
-      }
+    const properties = links
+      .filter(l => l.source === this.nodeShapeUri && l.predicate === 'sh://property')
+      .map((l, i) => {
+        const lines = statements(l.target);
+        // A blank node cannot carry the name the way the link URI does.
+        const name = this.properties[i].name;
+        if (name) lines.splice(1, 0, `sh:name ${str(name)}`);
+        return `sh:property [\n    ${lines.join(' ;\n    ')}\n  ]`;
+      });
 
-      if (prop.writable !== undefined) {
-        turtle += `    ad4m:writable ${prop.writable} ;\n`;
-      }
-
-      // Interpreter dedup key: `toLinks()` and `toJSON()` preserve
-      // `identity`; a Turtle export must too or the round-trip through
-      // Turtle silently drops the interpretation-dedup marker
-      // (CodeRabbit #881 review).
-      if (prop.identity !== undefined) {
-        turtle += `    ad4m:identity ${prop.identity} ;\n`;
-      }
-
-      // Remove trailing semicolon and close bracket
-      turtle = turtle.slice(0, -2) + '\n';
-      turtle += isLast ? `  ] .\n` : `  ] ;\n`;
-    }
-    
-    return turtle;
+    return `@prefix sh: <http://www.w3.org/ns/shacl#> .\n` +
+      `@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .\n` +
+      `@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .\n` +
+      `@prefix ad4m: <ad4m://> .\n\n` +
+      `<${this.nodeShapeUri}>\n  ${[...statements(this.nodeShapeUri), ...properties].join(' ;\n  ')} .\n`;
   }
+
   
   /**
    * Serialize shape to AD4M Links (RDF triples)
@@ -441,23 +420,25 @@ export class SHACLShape {
       });
     }
 
-    // Constructor actions — always emit, even for an empty array.
-    // An empty `[]` tells the executor the shape is valid but has no
-    // required initial links (all-optional model with no @Flag).
-    if (this.constructor_actions) {
+    // Parent shapes (model inheritance)
+    for (const parentUri of this.parentShapes) {
       links.push({
         source: this.nodeShapeUri,
-        predicate: "ad4m://constructor",
-        target: `literal:string:${JSON.stringify(this.constructor_actions)}`
+        predicate: "sh://node",
+        target: parentUri
       });
     }
 
-    // Destructor actions — same rationale as constructor.
-    if (this.destructor_actions) {
+    // Constructor and destructor actions, always, as the executor writes
+    // them: an empty `[]` still tells `createSubject` the class exists.
+    for (const [predicate, actions] of [
+      ["ad4m://constructor", this.constructor_actions],
+      ["ad4m://destructor", this.destructor_actions],
+    ] as const) {
       links.push({
         source: this.nodeShapeUri,
-        predicate: "ad4m://destructor",
-        target: `literal:string:${JSON.stringify(this.destructor_actions)}`
+        predicate,
+        target: `literal:string:${JSON.stringify(actions ?? [])}`
       });
     }
 
@@ -488,11 +469,16 @@ export class SHACLShape {
         propShapeId = `_:propShape${i}`;
       }
       
-      // Link shape to property shape
+      // Link shape to property shape, typed as the executor types it
       links.push({
         source: this.nodeShapeUri,
         predicate: "sh://property",
         target: propShapeId
+      });
+      links.push({
+        source: propShapeId,
+        predicate: "rdf://type",
+        target: isCollection(prop) ? "ad4m://CollectionShape" : "sh://PropertyShape"
       });
       
       // Property path
@@ -567,10 +553,13 @@ export class SHACLShape {
       }
       
       if (prop.hasValue) {
+        // As the executor writes it: URIs and literal URLs as they are, other
+        // strings as an RFC 3986-encoded string literal.
+        const v = prop.hasValue;
         links.push({
           source: propShapeId,
           predicate: "sh://hasValue",
-          target: `literal:${prop.hasValue}`
+          target: v.includes('://') || v.startsWith('literal:') ? v : Literal.from(v).toUrl()
         });
       }
       
@@ -738,366 +727,91 @@ export class SHACLShape {
    * Reconstruct shape from AD4M Links
    */
   static fromLinks(links: Link[], shapeUri: string): SHACLShape {
-    // Find target class
-    const targetClassLink = links.find(l => 
-      l.source === shapeUri && l.predicate === "sh://targetClass"
-    );
-    
-    const shape = new SHACLShape(shapeUri, targetClassLink?.target);
+    const target = (source: string, predicate: string) =>
+      links.find(l => l.source === source && l.predicate === predicate)?.target;
+    // `literal:string:<text>` (not URL-encoded) and `literal:<value>` targets.
+    const str = (source: string, predicate: string) => target(source, predicate)?.replace(/^literal:string:/, '');
+    const plain = (source: string, predicate: string) => target(source, predicate)?.replace(/^literal:/, '');
+    // Counts and flags: the executor wrote `literal://number:N` and
+    // `literal://boolean:B` from 2026-02-02 to 2026-02-17, and its storage
+    // migration only rewrites them to `literal:number:N` / `literal:boolean:B`.
+    // The executor's own reader (model_query/shape.rs) still accepts both.
+    const bool = (source: string, predicate: string) => {
+      const v = plain(source, predicate)?.replace(/^boolean:/, '');
+      return v === undefined ? undefined : v === 'true';
+    };
+    const num = (source: string, predicate: string, parse: (v: string) => number) => {
+      const v = plain(source, predicate)?.replace(/^number:/, '');
+      return v === undefined ? undefined : parse(v.replace(/\^\^.*$/, ''));
+    };
+    // JSON payloads that fail to parse are dropped.
+    const json = (source: string, predicate: string) => {
+      const v = str(source, predicate);
+      if (v === undefined) return undefined;
+      try { return JSON.parse(v); } catch { return undefined; }
+    };
 
-    // Find constructor actions
-    const constructorLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://constructor"
-    );
-    if (constructorLink) {
-      try {
-        const jsonStr = constructorLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        shape.constructor_actions = JSON.parse(jsonStr);
-      } catch (e) {
-        // Ignore parse errors
-      }
+    const shape = new SHACLShape(shapeUri, target(shapeUri, "sh://targetClass"));
+    for (const l of links) {
+      if (l.source === shapeUri && l.predicate === "sh://node") shape.addParentShape(l.target);
     }
+    shape.constructor_actions = json(shapeUri, "ad4m://constructor");
+    shape.destructor_actions = json(shapeUri, "ad4m://destructor");
+    shape.interpretationHint = str(shapeUri, "ad4m://interpretation_hint");
 
-    // Find destructor actions
-    const destructorLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://destructor"
-    );
-    if (destructorLink) {
-      try {
-        const jsonStr = destructorLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        shape.destructor_actions = JSON.parse(jsonStr);
-      } catch (e) {
-        // Ignore parse errors
-      }
-    }
+    for (const propLink of links.filter(l => l.source === shapeUri && l.predicate === "sh://property")) {
+      const id = propLink.target;
+      const path = target(id, "sh://path");
+      if (!path) continue;
 
-    // Class-level interpretation hint (mirror of the emit in toLinks())
-    const classHintLink = links.find(l =>
-      l.source === shapeUri && l.predicate === "ad4m://interpretation_hint"
-    );
-    if (classHintLink) {
-      shape.interpretationHint = classHintLink.target.replace(
-        /^literal:\/\/string:|^literal:string:/, ''
-      );
-    }
+      // Named property shapes are `{namespace}{ClassName}.{propertyName}`.
+      const dot = id.lastIndexOf('.');
+      const name = !id.startsWith('_:') && dot !== -1 ? id.substring(dot + 1) : undefined;
 
-    // Find all property shapes
-    const propShapeLinks = links.filter(l =>
-      l.source === shapeUri && l.predicate === "sh://property"
-    );
-    
-    for (const propLink of propShapeLinks) {
-      const propShapeId = propLink.target;
-      
-      // Reconstruct property from its links
-      const pathLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://path"
-      );
-      
-      if (!pathLink) continue;
-      
-      // Extract property name from propShapeId if it's a named URI
-      // Format: {namespace}{ClassName}.{propertyName}
-      let propertyName: string | undefined;
-      if (!propShapeId.startsWith('_:')) {
-        const lastDotIndex = propShapeId.lastIndexOf('.');
-        if (lastDotIndex !== -1) {
-          propertyName = propShapeId.substring(lastDotIndex + 1);
-        }
-      }
-      
+      const relationKind = str(id, "ad4m://relationKind");
+      const hasValue = target(id, "sh://hasValue");
+      const identity = str(id, "ad4m://identity");
+      const transform = str(id, "ad4m://transform");
+
       const prop: SHACLPropertyShape = {
-        name: propertyName,
-        path: pathLink.target
+        name,
+        path,
+        collection: links.some(l => l.source === id && l.predicate === "rdf://type" && l.target === "ad4m://CollectionShape") || undefined,
+        datatype: target(id, "sh://datatype"),
+        ordering: str(id, "ad4m://ordering"),
+        nodeKind: target(id, "sh://nodeKind")?.replace('sh://', '') as SHACLPropertyShape['nodeKind'],
+        minCount: num(id, "sh://minCount", parseInt),
+        maxCount: num(id, "sh://maxCount", parseInt),
+        pattern: plain(id, "sh://pattern"),
+        minInclusive: num(id, "sh://minInclusive", parseFloat),
+        maxInclusive: num(id, "sh://maxInclusive", parseFloat),
+        hasValue: hasValue?.startsWith('literal:string:') ? decodeURIComponent(hasValue.slice(15)) : hasValue,
+        local: bool(id, "ad4m://local"),
+        // The flag names the predicate itself; one naming another path is not this property's.
+        monotonic: links.some(l => l.source === id && l.predicate === "ad4m://monotonic"
+          && l.target === Literal.from(path).toUrl()) || undefined,
+        writable: bool(id, "ad4m://writable"),
+        resolveLanguage: str(id, "ad4m://resolveLanguage"),
+        setter: json(id, "ad4m://setter"),
+        adder: json(id, "ad4m://adder"),
+        remover: json(id, "ad4m://remover"),
+        getter: str(id, "ad4m://getter"),
+        conformanceConditions: json(id, "ad4m://conformanceConditions"),
+        class: target(id, "sh://class"),
+        in: json(id, "sh://in"),
+        relationKind: ['hasMany', 'hasOne', 'belongsToOne', 'belongsToMany'].includes(relationKind!)
+          ? relationKind as SHACLPropertyShape['relationKind'] : undefined,
+        targetClassName: str(id, "ad4m://targetClassName"),
+        whereFilter: json(id, "ad4m://whereFilter"),
+        wherePredicates: json(id, "ad4m://wherePredicates"),
+        filter: bool(id, "ad4m://filter"),
+        interpretationHint: str(id, "ad4m://interpretation_hint"),
+        identity: identity === undefined ? undefined : identity === 'true',
+        transform: transform === undefined ? undefined : parseTransform(transform, id),
       };
-      
-      // Extract constraints
-      const datatypeLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://datatype"
-      );
-      if (datatypeLink) prop.datatype = datatypeLink.target;
-
-      const orderingLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://ordering"
-      );
-      if (orderingLink) {
-        prop.ordering = orderingLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/, ''
-        );
-      }
-      
-      const nodeKindLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://nodeKind"
-      );
-      if (nodeKindLink) {
-        prop.nodeKind = nodeKindLink.target.replace('sh://', '') as any;
-      }
-      
-      const minCountLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://minCount"
-      );
-      if (minCountLink) {
-        // Handle both formats: literal:5^^xsd:integer and literal:number:5
-        let val = minCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
-        prop.minCount = parseInt(val);
-      }
-      
-      const maxCountLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://maxCount"
-      );
-      if (maxCountLink) {
-        // Handle both formats: literal:5^^xsd:integer and literal:number:5
-        let val = maxCountLink.target.replace(/^literal:\/\/|^literal:/, '').replace(/\^\^.*$/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
-        prop.maxCount = parseInt(val);
-      }
-      
-      const patternLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://pattern"
-      );
-      if (patternLink) {
-        prop.pattern = patternLink.target.replace(/^literal:\/\/|^literal:/, '');
-      }
-      
-      const minInclusiveLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://minInclusive"
-      );
-      if (minInclusiveLink) {
-        // Handle both formats: literal:5 and literal:number:5
-        let val = minInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
-        prop.minInclusive = parseFloat(val);
-      }
-
-      const maxInclusiveLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://maxInclusive"
-      );
-      if (maxInclusiveLink) {
-        // Handle both formats: literal:5 and literal:number:5
-        let val = maxInclusiveLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('number:')) val = val.substring(7);
-        prop.maxInclusive = parseFloat(val);
-      }
-      
-      const hasValueLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "sh://hasValue"
-      );
-      if (hasValueLink) {
-        prop.hasValue = hasValueLink.target.replace(/^literal:\/\/|^literal:/, '');
-      }
-      
-      // AD4M-specific
-      const localLink = links.find(l => 
-        l.source === propShapeId && l.predicate === "ad4m://local"
-      );
-      if (localLink) {
-        // Handle both formats: literal:true and literal:boolean:true
-        let val = localLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.local = val === 'true';
-      }
-
-      const monotonicLink = prop.path && links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://monotonic"
-          && l.target === Literal.from(prop.path).toUrl()
-      );
-      if (monotonicLink) {
-        prop.monotonic = true;
-      }
-      
-      const writableLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://writable"
-      );
-      if (writableLink) {
-        // Handle both formats: literal:true and literal:boolean:true
-        let val = writableLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.writable = val === 'true';
-      }
-
-      // The general language selector (e.g. "literal" or a custom address).
-      const resolveLangLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://resolveLanguage"
-      );
-      if (resolveLangLink) {
-        prop.resolveLanguage = resolveLangLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-      }
-
-      // Storage mode is derived from `resolveLanguage` alone:
-      //   - unset       → deterministic typed literal (fast path)
-      //   - "literal"   → signed envelope on the built-in literal language
-      //   - <address>   → expression on that custom language
-
-      // Parse action arrays
-      const setterLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://setter"
-      );
-      if (setterLink) {
-        try {
-          const jsonStr = setterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.setter = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const adderLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://adder"
-      );
-      if (adderLink) {
-        try {
-          const jsonStr = adderLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.adder = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const removerLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://remover"
-      );
-      if (removerLink) {
-        try {
-          const jsonStr = removerLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.remover = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const getterLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://getter"
-      );
-      if (getterLink) {
-        prop.getter = getterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-      }
-
-      const conditionsLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://conformanceConditions"
-      );
-      if (conditionsLink) {
-        try {
-          const jsonStr = conditionsLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.conformanceConditions = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const classLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://class"
-      );
-      if (classLink) {
-        prop.class = classLink.target;
-      }
-
-      const inLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "sh://in"
-      );
-      if (inLink) {
-        try {
-          const jsonStr = inLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.in = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const relationKindLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://relationKind"
-      );
-      if (relationKindLink) {
-        const val = relationKindLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        if (val === 'hasMany' || val === 'hasOne' || val === 'belongsToOne' || val === 'belongsToMany') {
-          prop.relationKind = val;
-        }
-      }
-
-      const targetClassNameLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://targetClassName"
-      );
-      if (targetClassNameLink) {
-        prop.targetClassName = targetClassNameLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/, ''
-        );
-      }
-
-      const whereFilterLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://whereFilter"
-      );
-      if (whereFilterLink) {
-        try {
-          const jsonStr = whereFilterLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.whereFilter = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const wherePredicatesLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://wherePredicates"
-      );
-      if (wherePredicatesLink) {
-        try {
-          const jsonStr = wherePredicatesLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-          prop.wherePredicates = JSON.parse(jsonStr);
-        } catch (e) {
-          // Ignore parse errors
-        }
-      }
-
-      const filterLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://filter"
-      );
-      if (filterLink) {
-        let val = filterLink.target.replace(/^literal:\/\/|^literal:/, '');
-        if (val.startsWith('boolean:')) val = val.substring(8);
-        prop.filter = val === 'true';
-      }
-
-      const interpretationHintLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://interpretation_hint"
-      );
-      if (interpretationHintLink) {
-        prop.interpretationHint = interpretationHintLink.target.replace(
-          /^literal:\/\/string:|^literal:string:/, ''
-        );
-      }
-
-      const identityLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://identity"
-      );
-      if (identityLink) {
-        prop.identity =
-          identityLink.target.replace(/^literal:\/\/string:|^literal:string:/, '') === 'true';
-      }
-
-      const transformLink = links.find(l =>
-        l.source === propShapeId && l.predicate === "ad4m://transform"
-      );
-      if (transformLink) {
-        const jsonStr = transformLink.target.replace(/^literal:\/\/string:|^literal:string:/, '');
-        try {
-          const parsed = JSON.parse(jsonStr);
-          if (!isNodeExpression(parsed)) {
-            throw new Error(
-              `Invalid transform for property ${propShapeId}: ` +
-              `payload is not a valid NodeExpression. Received: ${jsonStr}`
-            );
-          }
-          prop.transform = parsed;
-        } catch (e) {
-          throw new Error(
-            `Failed to deserialize transform for property ${propShapeId}: ` +
-            `${e instanceof Error ? e.message : String(e)}. Payload: ${jsonStr}`
-          );
-        }
-      }
-
-      shape.addProperty(prop);
+      shape.addProperty(Object.fromEntries(Object.entries(prop).filter(([, v]) => v !== undefined)) as SHACLPropertyShape);
     }
-    
+
     return shape;
   }
 
@@ -1136,6 +850,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relation_kind: p.relationKind,
+        collection: p.collection ?? (isCollection(p) || undefined),
         target_class_name: p.targetClassName,
         where_filter: p.whereFilter,
         where_predicates: p.wherePredicates,
@@ -1185,7 +900,7 @@ export class SHACLShape {
         local: p.local,
         monotonic: p.monotonic,
         writable: p.writable,
-        resolveLanguage: p.resolve_language ?? (p as any).resolveLanguage,
+        resolveLanguage: p.resolve_language,
         setter: p.setter,
         adder: p.adder,
         remover: p.remover,
@@ -1194,6 +909,7 @@ export class SHACLShape {
         class: p.class,
         in: p.in,
         relationKind: p.relation_kind,
+        collection: p.collection,
         targetClassName: p.target_class_name,
         whereFilter: p.where_filter,
         wherePredicates: p.where_predicates,

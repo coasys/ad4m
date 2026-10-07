@@ -118,6 +118,14 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
+    // Class-field initialisers (`count = 0`) run in the constructor, not on the
+    // prototype, so read them from one instance built without a perspective.
+    let instance: any;
+    try { instance = new target(); } catch {}
+    const fieldValue = (propName: string): unknown => {
+        try { return obj[propName] ?? instance?.[propName]; } catch { return undefined; }
+    };
+
     // ── Convert properties to SHACL property shapes ────────────────────
     for (const propName in properties) {
         const propMeta = properties[propName];
@@ -163,9 +171,10 @@ export function buildSHACL(
             const isLiteral =
                 propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
             if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
-                const initialType = typeof obj[propName];
+                const initialType = typeof fieldValue(propName);
                 if (initialType === "number") {
-                    propShape.datatype = "xsd://integer";
+                    // decimal, not integer: a `= 0` default must not make 0.5 invalid.
+                    propShape.datatype = "xsd://decimal";
                 } else if (initialType === "boolean") {
                     propShape.datatype = "xsd://boolean";
                 } else if (initialType === "string" || isLiteral) {
@@ -507,11 +516,8 @@ export function buildSHACL(
         });
     }
 
-    // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal:string:[]`
-    // which the Rust executor parses as a valid (no-op) command list,
-    // avoiding "No SHACL constructor found" errors for models whose
-    // properties are all optional and have no @Flag.
+    // Empty lists are valid: the executor stores them as `literal:string:[]`,
+    // so `createSubject` works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

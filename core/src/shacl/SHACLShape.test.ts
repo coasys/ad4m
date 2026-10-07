@@ -1,5 +1,15 @@
 import { SHACLShape, SHACLPropertyShape, AD4MAction } from './SHACLShape';
 import { concat, literal, focus } from './builders';
+import { readFileSync } from 'fs';
+import { join } from 'path';
+import { Parser } from 'n3';
+
+// Links the executor's parse_shacl_to_links writes for a shape that uses every
+// field (golden[0]) and one with empty action lists (golden[1]); its test
+// `parse_shacl_to_links_matches_the_golden_fixture` pins the same file.
+const goldenCases = JSON.parse(readFileSync(
+  join(__dirname, '../../../rust-executor/src/perspectives/fixtures/shacl_writer_golden.json'), 'utf8'));
+const golden = goldenCases[0];
 
 describe('SHACLShape', () => {
   describe('toLinks()', () => {
@@ -127,6 +137,25 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].path).toBe('recipe://name');
       expect(reconstructed.properties[0].datatype).toBe('xsd:string');
       expect(reconstructed.properties[0].minCount).toBe(1);
+    });
+
+    it('reads counts and flags the executor wrote from 2026-02-02 to 2026-02-17, after migration', () => {
+      // a84f2f178 wrote `literal://number:N` / `literal://boolean:B`; the
+      // storage migration only turns `literal://` into `literal:`.
+      const shapeUri = 'recipe://RecipeShape';
+      const prop = 'recipe://Recipe.name';
+      const links = [
+        { source: shapeUri, predicate: 'sh://targetClass', target: 'recipe://Recipe' },
+        { source: shapeUri, predicate: 'sh://property', target: prop },
+        { source: prop, predicate: 'sh://path', target: 'recipe://name' },
+        { source: prop, predicate: 'sh://minCount', target: 'literal:number:1' },
+        { source: prop, predicate: 'sh://maxCount', target: 'literal:number:1' },
+        { source: prop, predicate: 'ad4m://writable', target: 'literal:boolean:true' },
+        { source: prop, predicate: 'ad4m://local', target: 'literal:boolean:true' },
+      ];
+
+      const [p] = SHACLShape.fromLinks(links, shapeUri).properties;
+      expect([p.minCount, p.maxCount, p.writable, p.local]).toEqual([1, 1, true, true]);
     });
 
     it('handles multiple properties', () => {
@@ -272,6 +301,94 @@ describe('SHACLShape', () => {
     });
   });
 
+  describe('toTurtle()', () => {
+    const SH = 'http://www.w3.org/ns/shacl#';
+    const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
+    const iri = (v: string) => (v === `${RDF}type` ? 'rdf://type' : v.replace(SH, 'sh://'));
+
+    /**
+     * The parsed Turtle as "subject predicate value" lines: property blank
+     * nodes carry the URI toLinks() gives them, RDF lists read as JSON arrays.
+     */
+    const turtleTriples = (turtle: string, propertyUris: string[]) => {
+      const quads: any[] = new Parser().parse(turtle);
+      const object = (s: string, p: string) => quads.find(q => q.subject.value === s && q.predicate.value === p)!.object;
+      const list = (node: any): string[] =>
+        node.value === `${RDF}nil` ? [] : [object(node.value, `${RDF}first`).value, ...list(object(node.value, `${RDF}rest`))];
+      const blankNodes = quads.filter(q => q.predicate.value === `${SH}property`).map(q => q.object.value);
+      const term = (t: any) => (t.termType === 'BlankNode' ? propertyUris[blankNodes.indexOf(t.value)] : iri(t.value));
+      return quads
+        .filter(q => q.predicate.value === `${RDF}type` || !q.predicate.value.startsWith(RDF))
+        .map(q => {
+          const value = q.predicate.value === `${SH}in` ? JSON.stringify(list(q.object))
+            : q.object.termType === 'Literal' ? q.object.value : term(q.object);
+          return `${term(q.subject)} ${iri(q.predicate.value)} ${value}`;
+        });
+    };
+
+    /** The same lines from toLinks(), with each link's literal decoded to its value. */
+    const linkTriples = (shape: SHACLShape) => {
+      const links = shape.toLinks();
+      const names = links
+        .filter(l => l.source === shape.nodeShapeUri && l.predicate === 'sh://property')
+        .map((l, i) => `${l.target} sh://name ${shape.properties[i].name}`);
+      return [...names, ...links.flatMap(({ source, predicate, target }) => {
+        const string = target.startsWith('literal:string:') ? target.slice('literal:string:'.length) : undefined;
+        if (predicate === 'sh://in') {
+          const values = JSON.parse(string!).map((v: { value: string }) => v.value);
+          return [`${source} sh://in ${JSON.stringify(values)}`, `${source} ad4m://in ${string}`];
+        }
+        const value = string === undefined
+          ? target.startsWith('literal:') ? target.slice('literal:'.length).replace(/\^\^.*$/, '') : target
+          // Only sh:hasValue is URL-encoded in its link, as the executor stores it.
+          : predicate === 'sh://hasValue' ? decodeURIComponent(string) : string;
+        return [`${source} ${predicate} ${value}`];
+      })];
+    };
+
+    it('writes the same triples as toLinks(), readable by a Turtle parser', () => {
+      // The golden Dog shape covers URIs, strings, numbers, booleans, sh:in,
+      // a CollectionShape and a URL-encoded sh:hasValue.
+      const shape = SHACLShape.fromJSON(golden.shape);
+      shape.addProperty({ name: 'note', path: 'zoo://note', interpretationHint: 'say "hi"\\ \n\ttab' });
+      const propertyUris = shape.toLinks().filter(l => l.predicate === 'sh://property').map(l => l.target);
+
+      expect(turtleTriples(shape.toTurtle(), propertyUris).sort()).toEqual(linkTriples(shape).sort());
+    });
+
+    it('does not corrupt string literals at word boundaries', () => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'p', path: 'test://p', pattern: 'abc def', hasValue: 'x' });
+      const turtle = shape.toTurtle();
+      expect(turtle).toContain('sh:pattern "abc def"');
+      expect(turtle).toContain('sh:hasValue "x"');
+      expect(turtle).not.toContain('\\b');
+    });
+
+    it('writes a typed-literal sh:hasValue as a Turtle value, not a prefixed name', () => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'n', path: 'test://n', hasValue: 'literal:number:5' });
+      shape.addProperty({ name: 'b', path: 'test://b', hasValue: 'literal:boolean:true' });
+      shape.addProperty({ name: 's', path: 'test://s', hasValue: 'literal:string:a%20b' });
+      const turtle = shape.toTurtle();
+      expect(turtle).toContain('sh:hasValue 5\n');
+      expect(turtle).toContain('sh:hasValue true\n');
+      expect(turtle).toContain('sh:hasValue "a b"\n');
+      expect(turtle).not.toMatch(/sh:hasValue (number|boolean):/);
+    });
+
+    it('writes an untyped literal sh:hasValue as a string instead of throwing', () => {
+      const shape = new SHACLShape('test://Model');
+      shape.addProperty({ name: 'u', path: 'test://u', hasValue: 'literal:foo' });
+      expect(shape.toTurtle()).toContain('sh:hasValue "literal:foo"\n');
+    });
+
+    it('terminates a shape without properties', () => {
+      const turtle = new SHACLShape('test://Empty').toTurtle();
+      expect(turtle.trimEnd().endsWith('.')).toBe(true);
+    });
+  });
+
   describe('edge cases', () => {
     it('handles empty shape', () => {
       const shape = new SHACLShape('test://Empty');
@@ -326,6 +443,30 @@ describe('SHACLShape', () => {
       expect(reconstructed.properties[0].path).toBe('recipe://name');
       expect(reconstructed.properties[0].datatype).toBe('xsd:string');
       expect(reconstructed.properties[0].minCount).toBe(1);
+    });
+
+    it('writes collection for *Many relations and round-trips it', () => {
+      const original = new SHACLShape('todo://Todo');
+      original.addProperty({ name: 'state', path: 'todo://state', maxCount: 1 });
+      original.addProperty({ name: 'comments', path: 'todo://comment', relationKind: 'hasMany' });
+      original.addProperty({ name: 'owners', path: 'todo://owner', relationKind: 'belongsToMany' });
+      original.addProperty({ name: 'parent', path: 'todo://parent', relationKind: 'hasOne', maxCount: 1 });
+      original.addProperty({ name: 'tags', path: 'todo://tag', collection: true });
+      original.addProperty({ name: 'notMany', path: 'todo://x', relationKind: 'hasMany', collection: false });
+
+      const json: any = original.toJSON();
+      const collectionByName = Object.fromEntries(json.properties.map((p: any) => [p.name, p.collection]));
+      expect(collectionByName).toEqual({
+        state: undefined,
+        comments: true,
+        owners: true,
+        parent: undefined,
+        tags: true,
+        notMany: false,
+      });
+
+      const reconstructed = SHACLShape.fromJSON(JSON.parse(JSON.stringify(json)));
+      expect(reconstructed.toJSON()).toEqual(json);
     });
 
     it('preserves nodeShapeUri in round-trip', () => {
@@ -515,22 +656,6 @@ describe('SHACLShape', () => {
       const links = original.toLinks();
       const inLink = links.find(l => l.predicate === 'sh://in');
       expect(inLink).toBeUndefined();
-    });
-
-    it('handles sh:in with literal://string: prefix variant', () => {
-      // fromLinks should handle both `literal:string:` and `literal://string:` prefixes
-      const links = [
-        { source: 'test://ModelShape', predicate: 'sh://targetClass', target: 'test://Model' },
-        { source: 'test://ModelShape', predicate: 'sh://property', target: 'test://Model.status' },
-        { source: 'test://Model.status', predicate: 'sh://path', target: 'test://status' },
-        { source: 'test://Model.status', predicate: 'sh://in', target: 'literal://string:[{"value":"a"},{"value":"b"}]' },
-      ];
-
-      const reconstructed = SHACLShape.fromLinks(links, 'test://ModelShape');
-      expect(reconstructed.properties[0].in).toEqual([
-        { value: 'a' },
-        { value: 'b' },
-      ]);
     });
 
     it('preserves sh:in through toJSON() → fromJSON()', () => {
@@ -745,6 +870,25 @@ describe('SHACLShape', () => {
         expect(link.target).not.toMatch(/^literal:string:undefined$/);
         expect(link.target).not.toMatch(/^literal:string:.*function/);
       }
+    });
+  });
+  describe('executor golden links', () => {
+    const json = (shape: SHACLShape) => JSON.parse(JSON.stringify(shape.toJSON()));
+
+    it.each(goldenCases.map((c: any) => [c.name, c]))("decodes the executor's golden links back to the shape it sent (%s)", (_, c: any) => {
+      expect(json(SHACLShape.fromLinks(c.links, c.shape.node_shape_uri))).toEqual(c.shape);
+    });
+
+    it.each(goldenCases.map((c: any) => [c.name, c]))('sends the executor the shape fromJSON read (%s)', (_, c: any) => {
+      expect(json(SHACLShape.fromJSON(c.shape))).toEqual(c.shape);
+    });
+
+    it.each(goldenCases.map((c: any) => [c.name, c]))("toLinks() writes the executor's shape graph (%s)", (_, c: any) => {
+      // The executor adds the name-mapping and class links, which need the name.
+      const key = (l: any) => `${l.source} ${l.predicate} ${l.target}`;
+      const shapeLinks = c.links.filter((l: any) =>
+        l.source !== 'ad4m://self' && !l.source.startsWith('literal:') && l.source !== c.shape.target_class);
+      expect(SHACLShape.fromJSON(c.shape).toLinks().map(key).sort()).toEqual(shapeLinks.map(key).sort());
     });
   });
 });
