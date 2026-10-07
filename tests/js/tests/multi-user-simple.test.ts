@@ -799,9 +799,12 @@ describe("Multi-User Simple integration tests", () => {
             type Seen = { added: string[]; updated: string[]; removed: string[] };
             const listen = async (p: typeof pa) => {
                 const seen: Seen = { added: [], updated: [], removed: [] };
-                await p.addListener("link-added", (l: any) => { seen.added.push(l.data.target); });
-                await p.addListener("link-updated", (u: any) => { seen.updated.push(`${u.oldLink.data.target} -> ${u.newLink.data.target}`); });
-                await p.addListener("link-removed", (l: any) => { seen.removed.push(l.data.target); });
+                p.on("link-added", ({ link }) => { seen.added.push(link.data.target); });
+                p.on("link-updated", ({ oldLink, newLink }) => { seen.updated.push(`${oldLink.data.target} -> ${newLink.data.target}`); });
+                p.on("link-removed", ({ link }) => { seen.removed.push(link.data.target); });
+                // A call sends the client's events.watch ahead of itself, so once
+                // it returns the executor delivers these events to this client.
+                await p.get(new LinkQuery({ source: card.id }));
                 return seen;
             };
             const aliceSeen = await listen(pa);
