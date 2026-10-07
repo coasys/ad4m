@@ -9,9 +9,9 @@ use super::domain::{LinkExpressionInput, LinkInput, LinkStatus, PerspectiveInput
 use crate::agent::signatures::verify_or_false;
 use regex::Regex;
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct Expression<T: Serialize> {
+pub struct Expression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -25,8 +25,8 @@ pub struct ExpressionProof {
     pub signature: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct VerifiedExpression<T: Serialize> {
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct VerifiedExpression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -322,14 +322,14 @@ impl From<PerspectiveInput> for Perspective {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
@@ -339,13 +339,13 @@ pub struct NeighbourhoodExpression {
 
 pub type Address = String;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct LanguageRef {
-    pub name: String,
     pub address: Address,
+    pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct ExpressionRef {
     pub language: LanguageRef,
     pub expression: Address,
@@ -424,7 +424,7 @@ impl Display for ExpressionRef {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -460,7 +460,7 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub id: String,
@@ -477,14 +477,14 @@ pub struct Notification {
     pub owner_did: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamples {
     pub input: String,
     pub output: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
     pub name: String,
@@ -497,7 +497,7 @@ pub struct AITask {
     pub updated_at: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
     pub notification: Notification,
@@ -505,7 +505,16 @@ pub struct TriggeredNotification {
     pub trigger_match: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// The `notification-triggered` event: the triggered notification plus the
+/// perspective it fired in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTriggeredEvent {
+    pub perspective_uuid: String,
+    pub notification: TriggeredNotification,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
@@ -545,7 +554,7 @@ impl ToString for ModelApiType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApi {
     pub base_url: Url,
@@ -563,7 +572,7 @@ pub struct ModelApi {
     pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
@@ -572,7 +581,7 @@ pub struct LocalModel {
     pub revision: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSource {
     pub repo: String,
@@ -603,7 +612,7 @@ impl Display for ModelType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -616,7 +625,7 @@ pub struct Model {
 
 // Internal User struct - NOT exposed via REST API
 // Contains sensitive data like password_hash that should never be returned to clients
-#[derive(Default, Deserialize, Serialize, Clone)]
+#[derive(Default, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub username: String,
@@ -640,7 +649,7 @@ impl std::fmt::Debug for User {
 
 // Public UserInfo struct - safe to return from public APIs
 // Does NOT contain password_hash
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,

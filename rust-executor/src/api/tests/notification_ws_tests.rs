@@ -31,7 +31,8 @@ use crate::pubsub::{get_global_pubsub, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC};
 use crate::test_utils::setup_wallet;
 use crate::types::{
     ExpressionProof, Link, LinkExpression, LinkStatus, Notification, NotificationInput,
-    PerspectiveHandle, PerspectiveState, RequestContext, TriggeredNotification,
+    NotificationTriggeredEvent, PerspectiveHandle, PerspectiveState, RequestContext,
+    TriggeredNotification,
 };
 
 const TRIGGER: &str = "SELECT ?source ?target WHERE { ?source <test://notify> ?target }";
@@ -709,22 +710,25 @@ async fn only_the_admin_credential_imports_data() {
 
 /// Serialises the event that delivery publishes for a notification of `owner`.
 fn triggered(owner: &str) -> String {
-    serde_json::to_string(&TriggeredNotification {
-        notification: Notification {
-            id: Uuid::new_v4().to_string(),
-            granted: true,
-            description: String::new(),
-            app_name: String::new(),
-            app_url: String::new(),
-            app_icon_path: String::new(),
-            trigger: TRIGGER.to_string(),
-            perspective_ids: vec![],
-            webhook_url: "https://webhook.test".to_string(),
-            webhook_auth: "secret".to_string(),
-            owner_did: owner.to_string(),
+    serde_json::to_string(&NotificationTriggeredEvent {
+        perspective_uuid: "perspective".to_string(),
+        notification: TriggeredNotification {
+            notification: Notification {
+                id: Uuid::new_v4().to_string(),
+                granted: true,
+                description: String::new(),
+                app_name: String::new(),
+                app_url: String::new(),
+                app_icon_path: String::new(),
+                trigger: TRIGGER.to_string(),
+                perspective_ids: vec![],
+                webhook_url: "https://webhook.test".to_string(),
+                webhook_auth: "secret".to_string(),
+                owner_did: owner.to_string(),
+            },
+            perspective_id: "perspective".to_string(),
+            trigger_match: "[]".to_string(),
         },
-        perspective_id: "perspective".to_string(),
-        trigger_match: "[]".to_string(),
     })
     .unwrap()
 }

@@ -41,7 +41,8 @@ pub mod subscriptions;
 
 use super::server::McpContext;
 use crate::agent::capabilities::{
-    capabilities_from_token, check_capability, defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
+    capabilities_from_token, check_capability, defs::AGENT_PERMIT_CAPABILITY,
+    defs::PERSPECTIVE_CREATE_CAPABILITY, Capability,
 };
 use crate::agent::AgentContext;
 use crate::perspectives::get_perspective;
@@ -119,8 +120,8 @@ to read, instance_create to write.";
 /// documentation (which is what tells a cold agent how to authenticate).
 ///
 /// Being listed here only means `call_tool` does not reject the call outright.
-/// `request_capability` additionally runs `check_auth` itself and withholds the
-/// auto-permit (and the mint code) from unauthenticated callers — see
+/// `request_capability` additionally adopts a header credential and withholds the
+/// auto-permit (and the mint code) from any session without the PERMIT capability — see
 /// `handle_capability_request` in auth.rs (issue #851, sub-problem 3).
 pub(crate) const AUTH_TOOLS: &[&str] = &[
     "get_documentation",
@@ -517,6 +518,28 @@ impl Ad4mMcpHandler {
         let token = self.get_auth_token().await;
         let admin_cred = self.context.admin_credential.clone();
         capabilities_from_token(token.unwrap_or_default(), admin_cred)
+    }
+
+    /// Whether the current caller may auto-permit a capability request.
+    ///
+    /// Authentication alone is not enough: a multi-user user token authenticates
+    /// (it decodes to a valid session), but it holds no PERMIT capability, so it may
+    /// only *create* a request for the admin to approve out of band. Auto-permit hands
+    /// back the inline code, which `generate_jwt` turns into an ALL_CAPABILITY token; a
+    /// caller without PERMIT must never receive it (issue #851, sub-problem 3). The
+    /// admin credential decodes to ALL_CAPABILITY, which contains PERMIT, so the admin
+    /// still auto-permits. `request_capability_with_header` adopts a valid header
+    /// credential into the session before this runs, so reading the session token covers
+    /// header-only clients too.
+    ///
+    /// The check holds only on an executor with an admin credential. Without one, the empty
+    /// token holds ALL_CAPABILITY, so every caller passes, on a multi-user node also a user
+    /// who drops their token (#1059).
+    pub(crate) async fn caller_can_permit(&self) -> bool {
+        match self.get_capabilities().await {
+            Ok(caps) => check_capability(&Ok(caps), &AGENT_PERMIT_CAPABILITY).is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Store an auth token in the session and return a success JSON response

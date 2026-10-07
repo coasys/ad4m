@@ -1,14 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
+use ts_rs::TS;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfoExtended {
     pub request_id: String,
     pub auth: AuthInfo,
 }
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthInfo {
     pub app_name: String,
@@ -41,7 +42,7 @@ impl TryFrom<crate::types::AuthInfoInput> for AuthInfo {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Capability {
     pub with: Resource,
@@ -57,7 +58,7 @@ impl From<crate::types::CapabilityInput> for Capability {
     }
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Resource {
     pub domain: String,
@@ -73,7 +74,7 @@ impl From<crate::types::ResourceInput> for Resource {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, TS)]
 pub struct Claims {
     iss: String,
     pub sub: Option<String>, // User email - make public so we can access it
