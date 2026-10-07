@@ -42,14 +42,12 @@ export function subscribeToPerspective(
     console.log("subscribing!");
     perspective.addListener("link-added", (link) => {
       subscribers.get(addedKey)!.forEach((cb) => cb(link));
-      return null;
     });
   }
 
   if (!subscribers.has(removedKey)) {
     perspective.addListener("link-removed", (link) => {
       subscribers.get(removedKey)!.forEach((cb) => cb(link));
-      return null;
     });
   }
 
