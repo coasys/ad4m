@@ -261,8 +261,6 @@ describe('SHACLFlow', () => {
         // what `Literal.toUrl` writes for 1e21, and what Rust writes
         ['literal:number:1e%2B21', 1e21],
         ['literal:number:1000000000000000000000', 1e21],
-        // legacy prefix
-        ['literal://number:2', 2],
         // infinities: TS spelling, Rust spelling, any ASCII case
         ['literal:number:Infinity', Infinity],
         ['literal:number:-Infinity', -Infinity],
@@ -285,8 +283,9 @@ describe('SHACLFlow', () => {
         ['literal:number:\u0661', NaN], // ARABIC-INDIC DIGIT ONE
         ['literal:number:%zz', NaN],
         ['literal:number:%E2%82', NaN], // truncated UTF-8 sequence
-        // not a number literal at all
+        // not a number literal at all, including the legacy `literal://` form
         ['literal:string:1', NaN],
+        ['literal://number:2', NaN],
         ['ad4m://x', NaN],
       ];
       for (const [target, want] of rows) {

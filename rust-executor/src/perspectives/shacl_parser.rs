@@ -781,8 +781,7 @@ fn decode_literal_string(target: &str) -> Option<String> {
 /// in TS, so the two runtimes could pick different initial states from the
 /// same links. Now:
 ///
-/// 1. The target must be a number literal (`literal:number:` or the legacy
-///    `literal://number:` prefix). Anything else is NaN.
+/// 1. The target must be a `literal:number:` literal. Anything else is NaN.
 /// 2. The payload is percent-decoded: TS `Literal.toUrl` writes `1e21` as
 ///    `1e%2B21`. A payload that does not decode is NaN.
 /// 3. A plain decimal — `[+-]?([0-9]+.?[0-9]*|.[0-9]+)([eE][+-]?[0-9]+)?`,
@@ -808,10 +807,7 @@ fn decode_state_value(target: &str) -> f64 {
         Regex::new(r"^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$").expect("static")
     });
 
-    let Some(payload) = target
-        .strip_prefix("literal://number:")
-        .or_else(|| target.strip_prefix("literal:number:"))
-    else {
+    let Some(payload) = target.strip_prefix("literal:number:") else {
         return f64::NAN;
     };
     let Ok(payload) = urlencoding::decode(payload) else {
@@ -4367,8 +4363,6 @@ mod tests {
             // what TS `Literal.toUrl` writes for 1e21, and what Rust writes
             ("literal:number:1e%2B21", 1e21),
             ("literal:number:1000000000000000000000", 1e21),
-            // legacy prefix
-            ("literal://number:2", 2.0),
             // infinities: TS spelling, Rust spelling, any ASCII case
             ("literal:number:Infinity", f64::INFINITY),
             ("literal:number:-Infinity", f64::NEG_INFINITY),
@@ -4391,8 +4385,9 @@ mod tests {
             ("literal:number:\u{661}", f64::NAN), // ARABIC-INDIC DIGIT ONE
             ("literal:number:%zz", f64::NAN),
             ("literal:number:%E2%82", f64::NAN), // truncated UTF-8 sequence
-            // not a number literal at all
+            // not a number literal at all, including the legacy `literal://` form
             ("literal:string:1", f64::NAN),
+            ("literal://number:2", f64::NAN),
             ("ad4m://x", f64::NAN),
         ];
         for (target, want) in rows {

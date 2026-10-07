@@ -275,8 +275,7 @@ function compareCodePoints(a: string, b: string): number {
  * reverse — so before #1202 the two runtimes could decode the same links to
  * different values and pick different initial states. The grammar:
  *
- * 1. The target must be a number literal (`literal:number:` or the legacy
- *    `literal://number:` prefix). Anything else is NaN.
+ * 1. The target must be a `literal:number:` literal. Anything else is NaN.
  * 2. The payload is percent-decoded: `Literal.toUrl` writes `1e21` as
  *    `1e%2B21`. A payload that does not decode is NaN.
  * 3. A plain decimal — `[+-]?([0-9]+.?[0-9]*|.[0-9]+)([eE][+-]?[0-9]+)?`,
@@ -294,11 +293,9 @@ function compareCodePoints(a: string, b: string): number {
 const STATE_VALUE_DECIMAL = /^[+-]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?$/;
 const STATE_VALUE_INFINITE = /^[+-]?[iI][nN][fF](?:[iI][nN][iI][tT][yY])?$/;
 function decodeStateValue(target: string): number {
-  const payload = target.startsWith("literal://number:")
-    ? target.slice("literal://number:".length)
-    : target.startsWith("literal:number:")
-      ? target.slice("literal:number:".length)
-      : undefined;
+  const payload = target.startsWith("literal:number:")
+    ? target.slice("literal:number:".length)
+    : undefined;
   if (payload === undefined) return NaN;
   let decoded: string;
   try {
