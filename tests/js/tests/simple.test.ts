@@ -2,7 +2,7 @@ import { expect } from "chai";
 import { ChildProcess } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { Ad4mClient } from "@coasys/ad4m";
-import { startExecutor, baseUrl, sleep, gracefulShutdown } from "../utils/utils";
+import { startExecutor, baseUrl, gracefulShutdown } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import path from "path";
 import { fileURLToPath } from 'url';

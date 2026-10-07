@@ -7,22 +7,28 @@
 //! synthetic module at the `ad4m:host` specifier (see
 //! `rust-executor/src/js_core/options.rs` and `host.js`) that bridges
 //! the runtime-provided globals to the canonical camelCase API surface.
+//!
+//! Every import that calls a host operation which can fail is declared
+//! `catch` and returns `Result<_, JsValue>`. A JS exception that crosses
+//! into WASM unwinds the module without running Rust destructors, so the
+//! call never releases the language's instance lock and every later call
+//! waits forever. `?` turns the error into a `LanguageError`.
 
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(module = "ad4m:host")]
 extern "C" {
     // ----- Agent (spec §7.1) -----
-    #[wasm_bindgen(js_name = "agentDid")]
-    pub fn agent_did() -> String;
-    #[wasm_bindgen(js_name = "agentSigningKeyId")]
-    pub fn agent_signing_key_id() -> String;
-    #[wasm_bindgen(js_name = "agentSign")]
-    pub fn agent_sign(payload: &[u8]) -> Vec<u8>;
-    #[wasm_bindgen(js_name = "agentSignStringHex")]
-    pub fn agent_sign_string_hex(payload: &str) -> String;
-    #[wasm_bindgen(js_name = "agentCreateSignedExpression")]
-    pub fn agent_create_signed_expression(data: JsValue) -> JsValue;
+    #[wasm_bindgen(js_name = "agentDid", catch)]
+    pub fn agent_did() -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentSigningKeyId", catch)]
+    pub fn agent_signing_key_id() -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentSign", catch)]
+    pub fn agent_sign(payload: &[u8]) -> Result<Vec<u8>, JsValue>;
+    #[wasm_bindgen(js_name = "agentSignStringHex", catch)]
+    pub fn agent_sign_string_hex(payload: &str) -> Result<String, JsValue>;
+    #[wasm_bindgen(js_name = "agentCreateSignedExpression", catch)]
+    pub fn agent_create_signed_expression(data: JsValue) -> Result<JsValue, JsValue>;
 
     // ----- Holochain (spec §7.2) -----
     // These JS-side imports return Promises — `registerDNAs` installs an
@@ -49,8 +55,8 @@ extern "C" {
     // Canonical AD4M content-address hash: SHA-256 -> CIDv1 -> base58btc,
     // prefixed with "Qm". The deterministic address function used by
     // every content-addressed Language.
-    #[wasm_bindgen(js_name = "hash")]
-    pub fn hash(data: &str) -> String;
+    #[wasm_bindgen(js_name = "hash", catch)]
+    pub fn hash(data: &str) -> Result<String, JsValue>;
 
     // ----- HTTP fetch (spec §7.2b) -----
     // Thin wrapper around Deno's native fetch(). `headers_json` is a JSON
@@ -76,14 +82,14 @@ extern "C" {
     pub fn language_storage_directory() -> String;
 
     // ----- Storage KV -- CORE (spec §7.4) -----
-    #[wasm_bindgen(js_name = "storageGet")]
-    pub fn storage_get(key: &str) -> JsValue;
-    #[wasm_bindgen(js_name = "storagePut")]
-    pub fn storage_put(key: &str, value: &str);
-    #[wasm_bindgen(js_name = "storageDelete")]
-    pub fn storage_delete(key: &str);
-    #[wasm_bindgen(js_name = "storageListKeys")]
-    pub fn storage_list_keys(prefix: Option<String>) -> Vec<JsValue>;
+    #[wasm_bindgen(js_name = "storageGet", catch)]
+    pub fn storage_get(key: &str) -> Result<JsValue, JsValue>;
+    #[wasm_bindgen(js_name = "storagePut", catch)]
+    pub fn storage_put(key: &str, value: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = "storageDelete", catch)]
+    pub fn storage_delete(key: &str) -> Result<(), JsValue>;
+    #[wasm_bindgen(js_name = "storageListKeys", catch)]
+    pub fn storage_list_keys(prefix: Option<String>) -> Result<Vec<JsValue>, JsValue>;
 
     // ----- Storage File I/O -- OPTIONAL EXTENSION (spec §7.6) -----
     // Raw read/write access to a filesystem-like storage layer.
@@ -188,11 +194,10 @@ pub async fn holochain_call_typed<T: Serialize + ?Sized>(
 /// Create a signed expression. Type-safe wrapper around
 /// `agent_create_signed_expression` — ensures the wrapped data crosses
 /// the boundary as a plain object, not a Map.
-pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(data: &T) -> JsValue {
-    match crate::__serde::to_js(data) {
-        Ok(v) => agent_create_signed_expression(v),
-        Err(_) => JsValue::NULL,
-    }
+pub fn agent_create_signed_expression_typed<T: Serialize + ?Sized>(
+    data: &T,
+) -> crate::errors::LanguageResult<JsValue> {
+    Ok(agent_create_signed_expression(crate::__serde::to_js(data)?)?)
 }
 
 /// Response from `http_fetch_typed`.

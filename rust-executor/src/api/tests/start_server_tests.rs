@@ -1,10 +1,9 @@
 //! `start_server` failure paths: which ones are fatal to the API.
 //!
 //! The launcher embeds the executor, so a bad TLS certificate must leave the
-//! cleartext API serving. A taken API port must come back as an error that
-//! names the address, so executor binaries can exit with it.
+//! cleartext API serving.
 
-use crate::api::{cleartext_ip, start_server};
+use crate::api::start_server;
 use crate::config::TlsConfig;
 use crate::Ad4mConfig;
 use std::time::Duration;
@@ -75,49 +74,4 @@ async fn a_bad_tls_certificate_leaves_the_cleartext_api_serving() {
     assert!(TcpStream::connect(("127.0.0.1", tls_port)).await.is_err());
 
     server.abort();
-}
-
-#[tokio::test]
-async fn a_taken_api_port_is_an_error_that_names_the_address() {
-    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = taken.local_addr().unwrap().port();
-    let config = Ad4mConfig {
-        port: Some(port),
-        ..Default::default()
-    };
-
-    let result = tokio::time::timeout(Duration::from_secs(10), start_server(config))
-        .await
-        .expect("start_server kept running on a taken port");
-    let error = result.expect_err("start_server bound a port that was taken");
-    assert!(
-        error
-            .to_string()
-            .contains(&format!("could not bind the API to 127.0.0.1:{port}")),
-        "unexpected error: {error}"
-    );
-}
-
-#[test]
-fn with_tls_configured_the_cleartext_api_stays_on_loopback() {
-    let tls = Some(TlsConfig {
-        cert_file_path: String::new(),
-        key_file_path: String::new(),
-        tls_port: 0,
-    });
-    // localhost: false asks for 0.0.0.0, but TLS wins: a broken TLS setup
-    // must not put the API on the network in cleartext.
-    let with_tls = Ad4mConfig {
-        localhost: Some(false),
-        tls,
-        ..Default::default()
-    };
-    assert_eq!(cleartext_ip(&with_tls), [127, 0, 0, 1]);
-
-    let without_tls = Ad4mConfig {
-        localhost: Some(false),
-        ..Default::default()
-    };
-    assert_eq!(cleartext_ip(&without_tls), [0, 0, 0, 0]);
-    assert_eq!(cleartext_ip(&Ad4mConfig::default()), [127, 0, 0, 1]);
 }

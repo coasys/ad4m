@@ -137,10 +137,10 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
 
     let app = api_router(state);
 
-    let cleartext_ip = cleartext_ip(&config);
-
-    if let Some(tls_config) = &config.tls {
+    // With TLS, remote clients use the HTTPS listener, so cleartext stays on loopback.
+    let ip: [u8; 4] = if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
+
         let tls_state = AppState {
             admin_credential: admin_credential.clone(),
             auto_permit_cap_requests: auto_permit,
@@ -190,36 +190,20 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                 tls_config.key_file_path,
             ),
         }
-    }
-
-    let addr = SocketAddr::from((cleartext_ip, port));
-    let listener = bind_api(addr).await?;
-    // Log after the bind, not before it: test harnesses (tests/js/utils
-    // startExecutor) treat this line as "the API accepts connections",
-    // and a client that connected on the pre-bind line got ECONNREFUSED.
-    log::info!("API server starting on http://{}/api/v1", addr);
-    axum::serve(listener, app.into_make_service()).await?;
-
-    Ok(())
-}
-
-/// The address of the cleartext API listener. With TLS configured, remote
-/// clients use the HTTPS listener, so the cleartext one stays on 127.0.0.1.
-/// That holds even when the HTTPS listener fails: falling back to 0.0.0.0
-/// would expose credentials in cleartext.
-pub(crate) fn cleartext_ip(config: &Ad4mConfig) -> [u8; 4] {
-    if config.tls.is_some() || config.localhost.unwrap_or(true) {
+        [127, 0, 0, 1]
+    } else if config.localhost.unwrap_or(true) {
         [127, 0, 0, 1]
     } else {
         [0, 0, 0, 0]
-    }
-}
+    };
 
-/// Bind the cleartext API listener. The OS error alone ("Address already in
-/// use") does not say which port, and executor binaries exit on this error
-/// (see `exit_when_api_fails`), so it is the operator's only clue.
-async fn bind_api(addr: SocketAddr) -> Result<tokio::net::TcpListener, AnyError> {
-    tokio::net::TcpListener::bind(addr)
-        .await
-        .map_err(|e| deno_core::anyhow::anyhow!("could not bind the API to {}: {}", addr, e))
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((ip, port))).await?;
+    // Log only once bound: test harnesses (tests/js startExecutor) connect on this line.
+    log::info!(
+        "API server starting on http://{}/api/v1",
+        listener.local_addr()?
+    );
+    axum::serve(listener, app.into_make_service()).await?;
+
+    Ok(())
 }

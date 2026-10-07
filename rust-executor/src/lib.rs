@@ -582,29 +582,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         });
     };
 
-    // Start holochain signal receiver as standalone task
-    tokio::spawn(crate::holochain_signal_receiver());
+    // Start holochain signal receiver and Unyt service only when holochain runs
+    if config.run_holochain.unwrap_or(true) {
+        // Start holochain signal receiver as standalone task
+        tokio::spawn(crate::holochain_signal_receiver());
 
-    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
-    tokio::spawn(async {
-        if unyt_service::get_membrane_proof().is_none() {
-            info!("No Unyt membrane proof stored — skipping eager DNA install");
-            return;
-        }
-        match unyt_service::ensure_installed().await {
-            Ok(()) => info!("Unyt alliance DNA ready"),
-            Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
-        }
-    });
+        // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
+        tokio::spawn(async {
+            if unyt_service::get_membrane_proof().is_none() {
+                info!("No Unyt membrane proof stored — skipping eager DNA install");
+                return;
+            }
+            match unyt_service::ensure_installed().await {
+                Ok(()) => info!("Unyt alliance DNA ready"),
+                Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
+            }
+        });
 
-    // Spawn payment completion polling (every 30 seconds)
-    tokio::spawn(async {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            unyt_service::check_pending_payments().await;
-            unyt_service::check_pending_sends().await;
-        }
-    });
+        // Spawn payment completion polling (every 30 seconds)
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                unyt_service::check_pending_payments().await;
+                unyt_service::check_pending_sends().await;
+            }
+        });
+    } else {
+        info!(
+            "Holochain disabled (run_holochain=false) — skipping signal receiver and Unyt service"
+        );
+    }
 
     // Spawn credit change flush loop (every 2 seconds)
     // When any credit mutation marks a user dirty, this drains the set
@@ -612,8 +619,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     tokio::spawn(async {
         use crate::db::Ad4mDb;
         use crate::pubsub::{
-            get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
-            HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
+            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
         };
 
         loop {
@@ -693,25 +699,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
                     pubsub
                         .publish(&HOSTING_USER_INFO_CHANGED_TOPIC, &json)
                         .await;
-                }
-            }
-
-            // Drain and publish pending compute log entries
-            let pending_entries: Vec<crate::types::domain::ComputeLogEntry> = {
-                match PENDING_COMPUTE_LOG_ENTRIES.lock() {
-                    Ok(mut vec) => vec.drain(..).collect(),
-                    Err(e) => {
-                        error!(
-                            "Credit flush: failed to lock pending compute log entries: {}",
-                            e
-                        );
-                        Vec::new()
-                    }
-                }
-            };
-            for entry in pending_entries {
-                if let Ok(json) = serde_json::to_string(&entry) {
-                    pubsub.publish(&COMPUTE_LOG_UPDATED_TOPIC, &json).await;
                 }
             }
         }
