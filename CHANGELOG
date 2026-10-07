@@ -38,6 +38,10 @@ This project _loosely_ adheres to [Semantic Versioning](https://semver.org/spec/
   - `add_agent_infos` now short-cycles on repeated `K2SpaceNotFound` errors from the same space via a fingerprint cache (previously silently swallowed *every* error into a `skipped` bucket; now retries transient K2 errors with exponential backoff, then caches the fingerprint to avoid burning the 30s dispatcher budget, and surfaces genuine errors at `ERROR`).
 
 ### Fixed
+- A `$` projection inside a nested `include` is computed instead of silently dropped [#1236](https://github.com/coasys/ad4m/pull/1236)
+  - `include: { posts: { include: { $likeCount: { from: 'likes', count: true } } } }` used to come back with no `$likeCount` and no error: the SDK lifted `$` keys into `projections` at the top level only, so a nested one reached the executor as an `include` entry naming no relation, and was skipped. The SDK now lifts them at every depth into the sub-query's own `projections`, which the executor already reads.
+  - Under a typed relation the projection is tagged with the target class, as a top-level one is. Under a polymorphic relation it is left untagged and computed against each member's own class; a member whose class has no such relation carries no value for it.
+  - The executor reads an untagged projection's `where` against the target its class declares for `from`. Before, the property filters matched no predicate and were dropped, so `{ from: 'signals', count: true, where: { kind: 'like' } }` under a polymorphic include counted every signal.
 - `ai.setDefaultModel` keeps a default for every model type, not only `LLM` [#1239](https://github.com/coasys/ad4m/pull/1239)
   - For `EMBEDDING` and `TRANSCRIPTION` it answered `true` and wrote nothing, so `ai.getDefaultModel` read back `null`, and the OpenAI-compatible endpoints could never resolve `model: "default"` for those types. The write had been moved inside the guard meant only for respawning `"default"` LLM tasks.
   - It is refused unless the model exists and has that type, so an LLM can no longer become the default embedding model. `ai.removeModel` clears any default that pointed at the removed model.

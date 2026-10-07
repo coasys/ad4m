@@ -1,18 +1,23 @@
 //! AI WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
-use crate::types::{AITask, AITaskInput, Model, ModelInput, ModelType, RequestContext};
+use crate::types::{
+    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, RequestContext,
+    VoiceActivityParamsInput,
+};
 use base64::Engine;
 
 use super::guards::refuse_user_session;
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
     let global_free =
@@ -408,7 +413,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: OpenTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -434,7 +439,7 @@ async fn close_transcription_stream(
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CloseTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionCloseParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -450,22 +455,45 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("ai.models", list_models);
-    map.register("ai.discoverModels", discover_models);
-    map.register("ai.addModel", add_model);
-    map.register("ai.updateModel", update_model);
-    map.register("ai.removeModel", remove_model);
-    map.register("ai.setDefaultModel", set_default_model);
-    map.register("ai.getDefaultModel", get_default_model);
-    map.register("ai.modelLoadingStatus", get_model_loading_status);
-    map.register("ai.tasks", list_tasks);
-    map.register("ai.addTask", add_task);
-    map.register("ai.updateTask", update_task);
-    map.register("ai.removeTask", remove_task);
-    map.register("ai.prompt", ai_prompt);
-    map.register("ai.embed", ai_embed);
-    map.register("ai.transcriptionOpen", open_transcription_stream);
-    map.register("ai.transcriptionClose", close_transcription_stream);
+    map.method::<NoParams, Vec<Model>>("ai.models", list_models)
+        .read();
+    // The provider's own model ids.
+    map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
+        .read();
+    // The new model's id.
+    map.method::<AiAddModelParams, String>("ai.addModel", add_model)
+        .long();
+    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
+    map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
+    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
+    map.method::<AiGetDefaultModelParams, Option<Model>>("ai.getDefaultModel", get_default_model)
+        .read();
+    map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
+        "ai.modelLoadingStatus",
+        get_model_loading_status,
+    )
+    .read();
+    map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
+        .read();
+    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task);
+    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task);
+    map.method::<AiIdParams, bool>("ai.removeTask", remove_task);
+    // The completion text.
+    map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
+        .long();
+    // The embedding vector as JSON, zlib-deflated, base64-encoded.
+    map.method::<EmbedRequest, String>("ai.embed", ai_embed)
+        .long();
+    // The new stream's id.
+    map.method::<AiTranscriptionOpenParams, String>(
+        "ai.transcriptionOpen",
+        open_transcription_stream,
+    );
+    // Always the string `"true"`.
+    map.method::<AiTranscriptionCloseParams, String>(
+        "ai.transcriptionClose",
+        close_transcription_stream,
+    );
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────
@@ -572,6 +600,98 @@ pub(crate) fn feed_outcome(errors: &[String], stream_count: usize) -> Result<(),
         stream_count,
         errors.join("; ")
     )))
+}
+
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiDiscoverModelsParams {
+    pub base_url: String,
+    /// Parsed leniently (`openai`, `OpenAi`, `OPEN_AI`, ...); defaults to OpenAI.
+    #[ts(optional)]
+    pub api_type: Option<String>,
+    #[ts(optional)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddModelParams {
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateModelParams {
+    pub id: String,
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiSetDefaultModelParams {
+    pub id: String,
+    pub model_type: ModelType,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiGetDefaultModelParams {
+    pub model_type: ModelType,
+}
+
+/// One of `model` or `modelId` is required; `model` wins when both are set.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiModelLoadingStatusParams {
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[ts(optional)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddTaskParams {
+    pub task: AITaskInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateTaskParams {
+    pub task: AITask,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionOpenParams {
+    pub model_id: String,
+    #[ts(optional)]
+    pub params: Option<VoiceActivityParamsInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionCloseParams {
+    pub stream_id: String,
 }
 
 #[cfg(test)]

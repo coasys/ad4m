@@ -90,6 +90,17 @@ impl Drop for TestUser {
 async fn user_sessions_cannot_call_node_operations() {
     let dir = tempfile::tempdir().unwrap();
     let export_path = dir.path().join("dump.json");
+    // Every call carries params its contract accepts, so the dispatcher's params check
+    // passes and the guard is what refuses.
+    let model = json!({ "name": "m", "type": "LLM" });
+    let proof = json!({
+        "deviceKey": "k",
+        "deviceKeySignedByDid": "s",
+        "deviceKeyType": "t",
+        "did": "did:key:z6Mk",
+        "didSignedByDeviceKey": "s",
+        "didSigningKeyId": "i",
+    });
     let calls = [
         ("agent.generate", json!({ "passphrase": "p" })),
         ("agent.lock", json!({ "passphrase": "p" })),
@@ -99,20 +110,32 @@ async fn user_sessions_cannot_call_node_operations() {
         ),
         (
             "runtime.exportData",
-            json!({ "exportType": "db", "filePath": export_path.to_str().unwrap() }),
+            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
         ),
         (
             "runtime.importData",
-            json!({ "importType": "db", "filePath": export_path.to_str().unwrap() }),
+            json!({ "type": "db", "filePath": export_path.to_str().unwrap() }),
         ),
-        ("ai.discoverModels", json!({})),
-        ("ai.addModel", json!({})),
-        ("ai.updateModel", json!({})),
-        ("ai.removeModel", json!({})),
-        ("ai.setDefaultModel", json!({})),
-        ("agent.addEntanglementProofs", json!({})),
-        ("agent.deleteEntanglementProofs", json!({})),
-        ("agent.entanglementProofPreflight", json!({})),
+        (
+            "ai.discoverModels",
+            json!({ "baseUrl": "https://api.example.org/v1" }),
+        ),
+        ("ai.addModel", json!({ "model": model })),
+        ("ai.updateModel", json!({ "id": "m1", "model": model })),
+        ("ai.removeModel", json!({ "id": "m1" })),
+        (
+            "ai.setDefaultModel",
+            json!({ "id": "m1", "modelType": "LLM" }),
+        ),
+        ("agent.addEntanglementProofs", json!({ "proofs": [proof] })),
+        (
+            "agent.deleteEntanglementProofs",
+            json!({ "proofs": [proof] }),
+        ),
+        (
+            "agent.entanglementProofPreflight",
+            json!({ "deviceKey": "k", "deviceKeyType": "t" }),
+        ),
         ("agent.getEntanglementProofs", json!({})),
         (
             "agent.addTrustedAgents",
@@ -129,9 +152,12 @@ async fn user_sessions_cannot_call_node_operations() {
                 "languageMeta": { "name": "n", "description": "d" },
             }),
         ),
-        ("language.remove", json!({})),
-        ("language.writeSettings", json!({})),
-        ("runtime.addHcAgentInfos", json!({})),
+        ("language.remove", json!({ "address": "QmLang" })),
+        (
+            "language.writeSettings",
+            json!({ "address": "QmLang", "settings": {} }),
+        ),
+        ("runtime.addHcAgentInfos", json!({ "agentInfos": [] })),
         (
             "runtime.addLinkLanguageTemplates",
             json!({ "addresses": [] }),
@@ -143,7 +169,10 @@ async fn user_sessions_cannot_call_node_operations() {
         ("runtime.friends", json!({})),
         ("runtime.addFriends", json!({ "dids": [] })),
         ("runtime.removeFriends", json!({ "dids": [] })),
-        ("runtime.sendFriendMessage", json!({})),
+        (
+            "runtime.sendFriendMessage",
+            json!({ "did": "did:key:z6Mk", "message": { "links": [] } }),
+        ),
         ("runtime.outbox", json!({})),
         ("hosting.wallet", json!({})),
         ("hosting.walletHistory", json!({})),

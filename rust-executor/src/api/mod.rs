@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod errors;
+pub mod event_interest;
 pub mod events_ws;
 pub mod guards;
 pub mod internal;
