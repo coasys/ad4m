@@ -1758,6 +1758,11 @@ impl PerspectiveInstance {
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+        // Every write reaches here, local or synced, so this is where a local
+        // change to a flow definition queues the re-derivation that a synced
+        // one gets from `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -2156,6 +2161,10 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
+
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it queues the definition sweep here.
+            self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
