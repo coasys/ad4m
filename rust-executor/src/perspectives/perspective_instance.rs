@@ -565,6 +565,9 @@ pub struct PerspectiveInstance {
     /// Its reads leave out other agents' Local graphs. `None` — the shared
     /// instance the executor itself uses — reads everything.
     viewer: Option<String>,
+    /// Set by [`Self::for_shared_reads`]: every read leaves out every Local
+    /// graph, the viewer's own included.
+    shared_reads: bool,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -619,6 +622,7 @@ impl PerspectiveInstance {
 
         PerspectiveInstance {
             viewer: None,
+            shared_reads: false,
             persisted: Arc::new(Mutex::new(handle.clone())),
             uuid: handle.uuid.clone(),
 
@@ -1740,9 +1744,17 @@ impl PerspectiveInstance {
     /// Whether this instance's viewer reads the stored `link`. The executor's
     /// own view (no viewer) reads every link.
     pub(crate) fn sees(&self, link: &DecoratedLinkExpression) -> bool {
-        self.viewer
-            .as_deref()
-            .is_none_or(|viewer| link_visible_to(link, viewer))
+        link.graph.as_deref().is_none_or(|g| self.reads_graph(g))
+    }
+
+    /// Whether this instance reads named graph `iri`: not another agent's
+    /// Local graph, and no Local graph at all after [`Self::for_shared_reads`].
+    fn reads_graph(&self, iri: &str) -> bool {
+        !(self.shared_reads && is_local_graph(iri))
+            && self
+                .viewer
+                .as_deref()
+                .is_none_or(|viewer| graph_visible_to(iri, viewer))
     }
 
     /// Resolve the graph a write by `context` names, and the status its links
@@ -2652,10 +2664,10 @@ impl PerspectiveInstance {
     /// The links matching `q`, as this instance's viewer sees them (see
     /// [`Self::for_viewer`]). The shared instance reads every graph.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        match &self.viewer {
-            Some(viewer) => self.get_links_for(q, viewer).await,
-            None => self.get_links_unscoped(q).await,
+        if self.viewer.is_none() && !self.shared_reads {
+            return self.get_links_unscoped(q).await;
         }
+        self.get_links_for(q).await
     }
 
     async fn get_links_unscoped(
@@ -2732,21 +2744,22 @@ impl PerspectiveInstance {
         Ok(links)
     }
 
-    /// [`Self::get_links`] as `viewer` sees it: other agents' Local graphs left
-    /// out. When the store holds such graphs, a `limit` applies after the
-    /// filter, so a page never comes back short.
-    async fn get_links_for(
-        &self,
-        q: &LinkQuery,
-        viewer: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        if !self.sparql_store.has_hidden_graphs(viewer)? {
+    /// [`Self::get_links`] as this instance reads it ([`Self::sees`]): the
+    /// graphs it doesn't read left out. When the store holds such graphs, a
+    /// `limit` applies after the filter, so a page never comes back short.
+    async fn get_links_for(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        if self
+            .sparql_store
+            .named_graphs()?
+            .iter()
+            .all(|g| self.reads_graph(g))
+        {
             return self.get_links_unscoped(q).await;
         }
         let mut unlimited = q.clone();
         unlimited.limit = None;
         let mut links = self.get_links_unscoped(&unlimited).await?;
-        links.retain(|l| link_visible_to(l, viewer));
+        links.retain(|l| self.sees(l));
         if let Some(limit) = q.limit {
             links.truncate(limit as usize);
         }
@@ -2773,12 +2786,39 @@ impl PerspectiveInstance {
         self
     }
 
+    /// This instance, reading shared graphs only: every Local graph leaves
+    /// every read, the viewer's own included. For background work that writes
+    /// what it reads into shared graphs, such as an auto-processor pass. It
+    /// doesn't depend on what an unscoped read covers.
+    pub fn for_shared_reads(mut self) -> Self {
+        self.shared_reads = true;
+        self
+    }
+
     /// The graph scope a read on this instance runs in: [`Self::read_scope`]
     /// for the instance's viewer, or `requested` unchanged for the executor.
+    /// After [`Self::for_shared_reads`], no Local graph: a requested one is
+    /// refused.
     fn scope_for(&self, requested: Option<&[String]>) -> Result<Option<Vec<String>>, AnyError> {
-        match &self.viewer {
-            Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested),
-            None => Ok(requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec)),
+        let scope = match &self.viewer {
+            Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested)?,
+            None => requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec),
+        };
+        if !self.shared_reads {
+            return Ok(scope);
+        }
+        let requested = requested.is_some_and(|r| !r.is_empty());
+        match scope {
+            Some(graphs) if requested => {
+                if let Some(local) = graphs.iter().find(|g| is_local_graph(g)) {
+                    return Err(anyhow!("A shared read cannot read Local graph {}", local));
+                }
+                Ok(Some(graphs))
+            }
+            Some(graphs) => Ok(Some(
+                graphs.into_iter().filter(|g| !is_local_graph(g)).collect(),
+            )),
+            None => Ok(self.sparql_store.shared_scope()?),
         }
     }
 
@@ -3805,9 +3845,7 @@ impl PerspectiveInstance {
     /// agents' Local graphs stay out.
     pub fn named_graphs(&self) -> Result<Vec<String>, deno_core::anyhow::Error> {
         let mut graphs = self.sparql_store.named_graphs()?;
-        if let Some(viewer) = self.viewer.as_deref() {
-            graphs.retain(|g| graph_visible_to(g, viewer));
-        }
+        graphs.retain(|g| self.reads_graph(g));
         Ok(graphs)
     }
 
@@ -6959,10 +6997,11 @@ impl PerspectiveInstance {
         };
 
         let uuid = self.uuid.clone();
-        // The pass reads as the agent it runs for: another agent's Local graph
-        // must never reach the LLM or the shared graphs the pass writes to.
+        // The pass reads as the agent it runs for, and from shared graphs only:
+        // it writes what it extracts as Shared, so no Local graph may reach the
+        // LLM or the pass's output, the running agent's own included.
         let view = match did_for_context(context) {
-            Ok(did) => self.clone().for_viewer(did),
+            Ok(did) => self.clone().for_viewer(did).for_shared_reads(),
             Err(e) => {
                 log::warn!("auto_processor_tick [{}]: no DID for the pass: {e:#}", uuid);
                 return;

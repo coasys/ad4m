@@ -846,7 +846,130 @@ async fn the_auto_processor_does_not_gather_another_agents_local_graph() {
         .await;
     assert_eq!(gathered(&watcher), 0, "Alice's pass gathered Bob's draft");
 
-    // Control: Bob's own pass gathers it.
+    // Control: the same message, shared, is gathered. Bob's own pass leaving
+    // his draft out is pinned by
+    // `the_auto_processor_does_not_gather_its_runners_own_local_graph`.
+    p.add_link(
+        Link {
+            source: "msg://shared".to_string(),
+            predicate: Some("ns://body".to_string()),
+            target: "literal:string:public".to_string(),
+        },
+        LinkStatus::Shared,
+        None,
+        &bob,
+        None,
+    )
+    .await
+    .unwrap();
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &alice)
+        .await;
+    assert_eq!(gathered(&watcher), 1);
+}
+
+/// A pass writes what it extracts as Shared, so it reads shared graphs only:
+/// Bob's own tick leaves his Local draft out. It never reaches a batch, a
+/// claim, the LLM or a shared graph.
+#[tokio::test]
+async fn the_auto_processor_does_not_gather_its_runners_own_local_graph() {
+    use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+    use crate::perspectives::auto_processor::events::{
+        subscribe, AutoProcessorEvent, AutoProcessorStep,
+    };
+    use crate::perspectives::auto_processor::watcher::WatcherState;
+    use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+    use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
+    use crate::perspectives::sparql_store::is_local_graph;
+
+    let (mut p, _shapes, main) = setup_perspective_no_llm(&[]).await;
+    let (bob, _) = user("bob");
+    let body = |source: &str, text: &str| Link {
+        source: source.to_string(),
+        predicate: Some("ns://body".to_string()),
+        target: format!("literal:string:{text}"),
+    };
+    p.add_link(
+        body("msg://draft", "secret"),
+        LinkStatus::Shared,
+        None,
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    let debounce_ms = 50;
+    let cfg = AutoProcessorConfig {
+        processor_id: "own-local".into(),
+        source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+        interpretation_classes: vec!["ns://Task".into()],
+        debounce_ms,
+        batch_min: 1,
+        batch_max: 32,
+        claim_ttl_ms: 60_000,
+        ..Default::default()
+    };
+    write_processor(&mut p, &cfg, Some(false), &main)
+        .await
+        .unwrap();
+    let gathered = |watcher: &WatcherState| {
+        watcher
+            .pending_for("own-local")
+            .map(|e| e.items.len())
+            .unwrap_or(0)
+    };
+    let shared_links = |links: Vec<crate::types::DecoratedLinkExpression>| {
+        links
+            .into_iter()
+            .filter(|l| !l.graph.as_deref().is_some_and(is_local_graph))
+            .count()
+    };
+    let shared_before = shared_links(p.get_links(&LinkQuery::default()).await.unwrap());
+    let uuid = p.uuid.clone();
+    let mut rx = subscribe().await;
+
+    // Tick 1 gathers; tick 2 is past the debounce, so a gathered batch runs.
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut watcher = WatcherState::new();
+    p.run_auto_processor_tick(&mut watcher, now_ms, &bob).await;
+    assert_eq!(
+        gathered(&watcher),
+        0,
+        "Bob's pass gathered his own Local draft"
+    );
+    p.run_auto_processor_tick(&mut watcher, now_ms + debounce_ms + 1, &bob)
+        .await;
+
+    // A tick emits its events before it returns.
+    let mut started = Vec::new();
+    while let Ok(json) = rx.try_recv() {
+        if let Ok(ev) = serde_json::from_str::<AutoProcessorEvent>(&json) {
+            if ev.perspective_uuid == uuid && ev.step == AutoProcessorStep::BatchReady {
+                started.push(ev.item_ids);
+            }
+        }
+    }
+    assert_eq!(
+        started,
+        Vec::<Vec<String>>::new(),
+        "a pass ran on Bob's draft"
+    );
+    assert_eq!(
+        shared_links(p.get_links(&LinkQuery::default()).await.unwrap()),
+        shared_before,
+        "Bob's pass wrote into a shared graph"
+    );
+
+    // Control: the same message, shared, is gathered.
+    p.add_link(
+        body("msg://shared", "public"),
+        LinkStatus::Shared,
+        None,
+        &bob,
+        None,
+    )
+    .await
+    .unwrap();
     let mut watcher = WatcherState::new();
     p.run_auto_processor_tick(&mut watcher, now_ms, &bob).await;
     assert_eq!(gathered(&watcher), 1);
