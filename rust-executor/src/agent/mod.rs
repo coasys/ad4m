@@ -90,6 +90,36 @@ pub struct AgentStore {
     agent: Option<Agent>,
 }
 
+/// The stored DID document with every `privateKey…` member removed, or `None`
+/// if it carried none (or is not JSON, which `dump()` cannot serve either).
+///
+/// `agent.json` written before #1229 holds the main agent's document as the
+/// wallet used to build it — with `privateKeyBase58` for both keys, in
+/// plaintext next to the encrypted keystore. `load()` serves that string, so it
+/// has to be cleaned there. The executor never reads a secret from a document;
+/// it signs through the wallet.
+fn did_document_without_secrets(did_document: &str) -> Option<String> {
+    fn strip(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                let before = map.len();
+                map.retain(|key, _| !key.starts_with("privateKey"));
+                let removed = map.len() != before;
+                map.values_mut().fold(removed, |acc, v| strip(v) || acc)
+            }
+            serde_json::Value::Array(items) => items.iter_mut().fold(false, |acc, v| strip(v) || acc),
+            _ => false,
+        }
+    }
+
+    let mut value: serde_json::Value = serde_json::from_str(did_document).ok()?;
+    if strip(&mut value) {
+        serde_json::to_string(&value).ok()
+    } else {
+        None
+    }
+}
+
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     if context.is_main_agent {
         let backend = wallet_backend();
@@ -749,13 +779,37 @@ impl AgentService {
             .expect("Failed to write agent file");
     }
 
+    /// Replace `agent.json` with `store` through a temporary file and a rename,
+    /// so a crash mid-write cannot cost the only copy of the keystore.
+    fn rewrite_agent_file(&self, store: &AgentStore) -> Result<(), AnyError> {
+        let tmp = format!("{}.tmp", self.file);
+        std::fs::write(&tmp, serde_json::to_string(store)?)?;
+        std::fs::rename(&tmp, &self.file)?;
+        Ok(())
+    }
+
     pub fn load(&mut self) {
         if !self.is_initialized() {
             return;
         }
 
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
-        let dump: AgentStore = serde_json::from_str(&file).unwrap();
+        let mut dump: AgentStore = serde_json::from_str(&file).unwrap();
+
+        if let Some(public_document) = did_document_without_secrets(&dump.did_document) {
+            dump.did_document = public_document;
+            // Rewrite the file now rather than at the next save(): save() runs
+            // on lock and profile changes, so a node that is only ever unlocked
+            // would keep its private keys on disk in plaintext indefinitely.
+            // Everything else, the keystore included, is written back verbatim.
+            if let Err(e) = self.rewrite_agent_file(&dump) {
+                log::error!(
+                    "Could not remove private keys from the DID document in {}: {}",
+                    self.file,
+                    e
+                );
+            }
+        }
 
         self.did = Some(dump.did.clone());
         self.did_document = Some(dump.did_document);
