@@ -29,6 +29,7 @@ use crate::agent::AgentService;
 use crate::types::RequestContext;
 
 use super::auth::AppState;
+use super::event_interest;
 use super::ws_handler::HandlerMap;
 
 /// Per-connection registry of in-flight request ids → cancellation
@@ -94,29 +95,8 @@ async fn handle_ws(
     // Track last_seen at connect time (also updated on each RPC call below)
     track_last_seen_from_token(token.clone()).await;
 
-    let (mut ws_sink, mut ws_stream) = socket.split();
+    let (mut ws_sink, ws_stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-    let inflight: InflightRegistry = Arc::new(Mutex::new(HashMap::new()));
-
-    // ── Event broadcast ─────────────────────────────────────────────────
-    let token_for_events = token.clone();
-    let user_email_for_events = ctx.user_email.clone();
-    let is_admin_for_events = ctx.is_admin_credential;
-    let tx_events = tx.clone();
-    tokio::spawn(async move {
-        let event_stream = super::events_ws::build_event_stream(
-            token_for_events,
-            user_email_for_events,
-            is_admin_for_events,
-        )
-        .await;
-        tokio::pin!(event_stream);
-        while let Some(msg) = event_stream.next().await {
-            if tx_events.send(msg).is_err() {
-                break;
-            }
-        }
-    });
 
     // ── Writer task ─────────────────────────────────────────────────────
     let write_handle = tokio::spawn(async move {
@@ -128,28 +108,82 @@ async fn handle_ws(
         }
     });
 
-    // ── Reader loop — direct dispatch ───────────────────────────────────
-    while let Some(Ok(msg)) = ws_stream.next().await {
-        let text = match &msg {
-            Message::Text(t) => t.to_string(),
-            Message::Close(_) => break,
-            Message::Ping(_) | Message::Pong(_) => continue,
-            _ => continue,
-        };
+    let events = super::events_ws::build_event_stream(
+        token.clone(),
+        ctx.user_email.clone(),
+        ctx.is_admin_credential,
+    )
+    .await;
+    // Text frames until the socket closes or errors; pings and binary
+    // frames are skipped.
+    let incoming = ws_stream
+        .take_while(|msg| {
+            futures::future::ready(matches!(msg, Ok(m) if !matches!(m, Message::Close(_))))
+        })
+        .filter_map(|msg| {
+            futures::future::ready(match msg {
+                Ok(Message::Text(t)) => Some(t.to_string()),
+                _ => None,
+            })
+        });
+    serve(
+        Connection::new(handler_map, ctx, token, tx),
+        incoming,
+        events,
+    )
+    .await;
+
+    // The writer ends once calls still in flight drop their senders.
+    if let Err(e) = write_handle.await {
+        log::error!("WS RPC writer task failed: {}", e);
+    }
+}
+
+/// Per-connection state: what the reader needs to answer a message.
+pub(crate) struct Connection {
+    handler_map: Arc<HandlerMap>,
+    ctx: Arc<RequestContext>,
+    token: String,
+    tx: mpsc::UnboundedSender<String>,
+    inflight: InflightRegistry,
+    interest: event_interest::SharedInterest,
+}
+
+impl Connection {
+    /// A connection whose replies and events go to `tx`.
+    pub(crate) fn new(
+        handler_map: Arc<HandlerMap>,
+        ctx: Arc<RequestContext>,
+        token: String,
+        tx: mpsc::UnboundedSender<String>,
+    ) -> Self {
+        Self {
+            handler_map,
+            ctx,
+            token,
+            tx,
+            inflight: Default::default(),
+            interest: Default::default(),
+        }
+    }
+
+    /// Handle one text message from the client.
+    pub(crate) async fn handle_text(&self, text: &str) {
+        let tx = &self.tx;
 
         // Parse JSON
-        let parsed: Value = match serde_json::from_str(&text) {
+        let parsed: Value = match serde_json::from_str(text) {
             Ok(v) => v,
             Err(_) => {
                 let _ = tx.send(json!({"error":{"code":400,"message":"Invalid JSON"}}).to_string());
-                continue;
+                return;
             }
         };
 
         // Handle ping/pong keepalive
         if parsed.get("type").and_then(|v| v.as_str()) == Some("ping") {
             let _ = tx.send(json!({"type":"pong"}).to_string());
-            continue;
+            return;
         }
 
         // Extract id and type
@@ -165,11 +199,23 @@ async fn handle_ws(
                     json!({"id": id, "error":{"code":400,"message":"Missing 'type' field"}})
                         .to_string(),
                 );
-                continue;
+                return;
             }
         };
 
         let params = parsed.get("params").cloned().unwrap_or(json!({}));
+
+        // `events.watch` / `events.unwatch` set this connection's event
+        // filter (see `event_interest`), so they are handled inline too.
+        if let Some(reply) = event_interest::handle_control(
+            &msg_type,
+            &Value::String(id.clone()),
+            &params,
+            &self.interest,
+        ) {
+            let _ = tx.send(reply);
+            return;
+        }
 
         // ── `request.cancel` is dispatched inline ────────────────────────
         //
@@ -190,7 +236,7 @@ async fn handle_ws(
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_default();
-            let mut guard = inflight.lock().await;
+            let mut guard = self.inflight.lock().await;
             let cancelled = if let Some(token) = guard.remove(&target_id) {
                 token.cancel();
                 true
@@ -205,14 +251,8 @@ async fn handle_ws(
                 })
                 .to_string(),
             );
-            continue;
+            return;
         }
-
-        let handler_map = handler_map.clone();
-        let base_ctx = ctx.clone();
-        let tx_clone = tx.clone();
-        let token_for_dispatch = token.clone();
-        let inflight_clone = inflight.clone();
 
         // Allocate a CancellationToken for this request and stash it in
         // the registry under the request id.  The handler races its
@@ -221,31 +261,36 @@ async fn handle_ws(
         // reply with an `AbortError` (code 499).
         let cancel_token = CancellationToken::new();
         {
-            let mut guard = inflight.lock().await;
+            let mut guard = self.inflight.lock().await;
             guard.insert(id.clone(), cancel_token.clone());
         }
 
+        let handler_map = self.handler_map.clone();
+        let base_ctx = self.ctx.clone();
+        let token = self.token.clone();
+        let inflight = self.inflight.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
             // Re-check token revocation on every request so that
             // revokeToken() takes effect immediately for existing connections.
-            if let Err(e) = check_token_revoked(&token_for_dispatch) {
+            if let Err(e) = check_token_revoked(&token) {
                 // Remove the inflight entry BEFORE sending the terminal
                 // reply — same ordering as the normal-completion path
                 // below, and for the same reason: a `request.cancel`
                 // landing in the gap between send and remove would find
                 // the token, cancel it, and report `cancelled: true` for
                 // a request that already got its (401) answer.
-                let mut guard = inflight_clone.lock().await;
+                let mut guard = inflight.lock().await;
                 guard.remove(&id);
                 drop(guard);
-                let _ = tx_clone
-                    .send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
+                let _ =
+                    tx.send(json!({"id": id, "error": {"code": 401, "message": e}}).to_string());
                 return;
             }
             // Refresh last_seen on every RPC dispatch so long-lived
             // connections don't appear stale. Internally throttled to one
             // DB write per 5 minutes per user.
-            track_last_seen_from_token(token_for_dispatch.clone()).await;
+            track_last_seen_from_token(token.clone()).await;
 
             // Build a per-request context that carries the cancel token,
             // so handlers can clone it into long-running operations.
@@ -277,15 +322,41 @@ async fn handle_ws(
             // otherwise a late `request.cancel` arriving between the send
             // and the remove would find the token, cancel it, and report
             // success even though the response already left.
-            let mut guard = inflight_clone.lock().await;
+            let mut guard = inflight.lock().await;
             guard.remove(&id);
             drop(guard);
-            let _ = tx_clone.send(response.to_string());
+            let _ = tx.send(response.to_string());
         });
     }
+}
 
-    drop(tx);
-    if let Err(e) = write_handle.await {
-        log::error!("WS RPC writer task failed: {}", e);
+/// Serve one connection until `incoming` ends: answer each client message
+/// and forward `events` that match the connection's interest. When the
+/// client is gone the event task stops; calls still in flight finish on
+/// their own and reply to `tx`.
+pub(crate) async fn serve<S>(
+    conn: Connection,
+    incoming: S,
+    events: std::pin::Pin<Box<dyn futures::Stream<Item = String> + Send>>,
+) where
+    S: futures::Stream<Item = String>,
+{
+    let tx_events = conn.tx.clone();
+    let event_stream = event_interest::filter_stream(events, conn.interest.clone());
+    let event_task = tokio::spawn(async move {
+        tokio::pin!(event_stream);
+        while let Some(msg) = event_stream.next().await {
+            if tx_events.send(msg).is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::pin!(incoming);
+    while let Some(text) = incoming.next().await {
+        conn.handle_text(&text).await;
     }
+
+    event_task.abort();
+    let _ = event_task.await;
 }
