@@ -161,7 +161,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     await ConversationSubgroup.register(aliceP);
 
     const events: AutoProcessorEvent[] = [];
-    aliceP.addAutoProcessorEventListener((e) => events.push(e));
+    aliceP.on("auto-processor-event", (e) => events.push(e));
 
     await aliceP.addAutoProcessor({
       processorId: "managed-users-channel",

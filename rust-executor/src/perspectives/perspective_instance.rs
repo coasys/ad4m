@@ -1416,9 +1416,9 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
                     &serde_json::to_string(&PerspectiveStateFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle,
-                        state: serde_json::to_string(&state)
-                            .expect("must be able to serialze PerspectiveState"),
+                        state: state.clone(),
                     })
                     .unwrap(),
                 )
@@ -4319,10 +4319,13 @@ impl PerspectiveInstance {
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
 
-                let payload = TriggeredNotification {
-                    notification: notification.clone(),
-                    perspective_id: uuid.clone(),
-                    trigger_match,
+                let payload = NotificationTriggeredEvent {
+                    perspective_uuid: uuid.clone(),
+                    notification: TriggeredNotification {
+                        notification: notification.clone(),
+                        perspective_id: uuid.clone(),
+                        trigger_match,
+                    },
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -4555,6 +4558,7 @@ impl PerspectiveInstance {
                     .publish(
                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective_uuid: handle.uuid.clone(),
                             perspective: handle,
                             signal,
                             recipient: Some(recipient),
@@ -4659,6 +4663,7 @@ impl PerspectiveInstance {
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective_uuid: handle.uuid.clone(),
                                             perspective: handle,
                                             signal,
                                             recipient: Some(user_did),
@@ -4698,6 +4703,7 @@ impl PerspectiveInstance {
                         .publish(
                             &NEIGHBOURHOOD_SIGNAL_TOPIC,
                             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective_uuid: handle.uuid.clone(),
                                 perspective: handle,
                                 signal,
                                 recipient: Some(main_agent_did),
@@ -5701,6 +5707,7 @@ impl PerspectiveInstance {
                 sleep(delay).await;
             }
             let filter = PerspectiveQuerySubscriptionFilter {
+                perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
                 result,
