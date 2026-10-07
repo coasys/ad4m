@@ -184,8 +184,8 @@ describe('LiveQuery', () => {
         const live = new LiveQuery(client as any, 'p', open, onResult);
         const started = live.start();
         live.dispose();
-        reply.resolve({ subscriptionId: 's1', result: [], revision: 0 });
-        await started;
+        reply.resolve({ subscriptionId: 's1', result: [1], revision: 0 });
+        expect(await started).toEqual([1]);
         expect(client.disposeQuerySubscription).toHaveBeenCalledWith('p', 's1');
 
         update('s1', 1, [2]);

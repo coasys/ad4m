@@ -595,8 +595,8 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    *
    */
   async paginateSubscribe(
-    pageSize: number, 
-    pageNumber: number, 
+    pageSize: number,
+    pageNumber: number,
     callback: (results: PaginationResult<T>) => void
   ): Promise<PaginationResult<T>> {
     // Clean up any existing subscription

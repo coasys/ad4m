@@ -185,13 +185,16 @@ subscription.dispose();
 Query subscriptions provide real-time updates but require proper cleanup:
 
 1. **Initialization**: When you create a subscription, it waits for the first result before becoming active
-2. **Keepalive**: The subscription stays active through periodic keepalive signals
-3. **Updates**: Receive real-time updates through your callback as the data changes
-4. **Cleanup**: Call `dispose()` when done to:
-   - Stop keepalive signals
+2. **Updates**: Receive real-time updates through your callback as the data changes
+3. **Cleanup**: Call `dispose()` when done to:
    - Unsubscribe from updates
-   - Notify the backend to clean up resources
+   - End the backend subscription
    - Prevent memory leaks
+
+Every subscriber gets its own backend subscription, tied to the connection that
+opened it. Disposing one never interrupts another subscriber of the same query.
+The backend also ends every subscription of a connection when that connection
+closes, so a page closed without disposing leaves nothing behind.
 
 Always remember to call `dispose()` when you're done with a subscription.
 

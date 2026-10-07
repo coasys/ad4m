@@ -1057,6 +1057,17 @@ builder.dispose();
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
 
+#### Subscriptions and `dispose()`
+
+Each builder holds its own executor subscription, tied to its connection. Two
+builders on the same query (two components showing the same list, for example)
+get two subscriptions, so disposing one never stops the other's updates.
+
+A builder holds one subscription at a time: `subscribe()`, `countSubscribe()`
+and `paginateSubscribe()` end the previous one first. `dispose()` ends it on the
+client at once and tells the executor. The executor also ends every subscription
+of a connection when the connection closes.
+
 ## Transactions
 
 Group multiple operations into an atomic batch:

@@ -115,7 +115,9 @@ export class LiveQuery {
         }
         if (this.#disposed || generation !== this.#generation) {
             this.#client.disposeQuerySubscription(this.#uuid, subscribed.subscriptionId).catch(() => {})
-            return this.#disposed ? this.#result : this.#latest
+            // Disposed while opening (e.g. a newer subscribe() on the same
+            // builder): the caller still gets the snapshot that was read.
+            return this.#disposed ? (this.#result ?? subscribed.result) : this.#latest
         }
         this.#id = subscribed.subscriptionId
         this.#replace(subscribed.revision, subscribed.result)
