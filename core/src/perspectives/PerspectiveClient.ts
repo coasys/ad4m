@@ -1,18 +1,23 @@
-import { ApiClient, WsEvent, CallOptions, RpcError, longCall } from "../apiClient";
-import { addListener, notifyListeners } from "../notifyListeners"
+import {ApiClient, CallOptions, EventFilter, RpcError } from '../apiClient';
+import type { EventMap, EventName } from '../generated/api/Events';
 import { ExpressionRendered } from "../expression/Expression";
 import { ExpressionClient } from "../expression/ExpressionClient";
-import { Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations } from "../links/Links";
+import {
+    Link, LinkExpressionInput, LinkExpression, LinkMutations, LinkExpressionMutations,
+    linkExpressionInputToWire, linkExpressionToWire, linkMutationsToWire,
+} from "../links/Links";
 import { NeighbourhoodClient } from "../neighbourhood/NeighbourhoodClient";
 import { NeighbourhoodProxy } from "../neighbourhood/NeighbourhoodProxy";
 import { LinkQuery } from "./LinkQuery";
 import { Perspective } from "./Perspective";
-import { PerspectiveHandle, PerspectiveState } from "./PerspectiveHandle";
+import { PerspectiveHandle } from "./PerspectiveHandle";
 import { LinkStatus, PerspectiveProxy } from './PerspectiveProxy';
 import { AIClient } from "../ai/AIClient";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+import type { PerspectiveQueryLinksParams } from "../generated/api/PerspectiveQueryLinksParams";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
+import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 // FlowInstance.ts owns the flow-proposal result types so they sit next to the
 // `proposeTransition()` API they describe. `import type` keeps this out of the
 // runtime module graph (FlowInstance → PerspectiveProxy → PerspectiveClient
@@ -21,16 +26,6 @@ import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowValidOutput,
 } from "./FlowInstance";
-
-export type PerspectiveHandleCallback = (perspective: PerspectiveHandle) => void
-export type UuidCallback = (uuid: string) => void
-export type LinkCallback = (link: LinkExpression) => void
-export interface LinkUpdate {
-    oldLink: LinkExpression
-    newLink: LinkExpression
-}
-export type LinkUpdatedCallback = (update: LinkUpdate) => void
-export type SyncStateChangeCallback = (state: PerspectiveState) => void
 
 function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesResult {
     let finalResult: unknown = raw
@@ -48,18 +43,12 @@ function normalizeQueryResult(raw: unknown, errorContext: string): AllInstancesR
 
 export class PerspectiveClient {
     #apiClient: ApiClient
-    #perspectiveAddedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveUpdatedCallbacks: PerspectiveHandleCallback[]
-    #perspectiveRemovedCallbacks: UuidCallback[]
     #expressionClient?: ExpressionClient
     #neighbourhoodClient?: NeighbourhoodClient
     #aiClient?: AIClient
 
     constructor(baseUrl: string, token?: string, sharedApiClient?: ApiClient) {
         this.#apiClient = sharedApiClient || new ApiClient(baseUrl, token)
-        this.#perspectiveAddedCallbacks = []
-        this.#perspectiveUpdatedCallbacks = []
-        this.#perspectiveRemovedCallbacks = []
     }
 
     setExpressionClient(client: ExpressionClient) {
@@ -79,15 +68,15 @@ export class PerspectiveClient {
     }
 
     async all(): Promise<PerspectiveProxy[]> {
-        const perspectives = await this.#apiClient.call<PerspectiveHandle[]>('perspective.all')
-        return perspectives.map(handle => new PerspectiveProxy(handle, this))
+        const perspectives = await this.#apiClient.call('perspective.all', {})
+        return perspectives.map(handle => new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this))
     }
 
     async byUUID(uuid: string): Promise<PerspectiveProxy|null> {
         try {
-            const perspective = await this.#apiClient.call<PerspectiveHandle>('perspective.get', { uuid })
+            const perspective = await this.#apiClient.call('perspective.get', { uuid })
             if(!perspective) return null
-            return new PerspectiveProxy(perspective, this)
+            return new PerspectiveProxy(PerspectiveHandle.fromWire(perspective), this)
         } catch(e) {
             if (e instanceof RpcError && e.status === 404) return null
             throw e
@@ -95,36 +84,38 @@ export class PerspectiveClient {
     }
 
     async snapshotByUUID(uuid: string): Promise<Perspective|null> {
-        return this.#apiClient.call<Perspective|null>('perspective.snapshot', { uuid })
+        const snapshot = await this.#apiClient.call('perspective.snapshot', { uuid })
+        return snapshot ? new Perspective(snapshot.links.map(LinkExpression.fromWire)) : null
     }
 
     async publishSnapshotByUUID(uuid: string): Promise<string|null> {
-        return this.#apiClient.call<string|null>('perspective.publishSnapshot', { uuid })
+        return this.#apiClient.call('perspective.publishSnapshot', { uuid })
     }
 
     async queryLinks(uuid: string, query: LinkQuery, options?: CallOptions): Promise<LinkExpression[]> {
-        const params: Record<string, unknown> = { uuid }
+        const params: PerspectiveQueryLinksParams = { uuid }
         if (query.source) params.source = query.source
         if (query.predicate) params.predicate = query.predicate
         if (query.target) params.target = query.target
         if (query.fromDate) params.fromDate = query.fromDate instanceof Date ? query.fromDate.toISOString() : String(query.fromDate)
         if (query.untilDate) params.untilDate = query.untilDate instanceof Date ? query.untilDate.toISOString() : String(query.untilDate)
         if (query.limit !== undefined) params.limit = query.limit
-        return this.#apiClient.call<LinkExpression[]>('perspective.queryLinks', params, options)
+        const links = await this.#apiClient.call('perspective.queryLinks', params, options)
+        return links.map(LinkExpression.fromWire)
     }
 
     async queryProlog(uuid: string, query: string, options?: CallOptions): Promise<unknown> {
-        const result = await this.#apiClient.call<string>('perspective.queryProlog', { uuid, query }, options)
+        const result = await this.#apiClient.call('perspective.queryProlog', { uuid, query }, options)
         return JSON.parse(result)
     }
 
     async querySparql<T = any>(uuid: string, query: string, options?: CallOptions): Promise<T> {
-        const result = await this.#apiClient.call<string>('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
+        const result = await this.#apiClient.call('perspective.querySparql', { uuid, engine: 'sparql', query }, options)
         return JSON.parse(result) as T
     }
 
     async subscribeQuery(uuid: string, query: string): Promise<{ subscriptionId: string, result: AllInstancesResult }> {
-        const response = await this.#apiClient.call<{ subscriptionId: string, result: unknown }>(
+        const response = await this.#apiClient.call(
             'perspective.subscribeQuery', { uuid, query }
         )
         const { subscriptionId, result } = response
@@ -133,34 +124,26 @@ export class PerspectiveClient {
     }
 
     async perspectiveKeepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.keepAliveQuery', { uuid, subscriptionId }
         )
     }
 
     async perspectiveDisposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
     subscribeToQueryUpdates(subscriptionId: string, onData: (result: AllInstancesResult) => void): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                const event = data as Record<string, unknown>
-                if (event.type !== 'query-subscription-update') return
-
-                const eventSubscriptionId = event.subscriptionId || event.subscription_id
-                if (eventSubscriptionId !== subscriptionId) return
-
-                const parsed = normalizeQueryResult(event.result, 'Error parsing query subscription:')
-                onData(parsed)
-            }
-        )
+        return this.#apiClient.on('query-subscription-update', (event) => {
+            if (event.subscriptionId !== subscriptionId) return
+            onData(normalizeQueryResult(event.result, 'Error parsing query subscription:'))
+        })
     }
 
     async keepAliveQuery(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.keepAliveQuery', { uuid, subscriptionId }
         )
     }
@@ -168,20 +151,20 @@ export class PerspectiveClient {
     /** Ends the subscription on the executor. The caller releases its local listener
      *  with the function `subscribeToQueryUpdates` returned. */
     async disposeQuerySubscription(uuid: string, subscriptionId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.disposeQuery', { uuid, subscriptionId }
         )
     }
 
     async modelQuery(uuid: string, className: string, queryJson: string, options?: CallOptions): Promise<any> {
-        const resultJson = await this.#apiClient.call<string>(
+        const resultJson = await this.#apiClient.call(
             'perspective.modelQuery', { uuid, class_name: className, query_json: queryJson }, options
         )
         return JSON.parse(resultJson)
     }
 
     async subjectClassesOf(uuid: string, uris: string[]): Promise<Record<string, string[]>> {
-        return await this.#apiClient.call<Record<string, string[]>>(
+        return await this.#apiClient.call(
             'perspective.subjectClassesOf', { uuid, uris }
         )
     }
@@ -192,7 +175,7 @@ export class PerspectiveClient {
         instanceIds: string[],
         propertyNames?: string[],
     ): Promise<Record<string, Record<string, any>>> {
-        const resultJson = await this.#apiClient.call<string>(
+        const resultJson = await this.#apiClient.call(
             'perspective.evaluateGetters', {
                 uuid,
                 class_name: className,
@@ -204,7 +187,7 @@ export class PerspectiveClient {
     }
 
     async modelSubscribe(uuid: string, className: string, queryJson: string): Promise<{ subscriptionId: string, result: any }> {
-        const response = await this.#apiClient.call<{ subscription_id: string, result: string }>(
+        const response = await this.#apiClient.call(
             'perspective.modelSubscribe', { uuid, class_name: className, query_json: queryJson }
         )
         return {
@@ -214,42 +197,46 @@ export class PerspectiveClient {
     }
 
     async add(name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call<PerspectiveHandle>('perspective.create', { name })
-        return new PerspectiveProxy(handle, this)
+        const handle = await this.#apiClient.call('perspective.create', { name })
+        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
     }
 
     async update(uuid: string, name: string): Promise<PerspectiveProxy> {
-        const handle = await this.#apiClient.call<PerspectiveHandle>('perspective.update', { uuid, name })
-        return new PerspectiveProxy(handle, this)
+        const handle = await this.#apiClient.call('perspective.update', { uuid, name })
+        return new PerspectiveProxy(PerspectiveHandle.fromWire(handle), this)
     }
 
     async remove(uuid: string): Promise<{perspectiveRemove: boolean}> {
-        const result = await this.#apiClient.call<boolean>('perspective.remove', { uuid })
+        const result = await this.#apiClient.call('perspective.remove', { uuid })
         return { perspectiveRemove: result }
     }
 
     async addLink(uuid: string, link: Link, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return this.#apiClient.call<LinkExpression>(
+        const added = await this.#apiClient.call(
             'perspective.addLink', { uuid, link, status, batchId }
         )
+        return LinkExpression.fromWire(added)
     }
 
     async addLinks(uuid: string, links: Link[], status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression[]> {
-        return this.#apiClient.call<LinkExpression[]>(
+        const added = await this.#apiClient.call(
             'perspective.addLinks', { uuid, links, status, batchId }
         )
+        return added.map(LinkExpression.fromWire)
     }
 
     async removeLinks(uuid: string, links: LinkExpressionInput[], batchId?: string): Promise<LinkExpression[]> {
-        return this.#apiClient.call<LinkExpression[]>(
-            'perspective.removeLinks', { uuid, links, batchId }
+        const removed = await this.#apiClient.call(
+            'perspective.removeLinks', { uuid, links: links.map(linkExpressionInputToWire), batchId }
         )
+        return removed.map(LinkExpression.fromWire)
     }
 
     async linkMutations(uuid: string, mutations: LinkMutations, status?: LinkStatus): Promise<LinkExpressionMutations> {
-        return this.#apiClient.call<LinkExpressionMutations>(
-            'perspective.linkMutations', { uuid, mutations, status }
+        const diff = await this.#apiClient.call(
+            'perspective.linkMutations', { uuid, mutations: linkMutationsToWire(mutations), status }
         )
+        return LinkExpressionMutations.fromWire(diff)
     }
 
     /**
@@ -278,14 +265,14 @@ export class PerspectiveClient {
         observe?: RunInterpretationObserveOptions,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call<string[]>(
+        return this.#apiClient.call(
             'perspective.runInterpretation',
             {
                 uuid, transcript, basePrefix, classes, existingScope, mintScope,
                 observationId: observe?.observationId,
                 emitDebugEvents: observe?.emitDebugEvents,
             },
-            longCall(options),
+            options,
         )
     }
 
@@ -320,7 +307,7 @@ export class PerspectiveClient {
         emitDebugEvents?: boolean,
         options?: CallOptions,
     ): Promise<string[]> {
-        return this.#apiClient.call<string[]>(
+        return this.#apiClient.call(
             'perspective.runInterpretationWithHarness',
             {
                 uuid,
@@ -333,7 +320,7 @@ export class PerspectiveClient {
                 observationId,
                 emitDebugEvents,
             },
-            longCall(options),
+            options,
         )
     }
 
@@ -342,33 +329,36 @@ export class PerspectiveClient {
      * watch loop then runs interpretation automatically over new source items
      * (like Flux per channel), coordinating which peer processes each batch via
      * the shared-graph ProcessingClaim, and emits step signals on the events
-     * WebSocket (subscribe via {@link addAutoProcessorEventListener}).
+     * WebSocket (subscribe with `on('auto-processor-event', …, { perspective })`).
      * Returns the processor id.
      */
     async addAutoProcessor(uuid: string, config: AddAutoProcessorConfig): Promise<string> {
-        return this.#apiClient.call<string>(
-            'perspective.addAutoProcessor', { uuid, ...config },
+        return this.#apiClient.call(
+            'perspective.addAutoProcessor', { ...config, uuid },
         )
     }
 
     /** Delete an auto-processor's config. `false` when there was none to delete. */
     async removeAutoProcessor(uuid: string, processorId: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.removeAutoProcessor', { uuid, processorId },
         )
     }
 
     /** Pending interpretation overlays (LLM suggestions awaiting human accept/reject). */
     async interpretationOverlays(uuid: string): Promise<InterpretationOverlayInfo[]> {
-        return this.#apiClient.call<InterpretationOverlayInfo[]>(
+        const overlays = await this.#apiClient.call(
             'perspective.interpretationOverlays', { uuid },
         )
+        return overlays.map(({ base, kind, run, inferred }) => ({
+            base, run, inferred, kind: kind === 'create' ? 'create' : 'update',
+        }))
     }
 
     /** Accept an overlay's suggestion(s): the LLM value becomes the real value and
      *  the overlay is deleted. Omit `property` to accept the whole base. */
     async acceptInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.acceptInterpretation', { uuid, base, property },
         )
     }
@@ -376,7 +366,7 @@ export class PerspectiveClient {
     /** Reject an overlay's suggestion(s). Omit `property` to reject the whole base
      *  (a rejected `create` deletes the suggested instance). */
     async rejectInterpretation(uuid: string, base: string, property?: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.rejectInterpretation', { uuid, base, property },
         )
     }
@@ -388,13 +378,13 @@ export class PerspectiveClient {
         rationale?: string,
         outputs?: FlowOutputRef[],
     ): Promise<FlowProposeResult> {
-        return this.#apiClient.call<FlowProposeResult>(
+        return this.#apiClient.call(
             'perspective.proposeFlowTransition', { uuid, instanceUri, toState, rationale, outputs },
         )
     }
 
     async acceptFlowProposal(uuid: string, proposalUri: string): Promise<FlowFireOutcome[]> {
-        return this.#apiClient.call<FlowFireOutcome[]>(
+        return this.#apiClient.call(
             'perspective.acceptFlowProposal', { uuid, proposalUri },
         )
     }
@@ -405,15 +395,15 @@ export class PerspectiveClient {
      * proposal this agent opened.
      */
     async rejectFlowProposal(uuid: string, proposalUri: string): Promise<number> {
-        const result = await this.#apiClient.call<{ retractedLinks: number }>(
+        const result = await this.#apiClient.call(
             'perspective.rejectFlowProposal', { uuid, proposalUri },
         )
         return result.retractedLinks
     }
 
     /** Re-decide a flow receipt under this perspective's own flow catalogue. */
-    async verifyFlowReceipt(uuid: string, receipt: object): Promise<FlowReceiptVerdict> {
-        return this.#apiClient.call<FlowReceiptVerdict>(
+    async verifyFlowReceipt(uuid: string, receipt: JsonValue): Promise<FlowReceiptVerdict> {
+        return this.#apiClient.call(
             'perspective.verifyFlowReceipt', { uuid, receipt },
         )
     }
@@ -421,7 +411,7 @@ export class PerspectiveClient {
     /** The instances that are, as they stand, valid outputs of `flow`
      *  (optionally: of runs settled into terminal state `state`). */
     async flowValidOutputs(uuid: string, flow: string, state?: string): Promise<FlowValidOutput[]> {
-        return this.#apiClient.call<FlowValidOutput[]>(
+        return this.#apiClient.call(
             'perspective.flowValidOutputs', { uuid, flow, state },
         )
     }
@@ -430,96 +420,60 @@ export class PerspectiveClient {
      *  run has not settled into a terminal state, and when an output's
      *  content no longer matches what the quorum committed to. */
     async mintFlowReceipt(uuid: string, instanceUri: string): Promise<FlowMintedReceipt> {
-        return this.#apiClient.call<FlowMintedReceipt>(
+        return this.#apiClient.call(
             'perspective.mintFlowReceipt', { uuid, instanceUri },
         )
     }
 
-    /**
-     * Subscribe to auto-processor step signals. `cb` fires for every
-     * `auto-processor-event` on `uuid` (BatchReady → Claimed/BackedOff/… →
-     * Processed), letting a UI show progress and await the next batch.
-     *
-     * Returns a function that removes this listener.
-     */
-    addAutoProcessorEventListener(uuid: String, cb: (event: AutoProcessorEvent) => void): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'auto-processor-event' && data.perspectiveUuid === uuid) {
-                    cb(data as unknown as AutoProcessorEvent)
-                }
-            }
-        )
-    }
-
-    /**
-     * Subscribe to neighbourhood-state events on a perspective. `cb` fires
-     * when THIS executor claims / finishes / abandons a batch for any
-     * processor on `uuid` — perspective-scoped observability so a UI can
-     * render "someone is auto-processing this" without receiving the batch
-     * payload or LLM I/O. Returns a function that removes this listener.
-     */
-    addAutoProcessorNeighbourhoodStateListener(
-        uuid: String,
-        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'auto-processor-neighbourhood-state' && data.perspectiveUuid === uuid) {
-                    cb(data as unknown as AutoProcessorNeighbourhoodStateEvent)
-                }
-            }
-        )
-    }
-
     async addLinkExpression(uuid: string, link: LinkExpression, status: LinkStatus = 'shared', batchId?: string): Promise<LinkExpression> {
-        return this.#apiClient.call<LinkExpression>(
-            'perspective.addLinkExpression', { uuid, link, status, batchId }
+        const added = await this.#apiClient.call(
+            'perspective.addLinkExpression', { uuid, link: linkExpressionToWire(link), status, batchId }
         )
+        return LinkExpression.fromWire(added)
     }
 
     async updateLink(uuid: string, oldLink: LinkExpressionInput, newLink: Link, batchId?: string): Promise<LinkExpression> {
-        return this.#apiClient.call<LinkExpression>(
-            'perspective.updateLink', { uuid, oldLink, newLink, batchId }
+        const updated = await this.#apiClient.call(
+            'perspective.updateLink', { uuid, oldLink: linkExpressionInputToWire(oldLink), newLink, batchId }
         )
+        return LinkExpression.fromWire(updated)
     }
 
     async removeLink(uuid: string, link: LinkExpressionInput, batchId?: string): Promise<boolean> {
-        delete link.__typename
-        delete link.data.__typename
-        delete link.proof.__typename
-        delete link.status
-        return this.#apiClient.call<boolean>(
-            'perspective.removeLink', { uuid, link, batchId }
+        const { status, ...wire } = linkExpressionInputToWire(link)
+        return this.#apiClient.call(
+            'perspective.removeLink', { uuid, link: wire, batchId }
         )
     }
 
     async addSdna(uuid: string, name: string, sdnaCode: string | undefined, sdnaType: "subject_class" | "flow" | "custom", shaclJson?: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        const result = await this.#apiClient.call(
             'perspective.addSdna', { uuid, name, sdnaCode: sdnaCode || "", sdnaType, shaclJson }
         )
+        return typeof result === 'boolean' ? result : result.every(Boolean)
     }
 
     async addSdnaBatch(uuid: string, entries: { name: string; sdnaCode?: string; sdnaType: "subject_class" | "flow" | "custom"; shaclJson?: string }[]): Promise<boolean[]> {
-        return this.#apiClient.call<boolean[]>(
+        const result = await this.#apiClient.call(
             'perspective.addSdna', { uuid, entries: entries.map(e => ({ ...e, sdnaCode: e.sdnaCode || "" })) }
         )
+        return typeof result === 'boolean' ? [result] : result
     }
 
     async executeCommands(uuid: string, commands: string, expression: string, parameters: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.executeCommands', { uuid, commands, expression, parameters, batchId }
         )
     }
 
     async createSubject(uuid: string, subjectClass: string, expressionAddress: string, initialValues?: string, batchId?: string): Promise<boolean> {
-        return this.#apiClient.call<boolean>(
+        return this.#apiClient.call(
             'perspective.createSubject', { uuid, subjectClass, expressionAddress, initialValues, batchId }
         )
     }
 
     async getSubjectData(uuid: string, subjectClass: string, expressionAddress: string): Promise<string> {
-        return this.#apiClient.call<string>(
+        return this.#apiClient.call(
             'perspective.getSubjectData', { uuid, subjectClass, expressionAddress }
         )
     }
@@ -531,7 +485,7 @@ export class PerspectiveClient {
 
     /** List the names of every SHACL shape stored in a perspective (one RPC call). */
     async getShaclNames(uuid: string): Promise<string[]> {
-        return this.#apiClient.call<string[]>('perspective.getShaclNames', { uuid })
+        return this.#apiClient.call('perspective.getShaclNames', { uuid })
     }
 
     /**
@@ -545,7 +499,7 @@ export class PerspectiveClient {
      * than pushing the null one layer further up. PR #935 review r3897752023.
      */
     async getShaclTargetClass(uuid: string, name: string): Promise<string | undefined> {
-        const result = await this.#apiClient.call<string | null>(
+        const result = await this.#apiClient.call(
             'perspective.getShaclTargetClass',
             { uuid, name },
         )
@@ -558,7 +512,7 @@ export class PerspectiveClient {
      * or `null` if no shape with that name exists.
      */
     async getShacl(uuid: string, name: string): Promise<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null> {
-        return this.#apiClient.call<{ shapeUri: string; links: Array<{source: string; predicate: string; target: string}> } | null>(
+        return this.#apiClient.call(
             'perspective.getShacl', { uuid, name }
         )
     }
@@ -568,11 +522,10 @@ export class PerspectiveClient {
      * `{name, shapeUri, links}` — one entry per shape (one RPC call).
      */
     async getAllShacl(uuid: string): Promise<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>> {
-        return this.#apiClient.call<Array<{ name: string; shapeUri: string; links: Array<{source: string; predicate: string; target: string}> }>>(
+        return this.#apiClient.call(
             'perspective.getAllShacl', { uuid }
         )
     }
-
 
     // ExpressionClient functions, needed for Subjects:
     async getExpression(expressionURI: string): Promise<ExpressionRendered> {
@@ -583,94 +536,9 @@ export class PerspectiveClient {
         return await this.#expressionClient!.create(content, languageAddress)
     }
 
-    // Subscriptions:
-    /** Returns a function that removes the listener. */
-    addPerspectiveAddedListener(cb: PerspectiveHandleCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveAddedCallbacks, cb)
-    }
-
-    /** Returns a function that removes the listener. */
-    addPerspectiveUpdatedListener(cb: PerspectiveHandleCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveUpdatedCallbacks, cb)
-    }
-
-    /** Returns a function that removes the listener. */
-    addPerspectiveRemovedListener(cb: UuidCallback): () => void {
-        this.#listen()
-        return addListener(this.#perspectiveRemovedCallbacks, cb)
-    }
-
-    /** Idempotent (ApiClient keeps handlers in a Set); subscribes again after close(). */
-    #listen(): void {
-        this.#apiClient.subscribe(this.#onEvent)
-    }
-
-    #onEvent = (data: WsEvent): void => {
-        switch (data.type) {
-            case 'perspective-added':
-                notifyListeners(this.#perspectiveAddedCallbacks, data.perspective as PerspectiveHandle)
-                break
-            case 'perspective-updated':
-                notifyListeners(this.#perspectiveUpdatedCallbacks, data.perspective as PerspectiveHandle)
-                break
-            case 'perspective-removed':
-                notifyListeners(this.#perspectiveRemovedCallbacks, data.uuid as string)
-                break
-        }
-    }
-
-    addPerspectiveSyncStateChangeListener(uuid: String, cb: SyncStateChangeCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'sync-state-change' && data.uuid === uuid) {
-                    notifyListeners(cb, data.state as PerspectiveState)
-                }
-            }
-        )
-    }
-
-    addPerspectiveLinkAddedListener(uuid: String, cb: LinkCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-added' && data.perspectiveUuid === uuid) {
-                    notifyListeners(cb, data.link as LinkExpression)
-                }
-            }
-        )
-    }
-
-    addPerspectiveLinkRemovedListener(uuid: String, cb: LinkCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-removed' && data.perspectiveUuid === uuid) {
-                    const link = data.link as LinkExpression & { status?: unknown }
-                    if (!link.status) {
-                        delete link.status
-                    }
-                    notifyListeners(cb, link)
-                }
-            }
-        )
-    }
-
-    addPerspectiveLinkUpdatedListener(uuid: String, cb: LinkUpdatedCallback[]): () => void {
-        return this.#apiClient.subscribe(
-            (data) => {
-                if (data.type === 'link-updated' && data.perspectiveUuid === uuid) {
-                    const newLink = data.newLink as LinkExpression & { status?: unknown }
-                    const oldLink = data.oldLink as LinkExpression & { status?: unknown }
-                    if (!newLink.status) {
-                        delete newLink.status
-                    }
-                    if (!oldLink.status) {
-                        delete oldLink.status
-                    }
-                    notifyListeners(cb, data as unknown as LinkUpdate)
-                }
-            }
-        )
+    /** The client's event bus; see {@link ApiClient.on}. */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
     }
 
     getNeighbourhoodProxy(uuid: string): NeighbourhoodProxy {
@@ -678,13 +546,14 @@ export class PerspectiveClient {
     }
 
     async createBatch(uuid: string): Promise<string> {
-        return this.#apiClient.call<string>('perspective.createBatch', { uuid })
+        return this.#apiClient.call('perspective.createBatch', { uuid })
     }
 
     async commitBatch(uuid: string, batchId: string): Promise<LinkExpressionMutations> {
-        return this.#apiClient.call<LinkExpressionMutations>(
+        const diff = await this.#apiClient.call(
             'perspective.commitBatch', { uuid, batchId }
         )
+        return LinkExpressionMutations.fromWire(diff)
     }
 
     /** Register a callback that fires after a successful WebSocket reconnect.
