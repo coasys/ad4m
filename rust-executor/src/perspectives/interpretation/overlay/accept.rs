@@ -29,7 +29,8 @@ use std::collections::BTreeMap;
 const OVERLAY_RUN_PRED: &str = "ad4m://interp/run";
 
 /// One pending overlay, flattened for the query surface / UIs.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub(crate) struct OverlayView {
     /// The base instance the overlay sits on.
     pub base: String,
@@ -54,12 +55,25 @@ pub(crate) async fn overlay_of(
     Ok(view_from_links(base, &all))
 }
 
+/// The overlay's `kind` (`"create"` or `"update"`) from its stored target.
+///
+/// `write_overlay` uses `create_subject`'s setter path, which stores a non-URI
+/// string as `literal:string:<value>`, while the constructor path stores the
+/// plain string. Every reader decodes through here, so the listing and the
+/// reject branch agree with each other and with the documented type.
+fn overlay_kind(raw: &str) -> String {
+    match parse_literal_value(raw) {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
+    }
+}
+
 /// Build the view for `base` from its links, in `get_links` order (timestamp
 /// ascending). `None` when no `kind` link is among them. Links with other
 /// predicates are ignored, so this accepts either every link of the base or
 /// only its overlay links.
 fn view_from_links(base: &str, links: &[DecoratedLinkExpression]) -> Option<OverlayView> {
-    let kind = first_target(links, OVERLAY_KIND_PRED)?;
+    let kind = overlay_kind(&first_target(links, OVERLAY_KIND_PRED)?);
     let run = first_target(links, OVERLAY_RUN_PRED);
     let inferred = links
         .iter()
@@ -228,17 +242,10 @@ pub(crate) async fn reject_interpretation(
         Some(k) => k,
         None => anyhow::bail!("reject_interpretation: no overlay on `{base}`"),
     };
-    // `write_overlay` uses `create_subject`'s setter path, which encodes a
-    // non-URI string target as `literal:string:<value>`. Compare against the
-    // decoded value or a whole-base reject of a `create` silently takes the
-    // update branch and leaves the LLM-authored instance orphaned in the
-    // graph (CodeRabbit #881 review). `parse_literal_value` also handles the
-    // constructor's plain-string target (`"create"`) — that branch returns
-    // `Value::String("create")` unchanged.
-    let kind = match parse_literal_value(&raw_kind) {
-        serde_json::Value::String(s) => s,
-        other => other.to_string(),
-    };
+    // Compare against the decoded value, or a whole-base reject of a `create`
+    // silently takes the update branch and leaves the LLM-authored instance
+    // orphaned in the graph (CodeRabbit #881 review). See `overlay_kind`.
+    let kind = overlay_kind(&raw_kind);
 
     if let Some(_prop) = property {
         // Drop just this suggestion; the real value stays as it is.
@@ -578,6 +585,39 @@ mod tests {
     }
 
     // ── list_overlays: single query vs the old per-base algorithm ──────────
+
+    /// The listing returns `kind` decoded, as `OverlayView` documents
+    /// (`"create" | "update"`), for both ways it is stored: literal-encoded by
+    /// `write_overlay`'s setter path, plain by the constructor path. It used to
+    /// pass the stored target through, so engine-written overlays listed as
+    /// `literal:string:create`.
+    #[tokio::test]
+    async fn list_overlays_returns_kind_decoded() {
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let encoded = "soa://ext/Task/encoded";
+        let plain = "soa://ext/Task/plain";
+        add(
+            &mut p,
+            encoded,
+            OVERLAY_KIND_PRED,
+            "literal:string:create",
+            &ctx,
+        )
+        .await;
+        add(&mut p, plain, OVERLAY_KIND_PRED, "update", &ctx).await;
+
+        let views = list_overlays(&p).await.unwrap();
+        let kind_of = |base: &str| {
+            views
+                .iter()
+                .find(|v| v.base == base)
+                .unwrap_or_else(|| panic!("no overlay listed for {base}"))
+                .kind
+                .clone()
+        };
+        assert_eq!(kind_of(encoded), "create");
+        assert_eq!(kind_of(plain), "update");
+    }
 
     /// The previous `list_overlays`, kept as the parity and timing reference:
     /// one `get_links` for the `kind` links, then `overlay_of` (a `get_links`

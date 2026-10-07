@@ -10670,3 +10670,208 @@ async fn links_rows_are_viewer_scoped() {
         "Bob reads his own cache"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A to-one reference to a record of any type, read in one query: an untyped
+// `hasOne` hydrated through `include`, with a projection evaluated against each
+// member's own class.
+// ---------------------------------------------------------------------------
+
+/// Two placements: one points at a task carrying two signals (one `like`, one
+/// `flag`), one at a note whose class declares no `signals` relation at all.
+async fn placement_fixture() -> (SparqlStore, StaticShapeResolver, std::sync::Arc<ModelShape>) {
+    let store = SparqlStore::new(None).unwrap();
+    for uri in [
+        "we://models/Placement",
+        "we://models/TaskBlock",
+        "we://models/NoteBlock",
+    ] {
+        store
+            .add_link(&make_link(uri, "rdf://type", "ad4m://SubjectClass", "1"))
+            .unwrap();
+    }
+    for (p, target, ts) in [
+        ("we://p/1", "we://task/1", "2"),
+        ("we://p/2", "we://note/1", "3"),
+    ] {
+        store
+            .add_link(&make_link(p, "we://flag", "we://placement", ts))
+            .unwrap();
+        store
+            .add_link(&make_link(p, "we://placed_node", target, ts))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://flag",
+            "we://task_block",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://task/1",
+            "we://title",
+            "literal:string:ship",
+            "4",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/1", "5"))
+        .unwrap();
+    store
+        .add_link(&make_link("we://task/1", "we://signal", "we://sig/2", "6"))
+        .unwrap();
+    for (sig, kind) in [("we://sig/1", "like"), ("we://sig/2", "flag")] {
+        store
+            .add_link(&make_link(
+                sig,
+                "we://kind",
+                &format!("literal:string:{kind}"),
+                "6",
+            ))
+            .unwrap();
+    }
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://flag",
+            "we://note_block",
+            "7",
+        ))
+        .unwrap();
+    store
+        .add_link(&make_link(
+            "we://note/1",
+            "we://text",
+            "literal:string:hello",
+            "7",
+        ))
+        .unwrap();
+
+    let (resolver, placement_shape) = StaticShapeResolver::from_json(
+        "Placement",
+        r#"{"className":"Placement","properties":{
+             "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://placement"}
+           },"relations":{
+             "node":{"predicate":"we://placed_node","kind":"hasOne","maxCount":1,"targetClassName":""}
+           }}"#,
+    )
+    .unwrap();
+    resolver.register(
+        "TaskBlock",
+        parse_shape_from_json(
+            r#"{"className":"TaskBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://task_block"},
+                 "title":{"predicate":"we://title","resolveLanguage":"literal"}
+               },"relations":{
+                 "signals":{"predicate":"we://signal","kind":"hasMany","targetClassName":"Signal"}
+               }}"#,
+            "TaskBlock",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "Signal",
+        parse_shape_from_json(
+            r#"{"className":"Signal","properties":{
+                 "kind":{"predicate":"we://kind","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "Signal",
+        )
+        .unwrap(),
+    );
+    resolver.register(
+        "NoteBlock",
+        parse_shape_from_json(
+            r#"{"className":"NoteBlock","properties":{
+                 "flag":{"predicate":"we://flag","required":true,"flag":true,"initial":"we://note_block"},
+                 "text":{"predicate":"we://text","resolveLanguage":"literal"}
+               },"relations":{}}"#,
+            "NoteBlock",
+        )
+        .unwrap(),
+    );
+    (store, resolver, placement_shape)
+}
+
+fn placed<'a>(result: &'a ModelQueryResult, placement: &str) -> &'a Value {
+    let row = result
+        .instances
+        .iter()
+        .find(|r| r["id"] == placement)
+        .unwrap_or_else(|| panic!("placement {placement} missing: {:?}", result.instances));
+    &row["node"]
+}
+
+/// An untyped to-one comes back as one record, hydrated as the class it is.
+///
+/// The polymorphic path was only exercised through `hasMany` relations; a
+/// `hasOne` takes the same path and is unwrapped to a single object afterwards.
+#[tokio::test]
+async fn test_polymorphic_has_one_hydrates_as_one_record_of_its_own_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput =
+        serde_json::from_value(json!({ "include": { "node": { "polymorphic": true } } })).unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    let note = placed(&result, "we://p/2");
+    assert!(
+        task.is_object(),
+        "a to-one hydrates as one object, got {task}"
+    );
+    assert_eq!(task["__subjectClass"], "TaskBlock");
+    assert_eq!(task["title"], "ship");
+    assert_eq!(note["__subjectClass"], "NoteBlock");
+    assert_eq!(note["text"], "hello");
+}
+
+/// A projection on a polymorphic include is computed against each member's own
+/// class, and is absent, not an error, on a member whose class lacks the relation.
+#[tokio::test]
+async fn test_projection_on_a_polymorphic_include_is_read_per_member_class() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": { "$signalsCount": { "from": "signals", "count": true } }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    assert_eq!(placed(&result, "we://p/1")["$signalsCount"], 2);
+    assert!(placed(&result, "we://p/2").get("$signalsCount").is_none());
+}
+
+/// A projection's `where` on a polymorphic include is read against the target
+/// each member's own class declares for `from`.
+///
+/// The SDK leaves such a projection untagged: the members are of several
+/// classes, so there is no one target to name. Without a target the property
+/// filter matched no predicate and was dropped, and the count came back 2.
+/// A list stays a list of IRIs: only the filter reads the target.
+#[tokio::test]
+async fn test_projection_where_on_a_polymorphic_include_reads_the_member_class_target() {
+    let (store, resolver, shape) = placement_fixture().await;
+    let query: ModelQueryInput = serde_json::from_value(json!({ "include": { "node": {
+        "polymorphic": true,
+        "projections": {
+            "$likes": { "from": "signals", "count": true, "where": { "kind": "like" } },
+            "$liked": { "from": "signals", "where": { "kind": "like" } }
+        }
+    } } }))
+    .unwrap();
+    let result = fixture_query(&store, shape.as_ref(), &query, &resolver)
+        .await
+        .unwrap();
+
+    let task = placed(&result, "we://p/1");
+    assert_eq!(task["$likes"], 1, "the `kind` filter applies: {task}");
+    assert_eq!(task["$liked"], json!(["we://sig/1"]));
+    assert!(placed(&result, "we://p/2").get("$likes").is_none());
+}
