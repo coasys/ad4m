@@ -14,6 +14,18 @@ use std::collections::BTreeMap;
 use std::convert::TryInto;
 use std::sync::{Arc, Mutex, RwLock};
 
+/// How every DID document the wallet hands out is serialized: public keys only.
+///
+/// `did_key::Config::default()` is `CONFIG_LD_PRIVATE` in did-key 0.2.1, which
+/// writes `privateKeyBase58` for the Ed25519 signing key and the X25519
+/// key-agreement key into the document. Wallet documents leave the process —
+/// `agent.status`/`generate`/`unlock`/`lock`, the `agent-status-changed` event,
+/// multi-user status replies, `agent.json` on disk, and language code through
+/// `agent.didDocument()` — so they must never carry secrets (#1229). Nothing
+/// reads a secret back out of a document: signing goes through
+/// [`WalletBackend::sign`], which uses the stored key material.
+pub const DID_DOCUMENT_CONFIG: did_key::Config = did_key::CONFIG_LD_PUBLIC;
+
 fn slice_to_u8_array(slice: &[u8]) -> [u8; 32] {
     //If length of slice is not 32 then take the first 32 bytes
 
@@ -194,7 +206,7 @@ impl Wallet {
                 .by_name
                 .insert(name.clone(), Key::from(key));
             let key = did_key::resolve(did.as_str()).expect("Failed to get key pair");
-            let did_document = key.get_did_document(did_key::Config::default());
+            let did_document = key.get_did_document(DID_DOCUMENT_CONFIG);
             Some(did_document)
         } else {
             None
@@ -223,7 +235,7 @@ impl Wallet {
                 &key.public.clone(),
                 Some(&key.secret.clone()),
             );
-            key.get_did_document(did_key::Config::default())
+            key.get_did_document(DID_DOCUMENT_CONFIG)
         })
     }
 
@@ -667,7 +679,7 @@ impl WalletBackend for SharedWallet {
     fn get_did_document(&self, name: &str) -> Option<did_key::Document> {
         let (secret, public) = self.get_key_material(name)?;
         let key_pair = did_key::from_existing_key::<Ed25519KeyPair>(&public, Some(&secret));
-        Some(key_pair.get_did_document(did_key::Config::default()))
+        Some(key_pair.get_did_document(DID_DOCUMENT_CONFIG))
     }
 
     fn sign(&self, name: &str, message: &[u8]) -> Option<Vec<u8>> {

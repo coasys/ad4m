@@ -126,7 +126,9 @@ impl TestSigner {
     pub fn generate() -> Self {
         use did_key::{DIDCore, Ed25519KeyPair};
         let keypair = did_key::generate::<Ed25519KeyPair>(None);
-        let document = keypair.get_did_document(did_key::Config::default());
+        // Only the ids are read; the wallet's public config keeps this from
+        // being the one place that still builds documents with secrets.
+        let document = keypair.get_did_document(crate::wallet::DID_DOCUMENT_CONFIG);
         TestSigner {
             did: document.id.clone(),
             key_id: document.verification_method[0].id.clone(),
