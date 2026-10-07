@@ -160,6 +160,10 @@ export class QuerySubscriptionProxy {
             this.#keepaliveTimer = undefined;
         }
 
+        // A retry (init timeout, failed keepalive) replaces the hold this
+        // proxy already has; release it so the proxy never holds two.
+        this.#releaseHold();
+
         try {
             // Initialize the query subscription
             let initialResult;
@@ -296,6 +300,7 @@ export class QuerySubscriptionProxy {
                     );
                     const oldUnsub = this.#unsubscribe;
                     this.#unsubscribe = newUnsub;
+                    this.#releaseHold();
                     this.#subscriptionId = newSubId;
                     if (oldUnsub) oldUnsub();
 
@@ -482,6 +487,9 @@ export class QuerySubscriptionProxy {
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
+     * Calling it again is a no-op: subscribers of the same query share one
+     * executor subscription, and only the first call releases this proxy's
+     * hold on it.
      */
     dispose() {
         this.#disposed = true;
@@ -502,9 +510,20 @@ export class QuerySubscriptionProxy {
             this.#initTimeoutId = undefined;
         }
 
-        // Tell the backend to dispose of the subscription
-        if (this.#subscriptionId) {
-            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+        this.#releaseHold();
+    }
+
+    /** Release this proxy's hold on its executor subscription, at most once.
+     *
+     *  The executor hands every subscriber of the same query the same
+     *  subscription id and removes the entry when the last holder releases
+     *  it. The id is cleared before the RPC, so a repeated dispose() is a
+     *  local no-op and cannot release another subscriber's hold. */
+    #releaseHold() {
+        const subscriptionId = this.#subscriptionId;
+        this.#subscriptionId = undefined;
+        if (subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, subscriptionId)
                 .catch(e => console.error('Error disposing query subscription:', e));
         }
     }
@@ -1845,27 +1864,25 @@ export class PerspectiveProxy {
      * Uses SHACL-based lookup (Prolog-free implementation).
      */
     async subjectClasses(): Promise<string[]> {
-        try {
-            // Query SHACL class links directly — no need for a separate RPC endpoint
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const classNames = classLinks
-                .map(l => {
-                    const source = l.data.source;
-                    // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-                    const parts = source.split("://");
-                    const lastPart = parts[parts.length - 1];
-                    return lastPart.split('/').pop() || '';
-                })
-                .filter(name => name.length > 0);
-            // Deduplicate
-            return [...new Set(classNames)];
-        } catch (e) {
-            console.warn('subjectClasses: SHACL lookup failed:', e);
-            return [];
-        }
+        // A failed lookup rejects. Answering `[]` would read as "no classes are
+        // registered", which a caller deciding whether to register its own
+        // classes acts on.
+        // Query SHACL class links directly — no need for a separate RPC endpoint
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const classNames = classLinks
+            .map(l => {
+                const source = l.data.source;
+                // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+                const parts = source.split("://");
+                const lastPart = parts[parts.length - 1];
+                return lastPart.split('/').pop() || '';
+            })
+            .filter(name => name.length > 0);
+        // Deduplicate
+        return [...new Set(classNames)];
     }
 
     /**
@@ -1882,22 +1899,19 @@ export class PerspectiveProxy {
      * registered should call this once and test membership against the returned
      * set, rather than issuing one `queryLinks` per model.
      *
-     * One `queryLinks` round trip, no executor-side changes.
+     * One `queryLinks` round trip, no executor-side changes. A failed lookup
+     * rejects rather than answering `[]`, which would read as "nothing is
+     * registered" and lead such a caller to register everything again.
      */
     async subjectClassTargetClasses(): Promise<string[]> {
-        try {
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const uris = classLinks
-                .map(l => l.data.source)
-                .filter(source => source.length > 0);
-            return [...new Set(uris)];
-        } catch (e) {
-            console.warn('subjectClassTargetClasses: lookup failed:', e);
-            return [];
-        }
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const uris = classLinks
+            .map(l => l.data.source)
+            .filter(source => source.length > 0);
+        return [...new Set(uris)];
     }
 
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {
