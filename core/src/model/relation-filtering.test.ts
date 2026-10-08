@@ -14,6 +14,7 @@ import {
   Property,
   Flag,
   HasMany,
+  HasOne,
   Optional,
   buildConformanceFilter,
 } from "./decorators";
@@ -863,5 +864,90 @@ describe("compileWhereClause()", () => {
     expect(conditions).toHaveLength(1);
     expect(conditions[0]).toContain("test://raw_pred");
     expect(conditions[0]).toContain("value");
+  });
+});
+
+// ============================================================================
+// readOnly relations
+// ============================================================================
+
+@Model({ name: "ReadOnlyRelations" })
+class ReadOnlyRelations extends Ad4mModel {
+  @HasMany({
+    through: "test://voted_by",
+    getter: "SELECT ?target WHERE { ?source <test://voted_by> ?target . }",
+    readOnly: true,
+  })
+  votedBy: string[] = [];
+
+  @HasMany({ through: "test://tags" })
+  tags: string[] = [];
+}
+
+describe("readOnly relations", () => {
+  const shape = () => (ReadOnlyRelations as any).generateSHACL().shape as SHACLShape;
+  const prop = (name: string) =>
+    shape().properties.find((p: SHACLPropertyShape) => p.name === name)!;
+
+  it("keep their predicate as the shape's path, so a subscription re-runs on it", () => {
+    expect(prop("votedBy").path).toBe("test://voted_by");
+    expect(prop("votedBy").getter).toContain("test://voted_by");
+  });
+
+  it("generate no adder or remover and are marked not writable", () => {
+    expect(prop("votedBy").adder).toBeUndefined();
+    expect(prop("votedBy").remover).toBeUndefined();
+    expect(prop("votedBy").writable).toBe(false);
+  });
+
+  it("get no add/remove/set methods", () => {
+    const instance = ReadOnlyRelations.prototype as any;
+    expect(instance.addVotedBy).toBeUndefined();
+    expect(instance.removeVotedBy).toBeUndefined();
+    expect(instance.setVotedBy).toBeUndefined();
+    expect(typeof instance.addTags).toBe("function");
+  });
+
+  it("leave an ordinary relation writable", () => {
+    expect(prop("tags").adder).toBeDefined();
+    expect(prop("tags").writable).not.toBe(false);
+  });
+});
+
+@Model({ name: "SavesReadOnly" })
+class SavesReadOnly extends Ad4mModel {
+  @HasMany({ through: "test://read_only", readOnly: true })
+  readOnlyLinks: string[] = ["test://a"];
+
+  @HasMany({ through: "test://writable" })
+  writableLinks: string[] = ["test://b"];
+}
+
+describe("readOnly relations when saving", () => {
+  it("are skipped by save() and create(), even without a getter", async () => {
+    const proto = SavesReadOnly.prototype as any;
+    const set = jest.spyOn(proto, "setRelationValues").mockResolvedValue(undefined);
+    const add = jest.spyOn(proto, "addRelationValue").mockResolvedValue(undefined);
+    try {
+      const instance = new SavesReadOnly({ uuid: "p" } as any, "test://instance");
+      await (instance as any).innerUpdate(true);
+
+      const touched = [...set.mock.calls, ...add.mock.calls].map((call) => call[0]);
+      expect(touched).toContain("writableLinks");
+      expect(touched).not.toContain("readOnlyLinks");
+    } finally {
+      set.mockRestore();
+      add.mockRestore();
+    }
+  });
+
+  it("refuse `through` with `getter` on @HasOne, where the getter would be dropped", () => {
+    expect(() => {
+      class Refused extends Ad4mModel {
+        @HasOne({ through: "test://one", getter: "SELECT ?target WHERE { ?source <test://one> ?target . }", readOnly: true })
+        one: string = "";
+      }
+      return Refused;
+    }).toThrow(/@HasOne.*through.*getter/);
   });
 });
