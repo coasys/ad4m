@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -198,6 +198,14 @@ function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
         sharedLocalServices.catch(() => { sharedLocalServices = null; });
     }
     return sharedLocalServices;
+}
+
+/** Empties a test agent's app data dir before startExecutor. */
+export function resetAppDataPath(appDataPath: string) {
+    if (existsSync(appDataPath)) {
+        rmSync(appDataPath, { recursive: true });
+    }
+    mkdirSync(appDataPath, { recursive: true });
 }
 
 export async function startExecutor(dataPath: string,
