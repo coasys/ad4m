@@ -165,8 +165,8 @@ pub(super) fn resolve_link_keys(
 /// than the store's canonical one), and the verdict was computed over those
 /// same bytes, so the verdict and a consumer's own re-verification agree.
 ///
-/// Viewer-scoped like hydration (#1024): `viewer_did` sees another agent's
-/// `Local` link only on an engine-derived predicate (see
+/// Viewer-scoped like hydration (#1024): `viewer_did` never sees another
+/// agent's `Local` link, the flow engine's `currentState` cache included (see
 /// [`link_visibility`](crate::perspectives::link_visibility)). This read
 /// accepts arbitrary predicate IRIs, so without the filter it would be the
 /// widest way round it. `None` is executor scope and reads every row.
