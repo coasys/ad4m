@@ -296,6 +296,19 @@ pub enum Scope {
         id: String,
         predicate: String,
     },
+    /// What one item contains, through any of several containment predicates
+    /// — `has_child` and whatever the perspective declares as containment
+    /// (see `perspectives::containment`).
+    ///
+    /// Never on the wire: `skip` keeps every client's `parent` a `Raw` scope on
+    /// the one predicate it names, so declaring containment widens the
+    /// executor's own reads (the MCP `parent=` tools) and never an app's model
+    /// queries, which name their relation on purpose.
+    #[serde(skip)]
+    Contained {
+        id: String,
+        predicates: Vec<String>,
+    },
     /// Bounded traversal from one or more anchors — see [`Traverse`](Scope::Traverse).
     ///
     /// A third variant rather than options on the two above, because those are

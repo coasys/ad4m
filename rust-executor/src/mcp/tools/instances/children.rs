@@ -43,19 +43,27 @@ pub struct GetChildrenParams {
     pub limit: Option<usize>,
 }
 
-/// All `ad4m://has_child` links from `parent`, oldest first.
+/// All containment links from `parent`, oldest first — `ad4m://has_child`
+/// and every predicate the perspective declares as containment
+/// (`perspectives::containment`). One lookup per predicate, merged.
 pub(super) async fn child_links(
     perspective: &crate::perspectives::perspective_instance::PerspectiveInstance,
     parent: &str,
 ) -> Result<Vec<DecoratedLinkExpression>, String> {
-    let mut links = perspective
-        .get_links(&LinkQuery {
-            source: Some(link_target(parent)),
-            predicate: Some(HAS_CHILD.to_string()),
-            ..Default::default()
-        })
-        .await
-        .map_err(|e| format!("{e:#}"))?;
+    let source = link_target(parent);
+    let mut links = Vec::new();
+    for predicate in perspective.containment_predicates().await.iter() {
+        links.extend(
+            perspective
+                .get_links(&LinkQuery {
+                    source: Some(source.clone()),
+                    predicate: Some(predicate.clone()),
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| format!("{e:#}"))?,
+        );
+    }
     links.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
     Ok(links)
 }
@@ -101,7 +109,7 @@ impl Ad4mMcpHandler {
 
     /// List the `ad4m://has_child` children of a node, regardless of class.
     #[tool(
-        description = "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic — works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript."
+        description = "List the children of a node linked via ad4m://has_child or any predicate the perspective declares as containment, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic — works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript."
     )]
     pub async fn get_children(&self, params: Parameters<GetChildrenParams>) -> String {
         let p = &params.0;

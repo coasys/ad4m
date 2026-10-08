@@ -2,8 +2,7 @@
 
 use super::{
     error_json, fetch_instance, instance_uri, link_target, normalize_filter, not_found, pretty,
-    resolve_class, run_model_query, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, HAS_CHILD,
-    MAX_QUERY_LIMIT,
+    resolve_class, run_model_query_under, Ad4mMcpHandler, DEFAULT_QUERY_LIMIT, MAX_QUERY_LIMIT,
 };
 use rmcp::{handler::server::wrapper::Parameters, tool};
 use schemars::JsonSchema;
@@ -24,8 +23,8 @@ pub struct InstanceQueryParams {
     /// `{"owner": {"not": "did:key:…"}}`). Combine with `"OR": [..]` /
     /// `"AND": [..]` / `"NOT": {..}`. `id` filters on the instance URI.
     pub filter: Option<Map<String, Value>>,
-    /// Optional parent URI: only return instances that are `ad4m://has_child`
-    /// children of this node (e.g. the messages of one channel).
+    /// Optional parent URI: only return instances this node contains
+    /// (`ad4m://has_child`, or any predicate the perspective declares as containment) (e.g. the messages of one channel).
     pub parent: Option<String>,
     /// Maximum number of instances to return (default 100).
     pub limit: Option<usize>,
@@ -47,7 +46,7 @@ pub struct InstanceGetParams {
 impl Ad4mMcpHandler {
     /// Query instances of any subject class, with typed property values.
     #[tool(
-        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property."
+        description = "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"…\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to what one instance contains (ad4m://has_child, or any predicate the perspective declares as containment) (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property."
     )]
     pub async fn instance_query(&self, params: Parameters<InstanceQueryParams>) -> String {
         let p = &params.0;
@@ -74,11 +73,15 @@ impl Ad4mMcpHandler {
                 }
             }
         }
-        if let Some(parent) = p.parent.as_deref().filter(|s| !s.trim().is_empty()) {
-            query["parent"] = json!({ "id": link_target(parent.trim()), "predicate": HAS_CHILD });
-        }
+        // Under the parent through every containment predicate the perspective has.
+        let parent = p
+            .parent
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(link_target);
 
-        match run_model_query(&perspective, &class_name, &query).await {
+        match run_model_query_under(&perspective, &class_name, &query, parent.as_deref()).await {
             Ok((instances, total)) => pretty(&json!({
                 "class_name": class_name,
                 "count": instances.len(),

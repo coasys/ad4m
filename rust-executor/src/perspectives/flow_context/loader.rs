@@ -323,6 +323,7 @@ pub fn scope_subject(scope: &Scope) -> &str {
     match scope {
         Scope::Model { id, .. } => id.as_str(),
         Scope::Raw { id, .. } => id.as_str(),
+        Scope::Contained { id, .. } => id.as_str(),
         // A traversal can name several anchors where this wants one subject.
         // The first is the useful answer for the single-anchor spelling, which
         // is what any caller reaching here would have written; a traversal with

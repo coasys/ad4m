@@ -11,8 +11,8 @@
 //! `instance_query` resolves them.
 
 use super::{
-    class_properties, error_json, find_property, link_target, resolve_class, run_model_query,
-    Ad4mMcpHandler, PropView, HAS_CHILD, MAX_QUERY_LIMIT,
+    class_properties, error_json, find_property, link_target, resolve_class, run_model_query_under,
+    Ad4mMcpHandler, PropView, MAX_QUERY_LIMIT,
 };
 use crate::languages::LanguageController;
 use crate::types::Agent;
@@ -33,7 +33,7 @@ pub struct InstanceTranscriptParams {
     /// Subject class of the children to read (e.g. "Message"), as listed by
     /// describe_perspective
     pub class_name: String,
-    /// Parent node URI whose ad4m://has_child children are read (e.g. a
+    /// Parent node URI whose contents are read (ad4m://has_child, or any predicate the perspective declares as containment) (e.g. a
     /// Channel's id). A bare string is wrapped as a literal URI.
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
@@ -88,7 +88,7 @@ fn render_text(instance: &Value, text_property: &str) -> String {
 impl Ad4mMcpHandler {
     /// Read the most recent children of one class under a node as a transcript.
     #[tool(
-        description = "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -170,15 +170,16 @@ impl Ad4mMcpHandler {
             .unwrap_or(DEFAULT_TRANSCRIPT_LIMIT)
             .clamp(1, MAX_QUERY_LIMIT);
         let query = json!({
-            "parent": { "id": link_target(parent), "predicate": HAS_CHILD },
             "order": [["timestamp", "desc"]],
             "limit": limit,
         });
-        let (mut instances, total) = match run_model_query(&perspective, &class_name, &query).await
-        {
-            Ok(v) => v,
-            Err(e) => return error_json(format!("Error reading {class_name} instances: {e}")),
-        };
+        // Under the parent through every containment predicate the perspective has.
+        let under = link_target(parent);
+        let (mut instances, total) =
+            match run_model_query_under(&perspective, &class_name, &query, Some(&under)).await {
+                Ok(v) => v,
+                Err(e) => return error_json(format!("Error reading {class_name} instances: {e}")),
+            };
         if instances.is_empty() {
             return format!("(no {class_name} instances under {parent})");
         }

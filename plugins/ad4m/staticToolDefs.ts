@@ -390,7 +390,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_query",
-    "description": "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"\u2026\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to ad4m://has_child children of one instance (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property.",
+    "description": "List instances of a subject class with their property values. class_name is one of the class names from describe_perspective. Optional filter is a where clause on property values: exact match {\"status\": \"open\"}, IN {\"status\": [\"open\", \"doing\"]}, operators {\"count\": {\"gt\": 5}} / {\"title\": {\"contains\": \"mcp\"}} / {\"owner\": {\"not\": \"\u2026\"}}, combinators \"OR\" / \"AND\" / \"NOT\"; \"id\" filters on the instance URI. Optional parent restricts to what one instance contains (ad4m://has_child, or any predicate the perspective declares as containment) (e.g. messages of a channel). Paginate with limit (default 100) and offset; total_count reports the full match count. Each instance has id (its base_uri), author, timestamp, and one key per property.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceQueryParams",
@@ -412,7 +412,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "parent": {
-          "description": "Optional parent URI: only return instances that are `ad4m://has_child`\nchildren of this node (e.g. the messages of one channel).",
+          "description": "Optional parent URI: only return instances this node contains\n(`ad4m://has_child`, or any predicate the perspective declares as containment) (e.g. the messages of one channel).",
           "type": "string",
           "nullable": true
         },
@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent instances of a class that are ad4m://has_child children of a node, as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -626,7 +626,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "type": "string"
         },
         "parent": {
-          "description": "Parent node URI whose ad4m://has_child children are read (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
+          "description": "Parent node URI whose contents are read (ad4m://has_child, or any predicate the perspective declares as containment) (e.g. a\nChannel's id). A bare string is wrapped as a literal URI.",
           "type": "string"
         },
         "limit": {
@@ -680,7 +680,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "get_children",
-    "description": "List the children of a node linked via ad4m://has_child, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
+    "description": "List the children of a node linked via ad4m://has_child or any predicate the perspective declares as containment, regardless of their class: id, timestamp and author of each child link, oldest first. Class-agnostic \u2014 works for ad4m://self (the perspective root, whose children are the top-level channels), for plain-string ids, and for instances. limit keeps the most recent N (default 100, max 500); total_count is the full number. To read children of one class with their property values use instance_query(class_name, parent) or instance_transcript.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "GetChildrenParams",

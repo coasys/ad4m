@@ -20,6 +20,7 @@ mod interpretation_harness_e2e;
 // tools, which read flow state through the same loaders) can seed a real
 // `PerspectiveInstance` instead of duplicating the setup. Still `#[cfg(test)]`,
 // so it never reaches a release build.
+pub mod containment;
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;

@@ -110,10 +110,9 @@ impl Ad4mMcpHandler {
             if let Err(e) = validate_sparql_iri(&parent_encoded) {
                 return json!({"error": format!("Invalid parent: {}", e)}).to_string();
             }
-            format!(
-                "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) = \"ad4m://has_child\") }}",
-                parent_encoded
-            )
+            // Every containment predicate the perspective has, each checked as an IRI.
+            let predicates = perspective.containment_predicates().await;
+            children_query(&parent_encoded, &predicates)
         } else if let Some(ref predicate) = p.predicate {
             if let Err(e) = validate_sparql_iri(predicate) {
                 return json!({"error": format!("Invalid predicate: {}", e)}).to_string();
@@ -274,11 +273,19 @@ impl Ad4mMcpHandler {
             "query": query,
         });
 
+        // Which links are containment here, so the waker walks every kind of
+        // parent a mentioned item can have, not only `has_child`.
+        let containment = match perspective {
+            Some(ref p) => p.containment_predicates().await.as_ref().clone(),
+            None => vec![crate::perspectives::containment::HAS_CHILD.to_string()],
+        };
+
         json!({
             "did": did,
             "names": names,
             "perspective_id": perspective_id,
             "query": query,
+            "containment_predicates": containment,
             "subscription": subscription,
             "message": format!(
                 "Add the subscription entry to your waker config and restart the waker. \
@@ -357,8 +364,43 @@ pub fn build_mention_sub_id(perspective_id: &str) -> String {
     format!("mention-{}", perspective_id)
 }
 
+/// What a child subscription watches: links out of `parent` through any of
+/// `predicates` — `has_child` and whatever the perspective declares as
+/// containment. A predicate that is not a usable IRI is left out rather than
+/// spliced into the query.
+///
+/// The predicate is a variable here, as it always was, so the subscription
+/// re-runs on any change; the set only decides which of those count.
+pub(crate) fn children_query(parent: &str, predicates: &[String]) -> String {
+    let allowed: Vec<String> = predicates
+        .iter()
+        .filter(|p| validate_sparql_iri(p).is_ok())
+        .map(|p| format!("\"{}\"", p))
+        .collect();
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?source) = \"{}\" && STR(?predicate) IN ({})) }}",
+        parent,
+        allowed.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn children_query_watches_every_containment_predicate() {
+        let query = children_query(
+            "app://call-1",
+            &[
+                "ad4m://has_child".to_string(),
+                "app://child".to_string(),
+                "not an iri>".to_string(),
+            ],
+        );
+        assert!(query.contains("STR(?source) = \"app://call-1\""));
+        assert!(query.contains("STR(?predicate) IN (\"ad4m://has_child\", \"app://child\")"));
+        assert!(!query.contains("not an iri"));
+    }
+
     use super::*;
 
     /// Clients built against the pre-rename schema still send
