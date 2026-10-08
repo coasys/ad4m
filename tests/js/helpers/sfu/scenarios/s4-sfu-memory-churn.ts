@@ -93,7 +93,11 @@ export const s4SfuMemoryChurn: Scenario = {
     let nextIdx = 0;
 
     try {
-      // Record initial RSS AFTER user provisioning completes.
+      // Record initial RSS AFTER user provisioning completes and the
+      // executor's memory has settled: provisioning returns before the
+      // executor finishes setting up each user, and on CI that tail took
+      // RSS up ~140 MB after a too-early baseline.
+      metrics["settleMs"] = await waitForRssToSettle(executorPid);
       const initialRss = readRssKb(executorPid);
       rssTimeline.push({ t: 0, rssKb: initialRss });
       metrics["initialRssKb"] = initialRss;
@@ -205,7 +209,7 @@ export const s4SfuMemoryChurn: Scenario = {
               : Math.round((p.rssKb - (metrics["initialRssKb"] as number)) / 1024),
           ) ?? [],
         )} ` +
-        `nproc=${os.cpus().length} memDetail=${JSON.stringify(metrics["memDetail"] ?? [])}`,
+        `settleMs=${metrics["settleMs"]} nproc=${os.cpus().length} memDetail=${JSON.stringify(metrics["memDetail"] ?? [])}`,
     };
   },
 };
@@ -289,6 +293,23 @@ function readRssKb(pid: string): number | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Waits until RSS moves less than 10 MB across 5 s (at most 90 s), so the
+ * baseline excludes memory the executor is still allocating for setup.
+ * Returns the time waited.
+ */
+async function waitForRssToSettle(pid: string): Promise<number> {
+  const start = Date.now();
+  let prev = readRssKb(pid);
+  while (Date.now() - start < 90_000) {
+    await sleep(5_000);
+    const cur = readRssKb(pid);
+    if (prev != null && cur != null && Math.abs(cur - prev) < 10 * 1024) break;
+    prev = cur;
+  }
+  return Date.now() - start;
 }
 
 /** RssAnon / RssFile (MB) and thread count, to tell heap growth from mapped code and per-thread arenas. */
