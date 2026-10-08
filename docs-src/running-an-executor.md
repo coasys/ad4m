@@ -91,6 +91,11 @@ and their precedence are in `pages/developer-guides/executor-config.mdx`
 ("Executor config file"); `ad4m-executor config print` shows what `run`
 would start with.
 
+To run the executor as a `systemd` service without the launcher (a unit
+with the secrets loaded through `LoadCredential=`, updates with a copy of
+the data directory, health checks, rollback, moving a node off the
+launcher), follow `headless-executor.md`.
+
 **For AI agents**: Always run in a screen session with logging:
 
 ```bash
