@@ -82,6 +82,42 @@ describe("Ad4mModel.getModelMetadata()", () => {
     expect(metadata.relations.local.local).toBe(true);
   });
 
+  it("emits a monotonic property as a flag naming its predicate (#1176)", () => {
+    @Model({ name: "MonotonicGrant" })
+    class MonotonicGrant extends Ad4mModel {
+      @Property({ through: "test://member", monotonic: true })
+      member: string = "";
+
+      @Property({ through: "test://note" })
+      note: string = "";
+    }
+
+    const { shape } = (MonotonicGrant as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("test://member").monotonic).toBe(true);
+    expect(byPath("test://note").monotonic).toBeUndefined();
+    expect(shape.toJSON().properties.find((p: any) => p.path === "test://member").monotonic).toBe(true);
+  });
+
+  it("emits a monotonic flag as a flag naming its predicate (#1176)", () => {
+    @Model({ name: "MonotonicRole" })
+    class MonotonicRole extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://role", monotonic: true })
+      type: string = "";
+
+      @Flag({ through: "test://kind", value: "test://plain" })
+      kind: string = "";
+    }
+
+    const { shape } = (MonotonicRole as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("test://type").monotonic).toBe(true);
+    expect(byPath("test://type").hasValue).toBe("test://role");
+    expect(byPath("test://kind").monotonic).toBeUndefined();
+    expect(shape.toLinks().filter((l: any) => l.predicate === "ad4m://monotonic").map((l: any) => l.target))
+      .toEqual(["literal:string:test%3A%2F%2Ftype"]);
+  });
+
   it("should support NodeExpression transforms in properties", () => {
     // Transforms are now NodeExpression objects, not callable functions
     // The fileToDataUri and other builders are exported from @coasys/ad4m
@@ -320,6 +356,22 @@ describe("Ad4mModel.fromJSONSchema() with getModelMetadata()", () => {
 
     expect(metadata.properties.email.predicate).toBe("foaf://mbox");
     expect(metadata.properties.email.local).toBe(true);
+  });
+
+  it("reads x-ad4m monotonic from a JSON schema (#1176)", () => {
+    const RoleClass = Ad4mModel.fromJSONSchema({
+      title: "Role",
+      type: "object",
+      properties: {
+        member: { type: "string", "x-ad4m": { through: "role://member", monotonic: true } },
+        note: { type: "string", "x-ad4m": { through: "role://note" } },
+      },
+    }, { name: "MonotonicSchemaRole" });
+
+    const { shape } = (RoleClass as any).generateSHACL();
+    const byPath = (p: string) => shape.properties.find((prop: any) => prop.path === p);
+    expect(byPath("role://member").monotonic).toBe(true);
+    expect(byPath("role://note").monotonic).toBeUndefined();
   });
 
   it("should handle property mapping override in options", () => {

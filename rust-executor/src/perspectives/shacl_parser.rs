@@ -81,6 +81,14 @@ pub struct PropertyShape {
     pub max_count: Option<u32>,
     pub writable: Option<bool>,
     pub local: Option<bool>,
+    /// Declares `path` monotonic (#1176): a Shared link under it ends only
+    /// by tombstone. Emitted as `ad4m://monotonic` →
+    /// `literal:string:<path>` on the property node; the flag names the
+    /// predicate itself, so the declaration does not depend on `sh://path`.
+    /// Counts only when the neighbourhood author wrote it
+    /// (`monotonic::MonotonicDeclared`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monotonic: Option<bool>,
     /// Sole selector of storage mode. `None` → deterministic typed
     /// literal (fast POS-index path, the default). `Some("literal")` →
     /// signed envelope on the built-in literal language. `Some(<addr>)`
@@ -1699,6 +1707,15 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
                 source: prop_shape_uri.clone(),
                 predicate: Some("ad4m://local".to_string()),
                 target: format!("literal:{}", local),
+            });
+        }
+
+        // Only `true` emits: a declaration cannot be withdrawn.
+        if prop.monotonic == Some(true) {
+            links.push(Link {
+                source: prop_shape_uri.clone(),
+                predicate: Some(super::monotonic::MONOTONIC_FLAG_PREDICATE.to_string()),
+                target: ad4m_client::literal::Literal::from_string(prop.path.clone()).to_url()?,
             });
         }
 

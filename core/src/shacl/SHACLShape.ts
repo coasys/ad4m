@@ -173,6 +173,13 @@ export interface SHACLPropertyShape {
   /** AD4M-specific: Local-only property */
   local?: boolean;
 
+  /**
+   * AD4M-specific: Shared links under `path` end only by tombstone (#1176).
+   * `fromLinks` reports the flag naming `path`; whether it declares anything
+   * is the executor's call (author-gated), not this field's.
+   */
+  monotonic?: boolean;
+
   /** AD4M-specific: Writable property */
   writable?: boolean;
 
@@ -564,6 +571,16 @@ export class SHACLShape {
           target: `literal:${prop.local}`
         });
       }
+
+      // The flag names the predicate itself, not a boolean: see the
+      // executor's `monotonic.rs`.
+      if (prop.monotonic) {
+        links.push({
+          source: propShapeId,
+          predicate: "ad4m://monotonic",
+          target: Literal.from(prop.path).toUrl()
+        });
+      }
       
       if (prop.writable !== undefined) {
         links.push({
@@ -770,6 +787,9 @@ export class SHACLShape {
         maxInclusive: num(id, "sh://maxInclusive", parseFloat),
         hasValue: hasValue?.startsWith('literal:string:') ? decodeURIComponent(hasValue.slice(15)) : hasValue,
         local: bool(id, "ad4m://local"),
+        // The flag names the predicate itself; one naming another path is not this property's.
+        monotonic: links.some(l => l.source === id && l.predicate === "ad4m://monotonic"
+          && l.target === Literal.from(path).toUrl()) || undefined,
         writable: bool(id, "ad4m://writable"),
         resolveLanguage: str(id, "ad4m://resolveLanguage"),
         setter: json(id, "ad4m://setter"),
@@ -819,6 +839,7 @@ export class SHACLShape {
         pattern: p.pattern,
         has_value: p.hasValue,
         local: p.local,
+        monotonic: p.monotonic,
         writable: p.writable,
         resolve_language: p.resolveLanguage,
         setter: p.setter,
@@ -877,6 +898,7 @@ export class SHACLShape {
         pattern: p.pattern,
         hasValue: p.has_value,
         local: p.local,
+        monotonic: p.monotonic,
         writable: p.writable,
         resolveLanguage: p.resolve_language,
         setter: p.setter,
