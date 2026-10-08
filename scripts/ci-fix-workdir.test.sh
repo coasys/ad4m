@@ -26,7 +26,11 @@ STEP="$(awk '
         match($0, /^ */)
         if (!indent) indent = RLENGTH
         if (RLENGTH < indent) exit
-        print substr($0, indent + 1)
+        line = substr($0, indent + 1)
+        # CircleCI reads `<<` as its parameter tag, so the config escapes a
+        # here-string as `\<<<`; the runner sees `<<<`, and so must this test.
+        gsub(/\\<</, "<<", line)
+        print line
     }
 ' "$CONFIG")"
 if [ -z "$STEP" ] || ! grep -q 'git fsck --connectivity-only' <<<"$STEP"; then
@@ -117,8 +121,71 @@ mv "$TMP/origin.away" "$TMP/origin"
 grep -q "fsck --connectivity-only failed" <<<"$STEP_LOG" || fail "fsck failure not logged: $STEP_LOG"
 grep -q "broken link from" <<<"$STEP_LOG" || fail "fsck output not logged: $STEP_LOG"
 grep -q "remote.origin.promisor=true" <<<"$STEP_LOG" || fail "partial-clone config not logged: $STEP_LOG"
+grep -q "remote.origin.partialclonefilter=blob:none" <<<"$STEP_LOG" || fail "partial-clone filter not logged: $STEP_LOG"
 grep -q "promisor packs=0" <<<"$STEP_LOG" || fail "promisor pack count not logged: $STEP_LOG"
 grep -q "missing objects reachable from refs -- removing .git" <<<"$STEP_LOG" || fail "heal not logged: $STEP_LOG"
+
+echo "partial clone whose promisor config was lost (2026-09-30 state): healed, state logged"
+# The runners' clones carry remote.origin.promisor and .partialclonefilter and
+# no extensions.partialClone; losing the two leaves no promisor remote, and
+# fsck then reports every missing blob.
+make_workdir --filter=blob:none
+git -C "$TMP/w" config --unset remote.origin.promisor
+git -C "$TMP/w" config --unset remote.origin.partialclonefilter
+git -C "$TMP/w" config --unset extensions.partialClone || true
+mv "$TMP/origin" "$TMP/origin.away"
+run_step "$TMP/w"
+mv "$TMP/origin.away" "$TMP/origin"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
+grep -q "broken link from" <<<"$STEP_LOG" || fail "fsck output not logged: $STEP_LOG"
+grep -q "remote.origin.promisor=unset" <<<"$STEP_LOG" || fail "lost promisor config not logged: $STEP_LOG"
+grep -q "remote.origin.partialclonefilter=unset" <<<"$STEP_LOG" || fail "lost filter config not logged: $STEP_LOG"
+grep -q "promisor packs=2" <<<"$STEP_LOG" || fail "promisor pack count not logged: $STEP_LOG"
+grep -q "missing objects reachable from refs -- removing .git" <<<"$STEP_LOG" || fail "heal not logged: $STEP_LOG"
+grep -q "initialising an empty repository" <<<"$STEP_LOG" || fail "no init log line: $STEP_LOG"
+
+echo "truncated pack (fsck prints more than a pipe buffer): healed, not killed by SIGPIPE"
+# Enough history that fsck's complaints exceed 64 KB: the step must not die of
+# SIGPIPE while printing the first 20 lines under bash -eo pipefail.
+git init -q "$TMP/big"
+for i in $(seq 1 40); do
+    echo "v$i" > "$TMP/big/f$((i % 7))"
+    git -C "$TMP/big" add -A
+    git -C "$TMP/big" commit -qm "c$i"
+done
+rm -rf "$TMP/w"
+git clone -q "file://$TMP/big" "$TMP/w" 2>/dev/null
+pack="$(ls "$TMP/w"/.git/objects/pack/*.pack)"
+chmod u+w "$pack"   # packs are written read-only
+truncate -s $(( $(stat -c %s "$pack") * 2 / 3 )) "$pack"
+run_step "$TMP/w"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC (SIGPIPE is 141): $(head -3 "$TMP/w.log")"
+lines="$(grep -o 'failed ([0-9]* lines' <<<"$STEP_LOG" | grep -o '[0-9]*')"
+[ "${lines:-0}" -gt 200 ] || fail "fixture too small to overflow a pipe: $lines fsck lines"
+[ "$(wc -l <<<"$STEP_LOG")" -lt 40 ] || fail "fsck output not capped at 20 lines: $(wc -l <<<"$STEP_LOG") lines logged"
+grep -q "missing objects reachable from refs -- removing .git" <<<"$STEP_LOG" || fail "heal not logged: $(tail -3 "$TMP/w.log")"
+grep -q "initialising an empty repository" <<<"$STEP_LOG" || fail "no init log line"
+
+echo "branch checked out in a linked worktree: kept, the rest dropped"
+make_workdir
+git -C "$TMP/w" worktree add -q "$TMP/linked" "stale/one" 2>/dev/null
+run_step "$TMP/w"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
+[ "$(git -C "$TMP/w" for-each-ref --format='%(refname)' refs/heads)" = "refs/heads/stale/one" ] \
+    || fail "wrong branches left: $(git -C "$TMP/w" for-each-ref --format='%(refname)' refs/heads | tr '\n' ' ')"
+[ "$(git -C "$TMP/linked" rev-parse --abbrev-ref HEAD)" = "stale/one" ] || fail "the linked worktree lost its branch"
+grep -q "removed 3 stale local branch ref(s)" <<<"$STEP_LOG" || fail "no branch-removal log line: $STEP_LOG"
+grep -q "kept branch(es) checked out in linked worktrees: refs/heads/stale/one" <<<"$STEP_LOG" || fail "kept branch not logged: $STEP_LOG"
+git -C "$TMP/w" worktree remove --force "$TMP/linked"
+
+echo "dangling .git file (worktree gitlink): healed by the first check"
+rm -rf "$TMP/w"; mkdir -p "$TMP/w/target"; echo cached > "$TMP/w/target/x"
+echo "gitdir: $TMP/nowhere/.git/worktrees/w" > "$TMP/w/.git"
+run_step "$TMP/w"
+[ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
+grep -q "corrupted .git (git rev-parse fails) -- removing .git" <<<"$STEP_LOG" || fail "heal not logged: $STEP_LOG"
+[ -d "$TMP/w/.git" ] || fail "no repository initialised over the gitlink"
+[ "$(cat "$TMP/w/target/x")" = cached ] || fail "untracked cache lost"
 
 echo "clone missing a loose object: healed, empty repo initialised over the files"
 make_workdir
