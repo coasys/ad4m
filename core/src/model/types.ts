@@ -763,6 +763,8 @@ export interface RelationMetadata {
   predicate: string;
   /** Custom getter code */
   getter?: string;
+  /** No writer for this relation: `save()` and `create()` skip it */
+  readOnly?: boolean;
   /** Whether stored locally only */
   local?: boolean;
   /** Link direction: 'forward' for HasMany/HasOne, 'reverse' for BelongsToMany/BelongsToOne */

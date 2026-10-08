@@ -27,6 +27,7 @@ pub mod runtime_ws;
 pub mod users_ws;
 pub mod ws_handler;
 
+use crate::agent::capabilities::ListenerReach;
 use crate::Ad4mConfig;
 use auth::AppState;
 use axum::{
@@ -120,6 +121,84 @@ pub fn api_router(state: AppState) -> Router {
     .layer(cors)
 }
 
+/// The API router for one listener, marked with who can connect to it.
+///
+/// Every listener the executor binds goes through here, so the auth extractors know whether
+/// a caller without a token is on this machine. Without an admin credential that caller is
+/// the operator on a loopback listener, and anonymous on any other (#1059). The reach comes
+/// from the bound socket itself, so no call site can mark a listener with an address it did
+/// not bind.
+pub fn listener_router(
+    state: AppState,
+    listener: &tokio::net::TcpListener,
+) -> std::io::Result<Router> {
+    let addr = listener.local_addr()?;
+    let reach = ListenerReach::of(&addr);
+    if reach == ListenerReach::Network && state.admin_credential.is_none() {
+        log::warn!(
+            "API on {addr} is reachable from the network and no --admin-credential is set. \
+             Callers there without a token can only request a capability, check whether \
+             multi-user mode is on and sign up and log in when it is; they are not the operator. Set an admin credential to \
+             administer this node remotely."
+        );
+    }
+    Ok(api_router(state).layer(Extension(reach)))
+}
+
+/// The API's listeners, bound, each with the router marked from its own socket.
+pub(crate) struct ApiListeners {
+    /// Cleartext HTTP and WebSocket.
+    pub http: (tokio::net::TcpListener, Router),
+    /// HTTPS and WSS, when TLS is configured and its port could be bound.
+    pub https: Option<(std::net::TcpListener, Router)>,
+}
+
+/// Binds the API's listeners. With TLS the cleartext listener is on 127.0.0.1 and the TLS
+/// one on 0.0.0.0; without, the cleartext listener is on 127.0.0.1 unless `localhost` is
+/// false.
+pub(crate) async fn bind_api_listeners(
+    state: AppState,
+    port: u16,
+    localhost: bool,
+    tls_port: Option<u16>,
+) -> std::io::Result<ApiListeners> {
+    let address: [u8; 4] = if localhost || tls_port.is_some() {
+        [127, 0, 0, 1]
+    } else {
+        [0, 0, 0, 0]
+    };
+    let listener = tokio::net::TcpListener::bind(SocketAddr::from((address, port))).await?;
+    let app = listener_router(state.clone(), &listener)?;
+
+    let https = match tls_port {
+        None => None,
+        Some(tls_port) => {
+            match tokio::net::TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], tls_port))).await {
+                Ok(tls_listener) => {
+                    let tls_app = listener_router(state, &tls_listener)?;
+                    // axum-server serves a std socket; `into_std` leaves it non-blocking.
+                    Some((tls_listener.into_std()?, tls_app))
+                }
+                // As before, a TLS listener that cannot start does not stop the cleartext one.
+                Err(e) => {
+                    log::error!(
+                        "API HTTPS listener on port {tls_port} could not start: {e}. The remote \
+                         API is unavailable: the cleartext listener is on 127.0.0.1:{port} \
+                         because TLS is configured. Free port {tls_port} and restart the \
+                         executor to restore remote access."
+                    );
+                    None
+                }
+            }
+        }
+    };
+
+    Ok(ApiListeners {
+        http: (listener, app),
+        https,
+    })
+}
+
 /// Start the API server (HTTP + WebSocket).
 pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // Set global SMTP config for email verification
@@ -132,78 +211,87 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     let auto_permit = config.auto_permit_cap_requests.unwrap_or(false);
 
     let state = AppState {
-        admin_credential: admin_credential.clone(),
+        admin_credential,
         auto_permit_cap_requests: auto_permit,
     };
 
-    let app = api_router(state);
-
-    // With TLS, remote clients use the HTTPS listener, so cleartext stays on loopback.
-    let ip: [u8; 4] = if let Some(tls_config) = &config.tls {
-        let tls_port = tls_config.tls_port;
-
-        let tls_state = AppState {
-            admin_credential: admin_credential.clone(),
-            auto_permit_cap_requests: auto_permit,
-        };
-        let tls_app = api_router(tls_state);
-
-        // A bad certificate or key is not fatal: the API keeps serving on
-        // 127.0.0.1, as when the HTTPS bind fails below. The launcher embeds
-        // the executor and relies on this. It starts with a broken TLS path
-        // so the user can fix it on the Hosting page.
-        match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+    // A bad certificate or key is not fatal: the API keeps serving on 127.0.0.1,
+    // as when the HTTPS bind fails. The launcher embeds the executor and relies
+    // on this. It starts with a broken TLS path so the user can fix it on the
+    // Hosting page.
+    let rustls_config = match &config.tls {
+        Some(tls_config) => match axum_server::tls_rustls::RustlsConfig::from_pem_file(
             &tls_config.cert_file_path,
             &tls_config.key_file_path,
         )
         .await
         {
-            Ok(rustls_config) => {
-                log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
-                tokio::spawn(async move {
-                    axum_server::bind_rustls(
-                        SocketAddr::from(([0, 0, 0, 0], tls_port)),
-                        rustls_config,
-                    )
-                    .serve(tls_app.into_make_service())
-                    .await
-                    // Same reasoning as the MCP HTTPS listener: the cleartext API
-                    // below is bound to 127.0.0.1 because TLS is *configured*, not
-                    // because this task bound. If it fails, the API has no remote
-                    // surface, and "TLS server error" is not a sentence an operator
-                    // maps to that outage.
-                    .unwrap_or_else(|e| {
-                        log::error!(
-                            "API HTTPS listener on port {tls_port} stopped: {e}. The remote API \
-                             is now unavailable: the cleartext listener is on 127.0.0.1:{port} \
-                             because TLS is configured. Free port {tls_port} and restart the \
-                             executor to restore remote access."
-                        )
-                    });
-                });
+            Ok(rustls_config) => Some(rustls_config),
+            Err(e) => {
+                log::error!(
+                    "API HTTPS listener on port {} not started: TLS config error for \
+                     certificate {} and key {}: {e}. The remote API is unavailable: the \
+                     cleartext listener is on 127.0.0.1:{port} because TLS is configured. Fix \
+                     the TLS settings and restart the executor to restore remote access.",
+                    tls_config.tls_port,
+                    tls_config.cert_file_path,
+                    tls_config.key_file_path,
+                );
+                None
             }
-            Err(e) => log::error!(
-                "API HTTPS listener on port {tls_port} not started: TLS config error for \
-                 certificate {} and key {}: {e}. The remote API is unavailable: the cleartext \
-                 listener is on 127.0.0.1:{port} because TLS is configured. Fix the TLS \
-                 settings and restart the executor to restore remote access.",
-                tls_config.cert_file_path,
-                tls_config.key_file_path,
-            ),
-        }
-        [127, 0, 0, 1]
-    } else if config.localhost.unwrap_or(true) {
-        [127, 0, 0, 1]
-    } else {
-        [0, 0, 0, 0]
+        },
+        None => None,
     };
 
-    let listener = tokio::net::TcpListener::bind(SocketAddr::from((ip, port))).await?;
-    // Log only once bound: test harnesses (tests/js startExecutor) connect on this line.
+    let ApiListeners {
+        http: (listener, app),
+        https,
+    } = bind_api_listeners(
+        state,
+        port,
+        // With TLS configured, cleartext stays on loopback even when the certificate failed.
+        config.localhost.unwrap_or(true) || config.tls.is_some(),
+        // Only bind the TLS port when there is a certificate to serve on it.
+        rustls_config
+            .as_ref()
+            .and(config.tls.as_ref().map(|tls| tls.tls_port)),
+    )
+    .await?;
+
+    // The listeners are bound before these lines. Test harnesses (tests/js startExecutor) take
+    // the cleartext "API server starting on" line as the server being ready, so it is logged
+    // with and without TLS.
+    if let (Some((tls_listener, tls_app)), Some(rustls_config)) = (https, rustls_config) {
+        let tls_port = tls_listener.local_addr()?.port();
+        log::info!(
+            "Starting API server (HTTPS) on {}",
+            tls_listener.local_addr()?
+        );
+
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(tls_listener, rustls_config)
+                .serve(tls_app.into_make_service())
+                .await
+                // Same reasoning as the MCP HTTPS listener: the cleartext API
+                // below is bound to 127.0.0.1 because TLS is *configured*, not
+                // because this task bound. If it fails, the API has no remote
+                // surface, and "TLS server error" is not a sentence an operator
+                // maps to that outage.
+                .unwrap_or_else(|e| {
+                    log::error!(
+                        "API HTTPS listener on port {tls_port} stopped: {e}. The remote API is \
+                         now unavailable: the cleartext listener is on 127.0.0.1:{port} because \
+                         TLS is configured. Free port {tls_port} and restart the executor to \
+                         restore remote access."
+                    )
+                });
+        });
+    }
     log::info!(
         "API server starting on http://{}/api/v1",
         listener.local_addr()?
     );
+
     axum::serve(listener, app.into_make_service()).await?;
 
     Ok(())

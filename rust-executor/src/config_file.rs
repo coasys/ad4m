@@ -17,7 +17,8 @@
 //! `launcher-state.json` through [`MultiUserSettings`] and [`TlsSettings`]
 //! too, and must keep reading a file a later launcher added keys to.
 //!
-//! A secret must not be empty, and a secret file must not be readable by
+//! No string value may be empty or only whitespace. A secret must not be
+//! empty, and a secret file must not be readable by
 //! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
@@ -51,6 +52,11 @@ pub enum ConfigFileError {
         file_var: String,
     },
     UnknownKey {
+        path: PathBuf,
+        key: String,
+    },
+    /// A string value that is empty or only whitespace.
+    EmptyValue {
         path: PathBuf,
         key: String,
     },
@@ -90,6 +96,11 @@ impl fmt::Display for ConfigFileError {
                     path.display()
                 )
             }
+            Self::EmptyValue { path, key } => write!(
+                f,
+                "invalid config file {}: `{key}` is empty or only whitespace; give it a value",
+                path.display()
+            ),
             Self::EmptySecret { source } => write!(f, "the secret in {source} is empty"),
             Self::MissingSmtpPassword => write!(
                 f,
@@ -118,6 +129,10 @@ impl ConfigFileError {
                 message,
             },
             Self::UnknownKey { key, .. } => Self::UnknownKey {
+                path: file.to_path_buf(),
+                key,
+            },
+            Self::EmptyValue { key, .. } => Self::EmptyValue {
                 path: file.to_path_buf(),
                 key,
             },
@@ -348,6 +363,26 @@ fn key_path(path: &serde_ignored::Path) -> String {
     }
 }
 
+/// The dotted path of the first string value in `value` that is empty or
+/// only whitespace. `at` is the path of `value` itself.
+fn first_blank_string(value: &serde_json::Value, at: &str) -> Option<String> {
+    let join = |key: &dyn fmt::Display| match at {
+        "" => key.to_string(),
+        at => format!("{at}.{key}"),
+    };
+    match value {
+        serde_json::Value::String(text) if text.trim().is_empty() => Some(at.to_string()),
+        serde_json::Value::Object(object) => object
+            .iter()
+            .find_map(|(key, value)| first_blank_string(value, &join(key))),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, value)| first_blank_string(value, &join(&index))),
+        _ => None,
+    }
+}
+
 impl ExecutorConfigFile {
     pub fn load(path: &Path) -> Result<Self, ConfigFileError> {
         let text = std::fs::read_to_string(path).map_err(|error| ConfigFileError::Read {
@@ -358,7 +393,9 @@ impl ExecutorConfigFile {
     }
 
     /// Parses a config file's text: [`INLINE_SECRETS`] first, then the
-    /// shape, rejecting any key the types do not know, at any depth.
+    /// shape, rejecting any key the types do not know, at any depth, then
+    /// any empty or whitespace-only string value (an unset key keeps the
+    /// executor's default, an empty one would not).
     pub fn parse(text: &str) -> Result<Self, ConfigFileError> {
         let unlocated = |error| ConfigFileError::Parse {
             path: PathBuf::new(),
@@ -374,13 +411,20 @@ impl ExecutorConfigFile {
                 message,
             });
         }
+        let blank = first_blank_string(&json, "");
         let mut unknown = None;
         let file = serde_ignored::deserialize(json, |path| {
             unknown.get_or_insert_with(|| key_path(&path));
         })
         .map_err(unlocated)?;
-        match unknown {
-            Some(key) => Err(ConfigFileError::UnknownKey {
+        if let Some(key) = unknown {
+            return Err(ConfigFileError::UnknownKey {
+                path: PathBuf::new(),
+                key,
+            });
+        }
+        match blank {
+            Some(key) => Err(ConfigFileError::EmptyValue {
                 path: PathBuf::new(),
                 key,
             }),
@@ -560,6 +604,52 @@ mod tests {
             let err = parse(json).unwrap_err().to_string();
             assert!(err.contains(&format!("unknown key `{key}`")), "{err}");
         }
+    }
+
+    /// `"app_data_path": ""` would parse and keep the executor's default
+    /// unapplied (`prepare()` fills in only `None`), so an empty or
+    /// whitespace-only string is an error that names its key, at any depth.
+    #[test]
+    fn an_empty_or_whitespace_only_string_value_is_rejected() {
+        let tls = |cert: &str| {
+            format!(
+                r#"{{"multi_user_config": {{"enabled": true, "smtp_config": null,
+                    "tls_config": {{"enabled": true, "cert_file_path": "{cert}",
+                                   "key_file_path": "/k", "tls_port": null}}}}}}"#
+            )
+        };
+        for blank in ["", " ", "\t", " \n "] {
+            let blank_json = serde_json::to_string(blank).unwrap();
+            for (json, key) in [
+                (
+                    format!(r#"{{"app_data_path": {blank_json}}}"#),
+                    "app_data_path",
+                ),
+                (
+                    tls(blank_json.trim_matches('"')),
+                    "multi_user_config.tls_config.cert_file_path",
+                ),
+                (
+                    SMTP_FILE.replace(r#""smtp.example""#, &blank_json),
+                    "multi_user_config.smtp_config.host",
+                ),
+                (
+                    format!(r#"{{"log_config": {{"holochain": {blank_json}}}}}"#),
+                    "log_config.holochain",
+                ),
+            ] {
+                let err = parse(&json)
+                    .err()
+                    .unwrap_or_else(|| panic!("{key} = {blank:?} parsed"))
+                    .to_string();
+                assert!(
+                    err.contains(&format!("`{key}`")),
+                    "{key} = {blank:?}: {err}"
+                );
+                assert!(err.contains("empty"), "{key} = {blank:?}: {err}");
+            }
+        }
+        assert!(parse(&tls("/c")).is_ok());
     }
 
     #[test]

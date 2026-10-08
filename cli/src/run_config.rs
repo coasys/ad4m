@@ -15,12 +15,12 @@ use rust_executor::config_file::{ExecutorConfigFile, ExecutorSecrets, REDACTED};
 use rust_executor::Ad4mConfig;
 use std::path::PathBuf;
 
-/// Refuses an empty value, then parses with `P`. clap hands an empty
-/// `AD4M_<FLAG>` to the parser as `""`, so without this
+/// Refuses an empty or whitespace-only value, then parses with `P`. clap
+/// hands an empty `AD4M_<FLAG>` to the parser as `""`, so without this
 /// `AD4M_APP_DATA_PATH=${DATA_DIR}` with `DATA_DIR` unset would lay `""`
-/// over the file and put the data directory under the working directory.
-/// The error names the variable or the flag the value came from, never the
-/// value.
+/// over the file and put the data directory under the working directory
+/// (and `" "` would create a directory named ` ` there). The error names the
+/// variable or the flag the value came from, never the value.
 #[derive(Clone)]
 struct NonEmpty<P>(P);
 
@@ -47,7 +47,8 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
         value: &std::ffi::OsStr,
         source: ValueSource,
     ) -> Result<Self::Value, clap::Error> {
-        if !value.is_empty() {
+        let blank = value.to_str().is_some_and(|value| value.trim().is_empty());
+        if !blank {
             return self.0.parse_ref_(cmd, arg, value, source);
         }
         let var = arg
@@ -56,10 +57,12 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
         let flag = arg.and_then(|arg| arg.get_long());
         let message = match (source, var, flag) {
             (ValueSource::EnvVariable, Some(var), _) => {
-                format!("{var} is set but empty: unset it or give it a value")
+                format!("{var} is set but empty or only whitespace: unset it or give it a value")
             }
-            (_, _, Some(flag)) => format!("--{flag} needs a value, not an empty string"),
-            _ => "an empty value is not allowed".to_string(),
+            (_, _, Some(flag)) => {
+                format!("--{flag} needs a value, not an empty or whitespace-only string")
+            }
+            _ => "an empty or whitespace-only value is not allowed".to_string(),
         };
         Err(clap::Error::raw(ErrorKind::ValueValidation, message).format(&mut cmd.clone()))
     }
@@ -67,7 +70,8 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
 
 /// Flags of `ad4m-executor run`. Each also reads `AD4M_<FLAG>`, e.g.
 /// `--mcp-port` reads `AD4M_MCP_PORT`. Each goes through [`non_empty`], so
-/// an empty variable or flag value is an error rather than a value.
+/// an empty or whitespace-only variable or flag value is an error rather
+/// than a value.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
     /// JSON config file with the launcher's key names (see the docs'
@@ -157,6 +161,8 @@ pub struct RunArgs {
     #[arg(long, action, env = "AD4M_RUN_HOLOCHAIN", value_parser = non_empty(BoolValueParser::new()))]
     pub run_holochain: Option<bool>,
     /// Admin credential granting full capabilities to whoever presents it.
+    /// Required: `run` refuses to start without one unless
+    /// --insecure-no-admin-credential is set.
     /// Prefer AD4M_ADMIN_CREDENTIAL_FILE (or the AD4M_ADMIN_CREDENTIAL
     /// environment variable): a flag value is visible to every user on the
     /// host via `ps` and stays in shell history. Must not be empty.
@@ -168,6 +174,23 @@ pub struct RunArgs {
         value_parser = non_empty(StringValueParser::new())
     )]
     pub admin_credential: Option<String>,
+    /// For tests and local development only: start without an admin
+    /// credential. An empty token then has full admin access on a loopback
+    /// listener, so anyone who can reach it there (or through a proxy that
+    /// sets no forwarding header) controls the executor. On `--localhost
+    /// false`, the TLS listener, or with a forwarding header it is anonymous.
+    /// AD4M_INSECURE_NO_ADMIN_CREDENTIAL enables it only with `true`;
+    /// `false`, `0`, `no` or `off` leave it off. Must not be empty.
+    #[arg(
+        long,
+        env = "AD4M_INSECURE_NO_ADMIN_CREDENTIAL",
+        action = clap::ArgAction::Set,
+        num_args = 0..=1,
+        default_value = "false",
+        default_missing_value = "true",
+        value_parser = non_empty(parse_insecure_flag)
+    )]
+    pub insecure_no_admin_credential: bool,
     #[arg(long, action, env = "AD4M_LOCALHOST", value_parser = non_empty(BoolValueParser::new()))]
     pub localhost: Option<bool>,
     #[arg(
@@ -223,6 +246,19 @@ pub struct RunArgs {
     /// Useful for test harnesses that need targeted process cleanup.
     #[arg(long, env = "AD4M_PID_FILE", value_parser = non_empty(StringValueParser::new()))]
     pub pid_file: Option<String>,
+}
+
+/// Only the literal `true` enables the insecure mode; the usual "off"
+/// spellings disable it. Anything else is an error rather than a guess. An
+/// empty value never gets here: [`non_empty`] names the variable or flag.
+fn parse_insecure_flag(value: &str) -> Result<bool, String> {
+    match value {
+        "true" => Ok(true),
+        "false" | "0" | "no" | "off" => Ok(false),
+        other => Err(format!(
+            "`{other}`: use `true` to enable, or `false`, `0`, `no` or `off` to disable"
+        )),
+    }
 }
 
 /// The executor config plus the one secret `run` uses itself rather than
@@ -322,6 +358,7 @@ impl RunArgs {
         config.log_holochain_metrics = self.log_holochain_metrics;
         config.dynamic_class_tools = self.dynamic_class_tools;
         config.pid_file = self.pid_file;
+        config.insecure_no_admin_credential = Some(self.insecure_no_admin_credential);
         Ok(ResolvedRun {
             config,
             unlock_passphrase: secrets.unlock_passphrase,
@@ -871,7 +908,52 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 29, "every flag of run has a variable");
+        assert_eq!(checked, 30, "every flag of run has a variable");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A whitespace-only value is as empty as `""`: `AD4M_APP_DATA_PATH=" "`
+    /// would otherwise create a directory named ` ` under the working
+    /// directory. Every flag and its variable refuse it, naming themselves.
+    #[test]
+    fn a_whitespace_only_variable_or_flag_is_an_error_that_names_it() {
+        use clap::CommandFactory;
+        let _env = lock_env();
+        let dir = scratch_dir("blank-value");
+        let config = write_config(&dir, r#"{"app_data_path": "/from/file"}"#);
+        let mut wrong = Vec::new();
+        for arg in Cli::command().get_arguments() {
+            let Some(var) = arg.get_env().and_then(|var| var.to_str()) else {
+                continue;
+            };
+            let var: &'static str = Box::leak(var.to_owned().into_boxed_str());
+            let flag = format!("--{}", arg.get_long().unwrap());
+            let file: &[&str] = if var == "AD4M_CONFIG" {
+                &[]
+            } else {
+                &["--config", &config]
+            };
+            for blank in [" ", "\t", " \n "] {
+                let mut argv = file.to_vec();
+                argv.extend([flag.as_str(), blank]);
+                for (name, result) in [
+                    (var, resolve(file, &[(var, blank)])),
+                    (flag.as_str(), resolve(&argv, &[])),
+                ] {
+                    match result {
+                        Ok(resolved) => wrong.push(format!(
+                            "{name}={blank:?} accepted, app_data_path {:?}",
+                            resolved.config.app_data_path
+                        )),
+                        Err(err) if !format!("{err:#}").contains(name) => {
+                            wrong.push(format!("{name}={blank:?}: {}", format!("{err:#}").trim()))
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
