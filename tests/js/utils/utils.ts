@@ -1,5 +1,5 @@
 import { ChildProcess, exec, ExecException, execSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -200,11 +200,15 @@ function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
     return sharedLocalServices;
 }
 
-/** Empties a test agent's app data dir before startExecutor. */
+/**
+ * Empties a test agent's app data dir before startExecutor. The path may be
+ * a symlink left by an earlier run to a /tmp/ad4m-* dir that has since been
+ * deleted: existsSync() is false for such a link and mkdirSync() fails with
+ * ENOENT through it, so remove unconditionally (rmSync removes the link, not
+ * its target).
+ */
 export function resetAppDataPath(appDataPath: string) {
-    if (existsSync(appDataPath)) {
-        rmSync(appDataPath, { recursive: true });
-    }
+    rmSync(appDataPath, { recursive: true, force: true });
     mkdirSync(appDataPath, { recursive: true });
 }
 
