@@ -61,7 +61,9 @@ ORIGIN_HEAD="$(git -C "$TMP/origin" rev-parse HEAD)"
 # from earlier jobs, an untracked cache dir and a modified tracked file.
 make_workdir() {
     rm -rf "$TMP/w"
-    git clone -q "$@" "file://$TMP/origin" "$TMP/w"
+    # stderr dropped: a blob:none clone's checkout fetches HEAD's blobs and
+    # shows progress on a TTY.
+    git clone -q "$@" "file://$TMP/origin" "$TMP/w" 2>/dev/null
     git -C "$TMP/w" checkout -q -b "fix/some-pr" HEAD
     git -C "$TMP/w" branch -q "stale/one" HEAD~1
     git -C "$TMP/w" branch -q "stale/two" HEAD~2
@@ -107,7 +109,7 @@ grep -q "removing .git" <<<"$STEP_LOG" && fail "healthy partial clone logged a h
 
 echo "partial clone without its .promisor markers: healed, state logged"
 make_workdir --filter=blob:none
-rm "$TMP/w"/.git/objects/pack/*.promisor
+rm -f "$TMP/w"/.git/objects/pack/*.promisor   # -f: git's object files are read-only, and rm asks on a TTY
 mv "$TMP/origin" "$TMP/origin.away"
 run_step "$TMP/w"
 mv "$TMP/origin.away" "$TMP/origin"
@@ -122,7 +124,7 @@ echo "clone missing a loose object: healed, empty repo initialised over the file
 make_workdir
 echo local > "$TMP/w/g"; git -C "$TMP/w" add g; git -C "$TMP/w" commit -qm loose   # loose objects to delete
 blob="$(git -C "$TMP/w" rev-parse HEAD:g)"
-rm "$TMP/w/.git/objects/${blob:0:2}/${blob:2}"
+rm -f "$TMP/w/.git/objects/${blob:0:2}/${blob:2}"
 run_step "$TMP/w"
 [ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
 grep -q "missing blob $blob" <<<"$STEP_LOG" || fail "fsck output not logged: $STEP_LOG"
@@ -137,7 +139,7 @@ grep -q "initialising an empty repository" <<<"$STEP_LOG" || fail "no init log l
 
 echo "clone whose pack is gone (refs point nowhere): healed"
 make_workdir
-rm "$TMP/w"/.git/objects/pack/*.pack
+rm -f "$TMP/w"/.git/objects/pack/*.pack
 run_step "$TMP/w"
 [ "$STEP_RC" = 0 ] || fail "step exited $STEP_RC: $STEP_LOG"
 grep -q "invalid sha1 pointer" <<<"$STEP_LOG" || fail "fsck output not logged: $STEP_LOG"
