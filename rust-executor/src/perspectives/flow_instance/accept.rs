@@ -56,7 +56,7 @@ use std::collections::HashMap;
 /// state, when its outputs commitment fails [`check_outputs_commitment`]
 /// (each failure names its own `OutputsRefusal`). Returns whatever
 /// settled as a result, which may be nothing: a vote that does not yet reach
-/// quorum is a landed vote, not a failure. A settle this vote completed is
+/// quorum is a landed vote, not a failure. A settle this vote counts in is
 /// reported even when a concurrent pass recorded it first
 /// ([`run_pass_after_vote`]).
 pub async fn accept_flow_proposal(
@@ -76,7 +76,9 @@ pub(crate) struct CastVote {
     /// had not yet contributed to a settled edge. `None` when the DID had
     /// already voted (the call wrote nothing), or when the proposal already
     /// settled an edge on an earlier visit to its state, in a cyclic flow:
-    /// a vote there completes nothing.
+    /// a vote there counts in nothing. `Some` does not mean the vote will
+    /// count: a duplicate DID on a twin proposal, or a vote outside the
+    /// first `n`, does not, and [`run_pass_after_vote`] checks that.
     pub own: Option<OwnVote>,
 }
 

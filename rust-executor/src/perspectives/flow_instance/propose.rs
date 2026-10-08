@@ -105,7 +105,7 @@ pub struct ProposeOutcome {
     /// means the acting DID had already voted: the call changed nothing.
     pub recorded_vote: bool,
     /// Consensus events this call's pass recorded for the first time, and
-    /// the settle this call's vote completed even when a concurrent pass on
+    /// the settle this call's vote counts in even when a concurrent pass on
     /// this replica recorded it first (#1332). Empty while the edge is still
     /// short of quorum — read with `recorded_vote` to tell "your vote landed,
     /// waiting for others" from "nothing to do".
@@ -314,7 +314,7 @@ pub async fn propose_flow_transition(
         // The production accept path, so this vote is verified exactly as any
         // other co-sign is: it re-derives the seal on this replica and refuses
         // rather than signing what it cannot reproduce. It runs the consensus
-        // pass itself, and reports the settle this vote completed even if a
+        // pass itself, and reports the settle this vote counts in even if a
         // concurrent pass marked it first — a second sweep here would find
         // every mark already written and return nothing.
         (None, Some(uri)) => {

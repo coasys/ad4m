@@ -29,7 +29,7 @@ minted: boolean,
 recordedVote: boolean, 
 /**
  * Consensus events this call's pass recorded for the first time, and
- * the settle this call's vote completed even when a concurrent pass on
+ * the settle this call's vote counts in even when a concurrent pass on
  * this replica recorded it first (#1332). Empty while the edge is still
  * short of quorum — read with `recorded_vote` to tell "your vote landed,
  * waiting for others" from "nothing to do".

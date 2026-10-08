@@ -4,7 +4,9 @@
  * One consensus event recorded on this replica: the atoms that settled an
  * edge, now marked, with the cache advanced to match. A pass reports it
  * when it records it for the first time; the pass after a vote also
- * reports the one that vote completed ([`run_pass_after_vote`]).
+ * reports the one that vote counts in ([`run_pass_after_vote`]). So one
+ * settle can appear in more than one response on one replica: two users of
+ * it whose votes both count in the quorum, both racing the same sweep.
  */
 export type FireOutcome = { instanceUri: string, fromState: string, toState: string, 
 /**
