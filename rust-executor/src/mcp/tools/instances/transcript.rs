@@ -38,8 +38,10 @@ pub struct InstanceTranscriptParams {
     pub parent: String,
     /// How many of the most recent instances to include (default 50, max 500)
     pub limit: Option<usize>,
-    /// Which property holds the text shown per entry. Defaults to `body`,
-    /// falling back to the class's identity property.
+    /// Which property holds the text shown per entry. Defaults to the property
+    /// whose predicate the perspective declares as message text
+    /// (`rdfs:subPropertyOf ad4m://message_text`), then `body`, then the class's
+    /// identity property.
     pub text_property: Option<String>,
 }
 
@@ -88,7 +90,7 @@ fn render_text(instance: &Value, text_property: &str) -> String {
 impl Ad4mMcpHandler {
     /// Read the most recent children of one class under a node as a transcript.
     #[tool(
-        description = "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
+        description = "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order — one entry per instance with its timestamp, author display name and DID, and its text property (by default the one the perspective declares as message text, else body). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M …)'. Use instance_query for the full property maps or for filters."
     )]
     pub async fn instance_transcript(
         &self,
@@ -108,8 +110,10 @@ impl Ad4mMcpHandler {
             return error_json("parent must be a non-empty URI");
         }
 
-        // Which property to print: the caller's choice, else `body`, else the
-        // class's identity property — and a clear error if none applies.
+        // Which property to print: the caller's choice, else one whose
+        // predicate the perspective declares as message text, else `body`,
+        // else the class's identity property — and a clear error if none
+        // applies.
         // Only single-valued, non-flag properties qualify (a collection
         // renders as an array, a flag is a class marker), so the lookup is
         // restricted to exactly the set the error message offers.
@@ -149,14 +153,19 @@ impl Ad4mMcpHandler {
                 }
             },
             _ => {
-                match find_property(&scalars, "body")
+                let text_predicates = perspective.message_text_predicates().await;
+                match scalars
+                    .iter()
+                    .find(|i| text_predicates.iter().any(|p| p == i.predicate()))
+                    .or_else(|| find_property(&scalars, "body"))
                     .or_else(|| scalars.iter().find(|i| i.identity()))
                 {
                     Some(info) => info.name().to_string(),
                     None => {
                         return error_json(format!(
-                            "Class '{}' has neither a `body` nor an identity property — pass \
-                         text_property. Single-valued properties: {}",
+                            "Class '{}' has no declared message-text property, no `body` and \
+                         no identity property — pass text_property. Single-valued \
+                         properties: {}",
                             class_name,
                             scalar_names.join(", ")
                         ))

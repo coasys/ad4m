@@ -16,6 +16,7 @@ or writes the graph. Split plan: spec items 3, 7, 8.
 | `subject_classes_of.rs` | Which classes a URI conforms to (SPARQL) |
 | `declared_roles.rs` | Roles a perspective's own predicates play, declared as `<pred> rdfs:subPropertyOf <role>`; only the owner's or neighbourhood author's declarations count. `declared_for(role)` (cached per role, all dropped on any `subPropertyOf` write) |
 | `containment.rs` | Containment role: `ad4m://has_child` plus its declared sub-properties. `containment_predicates()`, `model_query_contained_by` (the MCP `parent=` reads, via `Scope::Contained`, which is never on the wire) |
+| `message_text.rs` | Message-text role `ad4m://message_text`: which predicates hold a message's text, for mention matching and transcripts. `message_text_predicates()` |
 | `sdna.rs`, `shacl_to_prolog.rs` | Prolog fact generation from links/SHACL. Only used when Prolog mode ≠ Disabled |
 | `flow_classes.rs`, `flow_evaluator.rs`, `flow_spawn.rs`, `flow_semantic_check.rs`, `flow_context/` | SHACLFlow state machines: hard-wired classes, deterministic transition evaluation, spawn candidates, LLM flow context. Moving to `agentic/` (spec item 7) |
 | `interpretation/` | LLM interpretation: text → typed subjects. `run.rs` orchestrates, `prompt.rs`, `parse.rs`, `dedup.rs`, `graph/{read,write}.rs`, `overlay/` (provenance + human accept). Depends on `ai_service::harness` |

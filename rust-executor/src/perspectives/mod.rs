@@ -25,6 +25,7 @@ pub mod declared_roles;
 #[cfg(test)]
 pub(crate) mod interpretation_test_support;
 pub mod memory_diagnostics;
+pub mod message_text;
 pub mod migration;
 pub mod model_query;
 pub mod ordering;

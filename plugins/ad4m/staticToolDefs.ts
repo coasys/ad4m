@@ -610,7 +610,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
   },
   {
     "name": "instance_transcript",
-    "description": "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (body by default). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
+    "description": "Read the most recent instances of a class contained by a node (ad4m://has_child, or any predicate the perspective declares as containment), as a plain-text transcript in chronological order \u2014 one entry per instance with its timestamp, author display name and DID, and its text property (by default the one the perspective declares as message text, else body). Ideal for reading a conversation-shaped container in one call, whatever the app calls it (e.g. class_name='Message', parent=<channel id>) — use describe_perspective to find this space's class and text property. limit picks how many of the newest to show (default 50); when there are more, the output starts with '(showing last N of M \u2026)'. Use instance_query for the full property maps or for filters.",
     "inputSchema": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "title": "InstanceTranscriptParams",
@@ -637,7 +637,7 @@ export const STATIC_TOOL_DEFS: McpTool[] =
           "nullable": true
         },
         "text_property": {
-          "description": "Which property holds the text shown per entry. Defaults to `body`,\nfalling back to the class's identity property.",
+          "description": "Which property holds the text shown per entry. Defaults to the property\nwhose predicate the perspective declares as message text\n(`rdfs:subPropertyOf ad4m://message_text`), then `body`, then the class's\nidentity property.",
           "type": "string",
           "nullable": true
         }
