@@ -363,6 +363,7 @@ impl AgentService {
                     log_holochain_metrics: None,
                     enable_multi_user: None,
                     smtp_config: None,
+                    log_config: None,
                     enable_mcp: None,
                     mcp_port: None,
                     dynamic_class_tools: None,

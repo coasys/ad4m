@@ -1,0 +1,185 @@
+# Executor config file
+
+`ad4m-executor run` can read its settings from a JSON file instead of flags,
+so a headless executor (a systemd service, a container) keeps them in one
+place and restarts with the same settings. The keys are the ones the ADAM
+Launcher writes to `~/.ad4m/launcher-state.json`.
+
+```bash
+ad4m-executor run --config /etc/ad4m/executor-config.json
+# or
+AD4M_CONFIG=/etc/ad4m/executor-config.json ad4m-executor run
+```
+
+There is no default path: without `--config` (or `AD4M_CONFIG`), `run`
+behaves as before and uses only flags and environment variables.
+
+## Precedence
+
+Each setting is taken from the last of these that sets it:
+
+1. the config file,
+2. an `AD4M_<FLAG>` environment variable,
+3. the flag.
+
+`ad4m-executor config print` takes the same flags and prints the merged
+result as JSON, with every secret replaced by `"<redacted>"` (an unset
+secret shows as `null`):
+
+```bash
+ad4m-executor config print --config /etc/ad4m/executor-config.json --port 12400
+```
+
+## Keys
+
+Every key is optional. The file is rejected at startup if it contains a key
+not listed here, at any depth (a typo fails loudly instead of being
+ignored, and the error names the key by its path, e.g.
+`multi_user_config.tls_config.tls_prot`), or a secret value (see
+[Secrets](#secrets)).
+
+| Key | Type | Default | Flag / variable |
+|---|---|---|---|
+| `app_data_path` | string | `~/.ad4m` | `--app-data-path` / `AD4M_APP_DATA_PATH` |
+| `port` | number | `12000` | `--port` / `AD4M_PORT` |
+| `hc_admin_port` | number | first free from 2000 | `--hc-admin-port` / `AD4M_HC_ADMIN_PORT` |
+| `hc_app_port` | number | first free from 1337 | `--hc-app-port` / `AD4M_HC_APP_PORT` |
+| `localhost` | bool | `true` | `--localhost` / `AD4M_LOCALHOST` |
+| `run_dapp_server` | bool | `true` (port 8080) | `--run-dapp-server` / `AD4M_RUN_DAPP_SERVER` |
+| `auto_permit_cap_requests` | bool | `false` with a config file, `true` without | `--auto-permit-cap-requests` / `AD4M_AUTO_PERMIT_CAP_REQUESTS` |
+| `mcp_enabled` | bool | `false` | `--enable-mcp` / `AD4M_ENABLE_MCP` |
+| `mcp_port` | number | `3001` | `--mcp-port` / `AD4M_MCP_PORT` |
+| `log_config` | object: crate → level | see below | `RUST_LOG` overrides it |
+| `multi_user_config.enabled` | bool | `false` | `--enable-multi-user` / `AD4M_ENABLE_MULTI_USER` |
+| `multi_user_config.tls_config` | object or `null` | no TLS | see below |
+| `multi_user_config.smtp_config` | object or `null` | no email | see below |
+
+Inside the nested objects some keys are required: `enabled` in
+`multi_user_config`; `enabled`, `cert_file_path` and `key_file_path` in
+`tls_config`; every key but `password_file` in `smtp_config`.
+`tls_config` and `smtp_config` may be `null` or left out.
+
+`multi_user_config.enabled: false` (or `--enable-multi-user false`) does not
+turn multi-user off on a data directory where it was enabled before: the
+executor records multi-user as on in its database and only ever sets it.
+
+**`tls_config`** starts an HTTPS/WSS listener on `0.0.0.0:<tls_port>`. The
+plain RPC port then stays on `127.0.0.1`.
+
+```json
+{ "enabled": true, "cert_file_path": "/etc/ad4m/tls/cert.pem",
+  "key_file_path": "/etc/ad4m/tls/key.pem", "tls_port": null }
+```
+
+`tls_port: null` means `port + 1`. The flags `--tls-cert-file`,
+`--tls-key-file` and `--tls-port` (`AD4M_TLS_CERT_FILE`, `AD4M_TLS_KEY_FILE`,
+`AD4M_TLS_PORT`) override the file's values; giving a certificate or key
+flag turns TLS on, and TLS without both a certificate and a key stops `run`.
+
+**`smtp_config`** is the account multi-user verification emails are sent from.
+
+```json
+{ "enabled": true, "host": "smtp.example.org", "port": 465,
+  "username": "ad4m@example.org", "from_address": "ad4m@example.org",
+  "password_file": "/etc/ad4m/secrets/smtp-password" }
+```
+
+With `enabled: true`, `run` stops unless a password is set (see
+[Secrets](#secrets)).
+
+**`log_config`** sets a level (`error`, `warn`, `info`, `debug`, `trace`)
+per crate over the defaults `rust_executor: info`, `holochain: warn`,
+`wasmer_compiler_cranelift: warn`, `warp::server: info`.
+
+Settings with no config key are flags only, each with its
+`AD4M_<FLAG>` variable: `--network-bootstrap-seed`,
+`--language-language-only`, `--connect-holochain`, `--run-holochain`,
+`--hc-use-bootstrap`, `--hc-use-local-proxy`, `--hc-use-mdns`,
+`--hc-use-proxy`, `--hc-proxy-url`, `--hc-bootstrap-url`, `--hc-relay-url`,
+`--log-holochain-metrics`, `--dynamic-class-tools`, `--pid-file`.
+The variable name is the flag in upper case with `-` as `_`, prefixed with
+`AD4M_`: `--hc-relay-url` reads `AD4M_HC_RELAY_URL`.
+
+A variable that is set but empty stops `run` with an error that names it
+(`AD4M_APP_DATA_PATH is set but empty`), and so does an empty flag value.
+Neither is laid over the file: `AD4M_APP_DATA_PATH=${DATA_DIR}` with
+`DATA_DIR` unset would otherwise put the data directory under the working
+directory. Unset the variable to use the file's value.
+
+## Secrets
+
+The config file never holds a secret value. An `admin_credential` key or a
+`smtp_config.password` key stops `run` with an error that names the key.
+Secrets come from files or environment variables:
+
+| Secret | From a file | From a value | In the config file |
+|---|---|---|---|
+| Admin credential | `AD4M_ADMIN_CREDENTIAL_FILE` | `AD4M_ADMIN_CREDENTIAL` | — |
+| SMTP password | `AD4M_SMTP_PASSWORD_FILE` | `AD4M_SMTP_PASSWORD` | `smtp_config.password_file` |
+| Agent passphrase | `AD4M_UNLOCK_PASSPHRASE_FILE` | — | — |
+
+- Setting both variables of one secret stops `run`. The variables win over
+  `smtp_config.password_file`.
+- A secret file must not be readable by group or others: mode `0600` or
+  `0400`, otherwise `run` stops and names the file and its mode.
+- One trailing newline is removed, so `echo "$SECRET" > file` works.
+- An empty secret stops `run`: an empty file (or one holding only a
+  newline), an empty `AD4M_ADMIN_CREDENTIAL` or `AD4M_SMTP_PASSWORD`, or
+  `--admin-credential ""`. An empty admin credential would match the empty
+  token a client without credentials sends.
+- `--admin-credential <value>` still works and wins over both variables,
+  but the value is visible to every user on the host through `ps`. Prefer
+  the file.
+- Neither `run`, `config print` nor the executor's log prints a secret
+  value, at any log level.
+
+Under systemd, load the files with `LoadCredential=` and point the variables
+at the credentials directory:
+
+```ini
+LoadCredential=admin-credential:/etc/ad4m/secrets/admin-credential
+LoadCredential=unlock-passphrase:/etc/ad4m/secrets/unlock-passphrase
+Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
+Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
+```
+
+### Unlocking at startup
+
+With `AD4M_UNLOCK_PASSPHRASE_FILE` set, the executor unlocks its agent
+itself once it has started, as `agent.unlock` would, so a restarted node
+serves requests without anyone unlocking it. It logs
+`Agent unlocked at startup` on success. On a wrong passphrase it logs an
+error starting `Unlocking the agent at startup … failed`, keeps running
+with the agent locked, and waits for `agent.unlock`. If no agent has been
+generated yet it logs a warning and does nothing; generate the agent, and
+the next start unlocks it.
+
+## Example
+
+```json
+{
+  "app_data_path": "/var/lib/ad4m",
+  "port": 12400,
+  "hc_admin_port": 12401,
+  "hc_app_port": 12402,
+  "run_dapp_server": false,
+  "multi_user_config": {
+    "enabled": true,
+    "tls_config": null,
+    "smtp_config": {
+      "enabled": true, "host": "smtp.example.org", "port": 465,
+      "username": "ad4m@example.org", "from_address": "ad4m@example.org",
+      "password_file": "/etc/ad4m/secrets/smtp-password"
+    }
+  },
+  "log_config": { "rust_executor": "info", "holochain": "warn" },
+  "mcp_enabled": true,
+  "mcp_port": 3003
+}
+```
+
+```bash
+AD4M_ADMIN_CREDENTIAL_FILE=/etc/ad4m/secrets/admin-credential \
+AD4M_UNLOCK_PASSPHRASE_FILE=/etc/ad4m/secrets/unlock-passphrase \
+  ad4m-executor run --config /etc/ad4m/executor-config.json
+```
