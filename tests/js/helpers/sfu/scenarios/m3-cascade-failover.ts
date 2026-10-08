@@ -3,10 +3,10 @@
  *
  * 2-node cluster, max=5 each.  Join 6 peers — 5 land on A, 1 redirects
  * to B.  Kill node A's executor process.  Reconnect the 5 peers that
- * were on A to node B (the wind tunnel simulates the failover the way
- * flux's `handleCascadeFailover` does: when the local SFU connection
- * dies, try the next cascade node).  Measure failover time +
- * participantCount on B after.
+ * were on A to node B — a failover only a client that can reach both
+ * nodes (as this harness can) is able to make; an SDK client reconnects
+ * to its own executor.  Measure failover time + participantCount on B
+ * after.
  */
 
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";

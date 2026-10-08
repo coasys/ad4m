@@ -269,8 +269,9 @@ pub struct CallSessionInfo {
     pub neighbourhood_url: String,
     pub participant_id: String,
     pub sdp_answer: String,
-    /// When set, the joining peer should reconnect to this DID's SFU
-    /// node (cascaded mode load redirect).
+    /// When set, the join was not served here: the caller should join this
+    /// DID's SFU node instead (cascade load redirect). Only a `callJoin` with
+    /// `acceptRedirect` gets one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub redirect_to: Option<String>,

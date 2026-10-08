@@ -69,6 +69,9 @@ pub struct ParticipantInfo {
     pub has_audio: bool,
     pub has_video: bool,
     pub is_active_speaker: bool,
+    /// Joined with `acceptRedirect`: it can reach other cascade nodes, so a
+    /// rebalance may move it. Other clients reach only this node.
+    pub accepts_redirect: bool,
 }
 
 /// A call room managed by the SFU.
@@ -121,10 +124,18 @@ impl SfuRoom {
                 has_audio: false,
                 has_video: false,
                 is_active_speaker: false,
+                accepts_redirect: false,
             },
         );
 
         Ok(())
+    }
+
+    /// Mark a participant as able to follow a redirect to another node.
+    pub fn mark_redirectable(&mut self, pid: &ParticipantId) {
+        if let Some(p) = self.participants.get_mut(pid) {
+            p.accepts_redirect = true;
+        }
     }
 
     /// Remove a participant from the room. Returns true if the room is now empty.

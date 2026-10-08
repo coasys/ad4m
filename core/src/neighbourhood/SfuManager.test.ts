@@ -174,7 +174,15 @@ test("a failed connection leaves, then joins this executor again", async () => {
     expect(FakePeerConnection.instances).toHaveLength(2)
 })
 
-test("reconnecting stops after three failures in a row", async () => {
+/** Drive the manager's current connection to an ICE state. */
+async function iceState(state: string) {
+    const pc = FakePeerConnection.instances[FakePeerConnection.instances.length - 1] as any
+    pc.iceConnectionState = state
+    pc.oniceconnectionstatechange()
+    await flush()
+}
+
+test("a rejoin that fails reports the error and closes its connection", async () => {
     const api = fakeApi()
     const manager = new SfuManager(api, ROOM, ME, URL)
     const errors: unknown[] = []
@@ -182,13 +190,54 @@ test("reconnecting stops after three failures in a row", async () => {
     await manager.join(fakeStream())
     api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
 
-    for (let i = 0; i < 4; i++) {
-        const pc = FakePeerConnection.instances[0] as any
-        pc.iceConnectionState = "failed"
-        pc.oniceconnectionstatechange()
-        await flush()
-    }
+    await iceState("failed")
+
+    expect(errors).toEqual([new Error("Room is full")])
+    expect(FakePeerConnection.instances.every((pc) => pc.closed)).toBe(true)
+})
+
+test("joins that succeed while ICE keeps failing stop after three reconnects", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const errors: unknown[] = []
+    manager.on("error", (e) => errors.push(e))
+    await manager.join(fakeStream())
+
+    for (let i = 0; i < 4; i++) await iceState("failed")
 
     expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
-    expect(errors[errors.length - 1]).toEqual(new Error("SFU reconnect attempts exhausted"))
+    expect(errors).toEqual([new Error("SFU reconnect attempts exhausted")])
+})
+
+test("a connection that comes up resets the reconnect count", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const errors: unknown[] = []
+    manager.on("error", (e) => errors.push(e))
+    await manager.join(fakeStream())
+
+    for (let i = 0; i < 6; i++) {
+        await iceState("failed")
+        await iceState("connected")
+    }
+
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(6)
+    expect(errors).toEqual([])
+})
+
+test("leaving during a reconnect stops it before it joins again", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    let releaseLeave!: () => void
+    api.sfuCallLeave.mockImplementationOnce(
+        () => new Promise((resolve) => { releaseLeave = () => resolve(true) }),
+    )
+
+    await iceState("failed")
+    await manager.leave()
+    releaseLeave()
+    await flush()
+
+    expect(api.sfuCallJoin).toHaveBeenCalledTimes(1)
 })

@@ -265,7 +265,8 @@ pub struct RunArgs {
     )]
     pub sfu_cascade_listen: Option<String>,
     /// Peer SFU nodes as `did=host:port`, comma separated. The gossip listener
-    /// accepts connections only from these addresses.
+    /// accepts connections only from these hosts, so each peer must connect
+    /// from the address it is listed under (not through NAT).
     #[arg(
         long,
         env = "AD4M_SFU_CASCADE_PEERS",

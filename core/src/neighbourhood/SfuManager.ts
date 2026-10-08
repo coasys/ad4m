@@ -177,8 +177,12 @@ export class SfuManager {
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
     private streamToParticipant: Map<string, string> = new Map()
+    /** Reconnects since ICE last reached connected — not since a join: a
+     *  join can succeed while the media path never comes up. */
     private reconnectAttempts: number = 0
     private static readonly MAX_RECONNECTS = 3
+    /** Bumped by `leave()`, so a reconnect in flight stops before rejoining. */
+    private generation: number = 0
     private midToParticipant: Map<string, string> = new Map()
     private trackDidIndex: number = 0
     private renegotiationUnsubscribe: (() => void) | null = null
@@ -247,6 +251,7 @@ export class SfuManager {
     private async reconnect(): Promise<void> {
         const stream = this.state.localStream
         if (!stream) return
+        const generation = this.generation
         if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
             this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
@@ -264,6 +269,7 @@ export class SfuManager {
         } catch {
             /* best-effort: the executor frees a dead session on its own */
         }
+        if (generation !== this.generation) return // left meanwhile
         this.resetParticipants()
         try {
             await this.join(stream)
@@ -320,6 +326,7 @@ export class SfuManager {
         // "disconnected" is often transient (network blip, route change) —
         // wait 3 seconds to let it recover.  "failed" reconnects at once.
         pc.oniceconnectionstatechange = () => {
+            if (this.state.peerConnection !== pc) return // superseded
             if (pc.iceConnectionState === "failed") {
                 if (this.disconnectedTimer) {
                     clearTimeout(this.disconnectedTimer)
@@ -342,7 +349,14 @@ export class SfuManager {
                 }
             } else {
                 // Any other state (connected, completed, checking) cancels
-                // the pending disconnected timer.
+                // the pending disconnected timer; a working path ends a run
+                // of reconnects.
+                if (
+                    pc.iceConnectionState === "connected" ||
+                    pc.iceConnectionState === "completed"
+                ) {
+                    this.reconnectAttempts = 0
+                }
                 if (this.disconnectedTimer) {
                     clearTimeout(this.disconnectedTimer)
                     this.disconnectedTimer = null
@@ -472,7 +486,7 @@ export class SfuManager {
                 sdpOffer,
             )
         } catch (err) {
-            this.releaseServerEvents()
+            this.abandon(pc)
             throw err
         }
         this.state.participantId = session.participantId
@@ -496,10 +510,9 @@ export class SfuManager {
             const answer = JSON.parse(session.sdpAnswer)
             await pc.setRemoteDescription(new RTCSessionDescription(answer))
         } catch (err) {
-            this.releaseServerEvents()
+            this.abandon(pc)
             throw err
         }
-        this.reconnectAttempts = 0
 
         // Flush buffered trickle ICE candidates
         joinComplete = true
@@ -521,6 +534,13 @@ export class SfuManager {
     private releaseServerEvents(): void {
         this.renegotiationUnsubscribe?.()
         this.renegotiationUnsubscribe = null
+    }
+
+    /** Undo a join that failed part way: its subscription and its connection. */
+    private abandon(pc: RTCPeerConnection): void {
+        this.releaseServerEvents()
+        pc.close()
+        if (this.state.peerConnection === pc) this.state.peerConnection = null
     }
 
     /**
@@ -589,6 +609,7 @@ export class SfuManager {
     }
 
     async leave(): Promise<void> {
+        this.generation++
         if (this.renegotiationUnsubscribe) {
             try {
                 this.renegotiationUnsubscribe()
