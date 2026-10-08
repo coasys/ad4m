@@ -7,7 +7,7 @@ extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::{debug, error, info};
-use rust_executor::config::TlsConfig as ExecutorTlsConfig;
+use rust_executor::config_file::ExecutorSecrets;
 use rust_executor::logging::{get_default_log_config, init_launcher_logging};
 use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
@@ -316,74 +316,26 @@ pub fn run() {
             build_menu(app.handle())?;
             build_system_tray(app.handle())?;
 
-            // Convert TlsConfig and SmtpConfig if enabled
             let launcher_state = LauncherState::load().unwrap();
-
-            // Prefer multi_user_config over deprecated tls_config
-            let (tls_config, smtp_config, enable_multi_user) =
-                if let Some(multi_user_config) = &launcher_state.multi_user_config {
-                    let tls = multi_user_config.tls_config.as_ref().and_then(|config| {
-                        if config.enabled {
-                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
-                            Some(ExecutorTlsConfig {
-                                cert_file_path: config.cert_file_path.clone(),
-                                key_file_path: config.key_file_path.clone(),
-                                tls_port,
-                            })
-                        } else {
-                            None
-                        }
-                    });
-
-                    let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
-                        rust_executor::config::SmtpConfig {
-                            enabled: config.enabled,
-                            host: config.host.clone(),
-                            port: config.port,
-                            username: config.username.clone(),
-                            password: config.password.clone(),
-                            from_address: config.from_address.clone(),
-                        }
-                    });
-
-                    (tls, smtp, Some(multi_user_config.enabled))
-                } else {
-                    // Fallback to deprecated tls_config for backwards compatibility
-                    let tls = launcher_state.tls_config.as_ref().and_then(|config| {
-                        if config.enabled {
-                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
-                            Some(ExecutorTlsConfig {
-                                cert_file_path: config.cert_file_path.clone(),
-                                key_file_path: config.key_file_path.clone(),
-                                tls_port,
-                            })
-                        } else {
-                            None
-                        }
-                    });
-                    (tls, None, None)
-                };
-
-            // TLS enabled = bind to 0.0.0.0, TLS disabled = bind to 127.0.0.1
-            let localhost = tls_config.is_none();
-
-            let config = rust_executor::Ad4mConfig {
-                admin_credential: Some(req_credential.to_string()),
-                app_data_path: Some(String::from(app_path.to_str().unwrap())),
-                port: Some(free_port),
-                network_bootstrap_seed: None,
-                run_dapp_server: Some(true),
-                hc_use_bootstrap: Some(true),
-                hc_use_mdns: Some(false),
-                hc_use_proxy: Some(true),
-                tls: tls_config,
-                localhost: Some(localhost),
-                enable_multi_user,
-                smtp_config,
-                enable_mcp: launcher_state.mcp_enabled,
-                mcp_port: launcher_state.mcp_port,
-                ..Default::default()
-            };
+            let (config_file, smtp_password) =
+                launcher_state.executor_config(String::from(app_path.to_str().unwrap()), free_port);
+            // to_ad4m_config fails only on inputs the launcher does not
+            // produce: an SMTP password is always set (possibly "", which is
+            // valid here), and free_port + 1 cannot overflow. Should that
+            // change, setup fails with the reason logged instead of a panic.
+            let mut config = config_file
+                .to_ad4m_config(&ExecutorSecrets {
+                    admin_credential: Some(req_credential.to_string()),
+                    smtp_password,
+                    unlock_passphrase: None,
+                })
+                .map_err(|e| {
+                    error!("Cannot start the executor with the launcher's settings: {e}");
+                    e
+                })?;
+            config.hc_use_bootstrap = Some(true);
+            config.hc_use_mdns = Some(false);
+            config.hc_use_proxy = Some(true);
 
             let handle = app.handle().clone();
 

@@ -242,7 +242,7 @@ export async function startExecutor(dataPath: string,
             relayUrl = services.relayUrl;
         }
     }
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
+    const command = executorBinary();
 
     const effectiveDataPath = path.join(
         os.tmpdir(),
@@ -254,7 +254,6 @@ export async function startExecutor(dataPath: string,
     if (effectiveDataPath !== dataPath) {
         console.log(`Using shortened executor data path: ${effectiveDataPath}`);
     }
-    let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
@@ -311,7 +310,34 @@ export async function startExecutor(dataPath: string,
     if (dynamicClassTools) { args.push('--dynamic-class-tools', 'true'); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
-    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    return spawnExecutor(args, apiPort, { enableMcp });
+}
+
+/** The `ad4m-executor` binary the suites run. */
+export function executorBinary(): string {
+    return path.resolve(__dirname, '..', '..', '..', 'target', 'release', 'ad4m-executor');
+}
+
+/**
+ * Spawns `ad4m-executor <args>` and resolves once the RPC port (and MCP, if
+ * `enableMcp`) logs that it is listening; rejects if the process exits
+ * first. `env` is added to this process's environment.
+ */
+export async function spawnExecutor(
+    args: string[],
+    apiPort: number,
+    opts: {
+        enableMcp?: boolean;
+        env?: Record<string, string>;
+        /** Receives every chunk of stdout and stderr from the start. */
+        onOutput?: (text: string) => void;
+    } = {},
+): Promise<ChildProcess> {
+    const { enableMcp = false, env = {}, onOutput } = opts;
+    const executorProcess = spawn(executorBinary(), args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ...env },
+    });
     // Decode as a stream, so a multibyte character split across two chunks
     // survives in the startup-failure tail. Every data handler below gets strings.
     executorProcess.stdout!.setEncoding('utf8');
@@ -381,15 +407,17 @@ export async function startExecutor(dataPath: string,
             maybeResolve();
         };
 
-        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
-        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
-    executorProcess!.stdout!.on('data', (data) => {
+    executorProcess.stdout!.on('data', (data) => {
         console.log(`${data}`);
+        onOutput?.(data.toString());
     });
-    executorProcess!.stderr!.on('data', (data) => {
+    executorProcess.stderr!.on('data', (data) => {
         console.log(`${data}`);
+        onOutput?.(data.toString());
     });
 
     console.log("Waiting for executor to settle...")
