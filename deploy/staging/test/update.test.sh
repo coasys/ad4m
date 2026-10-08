@@ -5,8 +5,9 @@
 # recover from a failed step after the stop, ignore a tag named like the branch,
 # start nothing when a restore fails, clean up after a deploy killed in its gate,
 # leave a lost status.json, a failed status write or an unfinished rollback by
-# hand (killed in its gate, in its restore or before it) to the operator, and
-# refuse a rollback by hand over any of these.
+# hand (killed in its gate, in its restore or before it) to the operator,
+# refuse a rollback by hand over any of these, and start the deployed build
+# again after a deploy killed while it was stopped.
 # Needs bash, git, jq, flock and GNU coreutils. Usage: update.test.sh
 set -euo pipefail
 
@@ -61,6 +62,17 @@ case $2 in
     fi
     rm -f "$STUB_DIR/running" ;;
   start)
+    # With a count in $STUB_DIR/kill-start, update.sh is killed as it makes
+    # that many-th `start`, before the unit comes up.
+    if [[ -f $STUB_DIR/kill-start ]]; then
+      n=$(($(cat "$STUB_DIR/kill-start") - 1))
+      if ((n == 0)); then
+        rm "$STUB_DIR/kill-start"
+        kill -9 "$(cat "$STUB_DIR/update.pid")"
+        exit 1
+      fi
+      echo "$n" >"$STUB_DIR/kill-start"
+    fi
     sha=$(basename "$(readlink "$AD4M_STAGING_STATE/current")")
     echo "$sha" >"$STUB_DIR/running"
     mkdir -p "$AD4M_STAGING_DATA"
@@ -95,9 +107,11 @@ if [[ -f $STUB_DIR/fail-snapshot && ${*: -1} == */snapshots/* ]] ||
   exit 1
 fi
 # With $STUB_DIR/kill-restore, update.sh is killed half-way through copying a
-# snapshot back into the data dir.
-if [[ -f $STUB_DIR/kill-restore && ${*: -1} == "$AD4M_STAGING_DATA" ]]; then
-  rm "$STUB_DIR/kill-restore"
+# snapshot back into the data dir; with $STUB_DIR/kill-snapshot, half-way
+# through copying the data dir into snapshots/.
+if [[ -f $STUB_DIR/kill-restore && ${*: -1} == "$AD4M_STAGING_DATA" ]] ||
+  [[ -f $STUB_DIR/kill-snapshot && ${*: -1} == */snapshots/* ]]; then
+  rm -f "$STUB_DIR/kill-restore" "$STUB_DIR/kill-snapshot"
   mkdir -p "${*: -1}"
   echo partial >"${*: -1}/written-by"
   kill -9 "$(cat "$STUB_DIR/update.pid")"
@@ -546,6 +560,9 @@ check "and keeps the newer build's data aside" grep -q marker12 "$T/data12.faile
 check "and leaves the half-copied data dir" [ "$(cat "$T/data12/written-by")" = partial ]
 check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
 check "and status.json still names the data aside" [ "$(jq -r .failed_data "$T/state12/status.json")" = "$two" ]
+# The refusal must not overwrite how the unfinished rollback ended.
+check "and keeps the interrupted rollback's result" [ "$(jq -r .last_result "$T/state12/status.json")" = \
+  "error: the rollback by hand from $two to $one was interrupted; left to the operator" ]
 
 # 24. A rollback by hand killed between the stop and moving the data aside:
 # the data is whole, staging is down. The next run does not say "already
@@ -669,6 +686,49 @@ flock "$T/state19/update.lock" true
 rm "$T/bad-$bad19"
 check "a failed gate's rollback killed before the move names no data moved aside" \
   [ "$(jq -r .failed_data "$T/state19/status.json")" = null ]
+
+# 30. A deploy killed while the deployed build was stopped: after a failed
+# gate's rollback pointed `current` back but before it started the build,
+# and before the swap, during the snapshot. The next run starts the
+# deployed build again instead of skipping the head and leaving staging
+# down until the branch moves.
+export AD4M_STAGING_STATE=$T/state20 AD4M_STAGING_DATA=$T/data20 AD4M_STAGING_SRC=$T/src20
+push_staging "$one"
+run
+bad20=$(commit "fails the gate, rollback killed before the start" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/bad-$bad20"
+echo 2 >"$T/kill-start"
+run
+flock "$T/state20/update.lock" true
+check "a rollback killed before its start leaves current at the deployed build, stopped" \
+  bash -c "[ \"\$(readlink '$T/state20/current')\" = 'releases/$one' ] && [ ! -e '$T/running' ]"
+check "and a deploy in flight" \
+  [ "$(jq -r '.in_flight + "/" + .last_failed_sha' "$T/state20/status.json")" = "deploy/$bad20" ]
+run
+check "the next run starts the deployed build again" [ "$(cat "$T/running")" = "$one" ]
+check "and says so" [ "$(jq -r .last_result "$T/state20/status.json")" = \
+  "error: the deploy of $bad20 was interrupted while $one was stopped; $one runs again" ]
+check "and leaves no deploy in flight" [ "$(jq -r .in_flight "$T/state20/status.json")" = null ]
+check "and does not build the failed head again" bash -c "! grep -q cargo '$T/calls'"
+check "and the data is the deployed build's, without the failed build's writes" \
+  bash -c "! grep -q '$bad20' '$T/data20/written-by'"
+run
+check "the run after that changes nothing" bash -c "! grep -qE 'cargo|systemctl' '$T/calls'"
+rm "$T/bad-$bad20"
+snap20=$(commit "killed during the snapshot" "AD4M_UNLOCK_PASSPHRASE_FILE")
+touch "$T/kill-snapshot"
+run
+flock "$T/state20/update.lock" true
+check "a deploy killed during the snapshot leaves the deployed build stopped" \
+  bash -c "[ \"\$(readlink '$T/state20/current')\" = 'releases/$one' ] && [ ! -e '$T/running' ]"
+run
+check "the next run starts the deployed build before it builds" \
+  [ "$(head -n 1 "$T/calls")" = "systemctl --user start ad4m-staging.service" ]
+check "and deploys the head" [ "$(jq -r '.deployed_sha + "/" + .previous_sha' "$T/state20/status.json")" = "$snap20/$one" ]
+check "and the partial snapshot is gone" \
+  [ "$(find "$T/state20/snapshots" -mindepth 1 -maxdepth 1 -name "*-$one" | wc -l)" = 1 ]
+check "and the kept snapshot is whole" \
+  bash -c "! grep -q partial '$T/state20/snapshots/'*-$one/written-by"
 
 echo "$failures failed"
 ((failures == 0))

@@ -15,7 +15,10 @@
 #                                 restore fails --> nothing runs, no current)
 #
 # A deploy killed after the swap leaves `current` != deployed_sha; the next
-# run rolls that build back first, as if it had failed the gate. An
+# run rolls that build back first, as if it had failed the gate. One killed
+# while the deployed build was stopped (before the swap, or after a
+# rollback pointed `current` back) leaves in_flight: deploy with `current`
+# = deployed_sha; the next run starts the deployed build again. An
 # unfinished rollback by hand (in_flight: rollback, from its first step on),
 # or a `current` that status.json does not account for, is left to the
 # operator. `rollback` itself refuses to start while `current` is not
@@ -316,6 +319,24 @@ if [[ $live != "$deployed" ]]; then
   ((rc != 2)) || restore_failed "$deployed" in_flight null
   ((rc == 0)) || fail "rolled_back: the deploy of $live was interrupted, and $deployed failed the gate after the rollback" in_flight null
   fail "rolled_back: the deploy of $live was interrupted; $deployed runs again" in_flight null
+fi
+
+# --- An earlier run that was killed while the deployed build was stopped
+# A deploy sets in_flight before it stops the node and clears it with its
+# result. A kill in between leaves `current` = deployed_sha with nothing
+# running: either before the swap (during the snapshot, say), or after a
+# failed gate's rollback has pointed `current` back but before it started
+# the build (roll_back above has the same window). Without this, every run
+# would pass the checks above, find the head deployed or failed, and exit 0
+# with the node down until the branch moves. The data dir is the deployed
+# build's and whole in both cases: a kill before the swap never touches it,
+# and roll_back links `current` only after the restore. So start it again
+# and go on; a head that failed is still skipped below.
+if [[ -n $live && $(field in_flight) == deploy ]]; then
+  interrupted=$(field staging_sha)
+  log "the deploy of ${interrupted:-a build} was interrupted while $deployed was stopped; starting $deployed again"
+  systemctl --user start "$UNIT" || fail "error: the deploy of ${interrupted:-a build} was interrupted while $deployed was stopped, and $deployed could not be started"
+  set_status in_flight null last_result "error: the deploy of ${interrupted:-a build} was interrupted while $deployed was stopped; $deployed runs again" || true
 fi
 
 # --- Fetch
