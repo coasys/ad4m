@@ -56,12 +56,13 @@ pub async fn ws_rpc(
     State(state): State<AppState>,
     Query(query): Query<WsAuthQuery>,
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
+    reach: ListenerReach,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
 
     // Build RequestContext once for the lifetime of this connection.
-    let capabilities = capabilities_from_token(token.clone(), state.admin_credential.clone());
-    let is_admin = is_admin_credential_token(&token, &state.admin_credential);
+    let capabilities = capabilities_on(token.clone(), state.admin_credential.clone(), reach);
+    let is_admin = is_admin_credential_token_on(&token, &state.admin_credential, reach);
 
     let user_email = user_email_from_token(token.clone());
     let user_did = user_email

@@ -1298,20 +1298,52 @@ export class PerspectiveProxy {
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
         const flowNameLiteral = Literal.from(name).toUrl();
-        const additions = [
+        const wanted = [
             ...flow.toLinks(),
             { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
             { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
-        ].map(l => new Link(l));
+        ];
 
-        // Re-adding a flow replaces its transitions. Their URIs may use an
-        // older scheme, so find them through the flow's hasTransition links.
-        const edges = await this.get(new LinkQuery({ source: flow.flowUri, predicate: "ad4m://hasTransition" }));
-        const transitionLinks = await Promise.all(
-            edges.map(l => this.get(new LinkQuery({ source: l.data.target })))
-        );
+        // Re-adding a flow replaces its definition. Adding alone would leave
+        // a changed consensus rule beside the old one, and a state holding two
+        // rules refuses every move into it. What is stored is found through
+        // the flow's own links, since state and transition URIs may use an
+        // older scheme. Only definition predicates are taken, from the flow's
+        // URI and from each state and transition URI: all of them can carry
+        // links the definition does not own.
+        const flowLevel = new Set(SHACLFlow.FLOW_LEVEL_PREDICATES);
+        const childLevel = new Set(SHACLFlow.STATE_AND_TRANSITION_PREDICATES);
+        const ownLinks = (await this.get(new LinkQuery({ source: flow.flowUri })))
+            .filter(l => flowLevel.has(l.data.predicate));
+        const children = ownLinks
+            .filter(l => l.data.predicate === "ad4m://hasState" || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childLinks = (await Promise.all(children.map(uri => this.get(new LinkQuery({ source: uri })))))
+            .flat()
+            .filter(l => childLevel.has(l.data.predicate));
+        // A name points at one flow: getFlow reads the first flow_uri link,
+        // and FlowInstance.findAll drops records of any other flow URI. So
+        // every flow_uri link of this name is taken, and one left from an
+        // earlier namespace is removed rather than kept beside the new one.
+        const registration = [
+            ...await this.get(new LinkQuery({ source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral })),
+            ...await this.get(new LinkQuery({ source: flowNameLiteral, predicate: "ad4m://flow_uri" })),
+        ];
+        const stored = [...ownLinks, ...childLinks, ...registration];
 
-        await this.linkMutations({ additions, removals: [...edges, ...transitionLinks.flat()] });
+        // Only the difference is written, so an unchanged definition writes
+        // nothing and a changed one touches only what changed.
+        const key = (l: { source: string; predicate?: string; target: string }) =>
+            JSON.stringify([l.source, l.predicate ?? "", l.target]);
+        const wantedKeys = new Set(wanted.map(key));
+        const storedKeys = new Set(stored.map(l => key(l.data)));
+        const additions = wanted
+            .filter((l, i, all) => !storedKeys.has(key(l)) && all.findIndex(o => key(o) === key(l)) === i)
+            .map(l => new Link(l));
+        const removals = stored.filter(l => !wantedKeys.has(key(l.data)));
+
+        if (additions.length === 0 && removals.length === 0) return;
+        await this.linkMutations({ additions, removals });
     }
 
     /**
