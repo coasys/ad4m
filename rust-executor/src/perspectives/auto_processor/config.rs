@@ -142,7 +142,8 @@ pub struct AutoProcessorConfig {
     /// accepts. Defines "the content this processor watches". Copy
     /// [`crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`]
     /// (reifier `ad4m://ontology/author` + `ad4m://ontology/timestamp` on the
-    /// body link) rather than selecting speaker+text alone.
+    /// body link) rather than selecting speaker+text alone. The gather runs it
+    /// over Shared links only, since the pass's output is Shared.
     pub source_scope_query: String,
     /// URI namespace new interpreted instances are minted under (the "spawn
     /// scope"), e.g. `soa://project/42/`. `None` falls back to a per-processor

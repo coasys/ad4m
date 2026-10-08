@@ -28,10 +28,13 @@
 //!
 //! - `None` — **executor scope**. Nothing is filtered. This is the scope of the
 //!   executor's own derivations: the flow engine's `currentState` cache and
-//!   `resolved_as` marks, the auto-processor, SDNA loading, and the Prolog fact
-//!   base built for engine use. Those passes are executor code reasoning over
-//!   executor state, so executor-private is the correct scope for them — see the
-//!   closing note on issue #1024. Keeping `None` as a real, named scope is what
+//!   `resolved_as` marks, SDNA loading, and the Prolog fact base built for
+//!   engine use. Those passes are executor code reasoning over executor state,
+//!   so executor-private is the correct scope for them — see the closing note
+//!   on issue #1024. A job whose output is *published* is not one of them: the
+//!   auto-processor writes what it extracts as Shared, so its gather reads
+//!   Shared links only, the runner's own Local links excluded
+//!   ([`shared_only_query`](super::shared_only_query)). Keeping `None` as a real, named scope is what
 //!   lets the user-facing surfaces be filtered without breaking them.
 //! - `Some(did)` — **agent scope**. A request arriving through a user-facing
 //!   surface (WS RPC, MCP) is attributed to the DID behind its auth token, and

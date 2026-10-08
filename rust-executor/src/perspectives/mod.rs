@@ -17,6 +17,7 @@ mod interpretation_e2e;
 #[cfg(test)]
 mod interpretation_harness_e2e;
 pub mod link_visibility;
+pub mod shared_only_query;
 mod viewer_reads;
 // `pub(crate)` so test modules outside `perspectives` (e.g. the MCP flow
 // tools, which read flow state through the same loaders) can seed a real

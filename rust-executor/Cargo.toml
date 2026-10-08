@@ -218,6 +218,10 @@ portpicker = "0.1.1"
 deno_error = "0.7"
 thiserror = "2.0.12"
 oxigraph = { version = "0.5.7", features = ["rocksdb", "rdf-12"] }
+# The SPARQL algebra oxigraph parses into; used to rewrite a query so it reads
+# Shared links only (`perspectives::shared_only_query`). Same version and
+# features as oxigraph's own copy.
+spargebra = { version = "0.4.6", features = ["sparql-12", "sep-0006"] }
 ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 

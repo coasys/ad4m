@@ -304,6 +304,10 @@ Each user's data is fully isolated within the shared executor:
 
   Typed relations are covered too, including the ones the SDK fills with its generated conformance getter (`@HasMany(() => Target)`), and a relation's `where`.
 
+  Live queries (`subscribe()` on a model query, `modelSubscribe`, `subscribeQuery`) re-run as the user who opened them, so an update can carry that user's local links. Each `query-subscription-update` event names that user's DID in its `owner` field and goes only to that user's connections. Another user who also owns the perspective does not receive it.
+
+  An auto-processor reads shared links only. Its `sourceScopeQuery` sees the perspective as if local links did not exist, the local links of the user it runs as included, because what it extracts is written as shared links that every member gets. A message stored as a local link is never sent to the LLM or recorded as a source of an interpretation run. A scope query with a property path such as `<ns://a>+` is refused, because the links along a path cannot be checked one at a time.
+
   Some reads are not filtered yet, and run over every link in the perspective: raw `querySparql` and `subscribeSparql`, `evaluateGetters`, hand-written SPARQL `getter` properties and relations, and the `author` / `timestamp` that `getSubjectData` reports for an instance. Do not rely on them to hide another user's local links. They are tracked in [#1152](https://github.com/coasys/ad4m/issues/1152).
 
 ## For App Developers: No Changes Required
