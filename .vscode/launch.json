@@ -20,7 +20,8 @@
                 }
             },
             "args": [
-                "run"
+                "run",
+                "--insecure-no-admin-credential"
             ],
             "cwd": "${workspaceFolder}"
         },

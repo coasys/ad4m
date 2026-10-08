@@ -1,0 +1,30 @@
+# AD4M staging executor: the build of origin/staging that update.sh deployed
+# last. Every listener is on 127.0.0.1 (RPC 12400, Holochain 12401/12402,
+# MCP 3003); nginx publishes 12400 as https://staging.ad4m.dev.
+# Setup, update and rollback: deploy/staging/README.md. The general guide
+# for a headless executor is docs-src/headless-executor.md.
+[Unit]
+Description=AD4M staging executor (origin/staging, 127.0.0.1:12400)
+After=network-online.target
+Wants=network-online.target
+# Nothing to run before the first deploy; skip instead of failing in a loop.
+ConditionPathExists=%h/.local/share/ad4m-staging/current/ad4m-executor
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+# Secrets: systemd copies the 0600 files into a directory only this unit can
+# read (%d, mode 0400); the executor reads them from there.
+LoadCredential=admin-credential:%h/.config/ad4m-staging/secrets/admin-credential
+LoadCredential=unlock-passphrase:%h/.config/ad4m-staging/secrets/unlock-passphrase
+Environment=AD4M_ADMIN_CREDENTIAL_FILE=%d/admin-credential
+Environment=AD4M_UNLOCK_PASSPHRASE_FILE=%d/unlock-passphrase
+# With an admin credential set, MCP binds 0.0.0.0 unless told otherwise.
+Environment=MCP_HOST=127.0.0.1
+ExecStart=%h/.local/share/ad4m-staging/current/ad4m-executor run --config %h/.config/ad4m-staging/executor-config.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+
+[Install]
+WantedBy=default.target

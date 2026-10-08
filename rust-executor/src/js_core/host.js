@@ -114,6 +114,30 @@ export async function holochainCallAsync(dnaNick, zome, fnName, params) {
 // Wraps the standard fetch() API so WASM languages can call HTTP APIs
 // without linking against web_sys. Returns { status, body } so callers
 // can distinguish 200 from 4xx/5xx without catching exceptions.
+//
+// Every call is bounded by HTTP_FETCH_TIMEOUT_MS, response headers and body
+// together. A language runtime serves its requests one at a time for all
+// users, so a server that accepts and never answers would otherwise block
+// that language until the OS drops the connection (~80 s on Linux, #1041).
+// 10 s keeps two queued timeouts under the 30 s client RPC timeout.
+
+var HTTP_FETCH_TIMEOUT_MS = 10000;
+
+// The URL as it may appear in an error: fetch sends `user:pass@` as Basic
+// auth and query strings often carry tokens, and these errors reach the
+// executor log and clients. Keeps scheme, host, port and path.
+function redactUrl(url) {
+    try {
+        var u = new URL(url);
+        u.username = "";
+        u.password = "";
+        if (u.search) u.search = "?redacted";
+        u.hash = "";
+        return u.href;
+    } catch (_) {
+        return "<unparseable url>";
+    }
+}
 
 async function httpFetchImpl(url, method, headersJson, body) {
     var headers = {};
@@ -125,13 +149,48 @@ async function httpFetchImpl(url, method, headersJson, body) {
             }
         } catch (_) { /* fall through -- empty headers */ }
     }
-    var init = { method: method || "GET", headers: headers };
+    var signal = AbortSignal.timeout(HTTP_FETCH_TIMEOUT_MS);
+    var init = { method: method || "GET", headers: headers, signal: signal };
     if (body && body.length > 0 && init.method !== "GET" && init.method !== "HEAD") {
         init.body = body;
     }
-    var res = await globalThis.fetch(url, init);
-    var text = await res.text();
-    return { status: res.status, body: text };
+    try {
+        var res = await globalThis.fetch(url, init);
+        var text = await res.text();
+        return { status: res.status, body: text };
+    } catch (e) {
+        if (signal.aborted) {
+            throw new Error(
+                "httpFetch " + init.method + " " + redactUrl(url) + " timed out after " +
+                HTTP_FETCH_TIMEOUT_MS + " ms"
+            );
+        }
+        // The runtime's error names the raw URL (e.g. "error sending request
+        // for url (http://user:pass@host/?token=...)"), so it is rebuilt from
+        // a scrubbed message and the original is not kept as its cause.
+        throw new Error(
+            "httpFetch " + init.method + " " + redactUrl(url) + " failed: " +
+            scrubUrl(e && e.message !== undefined ? e.message : e, url)
+        );
+    }
+}
+
+// `message` with every form of `url` replaced by its redacted form, and any
+// remaining copy of its password or query removed.
+function scrubUrl(message, url) {
+    var out = String(message);
+    var redacted = redactUrl(url);
+    var secrets = [];
+    var forms = [url];
+    try {
+        var u = new URL(url);
+        forms.push(u.href);
+        if (u.password) secrets.push(u.password);
+        if (u.search.length > 1) secrets.push(u.search.slice(1));
+    } catch (_) { /* unparseable: only the raw form */ }
+    forms.forEach(function (f) { out = out.split(f).join(redacted); });
+    secrets.forEach(function (s) { out = out.split(s).join("<redacted>"); });
+    return out;
 }
 
 export function httpFetch(url, method, headersJson, body) {

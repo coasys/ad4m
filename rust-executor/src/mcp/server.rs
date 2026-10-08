@@ -315,7 +315,11 @@ fn mcp_router(context: &McpContext, initial_token: Option<String>) -> axum::Rout
 /// where the consequence is worse: TLS proves the server's identity to a caller
 /// whom the server would then not check at all.
 ///
-/// A bad certificate path fails startup, matching the RPC server.
+/// A bad certificate path fails this listener (fail-closed) — unlike the RPC
+/// API, where TLS being configured keeps the cleartext listener on loopback
+/// even when the certificate fails to load. A broken cert therefore leaves
+/// the RPC API reachable locally with no remote surface, while it leaves MCP
+/// down entirely.
 ///
 /// Returns whether the HTTPS listener actually bound. The plain listener reads
 /// that to decide whether it can narrow to loopback — see
