@@ -529,6 +529,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
+    /// joined to a neighbourhood, so a test can exercise the cross-peer wait
+    /// without a running link language. Compiled out in non-test builds.
+    #[cfg(test)]
+    force_shape_sync_wait: Arc<AtomicBool>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -592,6 +597,8 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -642,7 +649,7 @@ impl PerspectiveInstance {
         match self.get_shape(class_name) {
             Ok(shape) => return Ok(shape),
             Err(e) => {
-                if self.link_language.read().await.is_none() {
+                if !self.shapes_may_still_sync().await {
                     return Err(e);
                 }
             }
@@ -650,16 +657,35 @@ impl PerspectiveInstance {
         let deadline = Instant::now() + budget;
         let poll = Duration::from_millis(100);
         loop {
-            if Instant::now() >= deadline {
-                // Falls through with the original error message so
-                // callers see the same wording they did before.
-                return self.get_shape(class_name);
+            let now = Instant::now();
+            if now >= deadline {
+                // Keeps the original message as a prefix (callers match on
+                // it) and says a wait happened, so "addSdna first" is not
+                // read as the whole story by a peer whose shape is syncing.
+                return self.get_shape(class_name).map_err(|e| {
+                    if budget.is_zero() {
+                        e
+                    } else {
+                        anyhow!("{e} (waited {budget:?} for it to sync from a peer)")
+                    }
+                });
             }
-            sleep(poll).await;
+            // Never sleep past the deadline: the caller's budget is shared.
+            sleep(poll.min(deadline - now)).await;
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
         }
+    }
+
+    /// Whether a class missing from the store can still arrive from a peer:
+    /// true once the perspective has a link language.
+    async fn shapes_may_still_sync(&self) -> bool {
+        #[cfg(test)]
+        if self.force_shape_sync_wait.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.has_link_language().await
     }
 
     /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
@@ -3847,11 +3873,24 @@ impl PerspectiveInstance {
     /// SHACL has not yet synced from a remote peer, waits up to
     /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
     /// can query classes registered by another peer without racing
-    /// p-diff-sync (see [`get_shape_or_wait`]).
+    /// p-diff-sync (see [`get_shape_or_wait`]). The same budget, not a
+    /// fresh one, covers the classes the query's `include`s hydrate.
     pub async fn model_query(
         &self,
         class_name: &str,
         query_json: &str,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
+    /// [`Self::model_query`] with the shape-wait budget as a parameter, so
+    /// tests can exercise its expiry without waiting the production 20 s.
+    async fn model_query_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
@@ -3868,15 +3907,11 @@ impl PerspectiveInstance {
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
-        // fail immediately. The subsequent recursive resolves inside
-        // `execute_model_query` use the plain (non-waiting) resolver
-        // because at that point the top-level shape has been resolved so
-        // referenced target-classes are extremely likely to also be
-        // present already — a nested wait per relation would multiply
-        // latency for a case we haven't seen bite in practice.
-        let _ = self
-            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
-            .await?;
+        // fail immediately. One budget covers the whole query: the classes
+        // its includes reach get whatever this wait leaves (see the retry
+        // around `execute_model_query` below).
+        let deadline = Instant::now() + shape_wait;
+        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
 
@@ -3915,13 +3950,43 @@ impl PerspectiveInstance {
             }
         }
 
-        let result = super::model_query::execute_model_query(
-            &self.sparql_store,
-            shape.as_ref(),
-            &query_input,
-            &resolver,
-        )
-        .await?;
+        // Include recursion resolves each target class through the plain,
+        // non-waiting resolver and fails on the first one not stored. A peer
+        // can hold the queried class's SHACL before an included one's (#909),
+        // so on a miss wait for that class with what is left of the budget
+        // and run the query again. Classes are only ever waited for when a
+        // hydration actually needs them. That holds only while the resolver
+        // call sites that drop a missing shape (`.ok()` / `None`) keep doing
+        // so: dotted `where`/`order` keys in `model_query/query.rs`,
+        // projections, `links.rs` and polymorphic includes. Switch one to `?`
+        // and its `MissingShape` reaches this loop, so that path waits too.
+        // Each class is waited for at most once: a class that
+        // goes missing again after its wait succeeded fails the query rather
+        // than looping. Local-only perspectives fail at once, as before —
+        // `get_shape_or_wait` does not wait there.
+        let mut waited_for: HashSet<String> = HashSet::new();
+        let result = loop {
+            let err = match super::model_query::execute_model_query(
+                &self.sparql_store,
+                shape.as_ref(),
+                &query_input,
+                &resolver,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(err) => err,
+            };
+            let Some(missing) = err.downcast_ref::<super::model_query::MissingShape>() else {
+                return Err(err);
+            };
+            if !waited_for.insert(missing.class_name.clone()) {
+                return Err(err);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.get_shape_or_wait(&missing.class_name, remaining)
+                .await?;
+        };
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -6065,10 +6130,15 @@ impl PerspectiveInstance {
                     crate::agent::AgentContext::main_agent()
                 };
 
-                // Model subscriptions: re-run execute_model_query instead of raw SPARQL
+                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
+                // With no shape wait: every subscription on the perspective is
+                // re-checked under one `join_all` below, so a wait here for one
+                // subscription's unsynced class would hold back every other
+                // subscription's update. A class still missing fails this pass
+                // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     match self_clone
-                        .model_query(&params.class_name, &params.query_json)
+                        .model_query_within(&params.class_name, &params.query_json, Duration::ZERO)
                         .await
                     {
                         Ok(r) => r,
@@ -8600,6 +8670,339 @@ mod tests {
         assert!(
             msg.contains("No SHACL shape stored for class 'Unknown'"),
             "error should name the class, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #909: an include's target-class SHACL that has not synced yet gets the
+    // same bounded wait as the queried class's own.
+    // -----------------------------------------------------------------------
+
+    const NESTED_TASK_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+        ]
+    }"#;
+
+    /// A `Board` whose `tasks` relation targets `Task`, one board linked to one
+    /// task, and only `Board`'s SHACL registered — the state a peer is in when
+    /// the queried class has synced and the included one has not.
+    async fn nested_include_fixture() -> PerspectiveInstance {
+        let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+    }
+
+    const NESTED_BOARD_SHACL: &str = r#"{
+        "target_class": "board://Board",
+        "properties": [
+            {"path": "board://name", "name": "name", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "board://has_task", "name": "tasks", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Task"}
+        ]
+    }"#;
+
+    async fn add_class(perspective: &mut PerspectiveInstance, name: &str, shacl: &str) {
+        perspective
+            .add_sdna(
+                name.into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+    }
+
+    /// Writes `triples` straight into the store as shared links, the way they
+    /// land from a peer, without triggering a subscription pass.
+    fn add_shared_triples(perspective: &PerspectiveInstance, triples: &[(&str, &str, &str)]) {
+        let signer = TestSigner::generate();
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+    }
+
+    const NESTED_INCLUDE_QUERY: &str = r#"{"include":{"tasks":true}}"#;
+
+    /// On a shared perspective, `Task`'s SHACL arriving while the query waits
+    /// lets the include hydrate instead of failing the whole query.
+    #[tokio::test]
+    async fn test_model_query_waits_for_late_include_target_shape() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_sync = async move {
+            sleep(Duration::from_millis(500)).await;
+            syncing
+                .add_sdna(
+                    "Task".into(),
+                    "".into(),
+                    SdnaType::SubjectClass,
+                    Some(NESTED_TASK_SHACL.into()),
+                    &AgentContext::main_agent(),
+                )
+                .await
+                .expect("add Task");
+        };
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            late_sync
+        );
+
+        let result: serde_json::Value =
+            serde_json::from_str(&result.expect("query waits for Task's shape")).unwrap();
+        let tasks = result["instances"][0]["tasks"]
+            .as_array()
+            .expect("tasks array");
+        assert_eq!(tasks.len(), 1, "one task included: {result}");
+        assert_eq!(tasks[0]["id"], "ad4m://task1", "task hydrated: {result}");
+    }
+
+    /// On a shared perspective, a target-class SHACL that never arrives fails
+    /// the query with the usual message — but only once the budget is spent.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_after_budget() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let budget = Duration::from_millis(800);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task's shape never arrives");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "error only after the budget is spent, came after {elapsed:?}"
+        );
+        assert!(
+            err.to_string().contains("waited"),
+            "error says a wait happened, got: {err}"
+        );
+    }
+
+    /// A local-only perspective has no peer to wait for: a missing target
+    /// class is a caller bug and fails at once, whatever the budget.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_at_once_when_local() {
+        let perspective = nested_include_fixture().await;
+        let budget = Duration::from_secs(10);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task is not registered");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "local-only must not wait, took {elapsed:?}"
+        );
+        assert!(
+            !err.to_string().contains("waited"),
+            "no wait happened, so the error must not claim one: {err}"
+        );
+    }
+
+    const TASK_WITH_COMMENTS_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "task://has_comment", "name": "comments", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Comment"}
+        ]
+    }"#;
+
+    const TWO_LEVEL_INCLUDE_QUERY: &str = r#"{"include":{"tasks":{"include":{"comments":true}}}}"#;
+
+    /// Budget for the shared-budget tests. A class that lands late does so
+    /// at 0.6 × this, so one shared budget ends at 1.0 × and a fresh one
+    /// per wait at 1.6 × — far enough apart to tell without flaking.
+    const SHARED_BUDGET: Duration = Duration::from_secs(2);
+
+    /// Asserts a query that waited for two classes ended by one budget's
+    /// deadline, not two, and failed on the class that never arrived.
+    fn assert_one_budget_spent(err: &AnyError, elapsed: Duration, never_arrives: &str) {
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "No SHACL shape stored for class '{never_arrives}'"
+            )),
+            "fails on the class that never arrives, got: {msg}"
+        );
+        assert!(
+            msg.contains("waited"),
+            "error says a wait happened, got: {msg}"
+        );
+        assert!(
+            elapsed >= SHARED_BUDGET,
+            "the budget is used in full before failing, came after {elapsed:?}"
+        );
+        assert!(
+            elapsed < SHARED_BUDGET.mul_f32(1.4),
+            "two waits share one budget of {SHARED_BUDGET:?}, but the query took {elapsed:?}"
+        );
+    }
+
+    /// Two missing include targets, `Board → Task → Comment`: `Task` lands
+    /// part-way through the budget, `Comment` never does. The wait for
+    /// `Comment` gets only what `Task`'s wait left, not a fresh budget.
+    #[tokio::test]
+    async fn test_model_query_include_waits_share_one_budget() {
+        let perspective = nested_include_fixture().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://comment1", "comment://body", "literal:string:c"),
+                ("ad4m://task1", "task://has_comment", "ad4m://comment1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_task = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Task", TASK_WITH_COMMENTS_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, SHARED_BUDGET),
+            late_task
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Comment's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Comment");
+    }
+
+    /// The queried class itself lands part-way through the budget and its
+    /// include target never does. The include's wait draws on the deadline
+    /// set before the top-level wait, not on one restarted after it.
+    #[tokio::test]
+    async fn test_model_query_top_level_and_include_waits_share_one_budget() {
+        let perspective = setup().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_board = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Board", NESTED_BOARD_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, SHARED_BUDGET),
+            late_board
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Task's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Task");
+    }
+
+    /// Subscription re-checks run under one `join_all`, so a model
+    /// subscription waiting for an include target that never syncs must not
+    /// hold back another subscription's update on the same perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_subscription_recheck_does_not_wait_for_missing_include_shape() {
+        let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[("ad4m://board1", "board://name", "literal:string:Sprint1")],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        // No board has tasks yet, so hydration does not need `Task`.
+        let (board_sub, _) = perspective
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+            .await
+            .expect("subscribe to Board");
+        let (other_sub, _) = perspective
+            .subscribe_and_query("SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(), None)
+            .await
+            .expect("subscribe to titles");
+
+        // A task syncs in under the board, but `Task`'s SHACL never does;
+        // an unrelated link for the other subscription lands alongside.
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+                ("ns://thing/1", "ns://title", "literal:string:hello"),
+            ],
+        );
+
+        let started = Instant::now();
+        perspective
+            .check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the pass waited {elapsed:?} for Task's shape (budget {MODEL_QUERY_SHAPE_WAIT:?})"
+        );
+        let queries = perspective.subscribed_queries.lock().await;
+        assert!(
+            queries[&other_sub].last_result.contains("ns://thing/1"),
+            "the other subscription is updated in the same pass, got: {}",
+            queries[&other_sub].last_result
+        );
+        assert!(
+            !queries[&board_sub].last_result.contains("ad4m://task1"),
+            "the Board subscription skips this pass, got: {}",
+            queries[&board_sub].last_result
         );
     }
 
