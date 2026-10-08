@@ -177,10 +177,16 @@ async fn main() -> Result<()> {
             config,
             unlock_passphrase,
         } = run_args.resolve(process_env)?;
-        let _ = tokio::spawn(async move {
-            rust_executor::run(config).await;
-        })
-        .await;
+        let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
+        // Exit 1 when the REST API fails (e.g. the port is taken), instead of
+        // running on with no API.
+        match startup {
+            Ok(api_thread) => rust_executor::exit_when_api_fails(api_thread),
+            Err(e) => {
+                eprintln!("rust_executor::run panicked during startup: {e}");
+                exit(1);
+            }
+        }
         if let Some(passphrase) = unlock_passphrase {
             tokio::spawn(rust_executor::unlock_agent_at_startup(passphrase));
         }

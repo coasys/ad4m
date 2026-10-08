@@ -5,7 +5,8 @@ import { PerspectiveClient } from './perspectives/PerspectiveClient'
 import { RuntimeClient } from './runtime/RuntimeClient'
 import { ExpressionClient } from './expression/ExpressionClient'
 import { AIClient } from './ai/AIClient'
-import { ApiClient } from './apiClient'
+import { ApiClient, EventFilter } from './apiClient'
+import type { EventMap, EventName } from './generated/api/Events'
 import { Ad4mModel } from './model/Ad4mModel'
 
 /**
@@ -17,8 +18,7 @@ import { Ad4mModel } from './model/Ad4mModel'
  * NeighbourhoodClient, PerspectiveClient and RuntimeClient
  * for the respective functionality.
  *
- * Event listeners (`addXListener`, `addXCallback`) receive events from the moment of
- * registration: the first one opens the event subscription of its sub-client.
+ * {@link Ad4mClient.on} receives executor events from the moment of registration.
  */
 export class Ad4mClient {
     #baseUrl: string
@@ -87,6 +87,16 @@ export class Ad4mClient {
 
     get ai(): AIClient {
         return this.#aiClient
+    }
+
+    /**
+     * Call `handler` with every `type` event, or only those about
+     * `filter.perspective`. The payload is typed by the executor's event
+     * table (`generated/api/Events.ts`). Returns a function that removes the
+     * handler.
+     */
+    on<K extends EventName>(type: K, handler: (event: EventMap[K]) => void, filter?: EventFilter): () => void {
+        return this.#apiClient.on(type, handler, filter)
     }
 
     /** Close all event connections and clear in-memory caches */

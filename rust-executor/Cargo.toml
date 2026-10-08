@@ -102,6 +102,8 @@ serde = "1.0.159"
 serde_ignored = "0.1"
 secp256k1 = { version = "0.27.0", features = ["rand", "serde"] }
 crypto_box = "0.8.2"
+chacha20poly1305 = "0.10.1"
+zeroize = "1.9"
 hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
@@ -216,7 +218,7 @@ portpicker = "0.1.1"
 deno_error = "0.7"
 thiserror = "2.0.12"
 oxigraph = { version = "0.5.7", features = ["rocksdb", "rdf-12"] }
-ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings"] }
+ts-rs = { version = "12.0.1", features = ["serde-compat", "no-serde-warnings", "serde-json-impl", "chrono-impl", "url-impl"] }
 tower-service = "0.3"
 
 [target.'cfg(not(target_env = "msvc"))'.dependencies]

@@ -200,6 +200,15 @@ function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
     return sharedLocalServices;
 }
 
+/**
+ * How long startExecutor() waits for the readiness markers before it kills
+ * the executor and rejects. A healthy start takes well under this; the bound
+ * turns a stalled start into a logged failure instead of mocha's 1200 s hang.
+ */
+const EXECUTOR_STARTUP_TIMEOUT_MS = 300_000;
+/** Output lines startExecutor() includes when the executor never gets ready. */
+const STARTUP_LOG_TAIL_LINES = 50;
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -329,6 +338,15 @@ export async function spawnExecutor(
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, ...env },
     });
+    // The last output lines, for the error when the executor never gets ready.
+    const recentOutput: string[] = [];
+    const recordOutput = (data: any) => {
+        recentOutput.push(...data.toString().split('\n').filter((line: string) => line.trim()));
+        recentOutput.splice(0, Math.max(0, recentOutput.length - STARTUP_LOG_TAIL_LINES));
+    };
+    executorProcess.stdout!.on('data', recordOutput);
+    executorProcess.stderr!.on('data', recordOutput);
+
     let executorReady = new Promise<void>((resolve, reject) => {
         // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
@@ -340,9 +358,37 @@ export async function spawnExecutor(
         let mcpReady = !enableMcp;
         let resolved = false;
 
+        // Without these, an executor that dies or stalls before the marker
+        // (e.g. the API port is taken: it logs the bind error and exits 1)
+        // leaves this promise pending until mocha's 1200 s timeout.
+        const fail = (reason: string) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            reject(new Error(
+                `Executor on API port ${apiPort} ${reason}. Last ${recentOutput.length} output lines:\n` +
+                recentOutput.join('\n'),
+            ));
+        };
+        // 'close', not 'exit': 'exit' can fire while the pipes still hold the
+        // executor's last lines, which are the ones that say why it died.
+        const onClose = (code: number | null, signal: NodeJS.Signals | null) =>
+            fail(`exited before it was ready (code ${code}, signal ${signal})`);
+        const onError = (error: Error) => fail(`could not be started: ${error.message}`);
+        const timer = setTimeout(() => {
+            // Kill it, so it does not keep holding its ports after we give up.
+            executorProcess!.kill('SIGKILL');
+            fail(`was not ready after ${EXECUTOR_STARTUP_TIMEOUT_MS / 1000} s`);
+        }, EXECUTOR_STARTUP_TIMEOUT_MS);
+        executorProcess!.once('close', onClose);
+        executorProcess!.once('error', onError);
+
         const maybeResolve = () => {
             if (!resolved && apiReady && mcpReady) {
                 resolved = true;
+                clearTimeout(timer);
+                executorProcess!.off('close', onClose);
+                executorProcess!.off('error', onError);
                 resolve();
             }
         };
@@ -359,12 +405,6 @@ export async function spawnExecutor(
 
         executorProcess.stdout!.on('data', (data: any) => checkReady(data.toString()));
         executorProcess.stderr!.on('data', (data: any) => checkReady(data.toString()));
-        executorProcess.once('exit', (code, signal) => {
-            if (!resolved) {
-                resolved = true;
-                reject(new Error(`ad4m-executor exited before it was ready (code ${code}, signal ${signal})`));
-            }
-        });
     })
 
     executorProcess.stdout!.on('data', (data) => {

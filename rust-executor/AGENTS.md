@@ -63,6 +63,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   itself (`agent/capabilities/defs.rs`). MCP tools check via `Ad4mMcpHandler::get_*_perspective`.
 - **Multi-user**: `AgentContext` (`agent/mod.rs`) carries main-agent vs managed-user (by email).
   Any signing/DID/billing path takes it explicitly.
+- **Keystore**: the `keystore` field of `agent.json` holds every local key, the main agent's and
+  each managed user's (`wallet.rs`: Argon2id + XChaCha20-Poly1305, fresh salt and nonce per write).
+  The first unlock of a legacy keystore rewrites the file and keeps `agent.json.legacy` until an
+  unlock opens `agent.json` directly (`AgentService::unlock`). Meanwhile every save writes
+  `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
+  only while the backup holds exactly those keys. Write the agent file only through
+  `AgentService::save` / `try_save`.
 
 ## Do / don't
 
