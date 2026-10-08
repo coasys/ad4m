@@ -62,6 +62,10 @@ enum ChangedPredicates {
 use uuid;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "perspective_instance_subscription_tests.rs"]
+mod subscription_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -393,6 +397,13 @@ struct SubscribedQuery {
     /// When set, this subscription was registered via `model_subscribe_and_query`.
     /// On trigger, `execute_model_query` is called instead of re-running raw SPARQL.
     model_query_params: Option<ModelSubscriptionParams>,
+    /// Number of subscribers currently holding this entry. `subscribe_and_query`
+    /// and `model_subscribe_and_query` hand the same id to every caller that
+    /// registers the same (query, user) pair, so one re-evaluation and one push
+    /// serve all of them. `dispose_query_subscription` releases one hold and
+    /// removes the entry only when the last holder is gone. Keepalive eviction
+    /// ignores this count: an entry nobody keeps alive is removed regardless.
+    holders: usize,
 }
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
@@ -1405,9 +1416,9 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
                     &serde_json::to_string(&PerspectiveStateFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle,
-                        state: serde_json::to_string(&state)
-                            .expect("must be able to serialze PerspectiveState"),
+                        state: state.clone(),
                     })
                     .unwrap(),
                 )
@@ -1747,6 +1758,11 @@ impl PerspectiveInstance {
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+        // Every write reaches here, local or synced, so this is where a local
+        // change to a flow definition queues the re-derivation that a synced
+        // one gets from `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -2145,6 +2161,10 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
+
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it queues the definition sweep here.
+            self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
@@ -4299,10 +4319,13 @@ impl PerspectiveInstance {
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
 
-                let payload = TriggeredNotification {
-                    notification: notification.clone(),
-                    perspective_id: uuid.clone(),
-                    trigger_match,
+                let payload = NotificationTriggeredEvent {
+                    perspective_uuid: uuid.clone(),
+                    notification: TriggeredNotification {
+                        notification: notification.clone(),
+                        perspective_id: uuid.clone(),
+                        trigger_match,
+                    },
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -4535,6 +4558,7 @@ impl PerspectiveInstance {
                     .publish(
                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective_uuid: handle.uuid.clone(),
                             perspective: handle,
                             signal,
                             recipient: Some(recipient),
@@ -4639,6 +4663,7 @@ impl PerspectiveInstance {
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective_uuid: handle.uuid.clone(),
                                             perspective: handle,
                                             signal,
                                             recipient: Some(user_did),
@@ -4678,6 +4703,7 @@ impl PerspectiveInstance {
                         .publish(
                             &NEIGHBOURHOOD_SIGNAL_TOPIC,
                             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective_uuid: handle.uuid.clone(),
                                 perspective: handle,
                                 signal,
                                 recipient: Some(main_agent_did),
@@ -5681,6 +5707,7 @@ impl PerspectiveInstance {
                 sleep(delay).await;
             }
             let filter = PerspectiveQuerySubscriptionFilter {
+                perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
                 result,
@@ -5709,11 +5736,16 @@ impl PerspectiveInstance {
                 .map(|(id, _)| id.clone())
         };
 
-        // Return existing subscription if found
+        // Return existing subscription if found. The caller becomes one more
+        // holder of the shared entry; see `SubscribedQuery::holders`.
         if let Some(existing_id) = existing_subscription {
             let existing_result = {
-                let queries = self.subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
+                let mut queries = self.subscribed_queries.lock().await;
+                queries.get_mut(&existing_id).map(|q| {
+                    q.holders += 1;
+                    q.last_keepalive = Instant::now();
+                    q.last_result.clone()
+                })
             };
 
             if let Some(last_result) = existing_result {
@@ -5751,6 +5783,7 @@ impl PerspectiveInstance {
             user_email,
             predicates,
             model_query_params: None,
+            holders: 1,
         };
 
         // Now insert the subscription
@@ -5814,7 +5847,9 @@ impl PerspectiveInstance {
         };
 
         if let Some(existing_id) = existing_subscription {
-            // Update last_result and trigger metadata with fresh data
+            // Update last_result and trigger metadata with fresh data. The
+            // caller becomes one more holder of the shared entry; see
+            // `SubscribedQuery::holders`.
             {
                 let mut queries = self.subscribed_queries.lock().await;
                 if let Some(q) = queries.get_mut(&existing_id) {
@@ -5822,6 +5857,7 @@ impl PerspectiveInstance {
                     q.predicates = predicate_set.clone();
                     q.last_result = initial_result.clone();
                     q.last_keepalive = Instant::now();
+                    q.holders += 1;
                 }
             }
             return Ok((existing_id, initial_result));
@@ -5839,6 +5875,7 @@ impl PerspectiveInstance {
                 class_name,
                 query_json,
             }),
+            holders: 1,
         };
 
         self.subscribed_queries
@@ -5922,13 +5959,30 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Release one subscriber's hold on `subscription_id`. The entry is removed
+    /// (and the prolog service notified) only when no holder remains, so a
+    /// subscription shared by several subscribers keeps pushing updates to the
+    /// others. Returns `Ok(true)` when the id was registered, `Ok(false)` when
+    /// it was unknown (already removed or evicted).
     pub async fn dispose_query_subscription(
         &self,
         subscription_id: String,
     ) -> Result<bool, AnyError> {
-        let removed_query = {
+        let (found, removed_query) = {
             let mut queries = self.subscribed_queries.lock().await;
-            queries.remove(&subscription_id)
+            match queries.get_mut(&subscription_id) {
+                None => (false, None),
+                Some(q) if q.holders > 1 => {
+                    q.holders -= 1;
+                    log::debug!(
+                        "🔗 subscription {} released by one holder, {} remaining",
+                        subscription_id,
+                        q.holders
+                    );
+                    (true, None)
+                }
+                Some(_) => (true, queries.remove(&subscription_id)),
+            }
         };
 
         if let Some(query) = removed_query {
@@ -5941,10 +5995,8 @@ impl PerspectiveInstance {
             {
                 log::warn!("Failed to notify prolog service of subscription end: {}", e);
             }
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(found)
     }
 
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
@@ -6327,7 +6379,9 @@ impl PerspectiveInstance {
     /// Auto-processor watch loop (P-B2b2 polling MVP).
     ///
     /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every `TICK_MS`:
+    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
+    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6354,16 +6408,27 @@ impl PerspectiveInstance {
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
-        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::auto_processor::watcher::{
+            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        const TICK_MS: u64 = 500;
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
+        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
 
         while !self.is_teardown.load(Ordering::Acquire) {
-            sleep(Duration::from_millis(TICK_MS)).await;
+            // Sleep in base-tick slices so teardown is observed as promptly
+            // while backed off as at the base rate.
+            let mut remaining = delay_ms;
+            while remaining > 0 {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
+                sleep(Duration::from_millis(step)).await;
+                remaining -= step;
+            }
             if self.is_teardown.load(Ordering::Acquire) {
                 return;
             }
@@ -6371,8 +6436,10 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            self.run_auto_processor_tick(&mut watcher, now_ms, &context)
+            let had_pending = self
+                .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
+            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6393,12 +6460,22 @@ impl PerspectiveInstance {
     /// loop passes the main agent; a multi-user test passes each managed user's
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
+    ///
+    /// Returns whether a declared processor had turns pending after recording,
+    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
+    /// sampled before draining, so a drained batch that is retried (stand-down,
+    /// awaiting author, missing shapes, pass error) keeps the base rate: the
+    /// next tick re-records it. `false` when no processor is declared or every
+    /// gathered turn was already processed or deferred. If loading the
+    /// processors fails, any queued turn counts. A per-config query failure
+    /// records nothing for that config, so a failing scope query backs off
+    /// instead of logging a warning twice a second.
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) {
+    ) -> bool {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_source_ids, turn_in_source_window},
@@ -6414,11 +6491,11 @@ impl PerspectiveInstance {
                     "auto_processor_tick [{}]: load_processors failed: {e:#}",
                     uuid
                 );
-                return;
+                return watcher.has_pending();
             }
         };
         if configs.is_empty() {
-            return;
+            return false;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
@@ -6473,6 +6550,8 @@ impl PerspectiveInstance {
             }
         }
 
+        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+
         // 2. Drain + run a pass per config.
         for cfg in &configs {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
@@ -6484,13 +6563,17 @@ impl PerspectiveInstance {
             let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
             let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             // Signal the batch is ready before the pass runs, so listeners
-            // (tests, the WS layer) can await "processing started".
-            emit(
+            // (tests, the WS layer) can await "processing started". Tagged with
+            // the acting agent like every signal `run_one_pass` emits: the WS
+            // layer delivers an untagged event to admin sessions only.
+            let mut ready =
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
                     .with_items(&item_ids)
-                    .with_batch_key(&batch_id),
-            )
-            .await;
+                    .with_batch_key(&batch_id);
+            if let Ok(me) = did_for_context(context) {
+                ready = ready.with_agent_did(&me);
+            }
+            emit(ready).await;
             let mut perspective_clone = self.clone();
             // Stall-fallback: if this batch has been standing down for its online
             // elected author past `claim_ttl_ms`, escalate past election straight
@@ -6550,6 +6633,7 @@ impl PerspectiveInstance {
                 }
             }
         }
+        had_pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added

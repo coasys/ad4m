@@ -78,11 +78,23 @@ ad4m-executor run \
 |------|---------|-------------|
 | `--app-data-path` | (required) | Data directory |
 | `--port` | 12000 | API port (WebSocket RPC + HTTP) |
-| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access |
+| `AD4M_ADMIN_CREDENTIAL` (env) / `--admin-credential` | (none) | Admin auth token. Set it through the environment variable; the flag form leaks the secret into `ps` output and shell history. Without it, an empty token has admin access on a loopback-bound API only, and a proxy or tunnel in front of that API needs a credential (see "A proxy or tunnel in front of a loopback listener" under Step 4); with `--localhost false` or TLS, a caller with no token can request a capability, check whether multi-user mode is on, and sign up and log in when it is |
 | `--enable-mcp` | false | Enable MCP server |
 | `--mcp-port` | 3001 | MCP server port |
 | `--hc-admin-port` | 2000 | Holochain admin port |
 | `--hc-app-port` | 1337 | Holochain app interface port |
+
+For a long-running node, put these settings in a config file instead
+(`ad4m-executor run --config <file>`), with the admin credential in a file
+named by `AD4M_ADMIN_CREDENTIAL_FILE`. The keys, the `AD4M_<FLAG>` variables
+and their precedence are in `pages/developer-guides/executor-config.mdx`
+("Executor config file"); `ad4m-executor config print` shows what `run`
+would start with.
+
+To run the executor as a `systemd` service without the launcher (a unit
+with the secrets loaded through `LoadCredential=`, updates with a copy of
+the data directory, health checks, rollback, moving a node off the
+launcher), follow `headless-executor.md`.
 
 **For AI agents**: Always run in a screen session with logging:
 
@@ -117,6 +129,11 @@ After restarting the executor, unlock the agent:
 ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
 ```
 
+A service can skip this step: with `AD4M_UNLOCK_PASSPHRASE_FILE` pointing at
+a mode-600 file holding the passphrase, the executor unlocks the agent
+itself at every start (see "Unlocking at startup" in
+`pages/developer-guides/executor-config.mdx`).
+
 `--holochain true` starts the Holochain conductor during unlock. Same caveat
 as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 
@@ -127,7 +144,15 @@ as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.
 
 If you're the executor's operator and don't have CLI access handy, the same unlock is available over the WebSocket RPC API (`references/setup.md` → "WebSocket RPC API (Fallback)"): `agent.unlock` with the agent's passphrase. If you're a third party hitting either error, this isn't something to retry your way around — someone with operator access needs to unlock the node first.
 
-**Test-only mode, not a security bug:** on a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access on the WS-RPC API, including `agent.unlock` — found live 2026-09-06 recovering a test executor. This is intentional, for local/test convenience, not a gap to fix. **Never run a node without an admin credential set except on loopback/local test setups** — on anything reachable by another user or over a network, this means anyone can unlock and fully control the node.
+**No admin credential: the empty token is the operator on loopback only.** On a node with no admin credential configured (neither `AD4M_ADMIN_CREDENTIAL` nor `--admin-credential`), an empty token resolves to full (`ALL_CAPABILITY`) access, including `agent.unlock`, on an API listener bound to a loopback address (the default, `--localhost true`). This is the single-user local mode. On a listener bound to any other address (`--localhost false`, or the HTTPS listener when TLS is configured) a caller with no token is anonymous: it can request a capability (`agent.requestCapability`), check whether multi-user mode is on, and sign up and log in when it is. It cannot read, unlock or administer anything. To administer a node over the network, set an admin credential.
+
+**A proxy or tunnel in front of a loopback listener needs an admin credential.** A reverse proxy or tunnel on the same host (nginx, Caddy, Traefik, cloudflared, `tailscale serve`, `ssh -R`) connects to the executor from `127.0.0.1`, so its remote clients arrive on the loopback listener. A request that carries a `Forwarded`, `X-Forwarded-For` or `X-Real-IP` header is treated as a network caller, which covers most HTTP proxy configurations. A proxy that sets none of these headers (a raw TCP or stream forward, `ssh -R`, an nginx `proxy_pass` without `proxy_set_header`) is still treated as the operator, and so is every client behind it. Set an admin credential on any node you put a proxy or tunnel in front of.
+
+**No admin credential is a testing/development mode, not a deployment target.** The launcher always sets an admin credential; a node with none configured only happens when `ad4m-executor` is started by hand without `AD4M_ADMIN_CREDENTIAL` or `--admin-credential`. Production deployments must set one.
+
+**A web page open in a browser on the same machine can reach a loopback executor too.** The HTTP API accepts requests from any origin (no CORS restriction), and the WebSocket API doesn't check the `Origin` header either. On a node with no admin credential, that means any page open in a local browser — not just terminal tools — gets the same operator access a local CLI would. Chrome asks the user for Local Network Access permission before a public site can reach loopback (for HTTP since Chrome 142, for WebSocket since Chrome 147), but one click grants it, and other browsers may not ask at all. Don't run without a credential on a machine where you also browse untrusted sites with a node holding real data.
+
+Before [#1059](https://github.com/coasys/ad4m/issues/1059) the empty token had full access on every listener.
 
 ### Step 5: Verify
 

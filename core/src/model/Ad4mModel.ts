@@ -140,6 +140,105 @@ function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): 
   }
 }
 
+/**
+ * Split an include map into its relations and its `$`-prefixed projections.
+ *
+ * The two travel in different fields: a relation is hydrated, a projection is
+ * computed over one. Both halves are new objects, so the caller's query is left
+ * as it was written and can be sent again.
+ */
+function splitIncludeProjections(include: IncludeMap): {
+  includes: IncludeMap;
+  projections: Record<string, IncludeProjection>;
+} {
+  const includes: IncludeMap = {};
+  const projections: Record<string, IncludeProjection> = {};
+  for (const [key, val] of Object.entries(include)) {
+    if (key.startsWith('$')) {
+      projections[key] = { ...(val as IncludeProjection) };
+    } else {
+      includes[key] = val;
+    }
+  }
+  return { includes, projections };
+}
+
+/**
+ * Tag each projection with its target class name, so the executor can resolve
+ * the target shape through its in-memory cache when applying a projection's
+ * where-clause. `ctor` is the class the projections are read against; without
+ * one (the members of a polymorphic relation) nothing is tagged, and the
+ * executor resolves each projection against each member's own class.
+ */
+function tagProjectionTargets(projections: Record<string, IncludeProjection>, ctor: Function | undefined): void {
+  if (!ctor) return;
+  const allRelMeta = getRelationsMetadata(ctor);
+  for (const proj of Object.values(projections)) {
+    const relMeta = allRelMeta[proj.from];
+    if (!proj.targetClassName && relMeta?.target) {
+      try {
+        const TargetClass = relMeta.target();
+        const targetMeta = (TargetClass as any).getModelMetadata?.();
+        if (targetMeta?.className) {
+          proj.targetClassName = targetMeta.className;
+        }
+      } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
+    }
+  }
+}
+
+/**
+ * Move the `$`-prefixed keys of every nested include into that sub-query's own
+ * `projections`, at every depth.
+ *
+ * The executor reads a sub-query exactly as it reads a top-level query, so a
+ * projection on related records belongs in the sub-query's `projections` field,
+ * as it does at the top. Left inside `include` it named a relation that does not
+ * exist and was skipped: the query succeeded and the field was simply absent, so
+ * `include: { posts: { include: { $likeCount: … } } }` came back without counts
+ * and said nothing.
+ *
+ * Copies every sub-query it changes rather than editing it, so a query object
+ * the caller keeps (a subscription re-preparing its query, say) still says what
+ * it said.
+ */
+function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined): IncludeMap {
+  const relMeta = ctor ? getRelationsMetadata(ctor) : {};
+  const out: IncludeMap = {};
+  for (const [relName, val] of Object.entries(includes)) {
+    if (typeof val !== 'object' || val === null || relName.startsWith('$')) {
+      out[relName] = val;
+      continue;
+    }
+    const subQuery: any = { ...val };
+    // The class the nested keys are read against. A polymorphic relation's
+    // members are of several classes, so there is none to name: its nested
+    // projections go untagged and the executor resolves them per member class.
+    let TargetClass: Function | undefined;
+    if (!subQuery.polymorphic) {
+      try {
+        TargetClass = relMeta[relName]?.target?.();
+      } catch (e) {
+        console.debug(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      }
+    }
+    if (subQuery.include && typeof subQuery.include === 'object') {
+      const { includes: nestedIncludes, projections } = splitIncludeProjections(subQuery.include);
+      if (Object.keys(nestedIncludes).length > 0) {
+        subQuery.include = liftNestedProjections(nestedIncludes, TargetClass);
+      } else {
+        delete subQuery.include;
+      }
+      if (Object.keys(projections).length > 0) {
+        tagProjectionTargets(projections, TargetClass);
+        subQuery.projections = { ...(subQuery.projections ?? {}), ...projections };
+      }
+    }
+    out[relName] = subQuery;
+  }
+  return out;
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -1022,17 +1121,9 @@ export class Ad4mModel {
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
-      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
-      // All other keys (boolean | RelationSubQuery) → queryInput.include
-      const normalIncludes: IncludeMap = {};
-      const projections: Record<string, IncludeProjection> = {};
-      for (const [key, val] of Object.entries(query.include)) {
-        if (key.startsWith('$')) {
-          projections[key] = val as IncludeProjection;
-        } else {
-          normalIncludes[key] = val;
-        }
-      }
+      // $-prefixed keys → queryInput.projections; all other keys (boolean |
+      // RelationSubQuery) → queryInput.include.
+      const { includes: normalIncludes, projections } = splitIncludeProjections(query.include);
       // A relation declared `polymorphic` reads that way by default, so the
       // caller writes `include: { children: true }` and still gets each child
       // hydrated as the class it actually is. Declaring it on the model rather
@@ -1042,25 +1133,10 @@ export class Ad4mModel {
       // every depth, since a nested include is a fact about the data too.
       if (Object.keys(normalIncludes).length > 0) {
         applyPolymorphicIncludeDefaults(normalIncludes, this as any);
-        queryInput.include = normalIncludes;
+        queryInput.include = liftNestedProjections(normalIncludes, this as any);
       }
       if (Object.keys(projections).length > 0) {
-        // Tag each projection with its target class name so the executor can
-        // resolve the target shape through its in-memory cache when applying
-        // projection where-clause filters.
-        const allRelMeta = getRelationsMetadata(this as any);
-        for (const [, proj] of Object.entries(projections)) {
-          const relMeta = allRelMeta[proj.from];
-          if (!proj.targetClassName && relMeta?.target) {
-            try {
-              const TargetClass = relMeta.target();
-              const targetMeta = (TargetClass as any).getModelMetadata?.();
-              if (targetMeta?.className) {
-                proj.targetClassName = targetMeta.className;
-              }
-            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
-          }
-        }
+        tagProjectionTargets(projections, this as any);
         queryInput.projections = projections;
       }
     }
