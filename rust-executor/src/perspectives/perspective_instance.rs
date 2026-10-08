@@ -6402,7 +6402,9 @@ impl PerspectiveInstance {
     /// Auto-processor watch loop (P-B2b2 polling MVP).
     ///
     /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every `TICK_MS`:
+    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
+    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6429,16 +6431,27 @@ impl PerspectiveInstance {
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
-        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::auto_processor::watcher::{
+            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        const TICK_MS: u64 = 500;
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
+        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
 
         while !self.is_teardown.load(Ordering::Acquire) {
-            sleep(Duration::from_millis(TICK_MS)).await;
+            // Sleep in base-tick slices so teardown is observed as promptly
+            // while backed off as at the base rate.
+            let mut remaining = delay_ms;
+            while remaining > 0 {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
+                sleep(Duration::from_millis(step)).await;
+                remaining -= step;
+            }
             if self.is_teardown.load(Ordering::Acquire) {
                 return;
             }
@@ -6446,8 +6459,10 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            self.run_auto_processor_tick(&mut watcher, now_ms, &context)
+            let had_pending = self
+                .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
+            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -6468,12 +6483,22 @@ impl PerspectiveInstance {
     /// loop passes the main agent; a multi-user test passes each managed user's
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
+    ///
+    /// Returns whether a declared processor had turns pending after recording,
+    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
+    /// sampled before draining, so a drained batch that is retried (stand-down,
+    /// awaiting author, missing shapes, pass error) keeps the base rate: the
+    /// next tick re-records it. `false` when no processor is declared or every
+    /// gathered turn was already processed or deferred. If loading the
+    /// processors fails, any queued turn counts. A per-config query failure
+    /// records nothing for that config, so a failing scope query backs off
+    /// instead of logging a warning twice a second.
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) {
+    ) -> bool {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_source_ids, turn_in_source_window},
@@ -6489,11 +6514,11 @@ impl PerspectiveInstance {
                     "auto_processor_tick [{}]: load_processors failed: {e:#}",
                     uuid
                 );
-                return;
+                return watcher.has_pending();
             }
         };
         if configs.is_empty() {
-            return;
+            return false;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
@@ -6547,6 +6572,8 @@ impl PerspectiveInstance {
                 watcher.record_item(&cfg.processor_id, pending, now_ms);
             }
         }
+
+        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
 
         // 2. Drain + run a pass per config.
         for cfg in &configs {
@@ -6629,6 +6656,7 @@ impl PerspectiveInstance {
                 }
             }
         }
+        had_pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added
