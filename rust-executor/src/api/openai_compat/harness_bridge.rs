@@ -105,61 +105,71 @@ impl CompletionSource for OpenAiCompatBridge {
             )
             .await?;
 
-        // The model's text is either a plain answer or a tool-call block
-        // (or both — some models emit a short pre-thought before the call).
-        // `extract_tool_calls` returns [] for pure-text answers, which the
-        // harness reads as "we're done".
-        let extracted = if tools_active {
-            tool_grammar::extract_tool_calls(&result.text)
-        } else {
-            Vec::new()
-        };
+        Ok(completion_from_injected_text(result.text, tools_active))
+    }
+}
 
-        let tool_calls: Vec<HarnessToolCall> = extracted
-            .into_iter()
-            .map(|c| {
-                // ExtractedToolCall.arguments is a JSON-encoded string (matches
-                // OpenAI's `function.arguments` wire shape). Parse it back into
-                // a Value here so the provider receives a real object; a bad
-                // parse degrades to an empty object rather than aborting the
-                // whole pass — the tool will get `{}` and produce its own
-                // wrong-shape error, which the LLM can read and retry.
-                let arguments = serde_json::from_str::<Value>(&c.arguments)
-                    .unwrap_or_else(|_| Value::Object(Default::default()));
-                // Stable `call_…` id so the assistant→tool→assistant triple
-                // the harness appends can be correlated by the LLM on the next
-                // turn. Matches the id shape /v1 mints.
-                HarnessToolCall {
-                    id: format!("call_{}", Uuid::new_v4()),
-                    name: c.name,
-                    arguments,
-                }
-            })
-            .collect();
+/// Turn the raw text an injected-path model wrote into the completion the
+/// harness loop consumes: the tool calls `extract_tool_calls` recovers, plus
+/// whatever prose surrounds them.
+///
+/// Split out of [`OpenAiCompatBridge::complete`] so the text-to-calls step
+/// can be driven through the real harness loop in tests without a model.
+fn completion_from_injected_text(text: String, tools_active: bool) -> HarnessCompletion {
+    // The model's text is either a plain answer or a tool-call block
+    // (or both — some models emit a short pre-thought before the call).
+    // `extract_tool_calls` returns [] for pure-text answers, which the
+    // harness reads as "we're done".
+    let extracted = if tools_active {
+        tool_grammar::extract_tool_calls(&text)
+    } else {
+        Vec::new()
+    };
 
-        // Preserve residual assistant text alongside tool_calls.
-        //
-        // Small local models often emit a short pre-thought before the call
-        // block — e.g. `I need to look up the task first.\n<tool_call>{...}
-        // </tool_call>`. The earlier "blank content on tool-call turn"
-        // dropped that scratchpad, so the next iteration's prompt lost the
-        // model's own reasoning about WHY it made this call (Lal's PR #911
-        // review, harness_bridge.rs:130). Strip only the `<tool_call>...
-        // </tool_call>` blocks; keep everything else as content on the
-        // assistant message the harness loop appends.
-        //
-        // When no tool_calls were emitted, the entire text is the answer —
-        // pass it through verbatim.
-        let content = if tool_calls.is_empty() {
-            result.text
-        } else {
-            strip_tool_call_blocks(&result.text)
-        };
-
-        Ok(HarnessCompletion {
-            content,
-            tool_calls,
+    let tool_calls: Vec<HarnessToolCall> = extracted
+        .into_iter()
+        .map(|c| {
+            // ExtractedToolCall.arguments is a JSON-encoded string (matches
+            // OpenAI's `function.arguments` wire shape). Parse it back into
+            // a Value here so the provider receives a real object; a bad
+            // parse degrades to an empty object rather than aborting the
+            // whole pass — the tool will get `{}` and produce its own
+            // wrong-shape error, which the LLM can read and retry.
+            let arguments = serde_json::from_str::<Value>(&c.arguments)
+                .unwrap_or_else(|_| Value::Object(Default::default()));
+            // Stable `call_…` id so the assistant→tool→assistant triple
+            // the harness appends can be correlated by the LLM on the next
+            // turn. Matches the id shape /v1 mints.
+            HarnessToolCall {
+                id: format!("call_{}", Uuid::new_v4()),
+                name: c.name,
+                arguments,
+            }
         })
+        .collect();
+
+    // Preserve residual assistant text alongside tool_calls.
+    //
+    // Small local models often emit a short pre-thought before the call
+    // block — e.g. `I need to look up the task first.\n<tool_call>{...}
+    // </tool_call>`. The earlier "blank content on tool-call turn"
+    // dropped that scratchpad, so the next iteration's prompt lost the
+    // model's own reasoning about WHY it made this call (Lal's PR #911
+    // review, harness_bridge.rs:130). Strip only the `<tool_call>...
+    // </tool_call>` blocks; keep everything else as content on the
+    // assistant message the harness loop appends.
+    //
+    // When no tool_calls were emitted, the entire text is the answer —
+    // pass it through verbatim.
+    let content = if tool_calls.is_empty() {
+        text
+    } else {
+        strip_tool_call_blocks(&text)
+    };
+
+    HarnessCompletion {
+        content,
+        tool_calls,
     }
 }
 
@@ -1110,5 +1120,160 @@ mod native_mapping_tests {
 
         assert!(turn.content.contains("one"));
         assert!(turn.content.contains("two"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// injected path end to end — model text → bridge → harness loop → dispatch
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod injected_path_dispatch_tests {
+    use super::*;
+    use crate::ai_service::harness::provider::{SideEffect, ToolProvider};
+    use crate::ai_service::harness::{run_with_tools, HarnessConfig};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    /// Stands in for the model only: each turn hands back canned raw text,
+    /// which then goes through the same `completion_from_injected_text` the
+    /// real bridge uses, so the loop sees exactly what production would.
+    struct CannedText(Mutex<VecDeque<String>>);
+
+    #[async_trait::async_trait]
+    impl CompletionSource for CannedText {
+        async fn complete(
+            &self,
+            _model_id: &str,
+            _messages: &[Value],
+            tools: Vec<ToolSchema>,
+        ) -> Result<HarnessCompletion> {
+            let text = self.0.lock().unwrap().pop_front().unwrap_or_default();
+            Ok(completion_from_injected_text(text, !tools.is_empty()))
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingProvider(Mutex<Vec<(String, Value)>>);
+
+    #[async_trait::async_trait]
+    impl ToolProvider for RecordingProvider {
+        async fn tools(&self) -> Vec<ToolSchema> {
+            vec![ToolSchema {
+                name: "extintention_create".into(),
+                description: "Create an ExtIntention".into(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "type": { "type": "string" },
+                        "title": { "type": "string" }
+                    },
+                    "required": ["title"]
+                }),
+                side_effect: SideEffect::Write,
+            }]
+        }
+        async fn call(&self, name: &str, args: Value) -> Result<String> {
+            self.0.lock().unwrap().push((name.to_string(), args));
+            Ok("soa://ext/extintention/1".into())
+        }
+    }
+
+    /// Run one harness pass in which the model's first reply is `model_text`
+    /// and its second is a plain answer; return every tool call dispatched.
+    async fn dispatched(model_text: &str) -> Vec<(String, Value)> {
+        let model = Arc::new(CannedText(Mutex::new(VecDeque::from(vec![
+            model_text.to_string(),
+            "Done.".to_string(),
+        ]))));
+        let provider = Arc::new(RecordingProvider::default());
+        run_with_tools(
+            "gemma3:12b",
+            vec![json!({"role": "user", "content": "extract"})],
+            provider.clone(),
+            model,
+            HarnessConfig::default(),
+            None,
+            None,
+        )
+        .await
+        .expect("harness pass");
+        let calls = provider.0.lock().unwrap().clone();
+        calls
+    }
+
+    fn intention(title: &str) -> (String, Value) {
+        (
+            "extintention_create".to_string(),
+            json!({ "type": "Intention", "title": title }),
+        )
+    }
+
+    // #1069: gemma3:12b answers with the *singular* wrapper. These shapes all
+    // produced zero dispatched calls — the pass then reads as "the model gave
+    // its final answer" and creates no instances.
+
+    #[tokio::test]
+    async fn singular_wrapper_bare_is_dispatched() {
+        let calls = dispatched(
+            r#"{"tool_call": {"name": "extintention_create", "arguments": {"type": "Intention", "title": "Ship it"}}}"#,
+        )
+        .await;
+        assert_eq!(calls, vec![intention("Ship it")]);
+    }
+
+    #[tokio::test]
+    async fn singular_wrapper_inside_tool_call_tags_is_dispatched() {
+        // The tag form our own system prompt asks for, with the singular key
+        // the prompt's `<tool_call>` wording plausibly provokes.
+        let calls = dispatched(
+            "<tool_call>\n\
+             {\"tool_call\": {\"name\": \"extintention_create\", \"arguments\": {\"type\": \"Intention\", \"title\": \"Ship it\"}}}\n\
+             </tool_call>",
+        )
+        .await;
+        assert_eq!(calls, vec![intention("Ship it")]);
+    }
+
+    #[tokio::test]
+    async fn fenced_array_of_singular_wrappers_dispatches_every_element() {
+        // Shape of CI job 29754's array-form attempts. The log's 240-char
+        // preview cut them off after the first element, so the second element
+        // here is reconstructed: the point is that n > 1 must not be dropped.
+        let calls = dispatched(
+            "```json\n[\n  {\n    \"tool_call\": {\n      \"name\": \"extintention_create\",\n      \
+             \"arguments\": {\n        \"type\": \"Intention\",\n        \"title\": \"Ship the release\"\n      }\n    }\n  },\n  \
+             {\n    \"tool_call\": {\n      \"name\": \"extintention_create\",\n      \
+             \"arguments\": {\n        \"type\": \"Intention\",\n        \"title\": \"Finish the WebRTC module\"\n      }\n    }\n  }\n]\n```",
+        )
+        .await;
+        assert_eq!(
+            calls,
+            vec![
+                intention("Ship the release"),
+                intention("Finish the WebRTC module")
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn fenced_singular_wrapper_from_ci_log_is_dispatched() {
+        // Verbatim from CI job 29754 (relation-hint-e2e, round 1).
+        let calls = dispatched(
+            "```json\n{\n  \"tool_call\": {\n    \"name\": \"extintention_create\",\n    \"arguments\": {\n      \"type\": \"Intention\",\n      \"title\": \"Let's make it the intention going into the sprint.\"\n    }\n  }\n}\n```",
+        )
+        .await;
+        assert_eq!(
+            calls,
+            vec![intention(
+                "Let's make it the intention going into the sprint."
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn prose_answer_dispatches_nothing() {
+        let calls = dispatched("There is nothing to extract from this transcript.").await;
+        assert!(calls.is_empty());
     }
 }
