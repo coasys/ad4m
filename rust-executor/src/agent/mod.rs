@@ -813,7 +813,7 @@ impl AgentService {
                 // Synced before the rewrite: after a power loss the backup must hold the
                 // legacy file whenever the agent file holds the new one.
                 match std::fs::copy(&self.file, self.legacy_backup_file())
-                    .and_then(|_| std::fs::File::open(self.legacy_backup_file())?.sync_all())
+                    .and_then(|_| open_for_sync(&self.legacy_backup_file())?.sync_all())
                     .map_err(AnyError::from)
                     .and_then(|_| self.try_save(&password))
                 {
@@ -972,6 +972,15 @@ impl AgentService {
             error: None,
         }
     }
+}
+
+/// Opens an existing file for `sync_all`, without truncating it.
+///
+/// The handle must be writable: on Windows `sync_all` is `FlushFileBuffers`, which
+/// needs write access and fails with "access denied" on the read-only handle that
+/// `File::open` gives. Linux and macOS `fsync` either kind.
+fn open_for_sync(path: &str) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).open(path)
 }
 
 #[cfg(test)]
@@ -1782,6 +1791,33 @@ mod tests {
     const OWNER: &str = "owner passphrase";
     /// Opens a legacy file written under `OWNER`: the legacy key ignored a trailing space.
     const VARIANT: &str = "owner passphrase ";
+
+    /// The backup is synced through a writable handle, because Windows refuses to flush a
+    /// read-only one, and the open must not truncate the backup it is about to sync. A
+    /// Windows failure cannot be reproduced here, so the test checks the handle's access
+    /// mode directly: a write through it succeeds, which a read-only handle rejects.
+    #[test]
+    fn the_legacy_backup_is_synced_through_a_writable_untruncated_handle() {
+        let tmp = tempfile::tempdir().expect("create temp dir");
+        let backup = tmp.path().join("agent.json.legacy");
+        let backup = backup.to_str().unwrap();
+        std::fs::write(backup, "legacy keystore").unwrap();
+
+        let mut file = open_for_sync(backup).expect("open the backup for sync");
+        file.sync_all().expect("sync the backup");
+        assert_eq!(
+            std::fs::read_to_string(backup).unwrap(),
+            "legacy keystore",
+            "opening for sync must not truncate the backup"
+        );
+
+        std::io::Write::write_all(&mut file, b"writable")
+            .expect("the sync handle must have write access");
+        drop(file);
+        assert!(std::fs::read_to_string(backup)
+            .unwrap()
+            .starts_with("writable"));
+    }
 
     /// Keys added after a migration under a variant passphrase exist only in the rewritten
     /// file. The real passphrase opens the legacy backup, which lacks them, so the fallback
