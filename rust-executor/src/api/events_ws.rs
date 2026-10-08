@@ -898,19 +898,18 @@ pub(crate) async fn matches_auto_processor_neighbourhood_state_reader(
     match auto_processor_neighbourhood_state_gate(msg, current_did, is_admin) {
         OwnerGate::Deliver => true,
         OwnerGate::Drop => false,
-        OwnerGate::IfOwned(uuid) => perspective_is_owned_by(&uuid, current_did.unwrap()).await,
+        OwnerGate::IfOwned { uuid, did } => perspective_is_owned_by(&uuid, &did).await,
     }
 }
 
 /// The part of an auto-processor filter that needs no registry lookup:
 /// everything the event and the session alone decide, and otherwise the
-/// perspective whose ownership settles it. `IfOwned` is only produced with a
-/// resolved DID.
+/// perspective whose ownership by the session's DID settles it.
 #[derive(Debug, PartialEq)]
 enum OwnerGate {
     Deliver,
     Drop,
-    IfOwned(String),
+    IfOwned { uuid: String, did: String },
 }
 
 fn auto_processor_neighbourhood_state_gate(
@@ -923,15 +922,18 @@ fn auto_processor_neighbourhood_state_gate(
     }
     // Non-admin + unresolved DID fails closed — same reasoning as
     // `matches_auto_processor_pass_owner`.
-    if current_did.is_none() {
+    let Some(did) = current_did else {
         return OwnerGate::Drop;
-    }
+    };
     let map = match serde_json::from_str::<serde_json::Value>(msg) {
         Ok(serde_json::Value::Object(map)) => map,
         _ => return OwnerGate::Drop,
     };
     match map.get("perspectiveUuid") {
-        Some(serde_json::Value::String(u)) => OwnerGate::IfOwned(u.clone()),
+        Some(serde_json::Value::String(u)) => OwnerGate::IfOwned {
+            uuid: u.clone(),
+            did: did.to_string(),
+        },
         _ => OwnerGate::Drop,
     }
 }
@@ -948,7 +950,7 @@ fn matches_auto_processor_neighbourhood_state_reader_with(
     match auto_processor_neighbourhood_state_gate(msg, current_did, is_admin) {
         OwnerGate::Deliver => true,
         OwnerGate::Drop => false,
-        OwnerGate::IfOwned(uuid) => owned_check(&uuid, current_did.unwrap()),
+        OwnerGate::IfOwned { uuid, did } => owned_check(&uuid, &did),
     }
 }
 
@@ -960,7 +962,7 @@ pub(crate) async fn matches_auto_processor_pass_owner(
     match auto_processor_pass_owner_gate(msg, current_did, is_admin) {
         OwnerGate::Deliver => true,
         OwnerGate::Drop => false,
-        OwnerGate::IfOwned(uuid) => perspective_is_owned_by(&uuid, current_did.unwrap()).await,
+        OwnerGate::IfOwned { uuid, did } => perspective_is_owned_by(&uuid, &did).await,
     }
 }
 
@@ -990,7 +992,10 @@ fn auto_processor_pass_owner_gate(
     // A pass by a managed user is delivered to that user's client, not to the
     // hosting agent, even though both share the executor.
     match map.get("agentDid") {
-        Some(serde_json::Value::String(agent)) if agent == did => OwnerGate::IfOwned(uuid),
+        Some(serde_json::Value::String(agent)) if agent == did => OwnerGate::IfOwned {
+            uuid,
+            did: did.to_string(),
+        },
         // No `agentDid` on the event → malformed or executor-side pass with
         // no attribution; fail closed rather than leak to every observer.
         _ => OwnerGate::Drop,
@@ -1009,7 +1014,7 @@ fn matches_auto_processor_pass_owner_with(
     match auto_processor_pass_owner_gate(msg, current_did, is_admin) {
         OwnerGate::Deliver => true,
         OwnerGate::Drop => false,
-        OwnerGate::IfOwned(uuid) => owned_check(&uuid, current_did.unwrap()),
+        OwnerGate::IfOwned { uuid, did } => owned_check(&uuid, &did),
     }
 }
 
@@ -1021,9 +1026,11 @@ fn matches_auto_processor_pass_owner_with(
 /// lock rather than treating contention as "not the owner": the lock is
 /// taken briefly by every link write and every RPC's access check, and an
 /// event filtered at that instant was dropped for good (#1333: a live-query
-/// update is pushed once, so the client's callback never fired). The event
-/// task runs one filter at a time per connection, so waiting here only
-/// delays that connection's events by the holder's critical section.
+/// update is pushed once, so the client's callback never fired). Each topic
+/// stream runs one filter at a time and the topics are merged with
+/// `stream::select`, so waiting here delays only this topic's events on this
+/// connection, by the holder's critical section; `persisted` is a leaf lock
+/// never held across an await (perspectives/AGENTS.md).
 async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
     use crate::perspectives::get_perspective;
     match get_perspective(uuid) {
