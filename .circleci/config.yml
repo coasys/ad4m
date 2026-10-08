@@ -686,8 +686,37 @@ jobs:
           command: npm test
 
   deploy-scripts:
-    # deploy/staging: shellcheck and the update.sh test (stubbed build and
-    # systemd, seconds). Needs no build; shellcheck is a pinned release binary.
+    # Checks the shell scripts in deploy/staging on every pipeline (about
+    # 20 s, no build needed), in two steps:
+    #
+    # 1. shellcheck, a static linter for shell scripts. It parses the script
+    #    without running it and reports the classic shell bugs: unquoted
+    #    variables that split on spaces or glob, `$?` or `$!` read after the
+    #    wrong command, conditions that are always true or false, commands
+    #    whose exit status is silently lost (`local x=$(cmd)`, `cmd | while`
+    #    subshells), misuse of `[ ]` and `[[ ]]`, bashisms under `sh`, and
+    #    variables that are set but never read. These are mistakes that only
+    #    show up on the branch of the script that happens to run, so a linter
+    #    catches them before a real deploy or rollback does. The binary is a
+    #    pinned release (v0.10.0) checked against its SHA-256, so a new
+    #    release cannot change what this job accepts, and a replaced download
+    #    fails the checksum instead of running. Nothing here depends on what
+    #    the runner has installed.
+    #
+    # 2. deploy/staging/test/update.test.sh runs update.sh itself against a
+    #    throwaway git remote, with the build (pnpm, cargo) and systemd
+    #    (systemctl, plus curl, node, sleep, cp, mv, jq) replaced by stubs, and
+    #    checks every decision it makes: wait, deploy, skip, roll back a
+    #    build that fails its check, keep a failed commit out, recover from a
+    #    failed step after the stop, ignore a tag named like the branch, start
+    #    nothing when a restore fails, clean up after a deploy or rollback
+    #    killed half-way, and refuse a rollback by hand over any of these.
+    #    This is worth running in CI because update.sh only ever runs on the
+    #    staging host, started by its timer: without the test, its failure
+    #    and rollback paths would only be exercised by a real failed deploy,
+    #    and a bug there is what turns a failed deploy into a node that stays
+    #    down. The stubs make the whole run take seconds and touch nothing
+    #    outside a temp dir.
     machine: true
     resource_class: coasys/marvin-light
     steps:
@@ -696,14 +725,17 @@ jobs:
       - run:
           name: shellcheck deploy/staging
           command: |
+            # Pinned release, verified by SHA-256 (see the job comment above).
             dir=$(mktemp -d)
             curl -fsSL -o "$dir/shellcheck.tar.xz" https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz
             echo "6c881ab0698e4e6ea235245f22832860544f17ba386442fe7e9d629f8cbedf87  $dir/shellcheck.tar.xz" | sha256sum -c -
             tar -xJf "$dir/shellcheck.tar.xz" -C "$dir"
+            # -x follows `source`d files, so a sourced helper is checked too.
             "$dir/shellcheck-v0.10.0/shellcheck" -x deploy/staging/update.sh deploy/staging/test/update.test.sh
             rm -rf "$dir"
       - run:
           name: update.sh test
+          # Stubbed build and systemd; see the job comment above.
           command: deploy/staging/test/update.test.sh
 
 workflows:
