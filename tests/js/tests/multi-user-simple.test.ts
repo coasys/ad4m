@@ -694,6 +694,9 @@ describe("Multi-User Simple integration tests", () => {
             expect(user1Status.didDocument).to.be.a('string');
             expect(user2Status.didDocument).to.be.a('string');
             expect(user1Status.didDocument).to.not.equal(user2Status.didDocument);
+            // #1229: a managed user's DID document carries no private key.
+            expect(user1Status.didDocument).not.to.include('privateKey');
+            expect(user2Status.didDocument).not.to.include('privateKey');
 
             // Parse and validate DID documents
             const user1DidDoc = JSON.parse(user1Status.didDocument!);

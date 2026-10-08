@@ -1,6 +1,8 @@
 //! API test utilities and shared test infrastructure.
 
 #[cfg(test)]
+pub mod agent_did_document_tests;
+#[cfg(test)]
 pub mod connection_tests;
 #[cfg(test)]
 pub mod error_tests;

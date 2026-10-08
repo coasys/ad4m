@@ -98,6 +98,111 @@ pub struct AgentStore {
     keystore_fingerprint: Option<String>,
 }
 
+/// The stored DID document with every `privateKey…` member removed, or `None`
+/// if it carried none (or is not JSON, which `dump()` cannot serve either).
+///
+/// `agent.json` written before #1229 holds the main agent's document as the
+/// wallet used to build it — with `privateKeyBase58` for both keys, in
+/// plaintext next to the encrypted keystore. `load()` serves that string, so it
+/// has to be cleaned there. The executor never reads a secret from a document;
+/// it signs through the wallet.
+fn did_document_without_secrets(did_document: &str) -> Option<String> {
+    fn strip(value: &mut serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(map) => {
+                let before = map.len();
+                map.retain(|key, _| !key.starts_with("privateKey"));
+                let removed = map.len() != before;
+                map.values_mut().fold(removed, |acc, v| strip(v) || acc)
+            }
+            serde_json::Value::Array(items) => {
+                items.iter_mut().fold(false, |acc, v| strip(v) || acc)
+            }
+            _ => false,
+        }
+    }
+
+    let mut value: serde_json::Value = serde_json::from_str(did_document).ok()?;
+    if strip(&mut value) {
+        serde_json::to_string(&value).ok()
+    } else {
+        None
+    }
+}
+
+/// Replace `path` with `value` serialised as JSON, so that `path` holds either
+/// the old or the new contents after a crash or power loss, never a truncated
+/// file:
+///
+/// - The temp file sits next to `path` (a rename is atomic only within one
+///   filesystem) and has a name unique to this process and call, so two
+///   executors on one data dir never write the same temp file.
+/// - It is created 0600, then takes the mode of the file it replaces, so an
+///   operator's `chmod 600` survives the rename instead of falling back to
+///   the umask.
+/// - Its data is synced before the rename, and the directory after it:
+///   without the first, some filesystems can commit the rename before the
+///   data and leave an empty file; without the second, the rename itself can
+///   be lost.
+/// - On any error the temp file is removed and `path` is untouched.
+///
+/// The only writer of the agent file and its legacy backup: `try_save` and the
+/// load-time private-key strip both go through it. It started as #1163's
+/// `try_save` write (0600, original mode kept, `sync_all`, rename) and adds the
+/// unique temp name, the cleanup on error and the directory sync.
+fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(), AnyError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => path::Path::new("."),
+    };
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let write_tmp = || -> Result<(), AnyError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            file.set_permissions(meta.permissions())?;
+        }
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    };
+    if let Err(e) = write_tmp().and_then(|()| Ok(std::fs::rename(&tmp, path)?)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // The rename is done; a failed directory sync only weakens durability.
+    #[cfg(unix)]
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        log::warn!(
+            "Could not sync {} after writing {}: {}",
+            dir.display(),
+            path.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     if context.is_main_agent {
         let backend = wallet_backend();
@@ -869,8 +974,8 @@ impl AgentService {
             .expect("Failed to write agent file");
     }
 
-    /// Writes the agent file. The write goes to a temporary file first and then replaces
-    /// the old one, so a crash mid-write never leaves a truncated keystore behind.
+    /// Writes the agent file through `write_json_atomically`, so a crash mid-write never
+    /// leaves a truncated keystore behind and an operator's `chmod` survives.
     pub fn try_save(&self, password: &str) -> Result<(), AnyError> {
         let backend = wallet_backend();
         let keystore = backend.export(password);
@@ -895,25 +1000,30 @@ impl AgentService {
             keystore_fingerprint,
         };
 
-        // The temp file starts as 0600 and then takes the mode of the file it replaces, so
-        // an operator's `chmod` on the agent file survives the rename.
-        let tmp = format!("{}.tmp", self.file);
-        let _ = std::fs::remove_file(&tmp);
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut file = options.open(&tmp)?;
-        if let Ok(meta) = std::fs::metadata(&self.file) {
-            file.set_permissions(meta.permissions())?;
+        write_json_atomically(path::Path::new(&self.file), &store)
+    }
+
+    /// Removes the private keys from `store`'s DID document and, if it had any, rewrites
+    /// `file` with the result. Failure is logged, not returned: the caller still serves
+    /// the cleaned `store`, so nothing leaks over the API.
+    ///
+    /// Done at load rather than at the next save(): save() runs on lock and profile
+    /// changes, so a node that is only ever unlocked would keep its private keys on disk
+    /// in plaintext indefinitely. The file is re-serialised from `AgentStore`, as save()
+    /// does: the keystore string and its fingerprint are kept byte for byte, but a
+    /// top-level key that `AgentStore` does not model is dropped.
+    fn strip_private_keys_from_stored_document(file: &str, store: &mut AgentStore) {
+        let Some(public_document) = did_document_without_secrets(&store.did_document) else {
+            return;
+        };
+        store.did_document = public_document;
+        if let Err(e) = write_json_atomically(path::Path::new(file), &*store) {
+            log::error!(
+                "Could not remove private keys from the DID document in {}: {}",
+                file,
+                e
+            );
         }
-        std::io::Write::write_all(&mut file, serde_json::to_string(&store)?.as_bytes())?;
-        // Without this, a power loss after the rename can leave an empty agent file on
-        // filesystems that do not flush data on rename.
-        file.sync_all()?;
-        drop(file);
-        std::fs::rename(&tmp, &self.file)?;
-        Ok(())
     }
 
     pub fn load(&mut self) {
@@ -922,7 +1032,24 @@ impl AgentService {
         }
 
         let file = std::fs::read_to_string(self.file.as_str()).expect("Failed to read agent file");
-        let dump: AgentStore = serde_json::from_str(&file).unwrap();
+        let mut dump: AgentStore = serde_json::from_str(&file).unwrap();
+        Self::strip_private_keys_from_stored_document(&self.file, &mut dump);
+
+        // A node that ran #1163 before this fix may have copied its leaking agent file to
+        // the legacy backup. Only the backup's keystore is ever read back
+        // (`unlock_from_legacy_backup`), so its document is cleaned the same way.
+        let backup = self.legacy_backup_file();
+        if path::Path::new(&backup).exists() {
+            match std::fs::read_to_string(&backup)
+                .map_err(AnyError::from)
+                .and_then(|s| Ok(serde_json::from_str::<AgentStore>(&s)?))
+            {
+                Ok(mut backup_store) => {
+                    Self::strip_private_keys_from_stored_document(&backup, &mut backup_store)
+                }
+                Err(e) => log::warn!("Could not read the keystore backup {}: {}", backup, e),
+            }
+        }
 
         self.did = Some(dump.did.clone());
         self.did_document = Some(dump.did_document);
@@ -990,6 +1117,83 @@ mod tests {
             setup_wallet();
             setup_agent();
         });
+    }
+
+    /// Serialises one map entry, then fails: a write that breaks partway.
+    struct FailsPartway;
+    impl Serialize for FailsPartway {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::{Error, SerializeMap};
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_entry("keystore", "half")?;
+            Err(S::Error::custom("disk full"))
+        }
+    }
+
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_json_atomically_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "old").unwrap();
+
+        write_json_atomically(&file, &json!({"keystore": "new"})).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            r#"{"keystore":"new"}"#
+        );
+        assert_eq!(dir_entries(dir.path()), vec!["agent.json"]);
+    }
+
+    #[test]
+    fn write_json_atomically_keeps_the_original_and_removes_the_temp_file_when_the_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "the only keystore").unwrap();
+
+        let result = write_json_atomically(&file, &FailsPartway);
+
+        assert!(result.is_err(), "a failed write must be reported");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "the only keystore",
+            "a failed write must leave the original untouched"
+        );
+        assert_eq!(
+            dir_entries(dir.path()),
+            vec!["agent.json"],
+            "a failed write must not leave its temp file behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomically_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+
+        // 0640 differs from both the 0600 the temp file starts with and the
+        // umask default, so only copying the mode gets it right.
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_json_atomically(&file, &json!({})).unwrap();
+        assert_eq!(mode(&file), 0o640);
+
+        // A new file is created private, not with the umask default.
+        let new_file = dir.path().join("new.json");
+        write_json_atomically(&new_file, &json!({})).unwrap();
+        assert_eq!(mode(&new_file), 0o600);
     }
 
     #[test]
@@ -1912,5 +2116,113 @@ mod tests {
         assert_eq!(mode & 0o777, 0o640);
 
         setup_agent();
+    }
+
+    /// A legacy agent file under `OWNER` whose DID document carries the main key's private
+    /// keys, as every agent file written before #1229 does. Returns the temp dir, the
+    /// file, the private-key values and the legacy keystore string.
+    fn leaking_legacy_agent_file() -> (tempfile::TempDir, String, Vec<String>, String) {
+        let (tmp, agent_file) = legacy_agent_file(OWNER);
+        let backend = wallet_backend();
+        let public = backend
+            .get_public_key(crate::wallet::KEY_NAME_MAIN)
+            .unwrap();
+        let secret = backend
+            .get_secret_key(crate::wallet::KEY_NAME_MAIN)
+            .unwrap();
+        let secrets = crate::test_utils::private_key_values(&public, &secret);
+        let leaking_document = {
+            use did_key::DIDCore;
+            let keypair =
+                did_key::from_existing_key::<did_key::Ed25519KeyPair>(&public, Some(&secret));
+            serde_json::to_string(&keypair.get_did_document(did_key::CONFIG_LD_PRIVATE)).unwrap()
+        };
+        let mut store: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&agent_file).unwrap()).unwrap();
+        store["didDocument"] = json!(leaking_document);
+        std::fs::write(&agent_file, store.to_string()).unwrap();
+        let legacy_keystore = store["keystore"].as_str().unwrap().to_string();
+        (tmp, agent_file, secrets, legacy_keystore)
+    }
+
+    fn stored(file: &str) -> (String, serde_json::Value) {
+        let raw = std::fs::read_to_string(file).unwrap();
+        let value = serde_json::from_str(&raw).unwrap();
+        (raw, value)
+    }
+
+    /// #1229 and #1163 in one start: a file with both a leaking document and a legacy
+    /// keystore. `load()` strips the document first, keeping the legacy keystore verbatim;
+    /// the unlock then backs up the already-clean file and migrates the keystore. Neither
+    /// file ends up with a private key, and the migrated file still unlocks.
+    #[test]
+    fn a_leaking_legacy_file_is_stripped_on_load_and_then_migrated_on_unlock() {
+        ensure_setup();
+        let (_tmp, agent_file, secrets, legacy_keystore) = leaking_legacy_agent_file();
+        let backup_file = format!("{}.legacy", agent_file);
+
+        wallet_backend().lock("scratch");
+        let after_load = AgentService::with_mutable_global_instance(|svc| {
+            svc.passphrase = None;
+            svc.load();
+            stored(&agent_file)
+        });
+        restart_and_unlock(OWNER).expect("the stripped legacy file unlocks");
+        let migrated = stored(&agent_file);
+        let backup = stored(&backup_file);
+        let reopened = restart_and_unlock(OWNER);
+        setup_agent();
+
+        crate::test_utils::assert_no_private_keys(&after_load.0, &secrets, "agent.json after load");
+        assert_eq!(
+            after_load.1["keystore"],
+            json!(legacy_keystore),
+            "the strip must keep the legacy keystore verbatim"
+        );
+        crate::test_utils::assert_no_private_keys(
+            &migrated.0,
+            &secrets,
+            "agent.json after migration",
+        );
+        assert!(!crate::wallet::is_legacy_keystore(
+            migrated.1["keystore"].as_str().unwrap()
+        ));
+        crate::test_utils::assert_no_private_keys(&backup.0, &secrets, "the legacy backup");
+        assert_eq!(
+            backup.0, after_load.0,
+            "the backup holds the stripped legacy file byte for byte"
+        );
+        reopened.expect("the migrated file unlocks");
+    }
+
+    /// A node that ran #1163 before #1229 copied its leaking agent file to the legacy
+    /// backup. `load()` cleans the backup too, keeping its keystore verbatim.
+    #[test]
+    fn load_strips_private_keys_from_an_existing_legacy_backup() {
+        ensure_setup();
+        let (_tmp, agent_file, secrets, legacy_keystore) = leaking_legacy_agent_file();
+        let backup_file = format!("{}.legacy", agent_file);
+        std::fs::copy(&agent_file, &backup_file).unwrap();
+
+        wallet_backend().lock("scratch");
+        AgentService::with_mutable_global_instance(|svc| {
+            svc.passphrase = None;
+            svc.load();
+        });
+        let backup = stored(&backup_file);
+        let unlocked = restart_and_unlock(OWNER);
+        setup_agent();
+
+        crate::test_utils::assert_no_private_keys(
+            &backup.0,
+            &secrets,
+            "the legacy backup after load",
+        );
+        assert_eq!(
+            backup.1["keystore"],
+            json!(legacy_keystore),
+            "the strip must keep the backup's keystore verbatim"
+        );
+        unlocked.expect("the node still unlocks");
     }
 }
