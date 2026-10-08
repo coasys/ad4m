@@ -474,16 +474,24 @@ fn earliest_proposer_timestamp(
         .map(|(_, ts)| ts)
 }
 
-/// Every predicate a proposal's links are read on: each `properties[].path` of
-/// the `FlowTransitionProposal` SDNA, plus the votes and this replica's fired
-/// mark, which the class does not declare. A property the class gains is read.
+/// Every predicate a proposal's links are read on, once each: each
+/// `properties[].path` of the `FlowTransitionProposal` SDNA, plus the votes and
+/// this replica's fired mark. The class declares those two as well
+/// (`acceptedBy`, `resolvedAs`); they are added only when it does not, since a
+/// predicate listed twice would read each of its links twice. A property the
+/// class gains is read.
 static PROPOSAL_LINK_PREDICATES: LazyLock<Vec<String>> =
     LazyLock::new(|| link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA));
 
 fn link_predicates_of(sdna: &str) -> Vec<String> {
     let shape: SHACLShape = serde_json::from_str(sdna).expect("the class SDNA parses");
-    let mut predicates: Vec<String> = shape.properties.into_iter().map(|p| p.path).collect();
-    predicates.extend([ACCEPTED_BY_PREDICATE, RESOLVED_AS_PREDICATE].map(String::from));
+    let mut predicates: Vec<String> = Vec::new();
+    let paths = shape.properties.into_iter().map(|p| p.path);
+    for predicate in paths.chain([ACCEPTED_BY_PREDICATE, RESOLVED_AS_PREDICATE].map(String::from)) {
+        if !predicates.contains(&predicate) {
+            predicates.push(predicate);
+        }
+    }
     predicates
 }
 
@@ -553,13 +561,19 @@ mod tests {
     use super::super::test_support::*;
     use super::*;
     /// The read follows the class SDNA: every `properties[].path`, and the
-    /// votes and fired mark it does not declare. Red if a property the SDNA
-    /// gains is not read, as with a hand-kept copy of the paths.
+    /// votes and fired mark, each once. Red if a property the SDNA gains is not
+    /// read, as with a hand-kept copy of the paths, and red if a predicate the
+    /// SDNA declares and the read adds anyway is listed twice: its links would
+    /// then be read twice.
     #[test]
     fn proposal_link_predicates_follow_the_class_sdna() {
         let read = link_predicates_of(FLOW_TRANSITION_PROPOSAL_SDNA);
         assert_eq!(*PROPOSAL_LINK_PREDICATES, read);
         assert!(read.iter().any(|p| p == "ad4m://flow/rationale"));
+        let mut once = read.clone();
+        once.sort();
+        once.dedup();
+        assert_eq!(once.len(), read.len(), "each predicate once: {read:?}");
         let mut sdna: serde_json::Value =
             serde_json::from_str(FLOW_TRANSITION_PROPOSAL_SDNA).expect("the class SDNA parses");
         let properties = sdna["properties"].as_array_mut().expect("properties");
@@ -571,6 +585,7 @@ mod tests {
             .map(String::from)
             .collect();
         expected.sort();
+        expected.dedup();
         let mut read = link_predicates_of(&sdna.to_string());
         read.sort();
         assert_eq!(read, expected);
