@@ -14,6 +14,7 @@ use tokio::time::timeout;
 use super::{holochain_service_once_started, HolochainServiceInterface};
 use crate::holochain_service::{HolochainService, LocalConductorConfig};
 use crate::js_core::error::AnyhowWrapperError;
+use crate::js_core::languages_extension::try_with_isolate_state;
 
 /// Convert an rmpv::Value (full-fidelity msgpack) to serde_json::Value.
 /// Binary data is represented as a JSON object `{"__binary": [byte, byte, ...]}` so
@@ -363,6 +364,10 @@ async fn shutdown() -> Result<(), AnyhowWrapperError> {
         .map_err(AnyhowWrapperError::from)
 }
 
+/// The node's first lair key, not the calling language's own agent key — see
+/// `HolochainServiceInterface::get_agent_key`. Since #1099 gave every language its own
+/// agent key, use `get_agent_key_for_language` instead unless a third-party language
+/// specifically needs this one.
 #[op2(async(lazy), fast)]
 #[serde]
 async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
@@ -373,6 +378,47 @@ async fn get_agent_key() -> Result<HoloHash<Agent>, AnyhowWrapperError> {
         .await
         .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
         .map_err(AnyhowWrapperError::from)
+}
+
+/// Per-language agent key (issue #1099): distinct languages get distinct
+/// cells even when they bundle the same DNA + network seed. See
+/// `HolochainServiceInterface::agent_key_for_language` for the resolution
+/// rules (stored mapping → adoption of an existing install → fresh key).
+///
+/// `language_address` is read from the isolate's own thread-local state, not
+/// a JS argument: every extension global is reachable from any language's
+/// code (see `languages::signing_reach_tests`), so a caller-supplied address
+/// would let one language pre-bind — and mint a lair key and a DB row for —
+/// another language's mapping before that language ever loads. `app_id` is
+/// still caller-supplied (the DNA nick is a per-call choice), but is checked
+/// against the real address below.
+#[op2(async(lazy), fast)]
+#[serde]
+async fn get_agent_key_for_language(
+    #[string] app_id: String,
+) -> Result<HoloHash<Agent>, AnyhowWrapperError> {
+    let language_address = try_with_isolate_state(|state| state.language_address.clone())
+        .flatten()
+        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("languageAddress not set yet")))?;
+
+    if !app_id.starts_with(&format!("{}-", language_address)) {
+        return Err(AnyhowWrapperError::from(anyhow!(
+            "app id {} does not belong to language {}",
+            app_id,
+            language_address
+        )));
+    }
+
+    let interface = holochain_service_once_started()
+        .await
+        .ok_or_else(|| AnyhowWrapperError::from(anyhow!("Holochain conductor not available")))?;
+    timeout(
+        TIMEOUT_DURATION,
+        interface.agent_key_for_language(&language_address, &app_id),
+    )
+    .await
+    .map_err(|_| AnyhowWrapperError::from(anyhow!("Timeout error")))?
+    .map_err(AnyhowWrapperError::from)
 }
 
 #[op2(async(lazy), fast)]
@@ -426,7 +472,7 @@ async fn unpack_happ(#[string] path: String) -> Result<String, AnyhowWrapperErro
 //Implement signal callbacks from dna/holochain to js
 deno_core::extension!(
     holochain_service,
-    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, shutdown, get_agent_key, pack_dna, unpack_dna, pack_happ, unpack_happ],
+    ops = [start_holochain_conductor, log_dht_status, install_app, get_app_info, call_zome_function, agent_infos, add_agent_infos, remove_app, shutdown, get_agent_key, get_agent_key_for_language, pack_dna, unpack_dna, pack_happ, unpack_happ],
     esm_entry_point = "ext:holochain_service/holochain_service_extension.js",
     esm = [dir "src/holochain_service", "holochain_service_extension.js"]
 );

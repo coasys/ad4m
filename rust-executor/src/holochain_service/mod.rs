@@ -858,6 +858,11 @@ impl HolochainService {
         Ok(())
     }
 
+    /// Signs with `list_public_keys().first()` — a well-defined "the node's key" only back
+    /// when lair held one Holochain agent key for the whole node. Since #1099 gave every
+    /// language its own key, this is just whichever key lair created earliest, naming no
+    /// particular language. See `HolochainServiceInterface::sign`: no in-tree caller, not
+    /// exposed to language JS.
     pub async fn sign(&self, data: String) -> Result<Signature, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
@@ -878,6 +883,11 @@ impl HolochainService {
         Ok(())
     }
 
+    /// Returns `list_public_keys().first()` — "the node's key" only back when lair held one
+    /// Holochain agent key for the whole node. Since #1099, lair holds one key per language;
+    /// this is just whichever key was created earliest, not the calling language's own. See
+    /// `HolochainServiceInterface::get_agent_key`: no in-tree caller, kept because it is
+    /// exposed to language JS as `getAgentKey()` and a third-party language may call it.
     pub async fn get_agent_key(&self) -> Result<HoloHash<Agent>, AnyError> {
         let keystore = self.conductor.keystore();
         let pub_keys = keystore.list_public_keys().await?;
@@ -1261,6 +1271,105 @@ mod tests {
             .await
             .expect("Failed to get existing agent key");
         assert_eq!(existing_key.get_raw_39().len(), 39);
+
+        iface.shutdown().await.expect("Failed to shutdown");
+    }
+
+    /// Integration test for issue #1099: per-language agent keys. Two
+    /// languages must resolve to two distinct, stable agent keys so that
+    /// the same DNA + network seed yields two distinct cells.
+    ///
+    /// The adoption path (an app already installed under the language's own app id keeps
+    /// its key) needs no real hApp install: `holochain_service::dispatch::tests` covers it,
+    /// against a `MockDispatch` answering `GetAppInfo`, in
+    /// `language_key_adoption_reuses_existing_app_key_without_minting` (and the fresh-key
+    /// and persistence paths next to it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_agent_key_for_language() {
+        use super::*;
+
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        crate::db::Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+
+        let tmp = std::env::temp_dir().join(format!("ad4m_test_lang_key_{}", std::process::id()));
+        let conductor_path = tmp.join("conductor");
+        std::fs::create_dir_all(&conductor_path).unwrap();
+
+        struct CleanupDir(std::path::PathBuf);
+        impl Drop for CleanupDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = CleanupDir(tmp.clone());
+
+        let config = LocalConductorConfig {
+            passphrase: "test-passphrase-lang-key".into(),
+            conductor_path: conductor_path.to_string_lossy().into(),
+            data_path: tmp.to_string_lossy().into(),
+            use_bootstrap: false,
+            use_proxy: false,
+            use_local_proxy: false,
+            use_mdns: false,
+            proxy_url: "ws://localhost:4444".into(),
+            bootstrap_url: "http://localhost:4445".into(),
+            relay_url: None,
+            app_port: 0,
+        };
+
+        HolochainService::init(config)
+            .await
+            .expect("Failed to init holochain service");
+
+        let iface = get_holochain_service().await;
+
+        // Fresh resolution generates a key
+        let key_a = iface
+            .agent_key_for_language("langA", "langA-main")
+            .await
+            .expect("Failed to resolve key for langA");
+        assert_eq!(key_a.get_raw_39().len(), 39);
+
+        // Stable across calls: the stored mapping is returned, not a new key
+        let key_a2 = iface
+            .agent_key_for_language("langA", "langA-main")
+            .await
+            .expect("Failed to re-resolve key for langA");
+        assert_eq!(key_a, key_a2, "Language key must be stable across calls");
+
+        // A different language gets a different key — the same DNA + seed
+        // therefore yields a different cell id
+        let key_b = iface
+            .agent_key_for_language("langB", "langB-main")
+            .await
+            .expect("Failed to resolve key for langB");
+        assert_ne!(key_a, key_b, "Two languages must get distinct agent keys");
+
+        // Concurrent first resolutions of the same language must agree:
+        // the per-language lock makes the loser adopt the winner's
+        // persisted key instead of generating and persisting its own.
+        let (key_c1, key_c2) = tokio::join!(
+            iface.agent_key_for_language("langC", "langC-main"),
+            iface.agent_key_for_language("langC", "langC-main"),
+        );
+        let key_c1 = key_c1.expect("Failed concurrent resolve 1 for langC");
+        let key_c2 = key_c2.expect("Failed concurrent resolve 2 for langC");
+        assert_eq!(
+            key_c1, key_c2,
+            "Concurrent first resolutions of one language must yield one key"
+        );
+
+        // A corrupt stored mapping is re-resolved instead of wedging the language
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_setting("language_agent_key:langA", "not-a-valid-agent-key")
+        })
+        .expect("Failed to corrupt stored key");
+        let key_a3 = iface
+            .agent_key_for_language("langA", "langA-main")
+            .await
+            .expect("Failed to recover from corrupt stored key");
+        assert_eq!(key_a3.get_raw_39().len(), 39);
 
         iface.shutdown().await.expect("Failed to shutdown");
     }

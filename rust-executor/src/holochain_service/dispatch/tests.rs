@@ -19,6 +19,13 @@
 //! 7. the `call_zome_function` op's deadline is the instant the op gives up: it starts only
 //!    once the conductor is up (`op_deadline_starts_after_the_conductor_is_up`) and it
 //!    reaches the loop (`op_passes_its_deadline_to_the_loop`).
+//! 8. `agent_key_for_language` (issue #1099) resolves in the order the doc comment on it
+//!    promises, against the same mock dispatcher and without a conductor: adoption of an
+//!    already-installed app's key, with no `NewSignKeypair` dispatched
+//!    (`language_key_adoption_reuses_existing_app_key_without_minting`); a fresh key minted
+//!    exactly once when there is neither a stored mapping nor an existing app
+//!    (`language_key_fresh_mints_once_and_persists`); and a stored mapping returned without
+//!    reaching the dispatcher at all (`language_key_persisted_mapping_short_circuits_dispatch`).
 //!
 //! Requests go through the real `HolochainServiceInterface` methods, so what is tested is
 //! what `holochain_service_extension.rs` and `unyt_service.rs` call. The mock reads the
@@ -27,8 +34,10 @@
 
 use super::*;
 use deno_core::error::AnyError;
+use holochain::conductor::api::AppInfo;
 use holochain::prelude::{
-    AppBundleSource, ExternIO, InstallAppPayload, Signature, ZomeCallResponse,
+    AgentPubKey, AppBundleSource, AppManifest, AppManifestV0Builder, AppStatus, ExternIO,
+    InstallAppPayload, Signature, ZomeCallResponse,
 };
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex as StdMutex;
@@ -37,8 +46,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::db::Ad4mDb;
 use crate::holochain_service::holochain_service_extension::call_zome_within;
 use crate::holochain_service::interface::HolochainServiceInterface;
+use holochain_timestamp::Timestamp;
 
 struct MockDispatch {
     /// Everything the mock ran, in the order it ran: `start:<label>`, `done:<label>`,
@@ -49,6 +60,12 @@ struct MockDispatch {
     zome_calls: AtomicUsize,
     in_flight: AtomicUsize,
     max_in_flight: AtomicUsize,
+    /// Canned `GetAppInfo` answers for the language-key tests, keyed by app id. Absent
+    /// means "no app installed under this id", exactly like a fresh conductor.
+    app_info: StdMutex<std::collections::HashMap<String, AppInfo>>,
+    /// Count of `NewSignKeypair` dispatches, so a test can assert a fresh key is minted
+    /// at most once.
+    new_sign_keypair_calls: AtomicUsize,
 }
 
 impl MockDispatch {
@@ -98,6 +115,19 @@ impl RequestDispatch for MockDispatch {
                 self.record(format!("sign:{data}"));
                 let _ = response.send(HolochainServiceResponse::Sign(Ok(Signature([0; 64]))));
             }
+            HolochainServiceRequest::GetAppInfo(app_id, response) => {
+                self.record(format!("get_app_info:{app_id}"));
+                let info = self.app_info.lock().unwrap().get(&app_id).cloned();
+                let _ = response.send(HolochainServiceResponse::GetAppInfo(Ok(info)));
+            }
+            HolochainServiceRequest::NewSignKeypair(response) => {
+                let n = self.new_sign_keypair_calls.fetch_add(1, Ordering::SeqCst) + 1;
+                self.record("new_sign_keypair".into());
+                // Distinct per call (n differs), so a test asserting two minted keys
+                // differ cannot pass by accident.
+                let key = AgentPubKey::from_raw_32(vec![n as u8; 32]);
+                let _ = response.send(HolochainServiceResponse::NewSignKeypair(Ok(key)));
+            }
             HolochainServiceRequest::Shutdown(response) => {
                 self.record("shutdown".into());
                 let _ = response.send(HolochainServiceResponse::Shutdown(Ok(())));
@@ -128,6 +158,8 @@ impl Harness {
             zome_calls: AtomicUsize::new(0),
             in_flight: AtomicUsize::new(0),
             max_in_flight: AtomicUsize::new(0),
+            app_info: StdMutex::new(std::collections::HashMap::new()),
+            new_sign_keypair_calls: AtomicUsize::new(0),
         });
         let loop_task = tokio::spawn(run_dispatch_loop(receiver, mock.clone()));
         Self {
@@ -197,6 +229,36 @@ impl Harness {
                 .map(|_| ())
                 .map_err(|e| e.to_string())
         }
+    }
+
+    /// Seeds the mock's canned `GetAppInfo` answer for `app_id`, as if an app were already
+    /// installed under it with `agent_pub_key`.
+    fn seed_app_info(&self, app_id: &str, agent_pub_key: AgentPubKey) {
+        self.mock
+            .app_info
+            .lock()
+            .unwrap()
+            .insert(app_id.to_string(), canned_app_info(app_id, agent_pub_key));
+    }
+}
+
+/// A minimal but valid `AppInfo` for the language-key tests. `agent_key_for_language` reads
+/// only `agent_pub_key` from it; every other field exists solely to type-check.
+fn canned_app_info(app_id: &str, agent_pub_key: AgentPubKey) -> AppInfo {
+    AppInfo {
+        installed_app_id: app_id.to_string(),
+        cell_info: Default::default(),
+        status: AppStatus::Enabled,
+        agent_pub_key,
+        manifest: AppManifest::V0(
+            AppManifestV0Builder::default()
+                .name(app_id.to_string())
+                .description(None)
+                .roles(vec![])
+                .build()
+                .expect("manifest builder with every required field set"),
+        ),
+        installed_at: Timestamp::ZERO,
     }
 }
 
@@ -484,5 +546,107 @@ async fn op_passes_its_deadline_to_the_loop() {
     assert!(
         !events.contains(&"start:late".to_string()),
         "a call whose op already timed out must never reach the dispatcher: {events:?}"
+    );
+}
+
+/// Adoption (review #1101, blocking 1): a language whose app is already installed under its
+/// own app id keeps that app's agent key instead of minting a fresh one. This is the "zero
+/// migration" promise for every node upgrading from the global conductor key — if it broke,
+/// every installed neighbourhood would silently get a new Holochain agent and an empty
+/// source chain on upgrade.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn language_key_adoption_reuses_existing_app_key_without_minting() {
+    let h = Harness::start();
+    Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+
+    let existing_key = AgentPubKey::from_raw_32(vec![0xAB; 32]);
+    h.seed_app_info("langAdopt-main", existing_key.clone());
+
+    let resolved = h
+        .iface
+        .agent_key_for_language("langAdopt", "langAdopt-main")
+        .await
+        .expect("adoption must resolve a key");
+
+    assert_eq!(
+        resolved, existing_key,
+        "adoption must keep the existing app's agent key"
+    );
+    assert_eq!(
+        h.mock.new_sign_keypair_calls.load(Ordering::SeqCst),
+        0,
+        "adoption must never mint a fresh key"
+    );
+
+    let stored = Ad4mDb::with_global_instance(|db| db.get_setting("language_agent_key:langAdopt"))
+        .expect("setting read must not fail")
+        .expect("the adopted key must be persisted");
+    assert_eq!(
+        stored,
+        existing_key.to_string(),
+        "the adopted key must be persisted, not just returned"
+    );
+}
+
+/// Fresh-key path (review #1101, blocking 1): a language with no stored mapping and no
+/// existing app install gets exactly one freshly minted key, and that resolution is
+/// persisted so later calls do not mint again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn language_key_fresh_mints_once_and_persists() {
+    let h = Harness::start();
+    Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+
+    // No seeded app_info: GetAppInfo answers None, as a fresh conductor would.
+    let key = h
+        .iface
+        .agent_key_for_language("langFresh", "langFresh-main")
+        .await
+        .expect("fresh resolution must mint a key");
+
+    assert_eq!(
+        h.mock.new_sign_keypair_calls.load(Ordering::SeqCst),
+        1,
+        "exactly one key must be minted for a first resolution"
+    );
+    assert!(
+        h.mock
+            .events()
+            .iter()
+            .any(|e| e == "get_app_info:langFresh-main"),
+        "the fresh path must still probe for an existing app before minting: {:?}",
+        h.mock.events()
+    );
+
+    let stored = Ad4mDb::with_global_instance(|db| db.get_setting("language_agent_key:langFresh"))
+        .expect("setting read must not fail")
+        .expect("the minted key must be persisted");
+    assert_eq!(stored, key.to_string());
+}
+
+/// Persistence (review #1101, blocking 1): once a language's key is stored, resolving it
+/// again never touches the mock dispatcher at all — not `GetAppInfo`, not `NewSignKeypair`.
+/// The stored mapping short-circuits before either request is sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn language_key_persisted_mapping_short_circuits_dispatch() {
+    let h = Harness::start();
+    Ad4mDb::init_global_instance(":memory:").expect("Ad4mDb to initialize");
+
+    let stored_key = AgentPubKey::from_raw_32(vec![0xCD; 32]);
+    Ad4mDb::with_global_instance(|db| {
+        db.set_setting("language_agent_key:langStored", &stored_key.to_string())
+    })
+    .expect("seeding the stored mapping must not fail");
+
+    let resolved = h
+        .iface
+        .agent_key_for_language("langStored", "langStored-main")
+        .await
+        .expect("a stored mapping must resolve without touching the dispatcher");
+
+    assert_eq!(resolved, stored_key);
+    assert!(
+        h.mock.events().is_empty(),
+        "a stored mapping must short-circuit before reaching the mock dispatcher: {:?}",
+        h.mock.events()
     );
 }

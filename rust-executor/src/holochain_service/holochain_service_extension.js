@@ -1,7 +1,8 @@
 import {
     start_holochain_conductor, log_dht_status, install_app, get_app_info,
     call_zome_function, agent_infos, add_agent_infos, remove_app,
-    shutdown, get_agent_key, pack_dna, unpack_dna,
+    shutdown, get_agent_key, get_agent_key_for_language,
+    pack_dna, unpack_dna,
     pack_happ, unpack_happ,
 } from 'ext:core/ops';
 
@@ -91,8 +92,20 @@ import {
         shutdown: async () => {
             return shutdown()
         },
+        // The node's first lair key, not the calling language's own agent key (that's
+        // getAgentKeyForLanguage below, added for issue #1099). No in-tree caller; kept
+        // for third-party languages that may already call it.
         getAgentKey: async () => {
             return get_agent_key()
+        },
+        // Per-language agent key (issue #1099) — distinct languages get
+        // distinct cells even when they bundle the same DNA + network seed.
+        // No languageAddress argument: the op reads the real one from the
+        // isolate's own state, since this global is reachable from any
+        // language's code and a caller-supplied address could bind another
+        // language's mapping.
+        getAgentKeyForLanguage: async (appId) => {
+            return get_agent_key_for_language(appId)
         },
         packDna: async (path) => {
             return pack_dna(path)

@@ -97,6 +97,7 @@ dependencies = [
  "hex",
  "holochain",
  "holochain_cli_bundle",
+ "holochain_timestamp",
  "holochain_types",
  "http-body-util",
  "include_dir",

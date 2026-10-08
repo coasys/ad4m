@@ -6,6 +6,7 @@
 
 use super::language_runtime_handle::LanguageRuntimeHandle;
 use crate::agent::{AgentContext, AgentService};
+use crate::languages::language_context::LanguageContext;
 use serde_json::{json, Value};
 
 fn init_v8_platform() {
@@ -93,6 +94,68 @@ async fn a_language_signs_only_as_the_user_it_runs_for() {
     assert_eq!(reach["entanglementService"], json!("undefined"));
     assert_eq!(reach["holochainSignString"], json!("undefined"));
     assert_eq!(reach["rawOps"], json!([]));
+
+    let _ = handle.teardown().await;
+}
+
+/// Review #1101, point 3: `HOLOCHAIN_SERVICE.getAgentKeyForLanguage` is a global reachable
+/// from any language's own code, like every other extension global (see the reach check
+/// above). It must not trust a caller-supplied app id naming a DIFFERENT language — this
+/// runtime's own, real language address (read from `IsolateState`, not a JS argument) is
+/// all it can ever resolve or bind a mapping for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_language_cannot_bind_another_languages_agent_key_mapping() {
+    init_v8_platform();
+    crate::test_utils::setup_wallet();
+    crate::test_utils::setup_agent();
+
+    let dir = tempfile::tempdir().unwrap();
+    let handle =
+        LanguageRuntimeHandle::spawn("QmReachLanguageA".into(), dir.path().to_path_buf(), false)
+            .unwrap();
+
+    // `agent_key_for_language`'s caller identity comes from `IsolateState.language_address`,
+    // which `LanguageRuntime::load_module` sets into the thread-local before evaluating the
+    // bundle — mirroring how a real language gets loaded. A trivial module is enough; this
+    // test never calls `init()` on it.
+    handle
+        .load_module(
+            "export function init() {}".to_string(),
+            LanguageContext {
+                agent_did: String::new(),
+                agent_signing_key_id: String::new(),
+                custom_settings: None,
+                storage_directory: dir.path().to_path_buf(),
+                language_address: "QmReachLanguageA".to_string(),
+            },
+        )
+        .await
+        .expect("loading a trivial module must succeed");
+
+    let result = run_as(
+        &handle,
+        &AgentContext::main_agent(),
+        r#"(async () => {
+  try {
+    const key = await HOLOCHAIN_SERVICE.getAgentKeyForLanguage("QmReachLanguageB-main");
+    return JSON.stringify({ ok: true, key: String(key) });
+  } catch (e) {
+    return JSON.stringify({ ok: false, error: String((e && e.message) || e) });
+  }
+})()"#,
+    )
+    .await;
+
+    assert_eq!(
+        result["ok"],
+        json!(false),
+        "a language must not resolve or bind another language's agent key mapping: {result:?}"
+    );
+    let error = result["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("does not belong to language"),
+        "expected the app-id-ownership refusal, got: {error}"
+    );
 
     let _ = handle.teardown().await;
 }
