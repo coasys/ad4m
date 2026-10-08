@@ -40,6 +40,23 @@ function snapshotIsValid(p: string): boolean {
   return existsSync(p) && statSync(p).size > 0;
 }
 
+/**
+ * Keeps a test executor's Holochain off the public network.
+ *
+ * `--hc-use-bootstrap false` does not do that: the executor then falls back to
+ * the public bootstrap (`bootstrap.ad4m.dev`), and `--hc-use-proxy false`
+ * without a relay URL to the public relay. A test node then gossips shared
+ * DNAs with real peers, and integrating their data burst S4's memory by
+ * 100–300 MB at a time that depends on who is online. An unreachable local
+ * bootstrap and relay keep the node alone.
+ */
+export const ISOLATED_HOLOCHAIN_ARGS = [
+  "--hc-use-bootstrap", "true",
+  "--hc-bootstrap-url", "http://127.0.0.1:9",
+  "--hc-relay-url", "http://127.0.0.1:9",
+  "--hc-use-proxy", "false",
+];
+
 export interface ExecutorConfig {
   branch: string;
   port: number;
@@ -180,8 +197,7 @@ export async function startExecutor(
     "--port", String(config.port),
     "--admin-credential", config.adminToken,
     "--run-dapp-server", "false",
-    "--hc-use-bootstrap", "false",
-    "--hc-use-proxy", "false",
+    ...ISOLATED_HOLOCHAIN_ARGS,
     "--enable-multi-user", "true",
     ...(config.extraArgs ?? []),
   ], {

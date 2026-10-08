@@ -18,6 +18,7 @@ import { existsSync, mkdirSync, rmSync, openSync, writeSync, closeSync } from "n
 import { spawn, execSync, ChildProcess } from "node:child_process";
 
 import { InstrumentedClient } from "./client.js";
+import { ISOLATED_HOLOCHAIN_ARGS } from "./executor.js";
 
 const ADMIN_TOKEN = process.env.AD4M_ADMIN_TOKEN ?? "test123";
 
@@ -133,8 +134,7 @@ export async function startCluster(opts: CascadeClusterOptions): Promise<Cascade
       "--port", String(planned.port),
       "--admin-credential", ADMIN_TOKEN,
       "--run-dapp-server", "false",
-      "--hc-use-bootstrap", "false",
-      "--hc-use-proxy", "false",
+      ...ISOLATED_HOLOCHAIN_ARGS,
       "--enable-multi-user", "true",
       "--connect-holochain", "false",
       "--sfu-local-did", planned.did,
