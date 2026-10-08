@@ -908,6 +908,51 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A whitespace-only value is as empty as `""`: `AD4M_APP_DATA_PATH=" "`
+    /// would otherwise create a directory named ` ` under the working
+    /// directory. Every flag and its variable refuse it, naming themselves.
+    #[test]
+    fn a_whitespace_only_variable_or_flag_is_an_error_that_names_it() {
+        use clap::CommandFactory;
+        let _env = lock_env();
+        let dir = scratch_dir("blank-value");
+        let config = write_config(&dir, r#"{"app_data_path": "/from/file"}"#);
+        let mut wrong = Vec::new();
+        for arg in Cli::command().get_arguments() {
+            let Some(var) = arg.get_env().and_then(|var| var.to_str()) else {
+                continue;
+            };
+            let var: &'static str = Box::leak(var.to_owned().into_boxed_str());
+            let flag = format!("--{}", arg.get_long().unwrap());
+            let file: &[&str] = if var == "AD4M_CONFIG" {
+                &[]
+            } else {
+                &["--config", &config]
+            };
+            for blank in [" ", "\t", " \n "] {
+                let mut argv = file.to_vec();
+                argv.extend([flag.as_str(), blank]);
+                for (name, result) in [
+                    (var, resolve(file, &[(var, blank)])),
+                    (flag.as_str(), resolve(&argv, &[])),
+                ] {
+                    match result {
+                        Ok(resolved) => wrong.push(format!(
+                            "{name}={blank:?} accepted, app_data_path {:?}",
+                            resolved.config.app_data_path
+                        )),
+                        Err(err) if !format!("{err:#}").contains(name) => {
+                            wrong.push(format!("{name}={blank:?}: {}", format!("{err:#}").trim()))
+                        }
+                        Err(_) => {}
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_group_readable_secret_file_stops_run() {
