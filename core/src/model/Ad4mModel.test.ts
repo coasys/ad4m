@@ -3051,6 +3051,64 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     });
   });
 
+  // `readOnly` keeps `through` as the predicate the relation reads. Writing it
+  // from save() would be the setter the shape refuses to offer, and on a create
+  // the `= []` initialiser turns that write into a clear.
+  describe("readOnly relations without a getter", () => {
+    @Model({ name: "TestReadOnlyRelations" })
+    class TestReadOnlyRelations extends Ad4mModel {
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://voted_by", readOnly: true })
+      votedBy: string[] = [];
+
+      @HasOne({ through: "test://resolved_by", readOnly: true })
+      resolvedBy?: string;
+
+      // The control: an ordinary relation on the same model is still written.
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    /** Predicates written by `executeAction`, across every call. */
+    const writtenPredicates = (perspective: any): string[] =>
+      perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+        (call[0] ?? []).map((action: any) => action.predicate)
+      );
+
+    it("are not written by create(), not even as the empty initialiser", async () => {
+      const perspective = makePerspective();
+
+      await TestReadOnlyRelations.create(
+        perspective,
+        { title: "t", tags: ["test://tag/1"] },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+    });
+
+    it("are not written by save() even when the caller sets them", async () => {
+      const perspective = makePerspective();
+      const instance = new TestReadOnlyRelations(perspective);
+      instance.title = "t";
+      instance.tags = ["test://tag/1"];
+      instance.votedBy = ["did:key:a"];
+      instance.resolvedBy = "did:key:b";
+
+      await instance.save("batch-1");
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenTargets(perspective)).not.toContain("did:key:a");
+      expect(writtenTargets(perspective)).not.toContain("did:key:b");
+    });
+  });
+
   describe("generated @HasOne accessors", () => {
     it("forward batchId, so a to-one link can join a write group", async () => {
       // Without this the link commits on its own, so every subscriber sees the

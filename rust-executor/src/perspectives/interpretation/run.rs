@@ -1273,8 +1273,10 @@ pub async fn run_interpretation_with_harness_and_model(
 /// credential set, the handler would ask it to authenticate and hide its read tools.
 fn harness_admin_credential(auth_token: &Option<String>) -> Option<String> {
     auth_token.as_ref()?;
-    crate::config::configured_admin_credential()
-        .or_else(|| std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+    // An empty env credential is none, as in `Ad4mConfig::prepare`.
+    crate::config::configured_admin_credential().or_else(|| {
+        crate::config::non_empty_credential(std::env::var("AD4M_ADMIN_CREDENTIAL").ok())
+    })
 }
 
 #[cfg(test)]
