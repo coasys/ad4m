@@ -14,6 +14,7 @@ use str0m::change::SdpOffer;
 use tokio::sync::RwLock;
 
 use super::cascade::{CascadeManager, CascadeSignal};
+use super::config_store;
 use super::gossip::{CascadeGossip, GossipTarget};
 use super::reachability::{check_reachability, SfuReachability};
 use super::room::{ParticipantId, RoomError, RoomId, RoomManager, SfuRoom};
@@ -34,8 +35,6 @@ pub const MAX_ROOMS_PER_NEIGHBOURHOOD: usize = 16;
 pub const EMPTY_ROOM_TTL: Duration = Duration::from_secs(600);
 /// Most calls one DID is in at once on this node.
 pub const MAX_CALLS_PER_DID: usize = 4;
-/// Most neighbourhoods with a stored call config.
-pub const MAX_CONFIGS: usize = 1024;
 /// Upper bound on `maxMeshParticipants`. A room's SFU capacity is four times
 /// this, so it also bounds every room.
 pub const MAX_MESH_PARTICIPANTS: u32 = 32;
@@ -74,8 +73,6 @@ fn max_quality_preference<'a>(values: impl Iterator<Item = &'a String>) -> Strin
 pub struct SfuService {
     server: SfuServer,
     rooms: Arc<RwLock<RoomManager>>,
-    /// Maps neighbourhood URLs to their SFU configuration (from Social DNA).
-    configs: Arc<RwLock<HashMap<String, SfuConfig>>>,
     /// Cascade manager for multi-node SFU deployments.
     cascade_manager: Arc<RwLock<CascadeManager>>,
     /// Pluggable cluster-gossip transport.  Always present — single-node
@@ -133,7 +130,6 @@ impl SfuService {
         let service = Arc::new(Self {
             server,
             rooms: Arc::new(RwLock::new(RoomManager::new())),
-            configs: Arc::new(RwLock::new(HashMap::new())),
             cascade_manager: Arc::new(RwLock::new(cascade_manager)),
             gossip: Arc::clone(&gossip),
             local_quality_preferences: RwLock::new(HashMap::new()),
@@ -798,16 +794,14 @@ impl SfuService {
         room_name: &str,
     ) -> Result<SfuRoomInfo, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
+        // Read before taking the rooms lock: it reads the neighbourhood's links.
+        let max = config_store::stored_config(neighbourhood_url)
+            .await
+            .map(|c| c.max_mesh_participants as usize * 4); // SFU supports ~4x mesh limit
         let mut rooms = self.rooms.write().await;
         if rooms.get_room(&room_id).is_none() {
             Self::check_new_room(&rooms, &room_id)?;
         }
-
-        // Get config for max participants
-        let configs = self.configs.read().await;
-        let max = configs
-            .get(neighbourhood_url)
-            .map(|c| c.max_mesh_participants as usize * 4); // SFU supports ~4x mesh limit
 
         rooms
             .create_room(room_id.clone(), max)
@@ -816,7 +810,6 @@ impl SfuService {
         let room = rooms.get_room(&room_id).unwrap();
         let info = self.room_to_info(room);
         // Drop the write lock before awaiting the async announce.
-        drop(configs);
         drop(rooms);
         // Broadcast the new room so cascade peers learn our capacity
         // BEFORE any clients join.  Without this, pick_redirect_node
@@ -887,20 +880,24 @@ impl SfuService {
         // Cascade redirect check — read-only lock, no room creation yet.
         // Room creation defers until after SDP parsing succeeds so a
         // malformed offer never leaves an empty room.
+        // Read before taking any lock: it reads the neighbourhood's links.
+        let preferred = if accept_redirect {
+            config_store::stored_config(neighbourhood_url)
+                .await
+                .and_then(|c| c.preferred_sfu_did)
+        } else {
+            None
+        };
         let max_per_node = {
             let mgr = self.cascade_manager.read().await;
             if accept_redirect {
                 let rooms = self.rooms.read().await;
-                let configs = self.configs.read().await;
                 let local_count = rooms
                     .get_room(&room_id)
                     .map(|r| r.participant_count() as u32)
                     .unwrap_or(0);
-                let preferred = configs
-                    .get(neighbourhood_url)
-                    .and_then(|c| c.preferred_sfu_did.as_deref());
                 if let Some(node) =
-                    mgr.pick_redirect_node(&room_id.to_string(), local_count, preferred)
+                    mgr.pick_redirect_node(&room_id.to_string(), local_count, preferred.as_deref())
                 {
                     return Ok(CallSessionInfo {
                         room_name: room_name.to_string(),
@@ -1408,19 +1405,20 @@ impl SfuService {
         }
     }
 
-    // ---- SFU configuration (Social DNA) ----
+    // ---- SFU configuration (links in the neighbourhood) ----
 
-    /// Get the SFU config for a neighbourhood.
+    /// The neighbourhood's call config, from its links.
     pub async fn get_config(&self, neighbourhood_url: &str) -> SfuConfig {
-        let configs = self.configs.read().await;
-        configs.get(neighbourhood_url).cloned().unwrap_or_default()
+        config_store::read_config(neighbourhood_url).await
     }
 
-    /// Set the SFU config for a neighbourhood (from Social DNA).
+    /// Validate `config` and store it in the neighbourhood as a link signed
+    /// by `context`. The caller checks that `context` is the creator.
     pub async fn set_config(
         &self,
         neighbourhood_url: &str,
         config: SfuConfig,
+        context: &crate::agent::AgentContext,
     ) -> Result<(), String> {
         // Validate mode
         match config.mode.as_str() {
@@ -1446,24 +1444,15 @@ impl SfuService {
             ));
         }
 
-        let mut configs = self.configs.write().await;
-        if !configs.contains_key(neighbourhood_url) && configs.len() >= MAX_CONFIGS {
-            return Err(format!(
-                "This node already holds {} call configs",
-                MAX_CONFIGS
-            ));
-        }
-        configs.insert(neighbourhood_url.to_string(), config);
-        Ok(())
+        config_store::write_config(neighbourhood_url, &config, context).await
     }
 
     /// Get the designated SFU peer DID for a neighbourhood.
     pub async fn sfu_peer_for_neighbourhood(&self, neighbourhood_url: &str) -> Option<String> {
-        let configs = self.configs.read().await;
-        configs
-            .get(neighbourhood_url)
+        config_store::stored_config(neighbourhood_url)
+            .await
             .and_then(|c| match c.mode.as_str() {
-                "designated" => c.designated_peer.clone(),
+                "designated" => c.designated_peer,
                 "gateway" => Some("gateway".to_string()), // Sentinel — caller resolves gateway DID
                 _ => None,
             })
@@ -1471,10 +1460,9 @@ impl SfuService {
 
     /// Get the SFU peer DIDs for a neighbourhood (cascaded mode returns multiple).
     pub async fn sfu_peers_for_neighbourhood(&self, neighbourhood_url: &str) -> Vec<String> {
-        let configs = self.configs.read().await;
-        match configs.get(neighbourhood_url) {
-            Some(c) if c.mode == "cascaded" => c.sfu_peers.clone(),
-            Some(c) if c.mode == "designated" => c.designated_peer.iter().cloned().collect(),
+        match config_store::stored_config(neighbourhood_url).await {
+            Some(c) if c.mode == "cascaded" => c.sfu_peers,
+            Some(c) if c.mode == "designated" => c.designated_peer.into_iter().collect(),
             Some(c) if c.mode == "gateway" => vec!["gateway".to_string()],
             _ => vec![],
         }

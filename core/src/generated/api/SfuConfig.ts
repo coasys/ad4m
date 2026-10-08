@@ -2,7 +2,8 @@
 import type { IceServer } from "./IceServer";
 
 /**
- * Social DNA SFU configuration for a neighbourhood.
+ * A neighbourhood's call configuration, stored as a link in the
+ * neighbourhood (see `sfu::config_store`).
  */
 export type SfuConfig = { 
 /**

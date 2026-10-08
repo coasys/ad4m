@@ -12,10 +12,14 @@
 //! - the neighbourhood. Every multi-user token holds both capabilities on
 //!   `*`, so the capability alone says nothing about *which* neighbourhood.
 //!   A handler that names one requires the caller to be its member on this
-//!   node ([`member_did`]); room and config writes require its owner
-//!   ([`require_owner`]); listings show only the caller's neighbourhoods.
+//!   node ([`member_did`]); room writes require its owner on this node
+//!   ([`require_owner`]); the call config, stored as a link every member
+//!   reads, only its creator may write; listings show only the caller's
+//!   neighbourhoods.
 //!
-//! The admin credential passes both. `ensureMembership` requires it.
+//! The admin credential passes both, except for the call config: it is
+//! signed as the caller, and a non-creator's config would be ignored.
+//! `ensureMembership` requires the admin credential.
 //!
 //! The SFU service is *always* available — there's no feature gate.
 //! When `get_sfu_service()` returns None it means the service hasn't
@@ -242,9 +246,17 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuSetConfigParams = parse(params)?;
-    require_owner(&ctx, &p.neighbourhood_url)?;
+    // The config is a link every member's node reads, and they read only
+    // the creator's — so only the creator may write it, admin or not.
+    let did = caller_did(&ctx)?;
+    if crate::sfu::config_store::neighbourhood_creator(&p.neighbourhood_url).await != Some(did) {
+        return Err(WsRpcError::forbidden(
+            "Only the neighbourhood's creator can change its call config".to_string(),
+        ));
+    }
+    let context = AgentContext::from_auth_token(ctx.auth_token.clone());
     service()?
-        .set_config(&p.neighbourhood_url, p.config)
+        .set_config(&p.neighbourhood_url, p.config, &context)
         .await
         .map_err(map_room_err)?;
     Ok(Value::Bool(true))
