@@ -214,7 +214,7 @@ Call `ad4m_set_agent_profile(username: "...")` before `ad4m_subscribe_to_mention
 ad4m_subscribe_to_mentions(perspective_id: "<your-local-uuid>")
 ```
 
-The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions your name or DID. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
+The plugin creates a live SPARQL subscription and wakes you via `/hooks/wake` when someone mentions you — `@yourname` or your DID in text, or a mention link to your DID where the space declares one. If the node isn't ready yet, this now tells you so and keeps retrying — see Rule 11.
 
 For monitoring an entire channel (not just mentions):
 

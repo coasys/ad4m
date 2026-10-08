@@ -834,9 +834,10 @@ Notes:
     name: "ad4m_subscribe_to_mentions",
     description:
       "Subscribe to mentions of this agent in a neighbourhood. " +
-      "Creates a live waker subscription that watches for any item whose text carries " +
-      "your name or DID — a message, or an instance of whatever class this space defines — " +
-      "and wakes you when detected. " +
+      "Creates a live waker subscription that wakes you when an item mentions you — a message, " +
+      "or an instance of whatever class this space defines. Where the space declares a mention " +
+      "relation, that is a link from the item to your DID; otherwise it is text carrying " +
+      "@ and one of your profile names, or your DID. " +
       "Note: this is called automatically when you join or publish a neighbourhood.",
     parameters: {
       type: "object",
@@ -904,7 +905,7 @@ Notes:
     description:
       "Subscribe to new children under a specific parent — messages in a channel, or whatever " +
       "items this space's ontology hangs under that container. " +
-      "Creates a live waker subscription that watches for new ad4m://has_child links and wakes you when detected. " +
+      "Creates a live waker subscription that watches for new children (ad4m://has_child, or any predicate the space declares as containment) and wakes you when detected. " +
       "Call this to monitor one container for everything added to it.",
     parameters: {
       type: "object",

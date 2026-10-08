@@ -2490,3 +2490,27 @@ async fn mention_scan_reads_the_declared_message_text() {
         ]
     );
 }
+
+/// A perspective that declares its mention relation is watched through it;
+/// one that declares none has no relations, so mentions fall back to text.
+#[tokio::test(flavor = "multi_thread")]
+async fn mention_relations_are_the_declared_ones() {
+    let (handler, uuid, _guard) = setup(false).await;
+    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    assert!(perspective.mention_relations().await.is_empty());
+
+    add(
+        &handler,
+        &uuid,
+        "app://mention",
+        crate::perspectives::declared_roles::SUB_PROPERTY_OF,
+        crate::perspectives::mentions::MENTIONS,
+    )
+    .await;
+    assert_eq!(
+        perspective.mention_relations().await.as_ref(),
+        &vec!["app://mention".to_string()]
+    );
+    // Another role's declaration is not a mention relation.
+    assert!(perspective.message_text_predicates().await.is_empty());
+}

@@ -148,6 +148,12 @@ called, and `instance_transcript` prints that property by default. A
 perspective that declares none falls back to the `body` property of a `Message`
 class.
 
+A schema that records a mention as a link — message → agent DID — declares
+that predicate too: `<app://mention> rdfs:subPropertyOf <ad4m://mentions>`. A
+mention subscription there follows those links to your DID and does not read
+text at all. Without one, it matches `@name` or your DID in message text,
+never a bare name.
+
 Not every perspective has a tree at all — a flat perspective (all instances
 directly in the perspective, no channels) is valid and common for simple
 bot-to-bot spaces. Check `describe_perspective` and do not assume a `parent` is
@@ -194,8 +200,8 @@ set_agent_profile_picture(image_base64, mime_type?)  → optional; crop to squar
 Two reasons this is not cosmetic:
 
 - **Mention-matching needs it.** A subscription that wakes you when someone
-  mentions you has to resolve "you" to a name, and without a profile there is
-  nothing to match. Registering one typically fails outright with
+  mentions you has to resolve "you" to a name (matched as `@name`), and
+  without a profile there is nothing to match. Registering one typically fails outright with
   `Failed to get agent: User profile not found for <email>`.
 - **Humans see the username**, not your DID, in transcripts and app UIs. An
   unnamed agent is hard to talk to and hard to trust.

@@ -185,7 +185,7 @@ impl Ad4mMcpHandler {
 
     /// Generate a single waker subscription config for mention tracking
     #[tool(
-        description = "Generate a single waker subscription config entry that watches for mentions of this agent by name(s) or DID in a neighbourhood. Watches for any link whose target contains a mention term (using SPARQL CONTAINS for substring matching). The waker plugin resolves parent channels in a second query when the subscription fires. Returns one subscription ORing all profile names and the full DID. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
+        description = "Generate a single waker subscription config entry that watches for mentions of this agent in a neighbourhood. Where the perspective declares a mention relation (<pred> rdfs:subPropertyOf ad4m://mentions), it watches for links through that relation to this agent's DID — exact, and the woken item is the message. Otherwise it watches message text for @name (each profile name) or the full DID, case-insensitively (SPARQL CONTAINS); a bare name without @ does not match. The waker plugin resolves parent channels in a second query when the subscription fires. Agents should call this once per neighbourhood they join and add the returned waker_config entry to their waker config file, then restart the waker. Profile names (username, given_name, family_name) are all included; name_override adds an extra alias without replacing them."
     )]
     pub async fn get_mention_waker_config(
         &self,
@@ -257,10 +257,25 @@ impl Ad4mMcpHandler {
             None => Vec::new(),
         };
 
-        if text_predicates.is_empty() {
-            log::warn!("get_mention_waker_config: no message-text predicate declared and no `body` on a Message class, falling back to unscoped (but ontology-excluded) query");
-        }
-        let query = build_mention_query(&names, &did, &text_predicates);
+        // A declared mention relation answers exactly; text is the fallback.
+        let relations: Vec<String> = match perspective {
+            Some(ref p) => p
+                .mention_relations()
+                .await
+                .iter()
+                .filter(|r| validate_sparql_iri(r).is_ok())
+                .cloned()
+                .collect(),
+            None => Vec::new(),
+        };
+        let query = if !relations.is_empty() {
+            build_mention_relation_query(&relations, &did)
+        } else {
+            if text_predicates.is_empty() {
+                log::warn!("get_mention_waker_config: no message-text predicate declared and no `body` on a Message class, falling back to unscoped (but ontology-excluded) query");
+            }
+            build_mention_query(&names, &did, &text_predicates)
+        };
 
         let sub_id = build_mention_sub_id(perspective_id);
 
@@ -283,18 +298,36 @@ impl Ad4mMcpHandler {
             "perspective_id": perspective_id,
             "query": query,
             "containment_predicates": containment,
+            "mention_relations": relations,
             "subscription": subscription,
-            "message": format!(
-                "Add the subscription entry to your waker config and restart the waker. \
-                 This single query watches for mentions of {} by {} in perspective {}.",
-                did,
-                if names.is_empty() {
-                    "DID only".to_string()
-                } else {
-                    format!("name(s) [{}] or", names.join(", "))
-                },
-                perspective_id
-            ),
+            "message": if !relations.is_empty() {
+                format!(
+                    "Add the subscription entry to your waker config and restart the waker. \
+                     This single query watches for links to {} through [{}] in perspective {}.",
+                    did,
+                    relations.join(", "),
+                    perspective_id
+                )
+            } else {
+                format!(
+                    "Add the subscription entry to your waker config and restart the waker. \
+                     This single query watches for mentions of {} by {} in perspective {}.",
+                    did,
+                    if names.is_empty() {
+                        "DID only".to_string()
+                    } else {
+                        format!(
+                            "[{}] or",
+                            names
+                                .iter()
+                                .map(|n| format!("@{}", n))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    },
+                    perspective_id
+                )
+            },
         })
         .to_string()
     }
@@ -325,8 +358,10 @@ pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -
 /// Build the SPARQL mention-detection query for the waker.
 ///
 /// CONTAINS does case-insensitive substring matching on the parsed literal
-/// target, so a message body containing any profile name or the agent DID
-/// matches. `text_predicates` scopes the scan to the predicates that hold
+/// target, so a message body containing `@` and any profile name, or the agent
+/// DID, matches. A bare name does not: names are common words and other
+/// people's names too, and a message that only talks about somebody is not
+/// addressed to them. `text_predicates` scopes the scan to the predicates that hold
 /// message text when any are known (much faster on large perspectives); empty
 /// scans every predicate.
 ///
@@ -344,7 +379,7 @@ pub(crate) async fn mention_text_predicates(perspective: &PerspectiveInstance) -
 pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[String]) -> String {
     let all_terms: Vec<String> = names
         .iter()
-        .map(|n| n.to_lowercase())
+        .map(|n| format!("@{}", n.to_lowercase()))
         .chain(std::iter::once(did.to_lowercase()))
         .collect();
     let mention_conditions: Vec<String> = all_terms
@@ -374,6 +409,21 @@ pub fn build_mention_query(names: &[String], did: &str, text_predicates: &[Strin
     format!(
         "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) {} FILTER({}) }}",
         ontology_guard, mention_predicate
+    )
+}
+
+/// Build the mention query for a perspective that declares its mention
+/// relation: links through any of `relations` whose target is the agent's DID.
+/// The source is the message, so the waker resolves its parents as usual.
+pub fn build_mention_relation_query(relations: &[String], did: &str) -> String {
+    let listed: Vec<String> = relations
+        .iter()
+        .map(|r| format!("\"{}\"", escape_sparql_literal(r)))
+        .collect();
+    format!(
+        "SELECT ?source ?predicate ?target WHERE {{ ?source ?predicate ?target . FILTER(isIRI(?source) && isIRI(?predicate)) FILTER(STR(?predicate) IN ({})) FILTER(STR(?target) = \"{}\") }}",
+        listed.join(", "),
+        escape_sparql_literal(did)
     )
 }
 
@@ -464,6 +514,20 @@ mod tests {
     }
 
     #[test]
+    fn relation_query_follows_declared_links_to_the_did() {
+        let q = build_mention_relation_query(
+            &["app://mention".to_string(), "app://cc".to_string()],
+            "did:key:zAgent",
+        );
+        assert!(
+            q.contains("STR(?predicate) IN (\"app://mention\", \"app://cc\")"),
+            "{q}"
+        );
+        assert!(q.contains("STR(?target) = \"did:key:zAgent\""), "{q}");
+        assert!(!q.contains("CONTAINS"), "no text matching: {q}");
+    }
+
+    #[test]
     fn scoped_query_lists_every_text_predicate() {
         let q = build_mention_query(
             &["alice".to_string()],
@@ -497,8 +561,9 @@ mod tests {
             "did:key:zABC",
             &[],
         );
-        assert!(q.contains("\"alice\""), "name lowercased");
-        assert!(q.contains("\"bob\""), "second name lowercased");
+        assert!(q.contains("\"@alice\""), "name lowercased, with @");
+        assert!(q.contains("\"@bob\""), "second name lowercased, with @");
+        assert!(!q.contains("\"alice\""), "a bare name is not a term");
         assert!(q.contains("\"did:key:zabc\""), "DID lowercased + included");
         assert!(q.contains("parse_literal"), "decodes literal targets");
     }
