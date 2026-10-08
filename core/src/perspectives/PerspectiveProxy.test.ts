@@ -50,6 +50,68 @@ describe('QuerySubscriptionProxy', () => {
     expect(unsubscribe).toHaveBeenCalled();
   });
 
+  // Subscribers of the same query share one executor subscription id, and each
+  // disposeQuerySubscription releases one hold on it. Every hold this proxy
+  // acquires must be released exactly once.
+  describe('executor hold', () => {
+    function holdClient(ids: string[]) {
+      let next = 0;
+      return {
+        subscribeQuery: jest.fn(async () => ({ subscriptionId: ids[next++], result: [] })),
+        subscribeToQueryUpdates: jest.fn(() => jest.fn()),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      } as any;
+    }
+
+    it('dispose() releases the hold once, even when called twice', async () => {
+      const mockClient = holdClient(['shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      subscription.dispose();
+      subscription.dispose();
+
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'shared-sub');
+    });
+
+    it('a retried subscribe() releases the hold it replaces', async () => {
+      // The executor returns the same id while the entry is alive, so the
+      // retry adds a second hold on it; the first must be released.
+      const mockClient = holdClient(['shared-sub', 'shared-sub']);
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+      await subscription.subscribe();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'shared-sub');
+    });
+
+    it('a reconnect swap releases the hold it replaces', async () => {
+      let reconnectCallback: (() => Promise<void>) | undefined;
+      const mockClient = holdClient(['sub-1', 'sub-2']);
+      mockClient.onReconnect = jest.fn((cb: () => Promise<void>) => {
+        reconnectCallback = cb;
+        return jest.fn();
+      });
+      const subscription = new QuerySubscriptionProxy('p-1', 'SELECT ?x WHERE { ?x ?p ?o }', mockClient);
+      await subscription.subscribe();
+
+      await reconnectCallback!();
+      expect(subscription.id).toBe('sub-2');
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith('p-1', 'sub-1');
+
+      subscription.dispose();
+      subscription.dispose();
+      expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(2);
+      expect(mockClient.disposeQuerySubscription).toHaveBeenNthCalledWith(2, 'p-1', 'sub-2');
+    });
+  });
+
   it('re-subscribes immediately when onReconnect fires', async () => {
     let reconnectCallback: (() => void) | undefined;
     const initialUnsubscribe = jest.fn();
@@ -139,9 +201,9 @@ describe('QuerySubscriptionProxy', () => {
   // integration-tests-mcp failure the first fix exposed.
   //
   // CodeRabbit warned about the "final-subscriber" loop: when this query
-  // owns the LAST `_wsCallbacks` entry in ApiClient, calling `#unsubscribe`
+  // owns the LAST `_handlers` entry in ApiClient, calling `#unsubscribe`
   // inside a reconnect-driven `subscribe()` closes the WebSocket
-  // (ApiClient.subscribe()'s deleter: "if no more callbacks and no pending
+  // (the release ApiClient.on() returns: "if no more handlers and no pending
   // calls, close the socket"). The subsequent `subscribeQuery` reopens the
   // socket, whose fresh `onopen` fires every registered reconnect callback
   // → recursion.
@@ -150,7 +212,7 @@ describe('QuerySubscriptionProxy', () => {
   // calling `subscribe()` from the reconnect handler at all. Instead it
   // swap-in-place: get a new server-side subscription ID via
   // `subscribeQuery`, register the new client-side callback FIRST, then
-  // dispose the old callback. `_wsCallbacks.size` never dips to 0 across
+  // dispose the old callback. `_handlers.size` never dips to 0 across
   // the swap, so the socket stays open, no `onopen` re-fires, no
   // cross-proxy RPCs die with 503 (the mcp-http.test.ts "should fire
   // onWake when mention uses agent DID" failure).
@@ -160,7 +222,7 @@ describe('QuerySubscriptionProxy', () => {
     // Real Set so we can observe the swap ordering.
     const reconnectCallbacks = new Set<() => void>();
     // Count of live client-side callback subscriptions (proxy analogue of
-    // ApiClient._wsCallbacks.size). Bumped by subscribeToQueryUpdates, and
+    // ApiClient._handlers.size). Bumped by subscribeToQueryUpdates, and
     // decremented by the returned unsubscribe. If this ever drops to 0
     // during the swap, ApiClient would close the socket — which is
     // exactly the loop CodeRabbit flagged.
@@ -292,7 +354,7 @@ describe('QuerySubscriptionProxy', () => {
   // `#subscriptionId`. Without the generation guard, a swap handler parked
   // on its subscribeQuery while a full subscribe() ran could register a
   // client-side callback that the subscribe() then overwrote WITHOUT
-  // disposing — leaking the callback in ApiClient._wsCallbacks for the
+  // disposing — leaking the callback in ApiClient._handlers for the
   // client lifetime (holding the socket open and firing into a dead
   // subscription). The stale writer must back out and release its
   // server-side subscription instead.
@@ -412,13 +474,26 @@ describe('PerspectiveProxy.subjectClassTargetClasses', () => {
     expect(await proxy.subjectClassTargetClasses()).toEqual([]);
   });
 
-  it('returns an empty array on error', async () => {
+  it('rejects when the lookup fails, rather than answering that nothing is registered', async () => {
     const mockClient: any = {
       queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
     };
     const proxy = createProxy(mockClient);
 
-    expect(await proxy.subjectClassTargetClasses()).toEqual([]);
+    await expect(proxy.subjectClassTargetClasses()).rejects.toThrow('network error');
+    await expect(proxy.subjectClasses()).rejects.toThrow('network error');
+  });
+
+  it('still lets subjectClassesByTemplate fall back to property matching when the lookup fails', async () => {
+    const mockClient: any = {
+      queryLinks: jest.fn().mockRejectedValue(new Error('network error')),
+    };
+    const proxy = createProxy(mockClient);
+    const byProperties = jest.spyOn(proxy as any, 'findClassByProperties').mockResolvedValue('Recipe' as never);
+
+    // A className sends it to the subjectClasses() lookup first, which now rejects.
+    await expect(proxy.subjectClassesByTemplate({ className: 'Recipe' })).resolves.toEqual(['Recipe']);
+    expect(byProperties).toHaveBeenCalled();
   });
 });
 

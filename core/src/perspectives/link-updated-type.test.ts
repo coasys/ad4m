@@ -1,42 +1,55 @@
 /**
- * Type test: `link-updated` callbacks receive `{ oldLink, newLink }`, not a
- * single `LinkExpression`. ts-jest type-checks this file, so a wrong callback
- * type fails the suite at compile time.
+ * Type test: `link-updated` handlers receive `{ oldLink, newLink }`, not a
+ * single link. ts-jest type-checks this file, so a wrong handler type fails
+ * the suite at compile time.
  */
+import { ApiClient } from '../apiClient';
+import { PerspectiveClient } from './PerspectiveClient';
+import { PerspectiveHandle } from './PerspectiveHandle';
 import { PerspectiveProxy } from './PerspectiveProxy';
-import type { LinkUpdate, LinkUpdatedCallback } from './PerspectiveClient';
-import { LinkExpression } from '../links/Links';
+import type { DecoratedLinkExpression } from '../generated/api/DecoratedLinkExpression';
+import type { PerspectiveLinkUpdatedWithOwner } from '../generated/api/PerspectiveLinkUpdatedWithOwner';
 
-function linkExpression(target: string): LinkExpression {
-  return { author: 'did:test:1', timestamp: '2024-01-01T00:00:00.000Z', data: { source: 's', predicate: 'p', target }, proof: { valid: true } } as unknown as LinkExpression;
+/** Captures the socket ApiClient opens, so the test can push an event. */
+class FakeWebSocket {
+  static last: FakeWebSocket;
+  readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onerror: ((e: unknown) => void) | null = null;
+  onclose: (() => void) | null = null;
+  constructor(public url: string) { FakeWebSocket.last = this; }
+  send() {}
+  close() { this.readyState = 3; }
 }
 
-describe('link-updated callback type', () => {
-  it('types the callback argument as { oldLink, newLink }', async () => {
-    let updatedCallbacks: LinkUpdatedCallback[] = [];
-    const client: any = {
-      addPerspectiveLinkAddedListener: jest.fn(),
-      addPerspectiveLinkRemovedListener: jest.fn(),
-      addPerspectiveLinkUpdatedListener: (_uuid: string, cbs: LinkUpdatedCallback[]) => { updatedCallbacks = cbs; return () => {}; },
-      addPerspectiveSyncStateChangeListener: jest.fn(),
-    };
-    const proxy = new PerspectiveProxy(
-      { uuid: 'test-uuid', name: 'test', owners: [], sharedUrl: null, neighbourhood: null, state: 'Synced' } as any,
-      client,
-    );
+function link(target: string): DecoratedLinkExpression {
+  return {
+    author: 'did:test:1', timestamp: '2024-01-01T00:00:00.000Z',
+    data: { source: 's', predicate: 'p', target },
+    proof: { key: 'k', signature: 's', valid: true, invalid: false },
+    status: 'SHARED',
+  };
+}
+
+describe('link-updated handler type', () => {
+  it('types the handler argument as { oldLink, newLink }', () => {
+    const api = new ApiClient('http://localhost:0', undefined, FakeWebSocket as unknown as new (url: string) => WebSocket);
+    const proxy = new PerspectiveProxy(new PerspectiveHandle('test-uuid', 'test'), new PerspectiveClient('http://localhost:0', undefined, api));
 
     const seen: string[] = [];
-    proxy.addListener('link-updated', (update) => {
-      // Compiles only if `update` is typed as LinkUpdate.
-      seen.push(`${update.oldLink.data.target}->${update.newLink.data.target}`);
+    // Compiles only if the event carries `oldLink` and `newLink`.
+    proxy.on('link-updated', ({ oldLink, newLink }) => {
+      seen.push(`${oldLink.data.target}->${newLink.data.target}`);
     });
-    // @ts-expect-error a link-updated callback does not receive a LinkExpression
-    proxy.addListener('link-updated', (link: LinkExpression) => {});
-    // link-added keeps its LinkExpression callback type
-    proxy.addListener('link-added', (link: LinkExpression) => {});
+    // @ts-expect-error a link-updated handler does not receive a single link
+    proxy.on('link-updated', (event: { link: DecoratedLinkExpression }) => {});
+    // link-added keeps its `{ link }` payload
+    proxy.on('link-added', ({ link }: { link: DecoratedLinkExpression }) => {});
 
-    const update: LinkUpdate = { oldLink: linkExpression('old'), newLink: linkExpression('new') };
-    updatedCallbacks[0](update);
+    const event: PerspectiveLinkUpdatedWithOwner = { perspectiveUuid: 'test-uuid', owner: 'did:test:1', oldLink: link('old'), newLink: link('new') };
+    FakeWebSocket.last.onmessage?.({ data: JSON.stringify({ type: 'link-updated', ...event }) });
     expect(seen).toEqual(['old->new']);
+    api.closeAll();
   });
 });
