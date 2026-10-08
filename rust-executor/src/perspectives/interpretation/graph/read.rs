@@ -248,6 +248,12 @@ pub fn build_speaker_name_map(
 /// `create_subject` — so class conformance and field decoding go through the
 /// class's own shape/getters rather than hand-matched type-flag links.
 ///
+/// The read sees the shared links only
+/// ([`PerspectiveInstance::shared_only`]), whatever handle the caller passes:
+/// the rows are rendered into the prompt and route Create-vs-Update of the
+/// Shared links the pass writes, so an instance or property value that exists
+/// only in Local links, any user's or the runner's own, is not listed.
+///
 /// A per-class `model_query` failure is propagated. Silently treating it as
 /// "no existing instances" would break [`filter_already_present`]'s deterministic
 /// dedup guarantee: an empty `known` set for the failing class lets the LLM's
@@ -259,6 +265,7 @@ pub async fn existing_instance_context(
     shapes: &[ModelShape],
     scope: Option<&Scope>,
 ) -> anyhow::Result<ExistingInstances> {
+    let shared = perspective.shared_only();
     let mut out: ExistingInstances = HashMap::new();
     for shape in shapes {
         // No declared identity property ⇒ no dedup key ⇒ skip.
@@ -304,7 +311,7 @@ pub async fn existing_instance_context(
             })?;
         }
         let query = query_obj.to_string();
-        let result_json = perspective.model_query(&class, &query).await.map_err(|e| {
+        let result_json = shared.model_query(&class, &query).await.map_err(|e| {
             anyhow::anyhow!(
                 "existing_instance_context: model_query({class}) failed — refusing to \
                  proceed because an empty existing-set here would silently break dedup: {e:#}"

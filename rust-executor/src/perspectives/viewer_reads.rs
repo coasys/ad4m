@@ -29,6 +29,18 @@ impl PerspectiveInstance {
         scoped
     }
 
+    /// This instance with the shared links only: every read through the
+    /// returned clone sees no user's `Local` links, its reader's included
+    /// ([`SparqlStore::shared_only`](crate::perspectives::sparql_store::SparqlStore::shared_only)).
+    /// For reads whose rows end up in shared links, such as the
+    /// auto-processor's existing-instance context, which is rendered into the
+    /// prompt and routes Create-vs-Update of the Shared links a pass writes.
+    pub fn shared_only(&self) -> PerspectiveInstance {
+        let mut scoped = self.clone();
+        scoped.sparql_store = std::sync::Arc::new(self.sparql_store.shared_only());
+        scoped
+    }
+
     /// [`Self::read_as`] the user `context` acts for. Fails closed: a
     /// context whose DID cannot be resolved is an error, not a read as the
     /// main agent (`is_main_agent` is true for every token without a user
