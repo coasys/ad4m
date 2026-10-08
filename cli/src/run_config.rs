@@ -274,10 +274,20 @@ pub struct RunArgs {
     )]
     pub sfu_cascade_peers: Option<Vec<String>>,
     /// IP address the SFU media server binds its UDP socket to. Default:
-    /// 127.0.0.1, so calls reach only this machine. Set it (e.g. `0.0.0.0` or
-    /// a LAN address) to accept media from other machines.
+    /// 127.0.0.1, so calls reach only this machine; with `--localhost false`,
+    /// the machine's outbound interface. Set it (e.g. a LAN address) to choose
+    /// which interface accepts media from other machines.
     #[arg(long, env = "AD4M_SFU_BIND_ADDR", value_parser = non_empty(StringValueParser::new()))]
     pub sfu_bind_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks once at startup whether a
+    /// public bind address is reachable. Unset: no probe, and a public
+    /// address reports reachability "unknown".
+    #[arg(
+        long,
+        env = "AD4M_SFU_STUN_SERVER",
+        value_parser = non_empty(StringValueParser::new())
+    )]
+    pub sfu_stun_server: Option<String>,
 }
 
 /// Only the literal `true` enables the insecure mode; the usual "off"
@@ -396,6 +406,7 @@ impl RunArgs {
         config.sfu_cascade_listen = self.sfu_cascade_listen;
         config.sfu_cascade_peers = self.sfu_cascade_peers;
         config.sfu_bind_addr = self.sfu_bind_addr;
+        config.sfu_stun_server = self.sfu_stun_server;
         Ok(ResolvedRun {
             config,
             unlock_passphrase: secrets.unlock_passphrase,
@@ -945,7 +956,7 @@ pub(crate) mod tests {
             checked += 1;
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
-        assert_eq!(checked, 30, "every flag of run has a variable");
+        assert_eq!(checked, 36, "every flag of run has a variable");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

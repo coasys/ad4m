@@ -1279,7 +1279,6 @@ impl Ad4mDb {
     /// `neighbourhood_url`.  Creates a synthetic perspective_handle if
     /// none with that `shared_url` exists yet (needed by test harnesses
     /// that use synthetic neighbourhood URLs).
-    /// Register `user_did` as a member of `neighbourhood_url`.
     ///
     /// **Caller must enforce authorization.** This method trusts
     /// that the caller already verified the DID matches the

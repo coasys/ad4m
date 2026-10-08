@@ -17,7 +17,6 @@ pub mod reachability;
 pub mod relay;
 pub mod room;
 pub mod server;
-pub mod turn;
 pub mod types;
 
 mod service;

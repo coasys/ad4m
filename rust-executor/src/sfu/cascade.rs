@@ -102,6 +102,17 @@ pub enum CascadeSignal {
 }
 
 impl CascadeSignal {
+    /// The DID the frame says sent it. A transport checks it against the
+    /// peer the frame actually came from.
+    pub fn sender_did(&self) -> &str {
+        match self {
+            CascadeSignal::Announce { did, .. } | CascadeSignal::Leave { did, .. } => did,
+            CascadeSignal::PipeOffer { from_did, .. }
+            | CascadeSignal::PipeAnswer { from_did, .. }
+            | CascadeSignal::QualityPreference { from_did, .. } => from_did,
+        }
+    }
+
     /// Human-readable variant name for debug/trace logging.
     pub fn variant_name(&self) -> &'static str {
         match self {
@@ -482,13 +493,6 @@ impl CascadeManager {
     pub fn has_pipe(&self, room_id: &str, remote_did: &str) -> bool {
         self.pipes
             .contains_key(&(room_id.to_string(), remote_did.to_string()))
-    }
-
-    /// Count of fully-established pipes (offer + answer round-trip
-    /// complete).  Used by the wind tunnel to assert the Phase E e2e
-    /// pipe handshake landed.
-    pub fn established_pipe_count(&self) -> usize {
-        self.pipes.values().filter(|p| p.established).count()
     }
 
     /// Evaluate whether the local node should migrate one participant

@@ -9,6 +9,7 @@ import {
   f7BadCapability,
   f8StuckRenegotiationRecovery,
   f9CascadeNodeCrashCleanup,
+  f10NonMemberRpcs,
 } from "../helpers/sfu/scenarios/index.js";
 
 describe("SFU: Fault injection", function () {
@@ -23,4 +24,5 @@ describe("SFU: Fault injection", function () {
   sfuScenario(f7BadCapability);
   sfuScenario(f8StuckRenegotiationRecovery);
   sfuScenario(f9CascadeNodeCrashCleanup, 300_000);
+  sfuScenario(f10NonMemberRpcs);
 });

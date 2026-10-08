@@ -111,9 +111,6 @@ hex = "0.4.3"
 argon2 = { version = "0.5.0", features = ["simple"] }
 rand = "0.8.5"
 base64 = "0.21.0"
-# TURN credential generation for SFU ICE server config
-hmac = "0.12"
-sha1 = "0.10"
 rmcp = { version = "0.15.0", features = ["server", "transport-streamable-http-server"] }
 async-trait = "0.1"
 axum = { version = "0.8", features = ["ws", "multipart"] }

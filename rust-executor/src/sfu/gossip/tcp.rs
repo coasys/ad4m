@@ -14,6 +14,13 @@
 //! inbound socket; each frame is JSON-decoded into a [`CascadeSignal`]
 //! and pushed onto a shared mpsc channel that `SfuService` consumes.
 //!
+//! Only configured peers are heard. The listener drops a connection from
+//! an address no peer is configured at, and a connection's first frame
+//! binds it to one of the DIDs configured at that address; a later frame
+//! claiming another DID closes it. Peers that share an IP (a single-host
+//! cluster) can still claim each other's DIDs: frames are not signed, so
+//! run the cascade listener only on a network its peers alone can reach.
+//!
 //! Discovery is static — the peer list is configuration provided at
 //! startup.  The transport doesn't try to maintain global mesh
 //! topology; if a peer goes down its outbound TcpStream errors and
@@ -21,8 +28,8 @@
 //! acceptable for this layer because cascade decisions tolerate
 //! stale views (`pick_redirect_node` falls back gracefully).
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -87,16 +94,34 @@ impl TcpGossip {
 
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
-        // Accept-loop: every inbound TCP stream spawns its own reader.
+        // Which DIDs may speak from which address. Inbound connections come
+        // from an ephemeral port, so only the IP identifies a peer.
+        let mut allowed: HashMap<IpAddr, HashSet<String>> = HashMap::new();
+        for peer in peers.iter().filter(|p| p.did != local_did) {
+            allowed
+                .entry(peer.addr.ip())
+                .or_default()
+                .insert(peer.did.clone());
+        }
+
+        // Accept-loop: every inbound TCP stream from a configured peer
+        // address spawns its own reader.
         {
             let inbound_tx = inbound_tx.clone();
             tasks.push(tokio::spawn(async move {
                 loop {
                     match listener.accept().await {
                         Ok((socket, peer_addr)) => {
+                            let Some(dids) = allowed.get(&peer_addr.ip()) else {
+                                warn!(
+                                    "TcpGossip: refusing {}, no peer is configured there",
+                                    peer_addr
+                                );
+                                continue;
+                            };
                             debug!("TcpGossip accept from {}", peer_addr);
                             let tx = inbound_tx.clone();
-                            tokio::spawn(reader_loop(socket, tx));
+                            tokio::spawn(reader_loop(socket, tx, dids.clone()));
                         }
                         Err(e) => {
                             warn!("TcpGossip accept error: {}", e);
@@ -195,12 +220,21 @@ const MAX_GOSSIP_LINE_BYTES: usize = 131_072;
 /// inbound channel.  Exits when the stream closes — its task
 /// terminates cleanly so the listener can accept the peer again
 /// when it reconnects.
-async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>) {
+///
+/// `allowed` holds the DIDs configured at this connection's address. The
+/// first frame binds the connection to its sender, which must be one of
+/// them; the connection closes on any frame from another sender.
+async fn reader_loop(
+    socket: TcpStream,
+    inbound_tx: mpsc::Sender<CascadeSignal>,
+    allowed: HashSet<String>,
+) {
     let reader = BufReader::with_capacity(MAX_GOSSIP_LINE_BYTES, socket);
     // Wrap in a length-limited reader so a malicious peer cannot send an
     // unbounded line that grows the String beyond MAX_GOSSIP_LINE_BYTES.
     let mut reader = reader.take(MAX_GOSSIP_LINE_BYTES as u64);
     let mut line = String::new();
+    let mut bound: Option<String> = None;
     loop {
         line.clear();
         // Reset the remaining byte limit before each read so every line
@@ -220,6 +254,20 @@ async fn reader_loop(socket: TcpStream, inbound_tx: mpsc::Sender<CascadeSignal>)
                 }
                 match serde_json::from_str::<CascadeSignal>(line.trim()) {
                     Ok(signal) => {
+                        let sender = signal.sender_did();
+                        let accepted = match &bound {
+                            Some(did) => did == sender,
+                            None => allowed.contains(sender),
+                        };
+                        if !accepted {
+                            warn!(
+                                "TcpGossip reader: {} frame from unexpected sender {}, closing",
+                                signal.variant_name(),
+                                sender
+                            );
+                            return;
+                        }
+                        bound.get_or_insert_with(|| sender.to_string());
                         debug!("TcpGossip reader: inbound {} signal", signal.variant_name());
                         if inbound_tx.send(signal).await.is_err() {
                             return; // SfuService dropped the receiver
@@ -278,5 +326,84 @@ async fn connect_loop(did: String, addr: SocketAddr, outbound: OutboundMap) {
             }
         }
         sleep(Duration::from_millis(500)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::timeout;
+
+    fn peer(did: &str, ip: &str) -> GossipPeer {
+        GossipPeer {
+            did: did.into(),
+            addr: SocketAddr::new(ip.parse().unwrap(), 9),
+        }
+    }
+
+    fn announce(did: &str) -> Vec<u8> {
+        let mut frame = serde_json::to_vec(&CascadeSignal::Announce {
+            did: did.into(),
+            room_id: "n:r".into(),
+            participant_count: 1,
+            capacity_hint: 4,
+        })
+        .unwrap();
+        frame.push(b'\n');
+        frame
+    }
+
+    /// A listener for `peers`, a raw connection to it from 127.0.0.1, and
+    /// the inbound channel.
+    async fn listen(
+        peers: Vec<GossipPeer>,
+    ) -> (TcpStream, mpsc::Receiver<CascadeSignal>, Arc<TcpGossip>) {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
+        let gossip = TcpGossip::start("did:me".into(), 4, addr, peers)
+            .await
+            .unwrap();
+        let rx = gossip.take_inbound().unwrap();
+        (TcpStream::connect(addr).await.unwrap(), rx, gossip)
+    }
+
+    async fn received(rx: &mut mpsc::Receiver<CascadeSignal>) -> Option<String> {
+        timeout(Duration::from_millis(300), rx.recv())
+            .await
+            .ok()
+            .flatten()
+            .map(|s| s.sender_did().to_string())
+    }
+
+    #[tokio::test]
+    async fn a_configured_peer_is_heard_and_bound_to_its_did() {
+        let (mut conn, mut rx, _g) =
+            listen(vec![peer("did:b", "127.0.0.1"), peer("did:c", "127.0.0.1")]).await;
+        conn.write_all(&announce("did:b")).await.unwrap();
+        assert_eq!(received(&mut rx).await.as_deref(), Some("did:b"));
+        // The connection is did:b's now: did:c, configured at the same
+        // address, cannot speak on it.
+        conn.write_all(&announce("did:c")).await.unwrap();
+        conn.write_all(&announce("did:b")).await.ok();
+        assert_eq!(received(&mut rx).await, None);
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_did_is_not_heard() {
+        let (mut conn, mut rx, _g) = listen(vec![peer("did:b", "127.0.0.1")]).await;
+        conn.write_all(&announce("did:evil")).await.unwrap();
+        conn.write_all(&announce("did:b")).await.ok();
+        assert_eq!(received(&mut rx).await, None);
+    }
+
+    #[tokio::test]
+    async fn an_address_with_no_configured_peer_is_refused() {
+        let (mut conn, mut rx, _g) = listen(vec![peer("did:b", "10.0.0.9")]).await;
+        conn.write_all(&announce("did:b")).await.ok();
+        assert_eq!(received(&mut rx).await, None);
     }
 }

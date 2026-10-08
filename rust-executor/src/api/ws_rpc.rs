@@ -112,6 +112,7 @@ async fn handle_ws(
         token.clone(),
         ctx.user_email.clone(),
         ctx.is_admin_credential,
+        super::events_ws::sfu_events_allowed(&ctx),
     )
     .await;
     // Text frames until the socket closes or errors; pings and binary

@@ -4,13 +4,18 @@
 //! `graphql/mutation_resolvers.rs` and `graphql/query_resolvers.rs`,
 //! now routed through the per-domain handler pattern.
 //!
-//! All handlers gate on neighbourhood capabilities:
-//! - reads (`getConfig`, `listRooms`, `sfuPeer*`, `status`,
-//!   `cascadeStatus`, `qualityPreferences`) require
-//!   `NEIGHBOURHOOD_READ_CAPABILITY`
-//! - writes (`startRoom`, `stopRoom`, `setConfig`, `call*`,
-//!   `addIceCandidate`, `sendData`) require `NEIGHBOURHOOD_UPDATE_CAPABILITY`
-//! - `ensureMembership` requires the admin credential
+//! Two gates, in this order:
+//! - a capability: reads (`getConfig`, `listRooms`, `sfuPeer*`, `status`,
+//!   `cascadeStatus`, `qualityPreferences`) need `NEIGHBOURHOOD_READ`, writes
+//!   (`startRoom`, `stopRoom`, `setConfig`, `call*`, `addIceCandidate`,
+//!   `sendData`) need `NEIGHBOURHOOD_UPDATE`;
+//! - the neighbourhood. Every multi-user token holds both capabilities on
+//!   `*`, so the capability alone says nothing about *which* neighbourhood.
+//!   A handler that names one requires the caller to be its member on this
+//!   node ([`member_did`]); room and config writes require its owner
+//!   ([`require_owner`]); listings show only the caller's neighbourhoods.
+//!
+//! The admin credential passes both. `ensureMembership` requires it.
 //!
 //! The SFU service is *always* available — there's no feature gate.
 //! When `get_sfu_service()` returns None it means the service hasn't
@@ -25,6 +30,7 @@ use ts_rs::TS;
 use crate::agent::capabilities::{
     check_capability, NEIGHBOURHOOD_READ_CAPABILITY, NEIGHBOURHOOD_UPDATE_CAPABILITY,
 };
+use crate::agent::AgentContext;
 use crate::db::Ad4mDb;
 use crate::sfu::{get_sfu_service, CallSessionInfo, SfuConfig, SfuRoomInfo};
 use crate::types::RequestContext;
@@ -54,24 +60,76 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))
 }
 
-/// Resolve the caller's DID for SFU operations.
-///
-/// In the multi-user flow `ctx.user_did` is set from the per-user JWT
-/// (`runtime.createUser` / `runtime.loginUser`) — this is the
-/// production case and how multi-participant calls authenticate.  In
-/// single-user / admin flows there is no per-user JWT and `user_did`
-/// is None; the executor is acting on behalf of *its own* main agent,
-/// so we fall through to `crate::agent::did()`.
+/// The DID the caller acts as: a user token's own DID, otherwise the main
+/// agent's — how every other API resolves a token (`AgentContext::from_auth_token`).
+/// That covers the admin credential and, on a single-user node, the app tokens
+/// ad4m-connect hands out. Handlers check a capability first, so an anonymous
+/// caller never reaches this.
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
     if let Some(did) = ctx.user_did.clone() {
         return Ok(did);
     }
-    if ctx.is_admin_credential {
-        return Ok(crate::agent::did());
+    crate::agent::did_for_context(&AgentContext::main_agent())
+        .map_err(|e| WsRpcError::unauthorized(format!("Caller DID not resolved: {}", e)))
+}
+
+/// This node's members of `neighbourhood_url`, first member first.
+fn neighbourhood_members(neighbourhood_url: &str) -> Vec<String> {
+    Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(neighbourhood_url))
+        .unwrap_or_default()
+}
+
+/// The caller's DID, once it is a member of `neighbourhood_url` on this
+/// node. The admin credential passes.
+fn member_did(ctx: &RequestContext, neighbourhood_url: &str) -> Result<String, WsRpcError> {
+    let did = caller_did(ctx)?;
+    if ctx.is_admin_credential || neighbourhood_members(neighbourhood_url).contains(&did) {
+        Ok(did)
+    } else {
+        Err(WsRpcError::forbidden(
+            "Not a member of this neighbourhood".to_string(),
+        ))
     }
-    Err(WsRpcError::unauthorized(
-        "Caller DID not resolved from token",
-    ))
+}
+
+/// Room and config writes: the admin credential, or the neighbourhood's
+/// owner on this node — its first member, which is its creator here or,
+/// for one created elsewhere, the first local user to join it. Rooms and
+/// config are this node's state, so this node's owner governs them.
+fn require_owner(ctx: &RequestContext, neighbourhood_url: &str) -> Result<(), WsRpcError> {
+    if ctx.is_admin_credential {
+        return Ok(());
+    }
+    let did = caller_did(ctx)?;
+    match neighbourhood_members(neighbourhood_url).first() {
+        Some(owner) if *owner == did => Ok(()),
+        _ => Err(WsRpcError::forbidden(
+            "Only the neighbourhood's owner can change its rooms or call config".to_string(),
+        )),
+    }
+}
+
+/// Keeps the entries of neighbourhoods the caller belongs to. The admin
+/// credential sees everything. Membership is looked up once per neighbourhood.
+fn visible_to<T>(
+    ctx: &RequestContext,
+    items: Vec<T>,
+    neighbourhood_of: impl Fn(&T) -> Option<String>,
+) -> Result<Vec<T>, WsRpcError> {
+    if ctx.is_admin_credential {
+        return Ok(items);
+    }
+    let did = caller_did(ctx)?;
+    let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+    Ok(items
+        .into_iter()
+        .filter(|item| match neighbourhood_of(item) {
+            Some(url) => *seen
+                .entry(url.clone())
+                .or_insert_with(|| neighbourhood_members(&url).contains(&did)),
+            None => false,
+        })
+        .collect())
 }
 
 // ── Room management ────────────────────────────────────────────────────────
@@ -80,6 +138,7 @@ async fn start_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
+    require_owner(&ctx, &p.neighbourhood_url)?;
     let room = service()?
         .start_room(&p.neighbourhood_url, &p.room_name)
         .await
@@ -91,6 +150,7 @@ async fn stop_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
+    require_owner(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
         .stop_room(&p.neighbourhood_url, &p.room_name)
         .await
@@ -101,7 +161,9 @@ async fn stop_room(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
 async fn list_rooms(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
-    let rooms = service()?.list_rooms().await;
+    let rooms = visible_to(&ctx, service()?.list_rooms().await, |room| {
+        Some(room.neighbourhood_url.clone())
+    })?;
     Ok(serde_json::to_value(rooms)?)
 }
 
@@ -111,24 +173,15 @@ async fn call_join(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuCallJoinParams = parse(params)?;
-    let agent_did = caller_did(&ctx)?;
-
-    // Neighbourhood membership gate — the sole check.
-    // If the caller's DID appears in the perspective owners for this
-    // neighbourhood URL, they have joined the neighbourhood and can
-    // join a call.  No admin bypass, no separate whitelist.
-    let is_member =
-        Ad4mDb::with_global_instance(|db| db.get_neighbourhood_owners(&p.neighbourhood_url))
-            .unwrap_or_default()
-            .contains(&agent_did);
-    if !ctx.is_admin_credential && !is_member {
-        return Err(WsRpcError::forbidden(
-            "Not a member of this neighbourhood".to_string(),
-        ));
-    }
-
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let session = service()?
-        .call_join(&p.neighbourhood_url, &p.room_name, &agent_did, &p.sdp_offer)
+        .call_join(
+            &p.neighbourhood_url,
+            &p.room_name,
+            &agent_did,
+            &p.sdp_offer,
+            p.accept_redirect.unwrap_or(false),
+        )
         .await
         .map_err(map_room_err)?;
     Ok(serde_json::to_value(session)?)
@@ -138,7 +191,7 @@ async fn call_leave(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuRoomParams = parse(params)?;
-    let agent_did = caller_did(&ctx)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
         .call_leave(&p.neighbourhood_url, &p.room_name, &agent_did)
         .await
@@ -153,7 +206,7 @@ async fn call_set_quality_preference(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuQualityPreferenceParams = parse(params)?;
-    let agent_did = caller_did(&ctx)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
         .call_set_quality_preference(
             &p.neighbourhood_url,
@@ -172,6 +225,7 @@ async fn get_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
+    member_did(&ctx, &p.neighbourhood_url)?;
     let cfg = service()?.get_config(&p.neighbourhood_url).await;
     Ok(serde_json::to_value(cfg)?)
 }
@@ -180,6 +234,7 @@ async fn set_config(params: Value, ctx: Arc<RequestContext>) -> Result<Value, Ws
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuSetConfigParams = parse(params)?;
+    require_owner(&ctx, &p.neighbourhood_url)?;
     service()?
         .set_config(&p.neighbourhood_url, p.config)
         .await
@@ -194,6 +249,7 @@ async fn sfu_peer_for_neighbourhood(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
+    member_did(&ctx, &p.neighbourhood_url)?;
     let peer = service()?
         .sfu_peer_for_neighbourhood(&p.neighbourhood_url)
         .await;
@@ -207,6 +263,7 @@ async fn sfu_peers_for_neighbourhood(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuNeighbourhoodParams = parse(params)?;
+    member_did(&ctx, &p.neighbourhood_url)?;
     let peers = service()?
         .sfu_peers_for_neighbourhood(&p.neighbourhood_url)
         .await;
@@ -227,7 +284,7 @@ async fn call_answer_server_offer(
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuAnswerServerOfferParams = parse(params)?;
-    let agent_did = caller_did(&ctx)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
         .call_answer_server_offer(
             &p.neighbourhood_url,
@@ -251,7 +308,7 @@ async fn add_ice_candidate(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuAddIceCandidateParams = parse(params)?;
-    let agent_did = caller_did(&ctx)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let ok = service()?
         .add_ice_candidate(&p.neighbourhood_url, &p.room_name, &agent_did, &p.candidate)
         .await
@@ -271,6 +328,7 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_UPDATE_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let p: SfuSendDataParams = parse(params)?;
+    let agent_did = member_did(&ctx, &p.neighbourhood_url)?;
     let binary = p.binary.unwrap_or(false);
     let data: Vec<u8> = if binary {
         // Binary data arrives base64-encoded.
@@ -279,7 +337,6 @@ async fn send_data(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     } else {
         p.data.into_bytes()
     };
-    let agent_did = caller_did(&ctx)?;
     let ok = service()?
         .send_data(
             &p.neighbourhood_url,
@@ -317,16 +374,19 @@ async fn cascade_status(_params: Value, ctx: Arc<RequestContext>) -> Result<Valu
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
     let svc = service()?;
-    let established_count = svc.cascade_established_pipe_count().await;
-    let pipes = svc
-        .cascade_established_pipes()
-        .await
-        .into_iter()
-        .map(|(room_id, remote_did)| SfuCascadePipe {
-            room_id,
-            remote_did,
-        })
-        .collect();
+    let room_neighbourhoods = svc.room_neighbourhoods().await;
+    let pipes: Vec<SfuCascadePipe> = visible_to(
+        &ctx,
+        svc.cascade_established_pipes().await,
+        |(room_id, _)| room_neighbourhoods.get(room_id).cloned(),
+    )?
+    .into_iter()
+    .map(|(room_id, remote_did)| SfuCascadePipe {
+        room_id,
+        remote_did,
+    })
+    .collect();
+    let established_count = pipes.len();
     Ok(serde_json::to_value(SfuCascadeStatus {
         established_count,
         pipes,
@@ -368,17 +428,21 @@ async fn quality_preferences(
 ) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &NEIGHBOURHOOD_READ_CAPABILITY)
         .map_err(WsRpcError::forbidden)?;
-    let prefs: Vec<SfuParticipantQualityPreference> = service()?
-        .get_quality_preferences()
-        .await
-        .into_iter()
-        .map(
-            |(participant_id, preference)| SfuParticipantQualityPreference {
-                participant_id,
-                preference,
-            },
-        )
-        .collect();
+    let svc = service()?;
+    let participant_neighbourhoods = svc.participant_neighbourhoods().await;
+    let prefs: Vec<SfuParticipantQualityPreference> = visible_to(
+        &ctx,
+        svc.get_quality_preferences().await,
+        |(participant_id, _)| participant_neighbourhoods.get(participant_id).cloned(),
+    )?
+    .into_iter()
+    .map(
+        |(participant_id, preference)| SfuParticipantQualityPreference {
+            participant_id,
+            preference,
+        },
+    )
+    .collect();
     Ok(serde_json::to_value(prefs)?)
 }
 
@@ -451,6 +515,11 @@ pub struct SfuCallJoinParams {
     pub room_name: String,
     /// JSON-encoded `RTCSessionDescriptionInit`.
     pub sdp_offer: String,
+    /// The caller can reach other cascade nodes, so a busy room may answer
+    /// with `redirectTo` instead of a session. Off by default: an SDK client
+    /// reaches only this executor.
+    #[ts(optional)]
+    pub accept_redirect: Option<bool>,
 }
 
 #[derive(Deserialize, TS)]

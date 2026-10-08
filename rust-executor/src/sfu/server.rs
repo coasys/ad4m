@@ -198,34 +198,61 @@ pub enum SfuCommand {
 pub struct SfuServerConfig {
     /// Address to bind the UDP socket on.  The IP becomes the ICE host
     /// candidate in every SDP answer, so it must equal the address
-    /// remote clients can reach.
-    ///
-    /// When no explicit `sfu_bind_addr` override exists, the default
-    /// auto-detects the machine's outbound IP via
-    /// [`detect_outbound_ip`](super::detect_outbound_ip).  On a server
-    /// with a public IP this resolves to that IP automatically; on a
-    /// local-only machine it falls back to `127.0.0.1`.
+    /// remote clients can reach. See [`sfu_bind_ip`] for how the executor
+    /// picks it.
     ///
     /// Port `:0` lets the OS pick a free UDP port.
     pub bind_addr: SocketAddr,
+    /// STUN server (`host:port`) for the startup reachability probe; `None`
+    /// skips it. See [`check_reachability`](super::reachability::check_reachability).
+    pub stun_server: Option<String>,
 }
 
 impl Default for SfuServerConfig {
+    /// Loopback: media reaches only this machine until a bind address
+    /// says otherwise.
     fn default() -> Self {
-        let ip = super::detect_outbound_ip();
         Self {
-            bind_addr: SocketAddr::new(ip, 0),
+            bind_addr: SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), 0),
+            stun_server: None,
         }
     }
 }
 
-/// Notification emitted by the event loop when a pipe peer's RTC dies.
-/// The service uses this to clean up the corresponding cascade entry.
+/// The IP the SFU binds, as the API listeners decide theirs: network
+/// exposure is opt-in.
+///
+/// - `--sfu-bind-addr` wins.
+/// - Otherwise the SFU follows `--localhost`: loopback while the API is
+///   loopback-only (the default), the outbound interface once the API is
+///   exposed (`--localhost false`), so other machines can reach the media.
+///
+/// A malformed address falls back to loopback, never to a wider interface.
+pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr {
+    let loopback = std::net::Ipv4Addr::LOCALHOST.into();
+    match explicit {
+        Some(addr) => addr.parse().unwrap_or_else(|e| {
+            warn!(
+                "SFU bind address `{}` parse error: {} — binding loopback",
+                addr, e
+            );
+            loopback
+        }),
+        None if localhost => loopback,
+        None => super::detect_outbound_ip(),
+    }
+}
+
+/// Notification emitted by the event loop when a peer's RTC dies. The
+/// event loop has already dropped the peer; the service removes what it
+/// holds: a client's room slot, or a pipe's cascade entry.
 #[derive(Debug)]
-pub struct DeadPipe {
-    pub room_id: String,
-    pub remote_did: String,
+pub struct DeadPeer {
+    pub room_id: RoomId,
+    /// The client's DID, or for a pipe the remote node's.
+    pub agent_did: String,
     pub participant_id: ParticipantId,
+    pub is_pipe: bool,
 }
 
 /// The SFU server. Owns the UDP socket and drives the str0m event loop.
@@ -234,9 +261,9 @@ pub struct SfuServer {
     pub local_addr: SocketAddr,
     /// Channel to send commands to the event loop.
     pub command_tx: mpsc::Sender<SfuCommand>,
-    /// Notifications about pipe peers whose RTC connection died.
-    /// The cascade cleanup task reads from the corresponding receiver.
-    pub dead_pipe_rx: StdMutex<Option<mpsc::Receiver<DeadPipe>>>,
+    /// Notifications about peers whose RTC connection died. Unbounded: a
+    /// dropped notification would leave the peer's room slot taken for good.
+    pub dead_peer_rx: StdMutex<Option<mpsc::UnboundedReceiver<DeadPeer>>>,
 }
 
 impl SfuServer {
@@ -247,19 +274,19 @@ impl SfuServer {
         info!("SFU server bound to UDP {}", local_addr);
 
         let (command_tx, command_rx) = mpsc::channel(256);
-        let (dead_pipe_tx, dead_pipe_rx) = mpsc::channel(64);
+        let (dead_peer_tx, dead_peer_rx) = mpsc::unbounded_channel();
 
         tokio::spawn(Self::event_loop(
             socket,
             command_rx,
             local_addr,
-            dead_pipe_tx,
+            dead_peer_tx,
         ));
 
         Ok(Self {
             local_addr,
             command_tx,
-            dead_pipe_rx: StdMutex::new(Some(dead_pipe_rx)),
+            dead_peer_rx: StdMutex::new(Some(dead_peer_rx)),
         })
     }
 
@@ -291,7 +318,7 @@ impl SfuServer {
         socket: UdpSocket,
         mut command_rx: mpsc::Receiver<SfuCommand>,
         local_addr: SocketAddr,
-        dead_pipe_tx: mpsc::Sender<DeadPipe>,
+        dead_peer_tx: mpsc::UnboundedSender<DeadPeer>,
     ) {
         let mut peers: HashMap<ParticipantId, SfuPeer> = HashMap::new();
         let mut relay = MediaRelay::new();
@@ -589,40 +616,33 @@ impl SfuServer {
                 }
             }
 
-            // Clean out disconnected peers.  For pipe peers, notify the
-            // cascade cleanup task so it can remove the stale PipeMeta
-            // entry — otherwise the cascade manager reports phantom
-            // established pipes after a remote node crash.
+            // Clean out disconnected peers, and tell the service: a client
+            // still holds a room slot (capacity, and its DID could not
+            // rejoin), a pipe a cascade entry (phantom established pipes
+            // after a remote node crash).
             {
-                let mut dead_pipes: Vec<DeadPipe> = Vec::new();
-                // Collect dead peers first, then remove — we need the pid +
-                // room_id after retain to call clean_stale_track_refs.
-                let mut dead_peers: Vec<(ParticipantId, RoomId)> = Vec::new();
+                let mut dead_peers: Vec<DeadPeer> = Vec::new();
                 peers.retain(|pid, peer| {
                     if !peer.rtc.is_alive() {
                         info!("SFU: peer {} disconnected", pid);
                         relay.remove_participant(pid);
                         quality_preferences.remove(pid);
-                        dead_peers.push((pid.clone(), peer.room_id.clone()));
-                        if peer.is_pipe {
-                            dead_pipes.push(DeadPipe {
-                                room_id: peer.room_id.to_string(),
-                                remote_did: peer.agent_did.clone(),
-                                participant_id: pid.clone(),
-                            });
-                        }
+                        dead_peers.push(DeadPeer {
+                            room_id: peer.room_id.clone(),
+                            agent_did: peer.agent_did.clone(),
+                            participant_id: pid.clone(),
+                            is_pipe: peer.is_pipe,
+                        });
                         false
                     } else {
                         true
                     }
                 });
-                // Remove stale track references that other peers held for
-                // the disconnected ones — matches the RemovePeer path.
-                for (pid, room_id) in &dead_peers {
-                    clean_stale_track_refs(&mut peers, pid, room_id);
-                }
-                for dp in dead_pipes {
-                    let _ = dead_pipe_tx.try_send(dp);
+                for dead in dead_peers {
+                    // Stale track references other peers held for it —
+                    // matches the RemovePeer path.
+                    clean_stale_track_refs(&mut peers, &dead.participant_id, &dead.room_id);
+                    let _ = dead_peer_tx.send(dead);
                 }
             }
 
@@ -1223,6 +1243,23 @@ fn publish_renegotiation_offer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sfu_binds_loopback_unless_exposure_is_asked_for() {
+        let loopback: std::net::IpAddr = std::net::Ipv4Addr::LOCALHOST.into();
+        assert_eq!(SfuServerConfig::default().bind_addr.ip(), loopback);
+        assert_eq!(sfu_bind_ip(None, true), loopback);
+        assert_eq!(
+            sfu_bind_ip(Some("::1"), false),
+            "::1".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(
+            sfu_bind_ip(Some("0.0.0.0"), true),
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert_eq!(sfu_bind_ip(Some("not-an-ip"), false), loopback);
+        assert_eq!(sfu_bind_ip(None, false), crate::sfu::detect_outbound_ip());
+    }
 
     #[test]
     fn test_forward_rid_non_simulcast() {

@@ -76,7 +76,10 @@ function fakeApi() {
             log.push("sfuCallJoin")
             return session()
         }),
-        sfuCallLeave: jest.fn(async () => true),
+        sfuCallLeave: jest.fn(async () => {
+            log.push("sfuCallLeave")
+            return true
+        }),
         sfuCallSetQualityPreference: jest.fn(async () => true),
         sfuCallAnswerServerOffer: jest.fn(async () => {
             log.push("sfuCallAnswerServerOffer")
@@ -92,10 +95,6 @@ function fakeApi() {
                 }
             },
         ),
-        subscribeSfuMigrateEvent: jest.fn(() => {
-            log.push("subscribe-migrate")
-            return () => { log.push("unsubscribe-migrate") }
-        }),
         sfuAddIceCandidate: jest.fn(async () => true),
         sfuSendData: jest.fn(async () => true),
         subscribeSfuDataChannel: jest.fn(() => () => {}),
@@ -112,7 +111,7 @@ beforeEach(() => {
 test("subscribes to server events before sfuCallJoin", async () => {
     const api = fakeApi()
     await new SfuManager(api, ROOM, ME, URL).join(fakeStream())
-    expect(api.log.slice(0, 3)).toEqual(["subscribe-offer", "subscribe-migrate", "sfuCallJoin"])
+    expect(api.log.slice(0, 2)).toEqual(["subscribe-offer", "sfuCallJoin"])
 })
 
 test("ignores offers before the join completes and answers them after", async () => {
@@ -145,7 +144,7 @@ test("a failed join drops its subscriptions", async () => {
     api.sfuCallJoin.mockRejectedValue(new Error("Not a member of this neighbourhood"))
     await expect(new SfuManager(api, ROOM, ME, URL).join(fakeStream())).rejects.toThrow("Not a member")
     expect(api.offerHandlers.size).toBe(0)
-    expect(api.log).toContain("unsubscribe-migrate")
+    expect(api.log).toContain("unsubscribe-offer")
 })
 
 test("a rejoin subscribes again before it releases the old subscriptions", async () => {
@@ -154,12 +153,42 @@ test("a rejoin subscribes again before it releases the old subscriptions", async
     await manager.join(fakeStream())
     api.log.length = 0
     await manager.join(fakeStream())
-    expect(api.log).toEqual([
-        "subscribe-offer",
-        "subscribe-migrate",
-        "unsubscribe-offer",
-        "unsubscribe-migrate",
-        "sfuCallJoin",
-    ])
+    expect(api.log).toEqual(["subscribe-offer", "unsubscribe-offer", "sfuCallJoin"])
     expect(api.offerHandlers.size).toBe(1)
+})
+
+test("a failed connection leaves, then joins this executor again", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    await manager.join(fakeStream())
+    api.log.length = 0
+
+    const failed = FakePeerConnection.instances[0] as any
+    failed.iceConnectionState = "failed"
+    failed.oniceconnectionstatechange()
+    await flush()
+
+    expect(failed.closed).toBe(true)
+    expect(api.log).toEqual(["unsubscribe-offer", "sfuCallLeave", "subscribe-offer", "sfuCallJoin"])
+    expect(api.sfuCallJoin).toHaveBeenLastCalledWith(URL, ROOM, expect.any(String))
+    expect(FakePeerConnection.instances).toHaveLength(2)
+})
+
+test("reconnecting stops after three failures in a row", async () => {
+    const api = fakeApi()
+    const manager = new SfuManager(api, ROOM, ME, URL)
+    const errors: unknown[] = []
+    manager.on("error", (e) => errors.push(e))
+    await manager.join(fakeStream())
+    api.sfuCallJoin.mockRejectedValue(new Error("Room is full"))
+
+    for (let i = 0; i < 4; i++) {
+        const pc = FakePeerConnection.instances[0] as any
+        pc.iceConnectionState = "failed"
+        pc.oniceconnectionstatechange()
+        await flush()
+    }
+
+    expect(api.sfuCallLeave).toHaveBeenCalledTimes(3)
+    expect(errors[errors.length - 1]).toEqual(new Error("SFU reconnect attempts exhausted"))
 })
