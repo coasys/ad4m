@@ -3583,6 +3583,13 @@ impl PerspectiveInstance {
         self.sparql_store.query_arbitrary(&query)
     }
 
+    /// [`Self::sparql_query`] over the shared links only: no user's `Local`
+    /// links, this instance's reader's included
+    /// ([`SparqlStore::shared_only`]).
+    pub fn sparql_query_shared(&self, query: String) -> Result<String, deno_core::anyhow::Error> {
+        self.sparql_store.shared_only().query_arbitrary(&query)
+    }
+
     /// Resolve each URI to every subject class it is an instance of, most
     /// specific first.
     ///
@@ -5795,10 +5802,14 @@ impl PerspectiveInstance {
         Ok(format!("{{ {} }}", stringified))
     }
 
+    /// Publish a subscription's new result. `owner` is the DID the
+    /// subscription runs as; the events socket delivers the update to that
+    /// agent only.
     async fn send_subscription_update(
         &self,
         subscription_id: String,
         result: String,
+        owner: String,
         delay: Option<Duration>,
     ) {
         let uuid = self.uuid.clone();
@@ -5811,6 +5822,7 @@ impl PerspectiveInstance {
                 uuid,
                 subscription_id,
                 result,
+                owner,
             };
             get_global_pubsub()
                 .await
@@ -6111,7 +6123,7 @@ impl PerspectiveInstance {
     async fn check_subscribed_queries(&self, changed_predicates: ChangedPredicates) {
         let mut queries_to_remove = Vec::new();
         let mut query_futures: Vec<
-            std::pin::Pin<Box<dyn Future<Output = Option<(String, String)>> + Send>>,
+            std::pin::Pin<Box<dyn Future<Output = Option<(String, String, String)>> + Send>>,
         > = Vec::new();
         let now = Instant::now();
 
@@ -6164,7 +6176,7 @@ impl PerspectiveInstance {
                 continue;
             }
 
-            // Each future returns Option<(id, new_result)> instead of locking individually.
+            // Each future returns Option<(id, new_result, owner_did)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
             let self_clone = self.clone();
             let query_future = Box::pin(async move {
@@ -6178,13 +6190,16 @@ impl PerspectiveInstance {
                 // so every re-run has to stay in that agent's visibility
                 // scope — otherwise the first update after a co-owner writes
                 // a Local link would deliver what the initial query withheld.
-                let subscriber = match self_clone.read_as_context(&_agent_context) {
-                    Ok(subscriber) => subscriber,
+                // The same DID addresses the push: the result is in this
+                // agent's view, so no other socket may receive it.
+                let viewer_did = match crate::agent::did_for_context(&_agent_context) {
+                    Ok(did) => did,
                     Err(e) => {
                         log::error!("❌ 🔗 subscription viewer DID unresolved: {}", e);
                         return None;
                     }
                 };
+                let subscriber = self_clone.read_as(&viewer_did);
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL
                 let result_string = if let Some(ref params) = model_params {
@@ -6218,7 +6233,7 @@ impl PerspectiveInstance {
                         }
                     }
                 };
-                Some((id, result_string))
+                Some((id, result_string, viewer_did))
             });
             query_futures.push(query_future);
         }
@@ -6231,7 +6246,7 @@ impl PerspectiveInstance {
         {
             let mut queries = self.subscribed_queries.lock().await;
             for result in results.into_iter().flatten() {
-                let (id, result_string) = result;
+                let (id, result_string, owner) = result;
                 if let Some(stored_query) = queries.get_mut(&id) {
                     let changed = result_string != stored_query.last_result;
                     if changed {
@@ -6244,7 +6259,7 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        updates_to_send.push((id, result_string, owner));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6257,8 +6272,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
+        for (id, result_string, owner) in updates_to_send {
+            self.send_subscription_update(id, result_string, owner, None)
+                .await;
         }
 
         // Remove timed out queries and notify prolog service

@@ -187,3 +187,72 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
         "the last dispose must remove the subscription"
     );
 }
+
+/// A push carries the DID of the agent the subscription re-runs as, so the
+/// events socket can deliver it to that agent alone. Without it the WS layer
+/// can only route by perspective ownership, and every co-owner's socket gets
+/// a result that may hold the subscriber's Local links.
+#[tokio::test(flavor = "multi_thread")]
+async fn subscription_push_names_the_subscribing_agent() {
+    use crate::agent::{did_for_context, AgentContext, AgentService};
+
+    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+    let email = "subscription-owner@test";
+    AgentService::ensure_user_key_exists(email).expect("user key");
+    let user_did =
+        did_for_context(&AgentContext::for_user_email(email.to_string())).expect("user did");
+
+    let (id, _) = perspective
+        .model_subscribe_and_query(
+            "Task".into(),
+            r#"{"where":{"owner":"bob"}}"#.into(),
+            Some(email.to_string()),
+        )
+        .await
+        .expect("model subscribe as a managed user");
+
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Task".to_string()),
+                query: None,
+            },
+            "ad4m://task/owned-push".to_string(),
+            Some(serde_json::json!({ "title": "route me", "owner": "bob" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject(Task)");
+    perspective
+        .check_subscribed_queries(ChangedPredicates::CheckAll)
+        .await;
+
+    let push = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let msg = rx.recv().await.expect("pubsub receiver closed");
+            let v: serde_json::Value = serde_json::from_str(&msg).expect("push JSON");
+            if v["uuid"] == perspective.uuid.as_str() && v["subscriptionId"] == id.as_str() {
+                return v;
+            }
+        }
+    })
+    .await
+    .expect("a push for the subscription");
+    assert!(
+        push["result"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ad4m://task/owned-push"),
+        "push must carry the new Task, got: {push}"
+    );
+    assert_eq!(
+        push["owner"].as_str(),
+        Some(user_did.as_str()),
+        "the push must name the subscribing agent, got: {push}"
+    );
+}

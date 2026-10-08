@@ -1164,17 +1164,28 @@ async fn model_query_handler(params: Value, ctx: Arc<RequestContext>) -> Result<
     // own cache brought in line with it; the query below then returns it.
     // Only this class pays for the derivation. Best effort: a read-only token
     // gets no refresh, and a failed one is logged, never the read's error.
-    // See `flow_instance::viewer_cache`.
+    // The refresh is bounded by the same timeout as the query, so a stalled
+    // derivation cannot hold the read open: past it, the query runs on the
+    // cache as it stands. See `flow_instance::viewer_cache`.
     if class_name == crate::perspectives::flow_classes::FLOW_INSTANCE_CLASS {
         let agent_context = AgentContext::from_auth_token(ctx.auth_token.clone());
-        crate::perspectives::flow_instance::viewer_cache::refresh_for_read(
-            &mut perspective,
-            &uuid,
-            &query_json,
-            &ctx.capabilities,
-            &agent_context,
+        let refreshed = tokio::time::timeout(
+            Duration::from_secs(SPARQL_QUERY_TIMEOUT_SECS),
+            crate::perspectives::flow_instance::viewer_cache::refresh_for_read(
+                &mut perspective,
+                &uuid,
+                &query_json,
+                &ctx.capabilities,
+                &agent_context,
+            ),
         )
         .await;
+        if refreshed.is_err() {
+            log::warn!(
+                "FlowInstance cache refresh timed out after {}s; reading the cache as it stands",
+                SPARQL_QUERY_TIMEOUT_SECS
+            );
+        }
     }
 
     // Run async model query with timeout
@@ -3035,7 +3046,9 @@ pub struct PerspectiveEvaluateGettersParams {
 pub struct PerspectiveAddAutoProcessorParams {
     pub uuid: String,
     pub processor_id: String,
-    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
+    /// SPARQL `SELECT ?speaker ?text ?timestamp` over the source items. Reads
+    /// Shared links only: a Local link, the caller's own included, matches
+    /// nothing.
     pub source_scope_query: String,
     #[serde(default)]
     #[ts(optional)]

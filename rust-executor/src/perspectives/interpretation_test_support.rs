@@ -1050,6 +1050,8 @@ pub(crate) fn proposal(
 /// two direct links per message: `<msg> <ns://body> <literal:string:...>` and
 /// `<msg> <ns://author> <did:key:...>`. Mirrors the shape a Flux-style channel
 /// perspective would present and the SPARQL queries in these tests target.
+/// Shared, like channel messages: the auto-processor's gather reads Shared
+/// links only.
 pub(crate) async fn seed_message(
     perspective: &mut crate::perspectives::perspective_instance::PerspectiveInstance,
     ctx: &crate::agent::AgentContext,
@@ -1066,7 +1068,7 @@ pub(crate) async fn seed_message(
                 predicate: Some(body_predicate.into()),
                 target: format!("literal:string:{body}"),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
         )
@@ -1079,7 +1081,7 @@ pub(crate) async fn seed_message(
                 predicate: Some("ns://author".into()),
                 target: author.into(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
         )

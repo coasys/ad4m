@@ -711,7 +711,7 @@ describe('PerspectiveClient', () => {
         const unsubscribe = freshClient.perspective.subscribeToQueryUpdates('sub-1', callback);
         const ws = lastOf(MockWebSocket.instances);
         const update = (subscriptionId: string, result: unknown) => event('query-subscription-update', {
-            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result),
+            perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result), owner: 'did:key:me',
         });
 
         ws.emit(perspectiveAdded('uuid-ignored'));

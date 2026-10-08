@@ -151,6 +151,10 @@ export interface AddAutoProcessorConfig {
    *
    * Swap `ns://body` for your own body predicate. A query binding only
    * speaker+text fails the gather.
+   *
+   * The query reads shared links only. A local link, including one written
+   * by the agent the processor runs as, matches nothing, because what the
+   * processor extracts is written as shared links.
    */
   sourceScopeQuery: string;
   /**

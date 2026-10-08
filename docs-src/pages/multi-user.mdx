@@ -310,6 +310,10 @@ Each user's data is fully isolated within the shared executor:
 
   Perspectives created before this storage existed are migrated once, when the executor loads them: each local link moves into the graph of its author when the author is a user of this host. A local link another agent signed, which some user of the host stored as local, is copied into the graph of each owner of the perspective, since every owner saw it before; only in a perspective without owners does it go to the main agent. A perspective whose links cannot be moved is not loaded until the executor restarts, so its local links are never shown to the wrong user.
 
+  Live queries (`subscribe()` on a model query, `modelSubscribe`, `subscribeQuery`) re-run as the user who opened them, so an update can carry that user's local links. Each `query-subscription-update` event names that user's DID in its `owner` field and goes only to that user's connections. Another user who also owns the perspective does not receive it.
+
+  An auto-processor reads shared links only. Its `sourceScopeQuery` runs over the shared store alone, without the local graph of the user it runs as, because what it extracts is written as shared links that every member gets. A message stored as a local link is never sent to the LLM or recorded as a source of an interpretation run.
+
 ## For App Developers: No Changes Required
 
 If you're building an AD4M app, multi-user mode is transparent to you. The `ad4m-connect` library handles the entire connection flow—whether the user is running a local executor or connecting to a remote multi-user host:

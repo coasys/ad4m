@@ -6,6 +6,8 @@
  */
 export type PerspectiveAddAutoProcessorParams = { uuid: string, processorId: string, 
 /**
- * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items.
+ * SPARQL `SELECT ?speaker ?text ?timestamp` over the source items. Reads
+ * Shared links only: a Local link, the caller's own included, matches
+ * nothing.
  */
 sourceScopeQuery: string, basePrefix?: string, interpretationClasses: Array<string>, flows?: Array<string>, debounceMs: number, batchMin?: number, batchMax: number, maxWaitMs?: number, claimTtlMs: number, dedupStrategyJson?: string, sourceWindowMs?: number, existingScope?: any, mintScope?: any, maxToolCalls?: number, emitDebugEvents?: boolean, };

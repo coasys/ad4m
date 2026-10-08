@@ -28,7 +28,7 @@
 //! | `exception-occurred`          | `exception`   | broadcast              | Exception occurred                   |
 //! | `transcription-text`          | (inline)      | userDid                | AI transcription text                |
 //! | `model-loading-status`        | (inline)      | broadcast              | AI model loading status              |
-//! | `query-subscription-update`   | (inline)      | perspective owner      | Live query subscription update       |
+//! | `query-subscription-update`   | (inline)      | subscriber DID (`owner`) | Live query subscription update     |
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //!
@@ -548,7 +548,7 @@ pub(crate) async fn build_event_stream_for(
             .await,
         events::QUERY_SUBSCRIPTION_UPDATE,
         d_query_sub,
-        matches_perspective_owner
+        matches_subscription_owner
     );
 
     // ── Auto-processor step signals ──
@@ -856,6 +856,23 @@ pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) ->
         .ok()
         .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string))
         .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
+}
+
+/// Multi-user: a live query update goes only to the agent that opened the
+/// subscription, named by its `owner`. The result is computed in that agent's
+/// visibility scope and can hold its Local links, so owning the perspective
+/// is not enough: a co-owner of a neighbourhood perspective must not get it.
+/// The perspective-owner check still applies. An update without `owner`, or
+/// one that does not parse, reaches nobody.
+pub(crate) fn matches_subscription_owner(msg: &str, current_did: Option<&str>) -> bool {
+    let Some(did) = current_did else {
+        return true;
+    };
+    let owner_matches = serde_json::from_str::<serde_json::Value>(msg)
+        .ok()
+        .and_then(|v| v.get("owner")?.as_str().map(|owner| owner == did))
+        .unwrap_or(false);
+    owner_matches && matches_perspective_owner(msg, current_did)
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -1394,6 +1411,7 @@ mod event_spec_tests {
                 uuid: p(),
                 subscription_id: "s".into(),
                 result: "[]".into(),
+                owner: "did:x".into(),
             }),
             uuid_of(AutoProcessorNeighbourhoodState::new(
                 "p",
@@ -1409,7 +1427,30 @@ mod event_spec_tests {
 
 #[cfg(test)]
 mod perspective_owner_filter_tests {
-    use super::matches_perspective_owner;
+    use super::{matches_perspective_owner, matches_subscription_owner};
+
+    #[test]
+    fn subscription_updates_need_the_subscribers_did() {
+        let mine =
+            r#"{"perspectiveUuid":"no-such-perspective","subscriptionId":"s","owner":"did:x"}"#;
+        assert!(matches_subscription_owner(mine, None), "single-user");
+        let theirs = r#"{"perspectiveUuid":"p","subscriptionId":"s","owner":"did:y"}"#;
+        assert!(
+            !matches_subscription_owner(theirs, Some("did:x")),
+            "another agent's subscription"
+        );
+        assert!(
+            !matches_subscription_owner(
+                r#"{"perspectiveUuid":"p","subscriptionId":"s"}"#,
+                Some("did:x")
+            ),
+            "an update without owner fails closed"
+        );
+        assert!(
+            !matches_subscription_owner(mine, Some("did:x")),
+            "the subscriber must still own the perspective"
+        );
+    }
 
     #[test]
     fn filters_by_the_flat_perspective_uuid() {

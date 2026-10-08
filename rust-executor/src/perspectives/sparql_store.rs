@@ -476,6 +476,8 @@ pub struct SparqlStore {
     store: Arc<Store>,
     /// Whose graph reads see besides the shared one; `None` is the main agent.
     reader: Option<Arc<str>>,
+    /// Reads see the shared links only, no user's graph ([`Self::shared_only`]).
+    shared_only: bool,
 }
 
 /// The SELECT behind [`SparqlStore::get_all_links`] and other link reads that
@@ -534,6 +536,7 @@ impl SparqlStore {
         Ok(SparqlStore {
             store: Arc::new(store),
             reader: None,
+            shared_only: false,
         })
     }
 
@@ -543,6 +546,19 @@ impl SparqlStore {
         SparqlStore {
             store: self.store.clone(),
             reader: did.map(Arc::from).or_else(|| self.reader.clone()),
+            shared_only: self.shared_only,
+        }
+    }
+
+    /// This store with the shared links only: reads see the default graph and
+    /// no user's graph, not even the reader's. For a job whose output is
+    /// published, such as the auto-processor's gather: what it reads ends up
+    /// in shared links, so it must not read anyone's Local links.
+    pub fn shared_only(&self) -> SparqlStore {
+        SparqlStore {
+            store: self.store.clone(),
+            reader: self.reader.clone(),
+            shared_only: true,
         }
     }
 
@@ -556,6 +572,9 @@ impl SparqlStore {
 
     /// The graph of the user this handle reads as, if any.
     fn reader_graph(&self) -> Option<NamedNode> {
+        if self.shared_only {
+            return None;
+        }
         self.reader().map(|did| local_graph(&did))
     }
 

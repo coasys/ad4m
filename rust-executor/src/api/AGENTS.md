@@ -48,7 +48,9 @@ anything that signs, bills or writes.
   uuids] }` (replaces the last watch; `events.unwatch` clears it). `event_interest.rs`, handled
   inline on both sockets (per-connection state, like `request.cancel`).
 - Live query updates (`query-subscription-update`) pass `events.watch` untouched: every socket of
-  the perspective owner gets them, and the SDK routes them by `subscriptionId`.
+  the agent that opened the subscription (the update's `owner` DID) gets them, and the SDK routes
+  them by `subscriptionId`. A co-owner of the perspective does not: the result is in the
+  subscriber's visibility scope.
 - `ws_rpc::serve` runs one RPC connection over any text stream; `tests/connection_tests.rs` drives
   it through channels in place of a WebSocket.
 - Contracts: each handler registers its params and result types (`map.method::<P, R>`), and

@@ -170,15 +170,14 @@ async fn closing_the_socket_ends_the_event_task() {
 #[tokio::test]
 async fn query_updates_reach_a_socket_without_a_watch() {
     // A live query update as the perspective publishes it: every socket of
-    // the owner gets it, whatever the socket watches.
+    // the subscriber gets it, whatever the socket watches.
     let p = registered_perspective(&[]).await;
     let mut socket = Socket::open().await;
     socket.send(json!({ "id": "w", "type": "events.watch", "params": { "agent-updated": null } }));
     socket.reply("w").await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    let update = json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]", "owner": DID });
     get_global_pubsub()
         .await
         .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
@@ -187,7 +186,7 @@ async fn query_updates_reach_a_socket_without_a_watch() {
     let got = socket.next_of(|m| m["subscriptionId"] == sub).await;
     assert_eq!(
         got,
-        json!({ "type": "query-subscription-update", "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" })
+        json!({ "type": "query-subscription-update", "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]", "owner": DID })
     );
 }
 
@@ -236,8 +235,7 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
     let mut alice = Socket::open().await;
 
     let sub = uuid::Uuid::new_v4().to_string();
-    let update =
-        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    let update = json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]", "owner": DID });
     get_global_pubsub()
         .await
         .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
@@ -253,5 +251,48 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
     assert!(
         leaked.is_err(),
         "Bob got Alice's live-query update: {leaked:?}"
+    );
+}
+
+#[tokio::test]
+async fn query_updates_reach_only_the_subscriber_among_co_owners() {
+    // A live query re-runs in the scope of the agent that opened it, so its
+    // result can hold that agent's Local links. Owning the perspective too is
+    // not enough to receive it: on a co-owned perspective Bob must not get
+    // the update for Alice's subscription.
+    let p = registered_perspective(&[]).await;
+    {
+        let inst = crate::perspectives::get_perspective(&p.0).unwrap();
+        inst.persisted.lock().await.owners = Some(vec![DID.to_string(), "did:key:bob".to_string()]);
+    }
+    let mut bob = Socket::open_as("did:key:bob").await;
+    let mut alice = Socket::open().await;
+
+    let sub = uuid::Uuid::new_v4().to_string();
+    let update = json!({
+        "perspectiveUuid": p.0,
+        "uuid": p.0,
+        "subscriptionId": sub,
+        "result": "[\"priv://local-alice\"]",
+        "owner": DID,
+    });
+    get_global_pubsub()
+        .await
+        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+        .await;
+
+    let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(
+        got["result"], "[\"priv://local-alice\"]",
+        "the subscriber gets it"
+    );
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(500),
+        bob.next_of(|m| m["subscriptionId"] == sub),
+    )
+    .await;
+    assert!(
+        leaked.is_err(),
+        "a co-owner got another user's live-query update: {leaked:?}"
     );
 }

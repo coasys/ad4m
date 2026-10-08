@@ -118,6 +118,13 @@ ORDER BY ?timestamp"#;
 /// identical bodies) — use [`BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY`] as the
 /// known-good reifier pattern.
 ///
+/// The query reads **Shared links only**: it runs over the shared store alone
+/// ([`PerspectiveInstance::sparql_query_shared`]), so a Local link, any
+/// user's and the runner's own, matches nothing.
+/// What the pass extracts from the transcript is written Shared, so a Local
+/// message in the transcript would reach the LLM and be published to every
+/// co-owner.
+///
 /// This is the generic counterpart to [`gather_transcript`]: a caller supplies
 /// an arbitrary scope query (the AutoProcessor reads one off its config; tests
 /// pass one directly) so interpretation can run over just the relevant subset
@@ -129,7 +136,7 @@ pub async fn gather_transcript_sparql(
     sparql: &str,
 ) -> anyhow::Result<Vec<TranscriptTurn>> {
     let rows_json = perspective
-        .sparql_query(sparql.to_string())
+        .sparql_query_shared(sparql.to_string())
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: SPARQL query failed: {e:#}"))?;
     let rows: Vec<serde_json::Value> = serde_json::from_str(&rows_json)
         .map_err(|e| anyhow::anyhow!("gather_transcript_sparql: bad SPARQL result JSON: {e:#}"))?;
@@ -523,7 +530,7 @@ mod tests {
                     predicate: Some(predicate.into()),
                     target: target.into(),
                 },
-                LinkStatus::Local,
+                LinkStatus::Shared,
                 None,
                 &ctx,
             )
