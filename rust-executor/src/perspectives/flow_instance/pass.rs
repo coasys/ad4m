@@ -250,6 +250,113 @@ pub async fn run_flow_consensus_pass(
     outcomes
 }
 
+/// A vote a propose or accept call just wrote: `did`'s, on `proposal_uri`,
+/// a proposal that had not yet contributed to a settled edge when the vote
+/// was written. That is the vote that can complete a quorum.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OwnVote {
+    pub proposal_uri: String,
+    pub did: String,
+}
+
+/// The pass a propose or accept call runs on `instance_uri` after its vote.
+///
+/// **Contract (#1332).** The outcomes are what [`run_flow_consensus_pass`]
+/// recorded for the first time, plus, when `own` is given, the settle that
+/// vote completed: the edge whose atoms include `own.proposal_uri` and whose
+/// quorum's voters include `own.did`, once it is recorded on this replica.
+/// It is reported whichever pass recorded it. A concurrent pass on this
+/// replica (the debounced sync sweep, or the definition-change sweep, run
+/// for any user of it) can read the vote and record the settle between the
+/// vote's write and this pass, and this pass then finds the edge marked and
+/// returns nothing. The caller's vote still completed the quorum, and the
+/// call has to say so.
+///
+/// This adds one edge and filters nothing. Which settles *other* users of
+/// the replica should see in a response is #1152's question, not this one.
+///
+/// The edge goes first. The pass that recorded it marked every edge settled
+/// before it in the same batch, so anything this pass recorded for the first
+/// time settled later.
+pub(crate) async fn run_pass_after_vote(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    own: Option<&OwnVote>,
+    context: &AgentContext,
+) -> Vec<FireOutcome> {
+    let mut outcomes = run_flow_consensus_pass(
+        perspective,
+        None,
+        context,
+        None,
+        Some(std::slice::from_ref(&instance_uri.to_string())),
+    )
+    .await;
+    let Some(own) = own else {
+        return outcomes;
+    };
+    if outcomes
+        .iter()
+        .any(|o| o.contributing_proposal_uris.contains(&own.proposal_uri))
+    {
+        return outcomes;
+    }
+    match recorded_settle_of(perspective, instance_uri, own).await {
+        Ok(Some(settle)) => outcomes.insert(0, settle),
+        Ok(None) => {}
+        // Reporting only: the vote is written and the state is the fold's.
+        Err(e) => log::warn!(
+            "run_pass_after_vote: looking up the settle of {} on {instance_uri} failed; not reported: {e:#}",
+            own.proposal_uri
+        ),
+    }
+    outcomes
+}
+
+/// The recorded settle `own` completed, if there is one: see
+/// [`run_pass_after_vote`]. "Recorded" means every atom of the edge carries
+/// this replica's mark, so a [`FireOutcome`] still means "marked, with the
+/// cache advanced". An edge the pass failed to record is reported by the
+/// next pass instead, as before.
+///
+/// Folds the raw read-set, for the reason given at the fold in
+/// [`run_flow_consensus_pass`]: it was just read from this replica's own
+/// store.
+async fn recorded_settle_of(
+    perspective: &PerspectiveInstance,
+    instance_uri: &str,
+    own: &OwnVote,
+) -> anyhow::Result<Option<FireOutcome>> {
+    let flows = load_shacl_flows(perspective).await?;
+    let records = load_all_flow_instances(perspective).await?;
+    let Some(record) = records.iter().find(|r| r.instance_uri == instance_uri) else {
+        return Ok(None);
+    };
+    let Some(flow) = flows.get(&record.flow_uri) else {
+        return Ok(None);
+    };
+    let read_set = FlowInstance::from_record(record, flow)
+        .read_set(perspective)
+        .await?;
+    let derived = fold_read_set(flow, &read_set)?;
+    let marked = read_set.marked_proposals();
+    Ok(derived
+        .settled
+        .iter()
+        .find(|edge| {
+            edge.atom_uris.contains(&own.proposal_uri)
+                && edge.voters.contains(&own.did)
+                && edge.atom_uris.iter().all(|uri| marked.contains(uri))
+        })
+        .map(|edge| FireOutcome {
+            instance_uri: instance_uri.to_string(),
+            from_state: edge.from_state.clone(),
+            to_state: edge.to_state.clone(),
+            voters: edge.voters.clone(),
+            contributing_proposal_uris: edge.atom_uris.clone(),
+        }))
+}
+
 /// Read this replica's own cached state for `instance_uri` — the value
 /// carried by the `Local` `currentState` link, if one is present.
 ///
