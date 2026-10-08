@@ -601,6 +601,64 @@ mod tests {
         assert!(ctx_map.contains_key("soa://existing/task/1"));
     }
 
+    /// The context is rendered into the prompt and routes Create-vs-Update of
+    /// Shared links (#1058 review, item 5), so it lists Shared instances only.
+    /// A co-owner's Local instance and the runner's own are both withheld; a
+    /// Shared instance is the control.
+    #[tokio::test]
+    async fn existing_instance_context_reads_shared_instances_only() {
+        use crate::agent::{AgentContext, AgentService};
+        use crate::types::{Link, LinkStatus};
+
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        let email = "instance-context-coowner@test";
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let alice_ctx = AgentContext::for_user_email(email.to_string());
+
+        seed_instance(
+            &mut perspective,
+            &ctx,
+            &shapes[0],
+            "soa://task/shared",
+            "Shared task",
+        )
+        .await;
+        for (author_ctx, base, title) in [
+            (&alice_ctx, "soa://task/alice-local", "AlicePrivateTask"),
+            (&ctx, "soa://task/runner-local", "RunnerPrivateTask"),
+        ] {
+            for (predicate, target) in [
+                ("ns://type", "ns://task".to_string()),
+                ("ns://title", format!("literal:string:{title}")),
+            ] {
+                perspective
+                    .add_link(
+                        Link {
+                            source: base.into(),
+                            predicate: Some(predicate.into()),
+                            target,
+                        },
+                        LinkStatus::Local,
+                        None,
+                        author_ctx,
+                    )
+                    .await
+                    .expect("seed Local instance link");
+            }
+        }
+
+        let ctx_map = existing_instance_context(&perspective, &shapes, None)
+            .await
+            .expect("existing_instance_context");
+        let mut ids: Vec<&str> = ctx_map.keys().map(String::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["soa://task/shared"], "got {ctx_map:#?}");
+        assert_eq!(
+            identity_values_by_class(&ctx_map).get("Task"),
+            Some(&vec!["Shared task".to_string()])
+        );
+    }
+
     #[tokio::test]
     async fn existing_instance_context_scope_constrains_to_subtree() {
         // Plumbing for tree-scoped extraction (#883): the existing-instance snapshot
