@@ -10,12 +10,15 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+/// Two distinct free ports. Both probe listeners are held until both ports
+/// are read, so the OS can't hand out the same port twice.
+fn two_free_ports() -> (u16, u16) {
+    let a = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let b = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    (
+        a.local_addr().unwrap().port(),
+        b.local_addr().unwrap().port(),
+    )
 }
 
 /// GET /health on 127.0.0.1:`port`. `None` while nothing answers there.
@@ -32,8 +35,9 @@ async fn get_health(port: u16) -> Option<String> {
 
 #[tokio::test]
 async fn a_bad_tls_certificate_leaves_the_cleartext_api_serving() {
-    let port = free_port();
-    let tls_port = free_port();
+    // Distinct, or the cleartext listener would answer on `tls_port` and
+    // fail the "HTTPS listener did not start" assertion below.
+    let (port, tls_port) = two_free_ports();
     let config = Ad4mConfig {
         port: Some(port),
         tls: Some(TlsConfig {
