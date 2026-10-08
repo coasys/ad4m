@@ -1,4 +1,5 @@
-import { LinkCallback, LinkUpdatedCallback, PerspectiveClient, SyncStateChangeCallback } from "./PerspectiveClient";
+import { PerspectiveClient } from "./PerspectiveClient";
+import type { EventMap, ScopedEventName } from "../generated/api/Events";
 import type {
     FlowFireOutcome, FlowMintedReceipt, FlowOutputRef, FlowProposeResult,
     FlowReceiptVerdict, FlowValidOutput,
@@ -18,11 +19,12 @@ import { getPropertiesMetadata, getRelationsMetadata } from "../model/decorators
 import { getCachedResult, setCachedResult, invalidatePerspectiveCache } from "../model/query-cache";
 import { AllInstancesResult } from "../model/types";
 import type { TranscriptTurn } from "../generated/api";
+import type { JsonValue } from "../generated/api/serde_json/JsonValue";
 
 import { SHACLShape } from "../shacl/SHACLShape";
 import { SHACLFlow } from "../shacl/SHACLFlow";
 import { Ad4mModel } from "../model/Ad4mModel";
-import type { AddAutoProcessorConfig, AutoProcessorEvent, AutoProcessorNeighbourhoodStateEvent, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
+import type { AddAutoProcessorConfig, InterpretationOverlayInfo, RawScope, RunInterpretationObserveOptions } from "./AutoProcessor";
 
 type QueryCallback = (result: AllInstancesResult) => void;
 
@@ -35,12 +37,6 @@ function extractNamespaceFromUri(uri: string): string {
     const colonIdx = uri.lastIndexOf(':');
     if (colonIdx >= 0) return uri.substring(0, colonIdx + 1);
     return uri;
-}
-
-
-// Generic unsubscribe interface for event subscriptions
-interface Unsubscribable {
-    unsubscribe(): void;
 }
 
 /** Proxy object for a subscribed Prolog query that provides real-time updates
@@ -159,6 +155,10 @@ export class QuerySubscriptionProxy {
             clearTimeout(this.#keepaliveTimer);
             this.#keepaliveTimer = undefined;
         }
+
+        // A retry (init timeout, failed keepalive) replaces the hold this
+        // proxy already has; release it so the proxy never holds two.
+        this.#releaseHold();
 
         try {
             // Initialize the query subscription
@@ -296,6 +296,7 @@ export class QuerySubscriptionProxy {
                     );
                     const oldUnsub = this.#unsubscribe;
                     this.#unsubscribe = newUnsub;
+                    this.#releaseHold();
                     this.#subscriptionId = newSubId;
                     if (oldUnsub) oldUnsub();
 
@@ -482,6 +483,9 @@ export class QuerySubscriptionProxy {
      * 
      * After calling this method, the subscription is no longer active and
      * will not receive any more updates. The instance should be discarded.
+     * Calling it again is a no-op: subscribers of the same query share one
+     * executor subscription, and only the first call releases this proxy's
+     * hold on it.
      */
     dispose() {
         this.#disposed = true;
@@ -502,22 +506,28 @@ export class QuerySubscriptionProxy {
             this.#initTimeoutId = undefined;
         }
 
-        // Tell the backend to dispose of the subscription
-        if (this.#subscriptionId) {
-            this.#client.disposeQuerySubscription(this.#uuid, this.#subscriptionId)
+        this.#releaseHold();
+    }
+
+    /** Release this proxy's hold on its executor subscription, at most once.
+     *
+     *  The executor hands every subscriber of the same query the same
+     *  subscription id and removes the entry when the last holder releases
+     *  it. The id is cleared before the RPC, so a repeated dispose() is a
+     *  local no-op and cannot release another subscriber's hold. */
+    #releaseHold() {
+        const subscriptionId = this.#subscriptionId;
+        this.#subscriptionId = undefined;
+        if (subscriptionId) {
+            this.#client.disposeQuerySubscription(this.#uuid, subscriptionId)
                 .catch(e => console.error('Error disposing query subscription:', e));
         }
     }
 }
 
-/** Callback type of each link event. */
-export interface LinkListeners {
-    "link-added": LinkCallback
-    "link-removed": LinkCallback
-    "link-updated": LinkUpdatedCallback
-}
-
-export type LinkStatus = "shared" | "local"
+/** Link status argument. The executor accepts either case and returns links
+ *  with the upper-case form (`LinkExpression.status`). */
+export type LinkStatus = "shared" | "local" | "SHARED" | "LOCAL"
 interface Parameter {
     name: string
     value: string
@@ -557,7 +567,7 @@ interface Parameter {
  * const todo = await perspective.createSubject("Todo", "expression://123");
  * 
  * // Subscribe to changes
- * perspective.addListener("link-added", (link) => {
+ * perspective.on("link-added", ({ link }) => {
  *   console.log("New link added:", link);
  * });
  * ```
@@ -588,12 +598,8 @@ export class PerspectiveProxy {
     /** @internal Exposed for ModelQueryBuilder subscription management */
     get client(): PerspectiveClient { return this.#client; }
 
-    #linkListeners: { [K in keyof LinkListeners]: LinkListeners[K][] } = { "link-added": [], "link-removed": [], "link-updated": [] }
-    #perspectiveSyncStateChangeCallbacks: SyncStateChangeCallback[] = []
-    /** Release of the one socket listener per type that feeds a callback array. */
-    #typeReleases = new Map<keyof LinkListeners | 'sync-state-change', () => void>()
-    /** Releases of the auto-processor listeners; each call adds one. */
-    #autoProcessorReleases: (() => void)[] = []
+    /** Releases of the handlers `on()` registered and has not released yet. */
+    #releases = new Set<() => void>()
     #ensuredSubjectClasses = new Set<string>()
     /** The `interpretationOverlays()` RPC currently in flight, shared by concurrent callers. */
     #overlaysInFlight: Promise<InterpretationOverlayInfo[]> | null = null
@@ -611,19 +617,6 @@ export class PerspectiveProxy {
         this.sharedUrl = this.#handle.sharedUrl;
         this.neighbourhood = this.#handle.neighbourhood;
         this.state = this.#handle.state;
-    }
-
-    /** Registers the socket listener that feeds one callback array on first use,
-     *  so a proxy with no listeners holds no socket callbacks. */
-    #register(type: keyof LinkListeners | 'sync-state-change'): void {
-        if (this.#typeReleases.has(type)) return
-        const uuid = this.#handle.uuid
-        this.#typeReleases.set(type,
-            type === 'link-added' ? this.#client.addPerspectiveLinkAddedListener(uuid, this.#linkListeners['link-added'])
-            : type === 'link-removed' ? this.#client.addPerspectiveLinkRemovedListener(uuid, this.#linkListeners['link-removed'])
-            : type === 'link-updated' ? this.#client.addPerspectiveLinkUpdatedListener(uuid, this.#linkListeners['link-updated'])
-            : this.#client.addPerspectiveSyncStateChangeListener(uuid, this.#perspectiveSyncStateChangeCallbacks)
-        )
     }
 
     /** Update the proxy's internal handle and public fields in-place.
@@ -818,7 +811,7 @@ export class PerspectiveProxy {
         // `emitDebugEvents` are supplied, every dispatched tool call fires
         // `ToolCall` + `ToolResult` events on the `auto-processor-event`
         // topic keyed by `observationId`. Subscribe with
-        // {@link addAutoProcessorEventListener} to render the harness loop
+        // `on('auto-processor-event')` to render the harness loop
         // live in a UI. Absent = fast headless path (no telemetry cost).
         observationId?: string,
         emitDebugEvents?: boolean,
@@ -842,7 +835,7 @@ export class PerspectiveProxy {
      * Register a neighbourhood auto-processor on this perspective. The executor
      * then runs interpretation automatically over new source items (like Flux
      * per channel), coordinating which peer processes each batch. Returns the
-     * processor id. Subscribe to progress via {@link addAutoProcessorEventListener}.
+     * processor id. Subscribe to progress via `on('auto-processor-event')`.
      */
     async addAutoProcessor(config: AddAutoProcessorConfig): Promise<string> {
         return await this.#client.addAutoProcessor(this.#handle.uuid, config)
@@ -946,7 +939,7 @@ export class PerspectiveProxy {
      * The verdict is three-way — see {@link FlowReceiptVerdict}: branch on
      * `outcome`, never on a boolean you derive from it.
      */
-    async verifyFlowReceipt(receipt: object): Promise<FlowReceiptVerdict> {
+    async verifyFlowReceipt(receipt: JsonValue): Promise<FlowReceiptVerdict> {
         return await this.#client.verifyFlowReceipt(this.#handle.uuid, receipt)
     }
 
@@ -971,24 +964,6 @@ export class PerspectiveProxy {
     /** Mint and store the receipt for a completed flow run. */
     async mintFlowReceipt(instanceUri: string): Promise<FlowMintedReceipt> {
         return await this.#client.mintFlowReceipt(this.#handle.uuid, instanceUri)
-    }
-
-    /** Subscribe to this perspective's auto-processor step signals until `dispose()`. */
-    addAutoProcessorEventListener(cb: (event: AutoProcessorEvent) => void): void {
-        this.#autoProcessorReleases.push(this.#client.addAutoProcessorEventListener(this.#handle.uuid, cb))
-    }
-
-    /**
-     * Subscribe to this perspective's auto-processor neighbourhood-state
-     * events — fires when this executor claims / finishes / abandons a
-     * batch. Perspective-scoped, so a UI can render "someone is
-     * auto-processing this" without receiving the batch payload. See
-     * `AutoProcessorNeighbourhoodStateEvent`.
-     */
-    addAutoProcessorNeighbourhoodStateListener(
-        cb: (event: AutoProcessorNeighbourhoodStateEvent) => void,
-    ): void {
-        this.#autoProcessorReleases.push(this.#client.addAutoProcessorNeighbourhoodStateListener(this.#handle.uuid, cb))
     }
 
     /**
@@ -1317,72 +1292,31 @@ export class PerspectiveProxy {
     }
 
     /**
-     * Subscribes to link changes in the perspective.
-     * 
-     * @param type - Type of change to listen for
-     * @param cb - Callback function
-     * 
-     * @example
-     * ```typescript
-     * // Listen for new links
-     * perspective.addListener("link-added", (link) => {
-     *   console.log("New link:", link);
-     * });
-     * 
-     * // Listen for removed links
-     * perspective.addListener("link-removed", (link) => {
-     *   console.log("Link removed:", link);
-     * });
+     * Call `handler` with every `type` event about this perspective, until the
+     * returned function or {@link dispose} releases it.
      *
-     * // Listen for updated links: the callback receives { oldLink, newLink }
-     * perspective.addListener("link-updated", ({ oldLink, newLink }) => {
-     *   console.log("Link updated:", oldLink, "->", newLink);
-     * });
-     * ```
-     */
-    addListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
-        this.#linkListeners[type].push(cb)
-        this.#register(type)
-    }
-
-    /**
-     * Subscribes to sync state changes if this perspective is shared.
-     * 
-     * @param cb - Callback function
-     * 
      * @example
      * ```typescript
-     * perspective.addSyncStateChangeListener((state) => {
-     *   console.log("Sync state:", state);
-     * });
+     * perspective.on("link-added", ({ link }) => console.log("New link:", link));
+     * perspective.on("link-updated", ({ oldLink, newLink }) => console.log(oldLink, "->", newLink));
+     * perspective.on("sync-state-change", ({ state }) => console.log("Sync state:", state));
      * ```
      */
-    addSyncStateChangeListener(cb: SyncStateChangeCallback): void {
-        this.#perspectiveSyncStateChangeCallbacks.push(cb)
-        this.#register('sync-state-change')
+    on<K extends ScopedEventName>(type: K, handler: (event: EventMap[K]) => void): () => void {
+        // A registration of this proxy's own, so dispose() cannot release another proxy's
+        // registration of the same function (on() treats equal handlers as one).
+        const release = this.#client.on(type, (event: EventMap[K]) => handler(event), { perspective: this.#handle.uuid })
+        const releaseOnce = () => {
+            if (this.#releases.delete(releaseOnce)) release()
+        }
+        this.#releases.add(releaseOnce)
+        return releaseOnce
     }
 
-    /**
-     * Unsubscribes from link changes.
-     * 
-     * @param type - Type of change to stop listening for
-     * @param cb - The callback function to remove
-     */
-    removeListener<K extends keyof LinkListeners>(type: K, cb: LinkListeners[K]): void {
-        const listeners = this.#linkListeners[type]
-        const index = listeners.indexOf(cb)
-        if (index >= 0) listeners.splice(index, 1)
-    }
-
-    /** Removes every listener this proxy registered. Other proxies for the same
+    /** Removes every handler this proxy registered. Other proxies for the same
      *  perspective keep theirs. */
     dispose(): void {
-        this.#typeReleases.forEach(release => release())
-        this.#typeReleases.clear()
-        this.#autoProcessorReleases.forEach(release => release())
-        this.#autoProcessorReleases = []
-        for (const listeners of Object.values(this.#linkListeners)) listeners.length = 0
-        this.#perspectiveSyncStateChangeCallbacks.length = 0
+        for (const release of [...this.#releases]) release()
     }
 
     /**
@@ -1456,17 +1390,8 @@ export class PerspectiveProxy {
      */
     async setSingleTarget(link: Link, status: LinkStatus = 'shared') {
         const query = new LinkQuery({source: link.source, predicate: link.predicate})
-        const foundLinks = await this.get(query)
-        const removals = [];
-        for(const l of foundLinks){
-            delete l.__typename
-            delete l.data.__typename
-            delete l.proof.__typename
-            removals.push(l);
-        }
-        const additions = [link];
-
-        await this.linkMutations({additions, removals}, status)
+        const removals = await this.get(query)
+        await this.linkMutations({additions: [link], removals}, status)
     }
 
     /** Returns all the Social DNA flows defined in this perspective */
@@ -1780,20 +1705,52 @@ export class PerspectiveProxy {
      */
     async addFlow(name: string, flow: SHACLFlow): Promise<void> {
         const flowNameLiteral = Literal.from(name).toUrl();
-        const additions = [
+        const wanted = [
             ...flow.toLinks(),
             { source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral },
             { source: flowNameLiteral, predicate: "ad4m://flow_uri", target: flow.flowUri },
-        ].map(l => new Link(l));
+        ];
 
-        // Re-adding a flow replaces its transitions. Their URIs may use an
-        // older scheme, so find them through the flow's hasTransition links.
-        const edges = await this.get(new LinkQuery({ source: flow.flowUri, predicate: "ad4m://hasTransition" }));
-        const transitionLinks = await Promise.all(
-            edges.map(l => this.get(new LinkQuery({ source: l.data.target })))
-        );
+        // Re-adding a flow replaces its definition. Adding alone would leave
+        // a changed consensus rule beside the old one, and a state holding two
+        // rules refuses every move into it. What is stored is found through
+        // the flow's own links, since state and transition URIs may use an
+        // older scheme. Only definition predicates are taken, from the flow's
+        // URI and from each state and transition URI: all of them can carry
+        // links the definition does not own.
+        const flowLevel = new Set(SHACLFlow.FLOW_LEVEL_PREDICATES);
+        const childLevel = new Set(SHACLFlow.STATE_AND_TRANSITION_PREDICATES);
+        const ownLinks = (await this.get(new LinkQuery({ source: flow.flowUri })))
+            .filter(l => flowLevel.has(l.data.predicate));
+        const children = ownLinks
+            .filter(l => l.data.predicate === "ad4m://hasState" || l.data.predicate === "ad4m://hasTransition")
+            .map(l => l.data.target);
+        const childLinks = (await Promise.all(children.map(uri => this.get(new LinkQuery({ source: uri })))))
+            .flat()
+            .filter(l => childLevel.has(l.data.predicate));
+        // A name points at one flow: getFlow reads the first flow_uri link,
+        // and FlowInstance.findAll drops records of any other flow URI. So
+        // every flow_uri link of this name is taken, and one left from an
+        // earlier namespace is removed rather than kept beside the new one.
+        const registration = [
+            ...await this.get(new LinkQuery({ source: "ad4m://self", predicate: "ad4m://has_flow", target: flowNameLiteral })),
+            ...await this.get(new LinkQuery({ source: flowNameLiteral, predicate: "ad4m://flow_uri" })),
+        ];
+        const stored = [...ownLinks, ...childLinks, ...registration];
 
-        await this.linkMutations({ additions, removals: [...edges, ...transitionLinks.flat()] });
+        // Only the difference is written, so an unchanged definition writes
+        // nothing and a changed one touches only what changed.
+        const key = (l: { source: string; predicate?: string; target: string }) =>
+            JSON.stringify([l.source, l.predicate ?? "", l.target]);
+        const wantedKeys = new Set(wanted.map(key));
+        const storedKeys = new Set(stored.map(l => key(l.data)));
+        const additions = wanted
+            .filter((l, i, all) => !storedKeys.has(key(l)) && all.findIndex(o => key(o) === key(l)) === i)
+            .map(l => new Link(l));
+        const removals = stored.filter(l => !wantedKeys.has(key(l.data)));
+
+        if (additions.length === 0 && removals.length === 0) return;
+        await this.linkMutations({ additions, removals });
     }
 
     /**
@@ -1845,27 +1802,25 @@ export class PerspectiveProxy {
      * Uses SHACL-based lookup (Prolog-free implementation).
      */
     async subjectClasses(): Promise<string[]> {
-        try {
-            // Query SHACL class links directly — no need for a separate RPC endpoint
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const classNames = classLinks
-                .map(l => {
-                    const source = l.data.source;
-                    // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
-                    const parts = source.split("://");
-                    const lastPart = parts[parts.length - 1];
-                    return lastPart.split('/').pop() || '';
-                })
-                .filter(name => name.length > 0);
-            // Deduplicate
-            return [...new Set(classNames)];
-        } catch (e) {
-            console.warn('subjectClasses: SHACL lookup failed:', e);
-            return [];
-        }
+        // A failed lookup rejects. Answering `[]` would read as "no classes are
+        // registered", which a caller deciding whether to register its own
+        // classes acts on.
+        // Query SHACL class links directly — no need for a separate RPC endpoint
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const classNames = classLinks
+            .map(l => {
+                const source = l.data.source;
+                // Extract class name from URI like "recipe://Recipe" or "flux://Channel"
+                const parts = source.split("://");
+                const lastPart = parts[parts.length - 1];
+                return lastPart.split('/').pop() || '';
+            })
+            .filter(name => name.length > 0);
+        // Deduplicate
+        return [...new Set(classNames)];
     }
 
     /**
@@ -1882,22 +1837,19 @@ export class PerspectiveProxy {
      * registered should call this once and test membership against the returned
      * set, rather than issuing one `queryLinks` per model.
      *
-     * One `queryLinks` round trip, no executor-side changes.
+     * One `queryLinks` round trip, no executor-side changes. A failed lookup
+     * rejects rather than answering `[]`, which would read as "nothing is
+     * registered" and lead such a caller to register everything again.
      */
     async subjectClassTargetClasses(): Promise<string[]> {
-        try {
-            const classLinks = await this.get(new LinkQuery({
-                predicate: "rdf://type",
-                target: "ad4m://SubjectClass"
-            }));
-            const uris = classLinks
-                .map(l => l.data.source)
-                .filter(source => source.length > 0);
-            return [...new Set(uris)];
-        } catch (e) {
-            console.warn('subjectClassTargetClasses: lookup failed:', e);
-            return [];
-        }
+        const classLinks = await this.get(new LinkQuery({
+            predicate: "rdf://type",
+            target: "ad4m://SubjectClass"
+        }));
+        const uris = classLinks
+            .map(l => l.data.source)
+            .filter(source => source.length > 0);
+        return [...new Set(uris)];
     }
 
     async stringOrTemplateObjectToSubjectClassName<T>(subjectClass: T): Promise<string> {

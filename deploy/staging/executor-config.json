@@ -1,0 +1,17 @@
+{
+  "app_data_path": "/home/marvin/.ad4m-staging",
+  "port": 12400,
+  "hc_admin_port": 12401,
+  "hc_app_port": 12402,
+  "localhost": true,
+  "run_dapp_server": false,
+  "auto_permit_cap_requests": false,
+  "multi_user_config": {
+    "enabled": true,
+    "tls_config": null,
+    "smtp_config": null
+  },
+  "log_config": { "rust_executor": "info", "holochain": "warn" },
+  "mcp_enabled": true,
+  "mcp_port": 3003
+}
