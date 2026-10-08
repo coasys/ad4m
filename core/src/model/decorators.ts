@@ -892,6 +892,9 @@ export interface RelationOptions {
      * this to decode `literal:<type>:<value>` wire form on hydration.
      * Omit for URI relations that point at other model instances.
      *
+     * Mutually exclusive with `target`: a relation holds either literals or
+     * model instances. Combines with `through` or `getter`.
+     *
      * @example
      * ```typescript
      * @HasMany({ through: "run://source", datatype: "xsd:string" })
@@ -1043,6 +1046,21 @@ function resolveRelationArgs(
         throw new Error(
             'Relation decorator: `where` and `filter: false` are contradictory. ' +
             '`where` adds filtering constraints; `filter: false` disables filtering.'
+        );
+    }
+
+    // `datatype` makes the relation's values encoded literals; `target` makes
+    // them model instances. `buildSHACL` would emit `sh:nodeKind sh:Literal`
+    // and `sh:class` on the same property shape, so the executor would decode
+    // the values as literals while `include` tried to hydrate them as
+    // instances. Checked before the getter path returns, so a getter
+    // relation is held to the same rule.
+    if (opts.datatype && opts.target) {
+        throw new Error(
+            'Relation decorator: `datatype` and `target` are mutually exclusive. ' +
+            '`datatype` declares a relation of literal values; `target` declares a ' +
+            'relation to model instances. Drop `datatype` to link instances, or drop ' +
+            '`target` to store literals.'
         );
     }
 
