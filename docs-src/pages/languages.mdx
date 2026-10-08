@@ -425,7 +425,9 @@ is off-limits and fails with a permission error.
 is necessary because most Languages are network protocols. A future
 release will scope this more tightly — today a Language can reach any
 host the runtime can reach, so trust decisions around which Languages
-to install matter (see below).
+to install matter (see below). Each `httpFetch` call, including reading
+the response body, times out after 10 seconds and rejects with an error
+naming the URL.
 
 **Other capabilities.** FFI, subprocess spawning, reading arbitrary
 environment variables, and loading arbitrary remote ES modules are
