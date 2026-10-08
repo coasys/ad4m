@@ -17,7 +17,8 @@
 //! `launcher-state.json` through [`MultiUserSettings`] and [`TlsSettings`]
 //! too, and must keep reading a file a later launcher added keys to.
 //!
-//! A secret must not be empty, and a secret file must not be readable by
+//! No string value may be empty or only whitespace. A secret must not be
+//! empty, and a secret file must not be readable by
 //! group or others (mode 0600 or 0400).
 
 use crate::config::{Ad4mConfig, SmtpConfig, TlsConfig, DEFAULT_PORT};
@@ -51,6 +52,11 @@ pub enum ConfigFileError {
         file_var: String,
     },
     UnknownKey {
+        path: PathBuf,
+        key: String,
+    },
+    /// A string value that is empty or only whitespace.
+    EmptyValue {
         path: PathBuf,
         key: String,
     },
@@ -90,6 +96,11 @@ impl fmt::Display for ConfigFileError {
                     path.display()
                 )
             }
+            Self::EmptyValue { path, key } => write!(
+                f,
+                "invalid config file {}: `{key}` is empty or only whitespace; give it a value",
+                path.display()
+            ),
             Self::EmptySecret { source } => write!(f, "the secret in {source} is empty"),
             Self::MissingSmtpPassword => write!(
                 f,
@@ -118,6 +129,10 @@ impl ConfigFileError {
                 message,
             },
             Self::UnknownKey { key, .. } => Self::UnknownKey {
+                path: file.to_path_buf(),
+                key,
+            },
+            Self::EmptyValue { key, .. } => Self::EmptyValue {
                 path: file.to_path_buf(),
                 key,
             },
@@ -348,6 +363,26 @@ fn key_path(path: &serde_ignored::Path) -> String {
     }
 }
 
+/// The dotted path of the first string value in `value` that is empty or
+/// only whitespace. `at` is the path of `value` itself.
+fn first_blank_string(value: &serde_json::Value, at: &str) -> Option<String> {
+    let join = |key: &dyn fmt::Display| match at {
+        "" => key.to_string(),
+        at => format!("{at}.{key}"),
+    };
+    match value {
+        serde_json::Value::String(text) if text.trim().is_empty() => Some(at.to_string()),
+        serde_json::Value::Object(object) => object
+            .iter()
+            .find_map(|(key, value)| first_blank_string(value, &join(key))),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, value)| first_blank_string(value, &join(&index))),
+        _ => None,
+    }
+}
+
 impl ExecutorConfigFile {
     pub fn load(path: &Path) -> Result<Self, ConfigFileError> {
         let text = std::fs::read_to_string(path).map_err(|error| ConfigFileError::Read {
@@ -358,7 +393,9 @@ impl ExecutorConfigFile {
     }
 
     /// Parses a config file's text: [`INLINE_SECRETS`] first, then the
-    /// shape, rejecting any key the types do not know, at any depth.
+    /// shape, rejecting any key the types do not know, at any depth, then
+    /// any empty or whitespace-only string value (an unset key keeps the
+    /// executor's default, an empty one would not).
     pub fn parse(text: &str) -> Result<Self, ConfigFileError> {
         let unlocated = |error| ConfigFileError::Parse {
             path: PathBuf::new(),
@@ -374,13 +411,20 @@ impl ExecutorConfigFile {
                 message,
             });
         }
+        let blank = first_blank_string(&json, "");
         let mut unknown = None;
         let file = serde_ignored::deserialize(json, |path| {
             unknown.get_or_insert_with(|| key_path(&path));
         })
         .map_err(unlocated)?;
-        match unknown {
-            Some(key) => Err(ConfigFileError::UnknownKey {
+        if let Some(key) = unknown {
+            return Err(ConfigFileError::UnknownKey {
+                path: PathBuf::new(),
+                key,
+            });
+        }
+        match blank {
+            Some(key) => Err(ConfigFileError::EmptyValue {
                 path: PathBuf::new(),
                 key,
             }),
