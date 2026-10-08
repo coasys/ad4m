@@ -513,10 +513,10 @@ pub struct PerspectiveInstance {
     /// Populated lazily from SHACL triples in `sparql_store`; invalidated by
     /// `add_sdna_inner` when SHACL is re-written for a class.  No persistence.
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
-    /// The containment predicates this perspective declares, resolved once —
-    /// `None` until first asked for, dropped when a declaration is written or
-    /// removed. See `containment.rs`.
-    pub(super) containment_cache: Arc<std::sync::RwLock<Option<Arc<Vec<String>>>>>,
+    /// The predicates this perspective declares for each role (keyed by the
+    /// role's IRI), resolved once per role and dropped when a declaration is
+    /// written or removed. See `declared_roles.rs`.
+    pub(super) declared_roles: Arc<std::sync::RwLock<HashMap<String, Arc<Vec<String>>>>>,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -599,7 +599,7 @@ impl PerspectiveInstance {
                     .expect("Failed to create per-perspective SPARQL service"),
             ),
             shape_cache: Arc::new(std::sync::RwLock::new(HashMap::new())),
-            containment_cache: Arc::new(std::sync::RwLock::new(None)),
+            declared_roles: Arc::new(std::sync::RwLock::new(HashMap::new())),
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
@@ -963,7 +963,7 @@ impl PerspectiveInstance {
             .collect();
         self.sparql_store.reload(link_exprs)?;
         self.shape_cache.write().unwrap().clear();
-        self.invalidate_containment();
+        self.invalidate_declared_roles();
         Ok(())
     }
 
@@ -4080,9 +4080,9 @@ impl PerspectiveInstance {
                 log::warn!("Failed to add link to SPARQL store: {:?}", e);
             }
         }
-        // The one sink for local and remote writes alike, so a containment
-        // declaration arriving either way drops the cached set.
-        self.note_containment_writes(diff);
+        // The one sink for local and remote writes alike, so a role
+        // declaration arriving either way drops the cached sets.
+        self.note_role_writes(diff);
 
         // EXPERIMENT: removed per-write flush. The fix-branch added a flush
         // call here to reclaim memtable memory, but flushing on EVERY single
