@@ -174,7 +174,7 @@ pub struct RunArgs {
     /// credential. An empty token then has full admin access, so anyone
     /// who can reach the executor's port controls it.
     /// AD4M_INSECURE_NO_ADMIN_CREDENTIAL enables it only with `true`;
-    /// an empty value, `false`, `0`, `no` or `off` leave it off.
+    /// `false`, `0`, `no` or `off` leave it off. Must not be empty.
     #[arg(
         long,
         env = "AD4M_INSECURE_NO_ADMIN_CREDENTIAL",
@@ -182,7 +182,7 @@ pub struct RunArgs {
         num_args = 0..=1,
         default_value = "false",
         default_missing_value = "true",
-        value_parser = parse_insecure_flag
+        value_parser = non_empty(parse_insecure_flag)
     )]
     pub insecure_no_admin_credential: bool,
     #[arg(long, action, env = "AD4M_LOCALHOST", value_parser = non_empty(BoolValueParser::new()))]
@@ -242,17 +242,15 @@ pub struct RunArgs {
     pub pid_file: Option<String>,
 }
 
-/// Only the literal `true` enables the insecure mode. An unset-but-present
-/// variable (a compose `${VAR}` with `VAR` unset gives `""`) and the usual
-/// "off" spellings disable it, so neither blocks a node that has a credential
-/// nor turns the mode on by accident. Anything else is an error rather than
-/// a guess.
+/// Only the literal `true` enables the insecure mode; the usual "off"
+/// spellings disable it. Anything else is an error rather than a guess. An
+/// empty value never gets here: [`non_empty`] names the variable or flag.
 fn parse_insecure_flag(value: &str) -> Result<bool, String> {
     match value {
         "true" => Ok(true),
-        "" | "false" | "0" | "no" | "off" => Ok(false),
+        "false" | "0" | "no" | "off" => Ok(false),
         other => Err(format!(
-            "`{other}`: use `true` to enable, or `false`, `0`, `no`, `off` or an empty value to disable"
+            "`{other}`: use `true` to enable, or `false`, `0`, `no` or `off` to disable"
         )),
     }
 }
