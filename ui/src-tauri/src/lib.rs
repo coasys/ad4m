@@ -16,6 +16,7 @@ use std::fs;
 use std::fs::File;
 use std::io;
 use tauri::{Emitter, Listener, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 //use tauri::Size;
 use tracing_subscriber::fmt::format;
 use tracing_subscriber::EnvFilter;
@@ -101,6 +102,32 @@ fn rlim_execute() {
         "Updated RLIMIT_NOFILE: current: {}, max: {}",
         rlim.rlim_cur, rlim_max
     );
+}
+
+/// The executor runs inside the launcher process, so a failed REST API must
+/// not exit it (`rust_executor::run` never does). Log the failure and tell the
+/// user, instead of leaving a launcher whose API silently never answers.
+fn report_api_failure<E: std::fmt::Debug + Send + 'static>(
+    api_thread: std::thread::JoinHandle<Result<(), E>>,
+    handle: AppHandle,
+) {
+    std::thread::spawn(move || {
+        let reason = match api_thread.join() {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("{:?}", e),
+            Err(_) => String::from("the REST API thread panicked"),
+        };
+        error!("ad4m-executor REST API failed: {}", reason);
+        handle
+            .dialog()
+            .message(format!(
+                "The AD4M executor's API is not running:\n\n{reason}\n\n\
+                 Apps cannot connect until you fix the cause and restart the launcher."
+            ))
+            .kind(MessageDialogKind::Error)
+            .title("AD4M executor API failed")
+            .show(|_| {});
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -317,7 +344,8 @@ pub fn run() {
                 splashscreen_clone: WebviewWindow,
                 handle: &AppHandle,
             ) {
-                rust_executor::run(config.clone()).await;
+                let api_thread = rust_executor::run(config.clone()).await;
+                report_api_failure(api_thread, handle.clone());
                 let url = app_url();
                 info!("Executor clone on: {:?}", url);
                 let _ = splashscreen_clone.hide();

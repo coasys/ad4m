@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod errors;
+pub mod event_interest;
 pub mod events_ws;
 pub mod internal;
 pub mod openai_compat;
@@ -140,10 +141,6 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     // With TLS, remote clients use the HTTPS listener, so cleartext stays on loopback.
     let ip: [u8; 4] = if let Some(tls_config) = &config.tls {
         let tls_port = tls_config.tls_port;
-        let cert_path = tls_config.cert_file_path.clone();
-        let key_path = tls_config.key_file_path.clone();
-
-        log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
 
         let tls_state = AppState {
             admin_credential: admin_credential.clone(),
@@ -151,29 +148,49 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         };
         let tls_app = api_router(tls_state);
 
-        let rustls_config =
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_path, &key_path)
-                .await
-                .map_err(|e| deno_core::anyhow::anyhow!("TLS config error: {}", e))?;
-
-        tokio::spawn(async move {
-            axum_server::bind_rustls(SocketAddr::from(([0, 0, 0, 0], tls_port)), rustls_config)
-                .serve(tls_app.into_make_service())
-                .await
-                // Same reasoning as the MCP HTTPS listener: the cleartext API
-                // below is bound to 127.0.0.1 because TLS is *configured*, not
-                // because this task bound. If it fails, the API has no remote
-                // surface, and "TLS server error" is not a sentence an operator
-                // maps to that outage.
-                .unwrap_or_else(|e| {
-                    log::error!(
-                        "API HTTPS listener on port {tls_port} stopped: {e}. The remote API is \
-                         now unavailable: the cleartext listener is on 127.0.0.1:{port} because \
-                         TLS is configured. Free port {tls_port} and restart the executor to \
-                         restore remote access."
+        // A bad certificate or key is not fatal: the API keeps serving on
+        // 127.0.0.1, as when the HTTPS bind fails below. The launcher embeds
+        // the executor and relies on this. It starts with a broken TLS path
+        // so the user can fix it on the Hosting page.
+        match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &tls_config.cert_file_path,
+            &tls_config.key_file_path,
+        )
+        .await
+        {
+            Ok(rustls_config) => {
+                log::info!("Starting API server (HTTPS) on 0.0.0.0:{}", tls_port);
+                tokio::spawn(async move {
+                    axum_server::bind_rustls(
+                        SocketAddr::from(([0, 0, 0, 0], tls_port)),
+                        rustls_config,
                     )
+                    .serve(tls_app.into_make_service())
+                    .await
+                    // Same reasoning as the MCP HTTPS listener: the cleartext API
+                    // below is bound to 127.0.0.1 because TLS is *configured*, not
+                    // because this task bound. If it fails, the API has no remote
+                    // surface, and "TLS server error" is not a sentence an operator
+                    // maps to that outage.
+                    .unwrap_or_else(|e| {
+                        log::error!(
+                            "API HTTPS listener on port {tls_port} stopped: {e}. The remote API \
+                             is now unavailable: the cleartext listener is on 127.0.0.1:{port} \
+                             because TLS is configured. Free port {tls_port} and restart the \
+                             executor to restore remote access."
+                        )
+                    });
                 });
-        });
+            }
+            Err(e) => log::error!(
+                "API HTTPS listener on port {tls_port} not started: TLS config error for \
+                 certificate {} and key {}: {e}. The remote API is unavailable: the cleartext \
+                 listener is on 127.0.0.1:{port} because TLS is configured. Fix the TLS \
+                 settings and restart the executor to restore remote access.",
+                tls_config.cert_file_path,
+                tls_config.key_file_path,
+            ),
+        }
         [127, 0, 0, 1]
     } else if config.localhost.unwrap_or(true) {
         [127, 0, 0, 1]
