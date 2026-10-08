@@ -190,7 +190,16 @@ export const s4SfuMemoryChurn: Scenario = {
         `initialRssKb=${metrics["initialRssKb"]} ` +
         `finalRssKb=${metrics["finalRssKb"]} ` +
         `growthMb=${metrics["rssGrowthMb"]} ` +
-        `withinBudget=${metrics["rssWithinBudget"]}`,
+        `withinBudget=${metrics["rssWithinBudget"]} ` +
+        // MB above the start at each sample, so a failure shows a leak (steady
+        // climb) apart from one allocation spike.
+        `timelineMb=${JSON.stringify(
+          (metrics["rssTimeline"] as Array<{ rssKb: number | null }> | undefined)?.map((p) =>
+            p.rssKb == null || metrics["initialRssKb"] == null
+              ? null
+              : Math.round((p.rssKb - (metrics["initialRssKb"] as number)) / 1024),
+          ) ?? [],
+        )}`,
     };
   },
 };
