@@ -459,6 +459,18 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let agent = unlock_main_agent(body.passphrase).await?;
+    Ok(serde_json::to_value(agent)?)
+}
+
+/// Unlocks the main agent's wallet with `passphrase`, then starts what an
+/// unlocked agent needs (system languages, the Holochain conductor, the
+/// agent's profile publish) and announces the new status. Shared by
+/// `agent.unlock` and the executor's own unlock at startup
+/// ([`crate::unlock_agent_at_startup`]). Errs when the wallet rejects the
+/// passphrase; the returned status carries `error` when the wallet stayed
+/// locked or a service failed to start.
+pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus, WsRpcError> {
     let agent_instance = AgentService::global_instance();
     {
         let mut agent_service = agent_instance
@@ -468,7 +480,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             .as_mut()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref
-            .unlock(body.passphrase.clone())
+            .unlock(passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
     }
 
@@ -486,7 +498,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         let language_language_only = config.language_language_only.unwrap_or(false);
 
         if config.run_holochain.unwrap_or(true) {
-            let startup = spawn_conductor_startup(body.passphrase.clone());
+            let startup = spawn_conductor_startup(passphrase);
             if let Err(e) = startup.load_core_languages(language_language_only).await {
                 log::error!("Error loading system languages: {:?}", e);
                 init_errors.push(format!("Failed to load system languages: {}", e));
@@ -538,7 +550,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         )
         .await;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(agent)
 }
 
 /// agent.sign — sign a message
