@@ -83,6 +83,10 @@
     "@coasys/server-link-language#build": {
       "dependsOn": ["@coasys/ad4m-ldk#build"]
     },
+    "@coasys/server-link-language#test": {
+      "dependsOn": ["@coasys/ad4m-ldk#build"],
+      "outputs": []
+    },
 
     "build-dapp": {
       "dependsOn": ["@coasys/ad4m#build", "@coasys/ad4m-connect#build", "@coasys/dapp#build"],
