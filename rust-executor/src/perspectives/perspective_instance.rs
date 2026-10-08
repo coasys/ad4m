@@ -8776,12 +8776,21 @@ mod tests {
             .store(true, Ordering::SeqCst);
 
         // No board has tasks yet, so hydration does not need `Task`.
-        let (board_sub, _) = perspective
-            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+        let (board_sub, _, _) = perspective
+            .model_subscribe_and_query(
+                "Board".into(),
+                NESTED_INCLUDE_QUERY.into(),
+                None,
+                "c".into(),
+            )
             .await
             .expect("subscribe to Board");
-        let (other_sub, _) = perspective
-            .subscribe_and_query("SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(), None)
+        let (other_sub, _, _) = perspective
+            .subscribe_and_query(
+                "SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(),
+                None,
+                "c".into(),
+            )
             .await
             .expect("subscribe to titles");
 
