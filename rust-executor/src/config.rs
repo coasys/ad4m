@@ -49,7 +49,7 @@ pub struct TlsConfig {
     pub tls_port: u16, // Port for the HTTPS/WSS server
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SmtpConfig {
     pub enabled: bool,
@@ -60,7 +60,9 @@ pub struct SmtpConfig {
     pub from_address: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` prints [`Ad4mConfig::redacted_json`], so a logged config never
+/// carries a secret.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Ad4mConfig {
     pub app_data_path: Option<String>,
@@ -80,6 +82,9 @@ pub struct Ad4mConfig {
     pub hc_bootstrap_url: Option<String>,
     pub hc_relay_url: Option<String>,
     pub connect_holochain: Option<bool>,
+    /// When false, skip Holochain conductor startup entirely.
+    /// Bootstrap languages must not depend on Holochain (use local bootstrap languages).
+    pub run_holochain: Option<bool>,
     pub admin_credential: Option<String>,
     pub localhost: Option<bool>,
     pub auto_permit_cap_requests: Option<bool>,
@@ -87,6 +92,9 @@ pub struct Ad4mConfig {
     pub log_holochain_metrics: Option<bool>,
     pub enable_multi_user: Option<bool>,
     pub smtp_config: Option<SmtpConfig>,
+    /// Log level per crate over [`crate::logging::get_default_log_config`];
+    /// `RUST_LOG` overrides it.
+    pub log_config: Option<std::collections::HashMap<String, String>>,
     /// Enable MCP (Model Context Protocol) server for AI agent integration
     pub enable_mcp: Option<bool>,
     /// Port for MCP HTTP server (default: 3001)
@@ -208,10 +216,13 @@ impl Ad4mConfig {
             self.run_dapp_server = Some(true);
         }
         if self.port.is_none() {
-            self.port = Some(12000);
+            self.port = Some(DEFAULT_PORT);
         }
         if self.connect_holochain.is_none() {
             self.connect_holochain = Some(false);
+        }
+        if self.run_holochain.is_none() {
+            self.run_holochain = Some(true);
         }
         if self.hc_proxy_url.is_none() {
             self.hc_proxy_url = Some("ws://bootstrap.ad4m.dev:4433".to_string());
@@ -238,6 +249,46 @@ impl Ad4mConfig {
 
     pub fn get_json(&self) -> String {
         serde_json::to_string(self).expect("Could not convert config to json")
+    }
+
+    /// The config as JSON with every secret value replaced by
+    /// [`crate::config_file::REDACTED`]; an unset secret stays `null`.
+    pub fn redacted_json(&self) -> serde_json::Value {
+        let mut json = serde_json::to_value(self).expect("Ad4mConfig serializes");
+        let redact = |value: &mut serde_json::Value| {
+            if !value.is_null() {
+                *value = serde_json::Value::from(crate::config_file::REDACTED);
+            }
+        };
+        for pointer in [
+            "/adminCredential",
+            "/internalApiToken",
+            "/smtpConfig/password",
+        ] {
+            if let Some(value) = json.pointer_mut(pointer) {
+                redact(value);
+            }
+        }
+        json
+    }
+}
+
+impl std::fmt::Debug for Ad4mConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ad4mConfig {}", self.redacted_json())
+    }
+}
+
+impl std::fmt::Debug for SmtpConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpConfig")
+            .field("enabled", &self.enabled)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("username", &self.username)
+            .field("password", &crate::config_file::REDACTED)
+            .field("from_address", &self.from_address)
+            .finish()
     }
 }
 
@@ -303,9 +354,23 @@ pub fn validate_shared_backend_url(url: &str, label: &str) -> Result<(), String>
     ))
 }
 
+/// The RPC port when none is configured.
+pub const DEFAULT_PORT: u16 = 12000;
+
 impl Default for Ad4mConfig {
     fn default() -> Self {
-        let mut config = Ad4mConfig {
+        let mut config = Ad4mConfig::unprepared();
+        config.prepare();
+        config
+    }
+}
+
+impl Ad4mConfig {
+    /// Every field unset. [`Ad4mConfig::prepare`] (which `run` calls) fills
+    /// the defaults, including those derived from other fields, such as the
+    /// bootstrap seed path inside `app_data_path`.
+    pub fn unprepared() -> Self {
+        Ad4mConfig {
             app_data_path: None,
             network_bootstrap_seed: None,
             language_language_only: None,
@@ -321,6 +386,7 @@ impl Default for Ad4mConfig {
             hc_bootstrap_url: None,
             hc_relay_url: None,
             connect_holochain: None,
+            run_holochain: None,
             admin_credential: None,
             localhost: None,
             auto_permit_cap_requests: None,
@@ -328,6 +394,7 @@ impl Default for Ad4mConfig {
             log_holochain_metrics: None,
             enable_multi_user: None,
             smtp_config: None,
+            log_config: None,
             enable_mcp: None,
             mcp_port: None,
             dynamic_class_tools: None,
@@ -339,15 +406,39 @@ impl Default for Ad4mConfig {
             db_backend_url: None,
             snapshot_interval_secs: None,
             internal_api_token: None,
-        };
-        config.prepare();
-        config
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_and_redacted_json_hide_secrets() {
+        let config = Ad4mConfig {
+            admin_credential: Some("admin-secret".into()),
+            internal_api_token: Some("internal-secret".into()),
+            smtp_config: Some(SmtpConfig {
+                enabled: true,
+                host: "smtp.example".into(),
+                port: 465,
+                username: "u".into(),
+                password: "smtp-secret".into(),
+                from_address: "f".into(),
+            }),
+            ..Default::default()
+        };
+        let debug = format!("{config:?}");
+        for secret in ["admin-secret", "internal-secret", "smtp-secret"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
+        assert!(debug.contains("smtp.example"), "{debug}");
+        let json = config.redacted_json();
+        assert_eq!(json["adminCredential"], "<redacted>");
+        assert_eq!(json["smtpConfig"]["password"], "<redacted>");
+        assert!(Ad4mConfig::default().redacted_json()["adminCredential"].is_null());
+    }
 
     #[test]
     fn test_validate_https_url() {

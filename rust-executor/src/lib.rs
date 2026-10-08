@@ -3,6 +3,7 @@ extern crate lazy_static;
 
 pub mod api;
 pub mod config;
+pub mod config_file;
 pub mod email_service;
 pub mod entanglement_service;
 mod globals;
@@ -37,6 +38,7 @@ pub mod types;
 
 use std::thread::JoinHandle;
 
+use deno_core::error::AnyError;
 use log::{error, info, warn};
 use tokio::sync::oneshot;
 
@@ -214,8 +216,49 @@ async fn holochain_signal_receiver() {
     }
 }
 
-/// Runs the REST server and the deno core runtime
-pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
+/// Unlocks the main agent with the passphrase an operator supplied at
+/// startup (`AD4M_UNLOCK_PASSPHRASE_FILE`), the way `agent.unlock` does, so
+/// a restarted headless executor serves requests without a person or a
+/// script unlocking it. Call after [`run`] has returned. Without an agent
+/// (not generated yet) it only logs. Neither path logs the passphrase.
+pub async fn unlock_agent_at_startup(passphrase: String) {
+    let initialized = AgentService::with_global_instance(|agent| agent.is_initialized());
+    if !initialized {
+        warn!(
+            "AD4M_UNLOCK_PASSPHRASE_FILE is set but there is no agent yet: generate one \
+             (agent.generate); later starts unlock it from the file"
+        );
+        return;
+    }
+    const FAILED: &str = "Unlocking the agent at startup with the passphrase from \
+                          AD4M_UNLOCK_PASSPHRASE_FILE failed";
+    const STAYS_LOCKED: &str = "The executor stays up with the agent locked; check the file, \
+                                then unlock with agent.unlock or restart";
+    match api::agent_ws::unlock_main_agent(passphrase).await {
+        Ok(status) if status.is_unlocked => match status.error {
+            None => info!(
+                "Agent unlocked at startup with the passphrase from AD4M_UNLOCK_PASSPHRASE_FILE"
+            ),
+            Some(error) => error!(
+                "Agent unlocked at startup with the passphrase from \
+                 AD4M_UNLOCK_PASSPHRASE_FILE, but starting its services failed: {error}"
+            ),
+        },
+        Ok(status) => error!(
+            "{FAILED}: {}. {STAYS_LOCKED}",
+            status.error.unwrap_or_default()
+        ),
+        Err(e) => error!("{FAILED}: {}. {STAYS_LOCKED}", e.message),
+    }
+}
+
+/// Runs the REST server and the deno core runtime.
+///
+/// Returns the REST API server's thread. It ends with `Err` when the server
+/// cannot start or stops, e.g. when the API port is taken. `run` never exits
+/// the process itself, because the launcher embeds it and must stay up to show
+/// the error. Executor binaries pass the handle to [`exit_when_api_fails`].
+pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     #[cfg(unix)]
     unsafe {
         let mut action: sigaction = std::mem::zeroed();
@@ -288,7 +331,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
 
     // Initialize logging for CLI (stdout)
     // Respects RUST_LOG environment variable if set
-    crate::logging::init_cli_logging(None);
+    crate::logging::init_cli_logging(config.log_config.as_ref());
     config.prepare();
 
     // Write PID file if requested via config.
@@ -576,29 +619,36 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
         });
     };
 
-    // Start holochain signal receiver as standalone task
-    tokio::spawn(crate::holochain_signal_receiver());
+    // Start holochain signal receiver and Unyt service only when holochain runs
+    if config.run_holochain.unwrap_or(true) {
+        // Start holochain signal receiver as standalone task
+        tokio::spawn(crate::holochain_signal_receiver());
 
-    // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
-    tokio::spawn(async {
-        if unyt_service::get_membrane_proof().is_none() {
-            info!("No Unyt membrane proof stored — skipping eager DNA install");
-            return;
-        }
-        match unyt_service::ensure_installed().await {
-            Ok(()) => info!("Unyt alliance DNA ready"),
-            Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
-        }
-    });
+        // Eagerly install Unyt alliance DNA in the background (only if membrane proof is available).
+        tokio::spawn(async {
+            if unyt_service::get_membrane_proof().is_none() {
+                info!("No Unyt membrane proof stored — skipping eager DNA install");
+                return;
+            }
+            match unyt_service::ensure_installed().await {
+                Ok(()) => info!("Unyt alliance DNA ready"),
+                Err(e) => error!("Failed to install Unyt alliance DNA: {}", e),
+            }
+        });
 
-    // Spawn payment completion polling (every 30 seconds)
-    tokio::spawn(async {
-        loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-            unyt_service::check_pending_payments().await;
-            unyt_service::check_pending_sends().await;
-        }
-    });
+        // Spawn payment completion polling (every 30 seconds)
+        tokio::spawn(async {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                unyt_service::check_pending_payments().await;
+                unyt_service::check_pending_sends().await;
+            }
+        });
+    } else {
+        info!(
+            "Holochain disabled (run_holochain=false) — skipping signal receiver and Unyt service"
+        );
+    }
 
     // Spawn credit change flush loop (every 2 seconds)
     // When any credit mutation marks a user dirty, this drains the set
@@ -606,8 +656,7 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
     tokio::spawn(async {
         use crate::db::Ad4mDb;
         use crate::pubsub::{
-            get_global_pubsub, COMPUTE_LOG_UPDATED_TOPIC, DIRTY_CREDIT_USERS,
-            HOSTING_USER_INFO_CHANGED_TOPIC, PENDING_COMPUTE_LOG_ENTRIES,
+            get_global_pubsub, DIRTY_CREDIT_USERS, HOSTING_USER_INFO_CHANGED_TOPIC,
         };
 
         loop {
@@ -689,25 +738,6 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
                         .await;
                 }
             }
-
-            // Drain and publish pending compute log entries
-            let pending_entries: Vec<crate::types::domain::ComputeLogEntry> = {
-                match PENDING_COMPUTE_LOG_ENTRIES.lock() {
-                    Ok(mut vec) => vec.drain(..).collect(),
-                    Err(e) => {
-                        error!(
-                            "Credit flush: failed to lock pending compute log entries: {}",
-                            e
-                        );
-                        Vec::new()
-                    }
-                }
-            };
-            for entry in pending_entries {
-                if let Ok(json) = serde_json::to_string(&entry) {
-                    pubsub.publish(&COMPUTE_LOG_UPDATED_TOPIC, &json).await;
-                }
-            }
         }
     });
 
@@ -752,6 +782,29 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<()> {
             .enable_all()
             .build()
             .unwrap();
-        runtime.block_on(api::start_server(config)).unwrap();
+        let result = runtime.block_on(api::start_server(config));
+        if let Err(e) = &result {
+            error!("REST API server failed: {:?}", e);
+        }
+        result
     })
+}
+
+/// For executor binaries: exit with status 1 once the REST API thread from
+/// [`run`] fails or panics.
+///
+/// Without it, a failed API ends only its own thread and leaves a process
+/// running with no API. The JS test harness then waits for the
+/// "API server starting" line until mocha's 1200 s timeout. Embedders that
+/// must outlive a failed API (the launcher) join the handle themselves.
+pub fn exit_when_api_fails(api_thread: JoinHandle<Result<(), AnyError>>) {
+    std::thread::spawn(move || {
+        let reason = match api_thread.join() {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("{:?}", e),
+            Err(_) => String::from("the REST API thread panicked"),
+        };
+        error!("REST API server failed, exiting: {}", reason);
+        std::process::exit(1);
+    });
 }

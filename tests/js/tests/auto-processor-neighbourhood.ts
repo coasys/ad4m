@@ -17,12 +17,13 @@
 import { PerspectiveProxy, Perspective, Link, LinkQuery, InterpretationRun } from "@coasys/ad4m";
 import type { AutoProcessorEvent } from "@coasys/ad4m";
 import { TestContext } from "./integration.test";
-import { sleep } from "../utils/utils";
+import { pollUntil, sleep } from "../utils/utils";
 import { waitUntil } from "../helpers/index";
 import fs from "fs";
 import { v4 as uuidv4 } from "uuid";
 import { expect } from "chai";
 import { ConversationSubgroup } from "./model/auto-processor-models";
+import { LinkLangConfig, holochainLinkLang, publishLinkLanguage } from "../utils/linkLangConfig";
 
 const DIFF_SYNC_OFFICIAL = fs.readFileSync("./scripts/perspective-diff-sync-hash").toString();
 
@@ -61,7 +62,12 @@ const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
   ? describe
   : (describe.skip as unknown as Mocha.SuiteFunction));
 
-export default function autoProcessorNeighbourhoodTests(testContext: TestContext) {
+export default function autoProcessorNeighbourhoodTests(
+  testContext: TestContext,
+  // Which link language carries the sync. Defaults to p-diff-sync; the
+  // local suite passes the server-link-language config.
+  getLinkLang: () => LinkLangConfig = () => holochainLinkLang(DIFF_SYNC_OFFICIAL),
+) {
   return () => {
     describeIfLLM("Auto-processor across two executors", function () {
       // Cumulative wait budget in the slowest test:
@@ -90,10 +96,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         await registerLlm(bob);
 
         const aliceHandle = await alice.perspective.add(`ap-channel-${processorId}`);
-        const socialContext = await alice.languages.applyTemplateAndPublish(
-          DIFF_SYNC_OFFICIAL,
-          JSON.stringify({ uid: uuidv4(), name: "auto-processor neighbourhood" }),
-        );
+        const socialContext = await publishLinkLanguage(alice, getLinkLang(), "auto-processor neighbourhood");
         const url = await alice.neighbourhood.publishFromPerspective(
           aliceHandle.uuid,
           socialContext.address,
@@ -102,7 +105,7 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
 
         const bobHandle = await bob.neighbourhood.joinFromUrl(url);
         await testContext.makeAllNodesKnown();
-        await sleep(2000);
+        await sleep(2000); // K2 space initialization after join + agent info exchange
 
         const aliceP = (await alice.perspective.byUUID(aliceHandle.uuid)) as PerspectiveProxy;
         const bobP = (await bob.perspective.byUUID(bobHandle.uuid)) as PerspectiveProxy;
@@ -130,8 +133,8 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
         // One merged stream: each executor reports its own passes, tagged with
         // the DID that ran them, so "who did what" is readable from one list.
         const events: AutoProcessorEvent[] = [];
-        await aliceP.addAutoProcessorEventListener((e) => events.push(e));
-        await bobP.addAutoProcessorEventListener((e) => events.push(e));
+        aliceP.on("auto-processor-event", (e) => events.push(e));
+        bobP.on("auto-processor-event", (e) => events.push(e));
 
         await aliceP.addAutoProcessor({
           processorId,
@@ -143,9 +146,19 @@ export default function autoProcessorNeighbourhoodTests(testContext: TestContext
           claimTtlMs: 60_000,
           ...config,
         } as any);
-        // Give the AutoProcessorConfig time to sync to Bob so his watcher can
-        // load it — otherwise Bob has no scope query and never gathers turns.
-        await sleep(3000);
+        // Wait for AutoProcessorConfig to sync to Bob so his watcher can load it.
+        // The config lives as a subject-class instance at node
+        // `ad4m://autoprocessor/{processorId}` — poll for its links on Bob's side.
+        await pollUntil(async () => {
+            try {
+                const bobLinks = await bobP.get(new LinkQuery({ source: `ad4m://autoprocessor/${processorId}` }));
+                // The config has 6+ required properties (processor_id, source_scope_query,
+                // interpretation_class, debounce_ms, batch_max, claim_ttl_ms). Poll until
+                // all required links sync — passing on the first link lets the watcher
+                // load a partial config and race the claim mechanism.
+                return bobLinks.length >= 6;
+            } catch { return false; }
+        }, { timeoutMs: 180000, intervalMs: 500, label: "AutoProcessorConfig fully syncs to Bob" });
 
         return { aliceP, bobP, events };
       }

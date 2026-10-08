@@ -15,6 +15,7 @@ type RpcHandler = unknown | ((params: Record<string, unknown>) => unknown);
 
 const MOCK_RESPONSES: Record<string, RpcHandler> = {
     'agent.get': { did: 'did:test:123', perspective: new Perspective(), directMessageLanguage: 'lang://dm' },
+    'events.watch': true,
     'agent.status': { did: 'did:test:123', didDocument: 'doc', isInitialized: true, isUnlocked: true },
     'agent.byDid': (p: Record<string, unknown>) => ({ did: p.did, perspective: new Perspective() }),
     'expression.get': (p: Record<string, unknown>) => ({
@@ -134,7 +135,7 @@ beforeEach(() => {
     rpcCallLog = [];
     MockWebSocket.instances = [];
     // Fresh client per test to avoid cache leakage
-    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+    ad4m = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
 });
 
 // ===================== NULLCACHE TESTS =====================
@@ -205,9 +206,6 @@ describe('AgentClient Cache', () => {
     });
 
     test('agent-updated event updates L1 cache', async () => {
-        // Subscribe to events
-        ad4m.agent.subscribeAgentUpdated();
-
         // First: populate cache via RPC
         const a1 = await ad4m.agent.byDID('did:test:event');
         expect(a1.did).toBe('did:test:event');
@@ -607,7 +605,8 @@ describe('ExpressionClient Cache — mutation & edge cases', () => {
 
 describe('AgentClient Cache — additional edge cases', () => {
     test('agent-updated event for unknown DID pre-populates cache', async () => {
-        ad4m.agent.subscribeAgentUpdated();
+        // The first byDID() starts the cache's agent-updated handler.
+        await ad4m.agent.byDID('did:test:other');
 
         // Emit event for a DID we never fetched
         const ws = lastOf(MockWebSocket.instances);
@@ -625,7 +624,7 @@ describe('AgentClient Cache — additional edge cases', () => {
         expect(agent.did).toBe('did:test:preload');
         expect(agent.directMessageLanguage).toBe('lang://pre');
 
-        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid');
+        const byDidCalls = rpcCallLog.filter(c => c.type === 'agent.byDid' && c.params.did === 'did:test:preload');
         expect(byDidCalls).toHaveLength(0);
     });
 
@@ -675,7 +674,7 @@ describe('AgentClient Cache — additional edge cases', () => {
 
 describe('Cache isolation between clients', () => {
     test('two Ad4mClient instances have independent caches', async () => {
-        const client2 = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const client2 = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
 
         await ad4m.agent.byDID('did:test:isolated');
         await ad4m.expression.get('lang://test/Qm-isolated');
@@ -705,7 +704,7 @@ describe('Ad4mClient cache integration', () => {
         // the clearByDidCache was called by checking the old client
         // Note: close() calls apiClient.closeAll() which may close sockets,
         // so we create a fresh client to verify the pattern
-        const fresh = new Ad4mClient('http://127.0.0.1:12000', 'test-token', false);
+        const fresh = new Ad4mClient('http://127.0.0.1:12000', 'test-token');
         await fresh.agent.byDID('did:test:close');
         // New client should make its own RPC (separate cache)
         expect(rpcCallLog.filter(c => c.type === 'agent.byDid')).toHaveLength(2);

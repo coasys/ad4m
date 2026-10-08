@@ -53,6 +53,13 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
+    env:
+      # Strip symbols from the binaries this job ships (the executor and the
+      # launcher). The executor drops from ~368 MB to ~293 MB. Local release
+      # builds keep their symbols, so a developer's panic backtrace still names
+      # functions; a shipped binary's names only file and line.
+      CARGO_PROFILE_RELEASE_STRIP: symbols
+
     steps:
     - name: Fetch source code
       uses: actions/checkout@v2

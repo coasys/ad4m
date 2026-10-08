@@ -4,10 +4,10 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, sleep, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, sleep, startExecutor, quitExecutor, pollUntil } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
-import { ExceptionInfo } from "@coasys/ad4m";
+import type { EventMap } from "@coasys/ad4m";
 
 const expect = chai.expect;
 chai.use(chaiAsPromised);
@@ -52,7 +52,7 @@ describe("Authentication integration tests", () => {
             // socket/reconnect state.
             let lastErr: unknown
             for (let attempt = 1; attempt <= 3; attempt++) {
-                ad4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+                ad4mClient = new Ad4mClient(baseUrl(apiPort))
                 try {
                     await ad4mClient.agent.generate("passphrase")
                     lastErr = null
@@ -124,10 +124,10 @@ describe("Authentication integration tests", () => {
             executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
                 apiPort, hcAdminPort, hcAppPort, false, "123");
        
-            adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123", false)
+            adminAd4mClient = new Ad4mClient(baseUrl(apiPort), "123")
             await adminAd4mClient.agent.generate("passphrase")
             
-            unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), undefined, false)
+            unAuthenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort))
         })
 
         after(async () => {
@@ -235,13 +235,13 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
         })
 
         it("user with invalid jwt can not query agent status", async () => {
             // @ts-ignore
-            let ad4mClient = new Ad4mClient(baseUrl(apiPort), "invalid-jwt", false)
+            let ad4mClient = new Ad4mClient(baseUrl(apiPort), "invalid-jwt")
 
             const call = async () => {
                 return await ad4mClient!.agent.status()
@@ -270,7 +270,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
 
             const call = async () => {
                 return await authenticatedAppAd4mClient!.agent.status()
@@ -299,7 +299,7 @@ describe("Authentication integration tests", () => {
             let jwt = await adminAd4mClient!.agent.generateJwt(requestId, rand)
 
             // @ts-ignore
-            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt, false)
+            let authenticatedAppAd4mClient = new Ad4mClient(baseUrl(apiPort), jwt)
             expect((await authenticatedAppAd4mClient!.agent.status()).isUnlocked).to.be.true;
 
             let oldApps = await adminAd4mClient!.agent.getApps();
@@ -320,10 +320,10 @@ describe("Authentication integration tests", () => {
         })
 
         it("requesting a capability toke should trigger a CapabilityRequested exception", async () => {
-            let excpetions: ExceptionInfo[] = [];
-            adminAd4mClient!.runtime.addExceptionCallback((e) => { excpetions.push(e); return null; })
-            adminAd4mClient!.runtime.subscribeExceptionOccurred();
-            
+            let excpetions: EventMap['exception-occurred']['exception'][] = [];
+            adminAd4mClient!.on('exception-occurred', ({ exception }) => { excpetions.push(exception) })
+            // Subscription-init delay: the subscription registered with the
+            // callback does not wait for the server, and exceptions are not redelivered.
             await sleep(1000);
 
             let requestId = await unAuthenticatedAppAd4mClient!.agent.requestCapability({
@@ -341,8 +341,8 @@ describe("Authentication integration tests", () => {
                     }
                 ] as CapabilityInput[]
             } as AuthInfoInput)
-            
-            await sleep(1000);
+
+            await pollUntil(() => excpetions.length >= 1, { timeoutMs: 5000, label: "capability request exception fires" });
 
             expect(excpetions.length).to.be.equal(1);
             expect(excpetions[0].type).to.be.equal("CAPABILITY_REQUESTED");

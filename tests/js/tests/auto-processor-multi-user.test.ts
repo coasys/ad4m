@@ -31,7 +31,6 @@ import { fileURLToPath } from "url";
 import { expect } from "chai";
 import {
   baseUrl,
-  sleep,
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
@@ -106,7 +105,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       bootstrapUrl!,
     );
 
-    admin = new Ad4mClient(baseUrl(apiPort), undefined, false);
+    admin = new Ad4mClient(baseUrl(apiPort));
     await admin.agent.generate("passphrase");
     await admin.runtime.setMultiUserEnabled(true);
 
@@ -129,8 +128,8 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     // Log in both — one JWT per user, one client per user.
     const aliceToken = await admin.agent.loginUser("alice@apmutest.local", "password");
     const bobToken = await admin.agent.loginUser("bob@apmutest.local", "password");
-    alice = new Ad4mClient(baseUrl(apiPort), aliceToken, false);
-    bob = new Ad4mClient(baseUrl(apiPort), bobToken, false);
+    alice = new Ad4mClient(baseUrl(apiPort), aliceToken);
+    bob = new Ad4mClient(baseUrl(apiPort), bobToken);
 
     // Trigger last_seen updates for both — the supervisor's freshness filter
     // is what decides whether to spawn a loop per user, and last_seen is set
@@ -162,7 +161,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
     await ConversationSubgroup.register(aliceP);
 
     const events: AutoProcessorEvent[] = [];
-    await aliceP.addAutoProcessorEventListener((e) => events.push(e));
+    aliceP.on("auto-processor-event", (e) => events.push(e));
 
     await aliceP.addAutoProcessor({
       processorId: "managed-users-channel",
@@ -173,9 +172,6 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
       batchMax: 32,
       claimTtlMs: 60_000,
     } as any);
-
-    // Give the supervisor its first tick (5s) to spawn per-user loops.
-    await sleep(6_000);
 
     // `perspective.add` assigns the caller as the owner, so a strict
     // ownership regime would make Bob's `byUUID` return `null`

@@ -473,4 +473,56 @@ describe("inverse relations appear once in the generated shape", () => {
     );
     expect(props.map((p) => p.name).sort()).toEqual(["comments", "inReplyTo"]);
   });
+
+  describe("datatype inferred from class-field initialisers", () => {
+    it("maps number and boolean fields to xsd://decimal and xsd://boolean", () => {
+      @Model({ name: "Counter" })
+      class Counter extends Ad4mModel {
+        @Property({ through: "ns://count" })
+        count: number = 0;
+
+        @Property({ through: "ns://done" })
+        done: boolean = false;
+
+        @Property({ through: "ns://label" })
+        label: string = "";
+
+        @Property({ through: "ns://explicit", datatype: "xsd://decimal" })
+        explicit: number = 0;
+
+        // No initialiser: no runtime type to read, so it keeps the string default.
+        @Property({ through: "ns://bare" })
+        bare!: number;
+      }
+
+      const { shape } = (Counter as any).generateSHACL();
+      const datatype = Object.fromEntries(shape.properties.map((p: any) => [p.name, p.datatype]));
+      expect(datatype).toEqual({
+        count: "xsd://decimal",
+        done: "xsd://boolean",
+        label: "xsd://string",
+        explicit: "xsd://decimal",
+        bare: "xsd://string",
+      });
+      expect(
+        flatten(shape).find((l) => l.source === "ns://Counter.count" && l.predicate === "sh://datatype")?.target,
+      ).toBe("xsd://decimal");
+    });
+
+    it("falls back to the string default when the constructor cannot run without arguments", () => {
+      @Model({ name: "NeedsArgs" })
+      class NeedsArgs extends Ad4mModel {
+        @Property({ through: "ns://count" })
+        count: number = 0;
+
+        constructor(perspective: any, baseExpression?: string) {
+          super(perspective, baseExpression);
+          if (!perspective) throw new Error("perspective required");
+        }
+      }
+
+      const { shape } = (NeedsArgs as any).generateSHACL();
+      expect(shape.properties.find((p: any) => p.name === "count").datatype).toBe("xsd://string");
+    });
+  });
 });

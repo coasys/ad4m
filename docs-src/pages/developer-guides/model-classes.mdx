@@ -67,7 +67,7 @@ This is how AD4M tooling (the MCP server, the CLI, the management UI) discovers 
 
 A `SHACLShape` is not just an in-process JavaScript object. It also has two serialized forms that make a shape portable beyond the app that defined it:
 
-- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` / `addSubjectClass` RPC carries a `shaclJson` string. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
+- **JSON** — the format used over the wire between the client and the AD4M executor. Every `addSdna` RPC carries a `shaclJson` string; `addShacl` and model registration send `shape.toJSON()`. This is the format you want to ship a shape between apps, store it in a config file, paste it into a Neighbourhood definition, or generate from another tool.
 - **Turtle** — the standard W3C SHACL serialization (RDF Turtle). Export-only in the client today (no `fromTurtle` round-trip yet), but useful for sharing shapes with non-AD4M tooling and for human-readable review.
 
 Both are produced by the same `SHACLShape`:
@@ -133,18 +133,17 @@ Because the JSON form is exactly what the executor consumes over RPC, an app —
 
 ```typescript
 // shape received over the wire / loaded from a file / fetched from a registry
-const shapeJson = JSON.parse(await readFile("recipe.shacl.json", "utf8"));
+const shape = SHACLShape.fromJSON(JSON.parse(await readFile("recipe.shacl.json", "utf8")));
 
 // Install it directly on a perspective
-await perspective.addSubjectClass("Recipe", JSON.stringify(shapeJson));
+await perspective.addShacl("Recipe", shape);
 
 // Optionally, hydrate a model class from it for ergonomic access
-const shape = SHACLShape.fromJSON(shapeJson);
 const Recipe = Ad4mModel.fromSHACL(shape, "Recipe");
 const recipes = await Recipe.findAll(perspective);
 ```
 
-This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addSubjectClass`, and from then on both apps read and write the same Subject Class against the same Perspective.
+This is the canonical path for sharing schemas across apps: the publisher serializes a shape to JSON (or Turtle for documentation), the consumer installs it with `addShacl`, and from then on both apps read and write the same Subject Class against the same Perspective.
 
 ### Option 3: From JSON Schema (Dynamic)
 
@@ -413,7 +412,7 @@ Each relation decorator supports two calling conventions:
 | Decorator | Cardinality | Generated methods | Ownership |
 |-----------|------------|-------------------|-----------|
 | `@HasMany` | One-to-many | `add*`, `remove*`, `set*` | Parent owns |
-| `@HasOne` | One-to-one | Property setter | Parent owns |
+| `@HasOne` | One-to-one | `set*` (also `add*`, `remove*`), or assign and `save()` | Parent owns |
 | `@BelongsToOne` | Many-to-one | Read-only | Child references |
 | `@BelongsToMany` | Many-to-many | Read-only | Child references |
 <Callout type="info" emoji="ℹ️">
@@ -445,6 +444,69 @@ const batchId = await perspective.createBatch();
 await recipe.addComments(comment, batchId);
 await perspective.commitBatch(batchId);
 ```
+
+`@HasOne` with a `through` gets the same three methods. Use `set*` to point it somewhere: it takes
+an ID or a model instance and replaces whatever the relation held. Writing works the same whether
+or not the relation names a target class, so a `polymorphic` to-one is written the same way.
+
+`add*` writes a second link and leaves the first in place. A read then returns the newest link,
+unless the relation names a `target` class that has a flag or a required property, and does not set
+`filter: false`. Such a read goes through a type-checking query and returns whichever row that query
+yields first. Either way the old link stays in the graph.
+
+```typescript
+@Model({ name: "Note" })
+class Note extends Ad4mModel {
+  @HasOne({ through: "note://about", polymorphic: true })
+  about: string = "";
+}
+
+// At creation: an ID, an instance, or a one-element array
+const note = await Note.create(perspective, { about: recipe.id });
+
+// Later
+await note.setAbout(otherRecipe);
+await note.setAbout([]); // clears it
+```
+
+The generated methods are added at runtime and are not declared on the class, so TypeScript does
+not know about them. Declare them on the class or call them through a cast.
+
+#### Ordered relations
+
+A `@HasMany` is a set by default. Assigning the same members in another order is not a change, and
+reads come back in link order (or in no stated order, when the relation is read through a
+type-checking query, below), never in an order someone chose. Add `ordering` to make the sequence part of the data:
+
+```typescript
+@HasMany({
+  through: "board://task",
+  target: () => Task,
+  ordering: { strategy: "linkedList" },
+})
+tasks: string[] = [];
+```
+
+Assigning the array (`board.tasks = [c, a, b]` then `save()`, or `setTasks([c, a, b])`) writes
+ordering entries alongside the member links. Concurrent reorders by different agents merge rather
+than overwrite each other.
+
+The member links decide what is in the relation; the entries decide only where things go. A member
+with no entry is still returned, after every positioned member. A member has no entry when it was
+written:
+
+- by `add*`, which writes the member link only
+- by raw `addLink`, an MCP tool, or a peer that does not know the strategy
+- before the relation had `ordering`
+
+Where those members go depends on how the relation is read:
+
+- **Through a type-checking query**, which is the case when the relation names a `target` class
+  that has a flag or a required property, and does not set `filter: false`: the query carries no
+  order, so their order among themselves is unspecified. A collection with no entries at all, such
+  as one written before `ordering` was added, therefore reads in an unspecified order until the
+  next assignment writes a full sequence.
+- **Otherwise:** oldest link first.
 
 ### Flags
 
@@ -1057,6 +1119,24 @@ builder.dispose();
 ```
 
 Always call `dispose()` when you're done with a subscription to prevent memory leaks.
+
+#### Subscription sharing and `dispose()`
+
+The executor keeps one live subscription per distinct query and agent. Two
+builders that subscribe to the same query (two components showing the same
+list, for example) share that subscription: the executor re-evaluates the
+query once per change and pushes one update that both builders receive.
+
+`dispose()` releases only the calling builder's hold. Other subscribers of the
+same query keep receiving updates, and the executor drops the subscription
+when the last holder disposes, or when no holder has sent a keepalive for a
+while (a page that was closed without disposing).
+
+The local cleanup, stopping the keepalive and the update listener, happens
+synchronously, so a plain `builder.dispose()` is sufficient. The method also
+returns a promise that resolves once the executor has acknowledged the release;
+await it when a following step depends on that, as `subscribe()` itself does
+before registering a replacement subscription.
 
 ## Transactions
 

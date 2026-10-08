@@ -8,6 +8,12 @@ import { Ad4mConnectOptions, ConnectionStates, AuthStates, ConfigStates, RemoteH
 import { fetchUserInfo, requestPayment } from './services/hostIndex';
 
 const DEFAULT_PORT = 12000;
+/** What the executor says, in words, when a call needs keys a locked wallet cannot open. */
+const LOCKED_WALLET = "Cannot extractByTags from a ciphered wallet. You must unlock first.";
+
+/** \`error\` is set for 'unauthenticated': the refusal, which decides whether the token is dropped. */
+type AuthReading = { state: 'authenticated' | 'locked' | 'unauthenticated'; error?: any };
+
 const DEFAULT_INDEX_URL = "https://hosting.ad4m.dev";
 const CREDIT_POLL_INTERVAL_MS = 60000;
 const DEFAULT_LOW_CREDIT_THRESHOLD = 10;
@@ -56,6 +62,7 @@ export default class Ad4mConnect extends EventTarget {
   hostIndexUrl: string;
   lowCreditThreshold: number;
   private creditPollInterval: ReturnType<typeof setInterval> | null = null;
+  private releaseCreditListener?: () => void;
 
   private embeddedResolve?: (client: Ad4mClient) => void;
   private embeddedReject?: (error: Error) => void;
@@ -150,18 +157,47 @@ export default class Ad4mConnect extends EventTarget {
       });
     }
 
-    // Standalone mode - connect directly
+    // Standalone mode - connect directly.
+    //
+    // The health check and the first authenticated call run together. The health check exists to
+    // turn a wrong URL into a readable error, and awaiting it before opening the socket cost every
+    // successful connect an extra round trip. Its answer still decides: when it fails, its error is
+    // thrown at once, without waiting for the auth read (which can hang on an unreachable socket).
+    //
+    // The token rides in the socket URL, so it goes out early only to the URL it was last accepted
+    // at. A different URL gets no socket, and no token, until its health check passes.
+    const open = () => {
+      const client = new Ad4mClient(this.baseUrl, this.token);
+      const auth: Promise<AuthReading> = this.readAuth(client)
+        .catch((error) => ({ state: 'unauthenticated' as const, error }));
+      return { client, auth };
+    };
+    let session = getLocal("ad4m-url") === this.url ? open() : undefined;
     try {
       await checkConnection(this.baseUrl);
-      setLocal("ad4m-url", this.url);
-      this.ad4mClient = this.buildClient();
-      await this.checkAuth();
-      return this.ad4mClient;
     } catch (error) {
+      session?.client.close();
       console.error('[Ad4m Connect] Connection failed:', error);
       this.notifyConnectionChange("error");
       throw error;
     }
+    if (!session) session = open();
+    const auth = await session.auth;
+    setLocal("ad4m-url", this.url);
+    this.adoptClient(session.client);
+    this.applyAuth(auth);
+    return this.ad4mClient;
+  }
+
+  /** Make this client the connection, closing the one it replaces. */
+  private adoptClient(client: Ad4mClient): void {
+    this.notifyConnectionChange("connecting");
+    // Close old client's WebSocket connections to avoid connection pool exhaustion
+    if (this.ad4mClient && this.ad4mClient !== client && typeof this.ad4mClient.close === 'function') {
+      this.ad4mClient.close();
+    }
+    this.ad4mClient = client;
+    this.notifyConnectionChange("connected");
   }
 
   private buildClient(): Ad4mClient {
@@ -172,8 +208,7 @@ export default class Ad4mConnect extends EventTarget {
       this.ad4mClient.close();
     }
 
-    // Defer subscriptions until auth is verified to avoid 403 spam
-    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token, false);
+    this.ad4mClient = new Ad4mClient(this.baseUrl, this.token);
     this.notifyConnectionChange("connected");
 
     return this.ad4mClient;
@@ -181,7 +216,7 @@ export default class Ad4mConnect extends EventTarget {
 
   private async withTempClient<T>(wsUrl: string, callback: (client: Ad4mClient) => Promise<T>): Promise<T> {
     const baseUrl = wsUrlToHttpBase(wsUrl);
-    const client = new Ad4mClient(baseUrl, undefined, false);
+    const client = new Ad4mClient(baseUrl);
     try {
       return await callback(client);
     } finally {
@@ -190,48 +225,60 @@ export default class Ad4mConnect extends EventTarget {
   }
 
   async checkAuth(): Promise<boolean> {
+    console.log('[Ad4m Connect] Checking authentication status...');
+    return this.applyAuth(await this.readAuth(this.ad4mClient));
+  }
+
+  /**
+   * What the executor says about this session, with nothing applied yet.
+   *
+   * \`agent.status\` first: on an authorised session — every connect after the first — it answers
+   * in one call. \`agent.isLocked\` needs no capability, so when \`status\` fails
+   * it is the one that can tell a locked wallet from a refused token.
+   */
+  private async readAuth(client: Ad4mClient): Promise<AuthReading> {
+    let statusError: any;
     try {
-      console.log('[Ad4m Connect] Checking authentication status...');
-
-      // isLocked may not exist on older executors (404). Treat errors
-      // as "not locked" and fall through to the status check.
-      let isLocked = false;
-      try {
-        isLocked = await this.ad4mClient.agent.isLocked();
-      } catch (lockErr) {
-        const msg = lockErr?.message || '';
-        if (msg === "Cannot extractByTags from a ciphered wallet. You must unlock first.") {
-          console.log('[Ad4m Connect] Agent wallet is locked (error path)');
-          this.notifyAuthChange("locked");
-          return true;
-        }
-        // 404 / network error → assume not locked
-        console.warn('[Ad4m Connect] isLocked check unavailable, assuming unlocked:', msg);
-      }
-
-      if (isLocked) {
-        console.log('[Ad4m Connect] Agent wallet is locked');
-        this.notifyAuthChange("locked");
-      } else {
-        await this.ad4mClient.agent.status();
-        this.ad4mClient.startSubscriptions();
-        this.notifyAuthChange("authenticated");
-      }
-
-      return true;
+      const status = await client.agent.status();
+      // A node with no agent yet has nothing to authenticate against: the user must create and
+      // unlock an agent first, which is what `locked` asks for.
+      if (!status.isInitialized) return { state: 'locked' };
+      return { state: status.isUnlocked ? 'authenticated' : 'locked' };
     } catch (error) {
-      console.error('[Ad4m Connect] Authentication check failed:', error);
-      
-      // Clear token if it's invalid (signed by different agent)
-      if (error.message === "InvalidSignature") {
-        console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
-        this.token = '';
-        removeLocal('ad4m-token');
-      }
-      
-      this.notifyAuthChange("unauthenticated");
-      return false;
+      if (error?.message === LOCKED_WALLET) return { state: 'locked' };
+      statusError = error;
     }
+
+    try {
+      if (await client.agent.isLocked()) return { state: 'locked' };
+    } catch (lockErr) {
+      if (lockErr?.message === LOCKED_WALLET) return { state: 'locked' };
+      console.warn('[Ad4m Connect] isLocked check failed:', lockErr?.message);
+    }
+    return { state: 'unauthenticated', error: statusError };
+  }
+
+  /** Act on what \`readAuth\` found. Answers whether it found anything usable — see \`checkAuth\`. */
+  private applyAuth(reading: AuthReading): boolean {
+    if (reading.state === 'locked') {
+      console.log('[Ad4m Connect] Agent wallet is locked');
+      this.notifyAuthChange("locked");
+      return true;
+    }
+    if (reading.state === 'authenticated') {
+      this.notifyAuthChange("authenticated");
+      return true;
+    }
+
+    console.error('[Ad4m Connect] Authentication check failed:', reading.error);
+    // Clear token if it's invalid (signed by different agent)
+    if (reading.error?.message === "InvalidSignature") {
+      console.log('[Ad4m Connect] Clearing invalid token due to InvalidSignature');
+      this.token = '';
+      removeLocal('ad4m-token');
+    }
+    this.notifyAuthChange("unauthenticated");
+    return false;
   }
 
   // Disconnect and clean up
@@ -252,6 +299,7 @@ export default class Ad4mConnect extends EventTarget {
     this.connectedHost = null;
     this.userInfo = null;
     this.stopCreditPolling();
+    this.releaseCreditListener?.();
     removeLocal('ad4m-last-host');
 
     // Update connection state
@@ -264,43 +312,29 @@ export default class Ad4mConnect extends EventTarget {
 
   /**
    * Subscribe to real-time credit updates.
-   * Falls back to polling if the subscription is not supported by the executor.
+   * Polling runs beside it as a safety net.
    */
   startCreditSubscription(): void {
     if (!this.ad4mClient) return;
 
-    try {
-      this.ad4mClient.agent.addHostingUserInfoChangedListener((info) => {
-        const userInfo: UserInfo = {
-          email: info.email,
-          remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
-          hotWalletAddress: info.hotWalletAddress || null,
-          freeAccess: info.freeAccess,
-        };
-        this.userInfo = userInfo;
-        this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
+    this.releaseCreditListener?.();
+    this.releaseCreditListener = this.ad4mClient.on('hosting-user-info-changed', (info) => {
+      const userInfo: UserInfo = {
+        email: info.email,
+        remainingCredits: info.remainingCredits === 'unlimited' ? Infinity : (parseFloat(info.remainingCredits) || 0),
+        hotWalletAddress: info.hotWalletAddress || null,
+        freeAccess: info.freeAccess,
+      };
+      this.userInfo = userInfo;
+      this.dispatchEvent(new CustomEvent('userinfochange', { detail: userInfo }));
 
-        if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
-          this.dispatchEvent(new CustomEvent('creditdepleted'));
-        }
-        if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
-          this.dispatchEvent(new CustomEvent('creditlow'));
-        }
-      });
-      this.ad4mClient.agent.subscribeHostingUserInfoChanged();
-    } catch (e) {
-      console.warn('[Ad4m Connect] Subscription not available, falling back to polling:', e);
-    }
-
-    // Subscribe to compute log updates for real-time activity log
-    try {
-      this.ad4mClient.agent.addComputeLogUpdatedListener((entry) => {
-        this.dispatchEvent(new CustomEvent('computelogentry', { detail: entry }));
-      });
-      this.ad4mClient.agent.subscribeComputeLogUpdated();
-    } catch (e) {
-      console.warn('[Ad4m Connect] Compute log subscription not available:', e);
-    }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= 0) {
+        this.dispatchEvent(new CustomEvent('creditdepleted'));
+      }
+      if (!userInfo.freeAccess && userInfo.remainingCredits <= this.lowCreditThreshold) {
+        this.dispatchEvent(new CustomEvent('creditlow'));
+      }
+    });
 
     // Always start polling as a safety-net (at a longer 60s interval)
     this.startCreditPolling();
@@ -339,7 +373,7 @@ export default class Ad4mConnect extends EventTarget {
     }
   }
 
-  async requestTopUp(amountHOT: number): Promise<{ success: boolean; message: string }> {
+  async requestTopUp(amountHOT: number): Promise<{ success: boolean; amountHOT: string }> {
     if (!this.ad4mClient) throw new Error('Not connected');
     return requestPayment(this.ad4mClient, amountHOT);
   }
@@ -433,7 +467,6 @@ export default class Ad4mConnect extends EventTarget {
             this.ad4mClient = new Ad4mClient(
               'http://proxy', // URL ignored by PostMessageWebSocket; HTTP requests are proxied via fetchImpl
               normalizedToken,
-              false,          // defer subscriptions until auth confirmed
               { webSocketImpl: WsImpl as unknown as new (url: string) => WebSocket, fetchImpl }
             );
             this.notifyConnectionChange('connected');

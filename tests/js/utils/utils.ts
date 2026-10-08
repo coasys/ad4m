@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "path";
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
+import { configureSharedStores } from './sharedStores';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -199,6 +200,15 @@ function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
     return sharedLocalServices;
 }
 
+/**
+ * How long startExecutor() waits for the readiness markers before it kills
+ * the executor and rejects. A healthy start takes well under this; the bound
+ * turns a stalled start into a logged failure instead of mocha's 1200 s hang.
+ */
+const EXECUTOR_STARTUP_TIMEOUT_MS = 300_000;
+/** Output lines startExecutor() includes when the executor never gets ready. */
+const STARTUP_LOG_TAIL_LINES = 50;
+
 export async function startExecutor(dataPath: string,
     bootstrapSeedPath: string,
     apiPort: number,
@@ -221,8 +231,10 @@ export async function startExecutor(dataPath: string,
     // Off by default, matching the executor's default: only the static
     // instance_* surface is advertised.
     dynamicClassTools: boolean = false,
+    runHolochain: boolean = true,
+    sharedStores: boolean = true,
 ): Promise<ChildProcess> {
-    if (!proxyUrl || !bootstrapUrl) {
+    if (runHolochain && (!proxyUrl || !bootstrapUrl)) {
         const services = await ensureSharedLocalServices();
         proxyUrl = services.proxyUrl!;
         bootstrapUrl = services.bootstrapUrl!;
@@ -230,7 +242,7 @@ export async function startExecutor(dataPath: string,
             relayUrl = services.relayUrl;
         }
     }
-    const command = path.resolve(__dirname, '..', '..', '..','target', 'release', 'ad4m-executor');
+    const command = executorBinary();
 
     const effectiveDataPath = path.join(
         os.tmpdir(),
@@ -242,10 +254,16 @@ export async function startExecutor(dataPath: string,
     if (effectiveDataPath !== dataPath) {
         console.log(`Using shortened executor data path: ${effectiveDataPath}`);
     }
-    let executorProcess = null as ChildProcess | null;
     rmSync(dataPath, { recursive: true, force: true })
     rmSync(effectiveDataPath, { recursive: true, force: true })
     execSync(`${command} init --data-path ${effectiveDataPath} --network-bootstrap-seed ${bootstrapSeedPath}`, {cwd: process.cwd()})
+
+    // Shared mode for the local language-language and neighbourhood store,
+    // so executors see each other's published languages and neighbourhoods
+    // (see sharedStores.ts). Off only for tests of the default KV mode.
+    if (sharedStores) {
+        configureSharedStores(effectiveDataPath, bootstrapSeedPath);
+    }
 
     // Symlink legacy dataPath → effectiveDataPath so test helpers that
     // reference the original path (e.g. injectPublishingAgent.js) still work.
@@ -269,24 +287,70 @@ export async function startExecutor(dataPath: string,
         'run',
         '--app-data-path', effectiveDataPath,
         '--port', String(apiPort),
-        '--hc-admin-port', String(hcAdminPort),
-        '--hc-app-port', String(hcAppPort),
-        '--hc-proxy-url', proxyUrl,
-        '--hc-bootstrap-url', bootstrapUrl,
-        '--hc-use-bootstrap', 'true',
-        '--hc-use-proxy', 'true',
-        '--hc-use-local-proxy', 'true',
-        '--hc-use-mdns', 'true',
         '--language-language-only', String(languageLanguageOnly),
         '--run-dapp-server', 'false',
     ];
+    if (runHolochain) {
+        args.push(
+            '--hc-admin-port', String(hcAdminPort),
+            '--hc-app-port', String(hcAppPort),
+            '--hc-proxy-url', proxyUrl!,
+            '--hc-bootstrap-url', bootstrapUrl!,
+            '--hc-use-bootstrap', 'true',
+            '--hc-use-proxy', 'true',
+            '--hc-use-local-proxy', 'true',
+            '--hc-use-mdns', 'true',
+        );
+    } else {
+        args.push('--run-holochain', 'false');
+    }
     if (relayUrl) { args.push('--hc-relay-url', relayUrl); }
     if (enableMcp) { args.push('--enable-mcp', 'true'); }
     if (mcpPort) { args.push('--mcp-port', String(mcpPort)); }
     if (dynamicClassTools) { args.push('--dynamic-class-tools', 'true'); }
     if (adminCredential) { args.push('--admin-credential', adminCredential); }
 
-    executorProcess = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    return spawnExecutor(args, apiPort, { enableMcp });
+}
+
+/** The `ad4m-executor` binary the suites run. */
+export function executorBinary(): string {
+    return path.resolve(__dirname, '..', '..', '..', 'target', 'release', 'ad4m-executor');
+}
+
+/**
+ * Spawns `ad4m-executor <args>` and resolves once the RPC port (and MCP, if
+ * `enableMcp`) logs that it is listening; rejects if the process exits
+ * first. `env` is added to this process's environment.
+ */
+export async function spawnExecutor(
+    args: string[],
+    apiPort: number,
+    opts: {
+        enableMcp?: boolean;
+        env?: Record<string, string>;
+        /** Receives every chunk of stdout and stderr from the start. */
+        onOutput?: (text: string) => void;
+    } = {},
+): Promise<ChildProcess> {
+    const { enableMcp = false, env = {}, onOutput } = opts;
+    const executorProcess = spawn(executorBinary(), args, {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, ...env },
+    });
+    // Decode as a stream, so a multibyte character split across two chunks
+    // survives in the startup-failure tail. Every data handler below gets strings.
+    executorProcess.stdout!.setEncoding('utf8');
+    executorProcess.stderr!.setEncoding('utf8');
+    // The last output lines, for the error when the executor never gets ready.
+    const recentOutput: string[] = [];
+    const recordOutput = (data: any) => {
+        recentOutput.push(...data.toString().split('\n').filter((line: string) => line.trim()));
+        recentOutput.splice(0, Math.max(0, recentOutput.length - STARTUP_LOG_TAIL_LINES));
+    };
+    executorProcess.stdout!.on('data', recordOutput);
+    executorProcess.stderr!.on('data', recordOutput);
+
     let executorReady = new Promise<void>((resolve, reject) => {
         // REST branch no longer emits the old `listening on http://127.0.0.1:<port>`
         // marker consistently. Accept either the legacy marker or the REST startup log so tests
@@ -298,9 +362,37 @@ export async function startExecutor(dataPath: string,
         let mcpReady = !enableMcp;
         let resolved = false;
 
+        // Without these, an executor that dies or stalls before the marker
+        // (e.g. the API port is taken: it logs the bind error and exits 1)
+        // leaves this promise pending until mocha's 1200 s timeout.
+        const fail = (reason: string) => {
+            if (resolved) return;
+            resolved = true;
+            clearTimeout(timer);
+            reject(new Error(
+                `Executor on API port ${apiPort} ${reason}. Last ${recentOutput.length} output lines:\n` +
+                recentOutput.join('\n'),
+            ));
+        };
+        // 'close', not 'exit': 'exit' can fire while the pipes still hold the
+        // executor's last lines, which are the ones that say why it died.
+        const onClose = (code: number | null, signal: NodeJS.Signals | null) =>
+            fail(`exited before it was ready (code ${code}, signal ${signal})`);
+        const onError = (error: Error) => fail(`could not be started: ${error.message}`);
+        const timer = setTimeout(() => {
+            // Kill it, so it does not keep holding its ports after we give up.
+            executorProcess!.kill('SIGKILL');
+            fail(`was not ready after ${EXECUTOR_STARTUP_TIMEOUT_MS / 1000} s`);
+        }, EXECUTOR_STARTUP_TIMEOUT_MS);
+        executorProcess!.once('close', onClose);
+        executorProcess!.once('error', onError);
+
         const maybeResolve = () => {
             if (!resolved && apiReady && mcpReady) {
                 resolved = true;
+                clearTimeout(timer);
+                executorProcess!.off('close', onClose);
+                executorProcess!.off('error', onError);
                 resolve();
             }
         };
@@ -315,15 +407,17 @@ export async function startExecutor(dataPath: string,
             maybeResolve();
         };
 
-        executorProcess!.stdout!.on('data', (data: any) => checkReady(data.toString()));
-        executorProcess!.stderr!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess.stdout!.on('data', (data: any) => checkReady(data.toString()));
+        executorProcess.stderr!.on('data', (data: any) => checkReady(data.toString()));
     })
 
-    executorProcess!.stdout!.on('data', (data) => {
+    executorProcess.stdout!.on('data', (data) => {
         console.log(`${data}`);
+        onOutput?.(data.toString());
     });
-    executorProcess!.stderr!.on('data', (data) => {
+    executorProcess.stderr!.on('data', (data) => {
         console.log(`${data}`);
+        onOutput?.(data.toString());
     });
 
     console.log("Waiting for executor to settle...")
@@ -337,6 +431,93 @@ export function baseUrl(port: number): string {
 
 export function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Poll a predicate until it returns true, or throw with `label` after
+ * `timeoutMs`.
+ *
+ * Replaces the `await sleep(N); expect(x)` pattern: the test completes as
+ * soon as the condition holds and only fails after a bounded timeout.
+ * Only for POSITIVE conditions: an absence check ("X does not happen") passes
+ * on the first tick. Use `assertStaysFalse` after a positive barrier for those.
+ *
+ * The predicate may be sync or async. Exceptions from it are treated as
+ * "not yet true"; the last one is reported in the timeout message.
+ */
+export async function pollUntil(
+    predicate: () => boolean | Promise<boolean>,
+    opts: { timeoutMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<void> {
+    const { timeoutMs = 15000, intervalMs = 200, label = "condition" } = opts;
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+        try {
+            if (await predicate()) return;
+        } catch (err) { lastError = err; /* treat as "not yet" */ }
+        await sleep(intervalMs);
+    }
+    const suffix = lastError ? ` (last error: ${lastError instanceof Error ? lastError.message : String(lastError)})` : "";
+    throw new Error(`pollUntil timed out after ${timeoutMs}ms waiting for: ${label}${suffix}`);
+}
+
+/**
+ * Resolves true once `child` has exited (or had already), false after `timeoutMs`.
+ * Use this, not `child.killed`: `killed` only records that a signal was delivered.
+ */
+export function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+    if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const onExit = () => { clearTimeout(timer); resolve(true); };
+        const timer = setTimeout(() => { child.off("exit", onExit); resolve(false); }, timeoutMs);
+        child.once("exit", onExit);
+    });
+}
+
+/** SIGTERM `child`, and SIGKILL it if it has not exited within `graceMs`; waits for the exit either way. */
+export async function stopChildProcess(child: ChildProcess, graceMs = 5000): Promise<void> {
+    child.kill("SIGTERM");
+    if (await waitForExit(child, graceMs)) return;
+    child.kill("SIGKILL");
+    await waitForExit(child, graceMs);
+}
+
+/**
+ * Actively polls a predicate for `waitMs` and fails as soon as it becomes true.
+ * Use this for negative assertions ("X should NOT happen"), and run it after a
+ * positive barrier or with a window at least as long as the latency of the
+ * thing that must not happen.
+ *
+ * A predicate that throws counts as "not evaluable", not as false: if it never
+ * evaluated successfully during the window, this fails with the last error, so
+ * a broken predicate cannot pass the check vacuously.
+ */
+export async function assertStaysFalse(
+    predicate: () => boolean | Promise<boolean>,
+    opts: { waitMs?: number; intervalMs?: number; label?: string } = {},
+): Promise<void> {
+    const { waitMs = 1000, intervalMs = 100, label = "condition" } = opts;
+    const deadline = Date.now() + waitMs;
+    let evaluations = 0;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+        let value: boolean;
+        try {
+            value = await predicate();
+            evaluations++;
+        } catch (err) {
+            lastError = err;
+            await sleep(intervalMs);
+            continue;
+        }
+        if (value) throw new Error(`assertStaysFalse failed: ${label} became true`);
+        await sleep(intervalMs);
+    }
+    if (evaluations === 0) {
+        const detail = lastError instanceof Error ? lastError.message : String(lastError);
+        throw new Error(`assertStaysFalse: ${label} never evaluated in ${waitMs}ms (last error: ${detail})`);
+    }
 }
 
 /**

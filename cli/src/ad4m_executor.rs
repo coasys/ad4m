@@ -55,12 +55,13 @@ mod languages;
 mod neighbourhoods;
 mod perspectives;
 mod repl;
+mod run_config;
 mod runtime;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use dev::DevFunctions;
-use rust_executor::{config::TlsConfig, Ad4mConfig};
+use run_config::{process_env, ResolvedRun, RunArgs};
 
 /// AD4M command line interface.
 /// https://ad4m.dev
@@ -120,67 +121,19 @@ enum Domain {
         #[arg(short, long, action)]
         network_bootstrap_seed: Option<String>,
     },
-    Run {
-        #[arg(short, long, action)]
-        app_data_path: Option<String>,
-        #[arg(short, long, action)]
-        network_bootstrap_seed: Option<String>,
-        #[arg(short, long, action)]
-        language_language_only: Option<bool>,
-        #[arg(long, action)]
-        run_dapp_server: Option<bool>,
-        #[arg(short = 'p', long = "port", action)]
-        port: Option<u16>,
-        #[arg(long, action)]
-        hc_admin_port: Option<u16>,
-        #[arg(long, action)]
-        hc_app_port: Option<u16>,
-        #[arg(long, action)]
-        hc_use_bootstrap: Option<bool>,
-        #[arg(long, action)]
-        hc_use_local_proxy: Option<bool>,
-        #[arg(long, action)]
-        hc_use_mdns: Option<bool>,
-        #[arg(long, action)]
-        hc_use_proxy: Option<bool>,
-        #[arg(long, action)]
-        hc_proxy_url: Option<String>,
-        #[arg(long, action)]
-        hc_bootstrap_url: Option<String>,
-        #[arg(long, action)]
-        hc_relay_url: Option<String>,
-        #[arg(short, long, action)]
-        connect_holochain: Option<bool>,
-        /// Admin credential granting full capabilities to whoever presents it.
-        /// Prefer the AD4M_ADMIN_CREDENTIAL environment variable: a flag value is
-        /// visible to every user on the host via `ps` and stays in shell history.
-        #[arg(long, action, env = "AD4M_ADMIN_CREDENTIAL", hide_env_values = true)]
-        admin_credential: Option<String>,
-        #[arg(long, action)]
-        localhost: Option<bool>,
-        #[arg(long, action)]
-        tls_cert_file: Option<String>,
-        #[arg(long, action)]
-        tls_key_file: Option<String>,
-        #[arg(long, action)]
-        tls_port: Option<u16>,
-        #[arg(long, action)]
-        log_holochain_metrics: Option<bool>,
-        #[arg(long, action)]
-        enable_multi_user: Option<bool>,
-        #[arg(long, action)]
-        enable_mcp: Option<bool>,
-        #[arg(long, action)]
-        mcp_port: Option<u16>,
-        /// Expose dynamic per-class SHACL tools ({class}_create, {class}_set_{prop}, …)
-        /// over MCP in addition to the static instance_* tools. Default: false.
-        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
-        dynamic_class_tools: Option<bool>,
-        /// Write the executor PID to this file on startup (removed on clean shutdown).
-        /// Useful for test harnesses that need targeted process cleanup.
-        #[arg(long)]
-        pid_file: Option<String>,
+    Run(RunArgs),
+    /// Inspect the settings `run` would start with
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommand {
+    /// Print the merged settings (config file < AD4M_* env < flags) as JSON,
+    /// with every secret replaced by "<redacted>". Takes the flags of `run`.
+    Print(RunArgs),
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -207,80 +160,36 @@ async fn main() -> Result<()> {
         return Ok(());
     };
 
-    if let Domain::Run {
-        app_data_path,
-        network_bootstrap_seed,
-        language_language_only,
-        run_dapp_server,
-        port,
-        hc_admin_port,
-        hc_app_port,
-        hc_use_bootstrap,
-        hc_use_local_proxy,
-        hc_use_mdns,
-        hc_use_proxy,
-        hc_proxy_url,
-        hc_bootstrap_url,
-        hc_relay_url,
-        connect_holochain,
-        admin_credential,
-        localhost,
-        tls_cert_file,
-        tls_key_file,
-        tls_port,
-        log_holochain_metrics,
-        enable_multi_user,
-        enable_mcp,
-        mcp_port,
-        dynamic_class_tools,
-        pid_file,
+    if let Domain::Config {
+        command: ConfigCommand::Print(run_args),
     } = args.domain
     {
-        let tls = if tls_cert_file.is_some() && tls_key_file.is_some() {
-            Some(TlsConfig {
-                cert_file_path: tls_cert_file.unwrap(),
-                key_file_path: tls_key_file.unwrap(),
-                tls_port: tls_port.unwrap_or(12001),
-            })
-        } else {
-            if tls_cert_file.is_some() || tls_key_file.is_some() {
-                println!("To active TLS encryption, please provide arguments: tls_cert_file and tls_key_file!");
+        let resolved = run_args.resolve(process_env)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&resolved.redacted_json())?
+        );
+        return Ok(());
+    }
+
+    if let Domain::Run(run_args) = args.domain {
+        let ResolvedRun {
+            config,
+            unlock_passphrase,
+        } = run_args.resolve(process_env)?;
+        let startup = tokio::spawn(async move { rust_executor::run(config).await }).await;
+        // Exit 1 when the REST API fails (e.g. the port is taken), instead of
+        // running on with no API.
+        match startup {
+            Ok(api_thread) => rust_executor::exit_when_api_fails(api_thread),
+            Err(e) => {
+                eprintln!("rust_executor::run panicked during startup: {e}");
+                exit(1);
             }
-            None
-        };
-        let _ = tokio::spawn(async move {
-            rust_executor::run(Ad4mConfig {
-                app_data_path,
-                network_bootstrap_seed,
-                language_language_only,
-                run_dapp_server,
-                port,
-                hc_admin_port,
-                hc_app_port,
-                hc_use_bootstrap,
-                hc_use_local_proxy,
-                hc_use_mdns,
-                hc_use_proxy,
-                hc_proxy_url,
-                hc_bootstrap_url,
-                hc_relay_url,
-                connect_holochain,
-                admin_credential,
-                localhost,
-                auto_permit_cap_requests: Some(true),
-                tls,
-                log_holochain_metrics,
-                enable_multi_user,
-                smtp_config: None,
-                enable_mcp,
-                mcp_port,
-                dynamic_class_tools,
-                pid_file,
-                ..Default::default()
-            })
-            .await;
-        })
-        .await;
+        }
+        if let Some(passphrase) = unlock_passphrase {
+            tokio::spawn(rust_executor::unlock_agent_at_startup(passphrase));
+        }
 
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
@@ -303,27 +212,12 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, MutexGuard};
-
-    /// `AD4M_ADMIN_CREDENTIAL` is process-global, so every test that sets it
-    /// must hold this lock — otherwise a parallel test observes the other
-    /// one's value. Poisoning is irrelevant here: the guard protects an
-    /// environment variable, not an invariant, so a panicking test leaves
-    /// nothing inconsistent behind.
-    static ADMIN_CREDENTIAL_ENV: Mutex<()> = Mutex::new(());
-
-    fn lock_admin_credential_env() -> MutexGuard<'static, ()> {
-        ADMIN_CREDENTIAL_ENV
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+    use crate::run_config::tests::lock_env;
 
     fn run_admin_credential(argv: &[&str]) -> Option<String> {
         let app = ClapApp::try_parse_from(argv).expect("argv parses");
         match app.domain {
-            Domain::Run {
-                admin_credential, ..
-            } => admin_credential,
+            Domain::Run(run) => run.admin_credential,
             other => panic!("expected the run subcommand, got {other:?}"),
         }
     }
@@ -334,7 +228,7 @@ mod tests {
     /// set.
     #[test]
     fn run_reads_the_admin_credential_from_the_environment() {
-        let _env = lock_admin_credential_env();
+        let _env = lock_env();
         std::env::set_var("AD4M_ADMIN_CREDENTIAL", "from-env");
         assert_eq!(
             run_admin_credential(&["ad4m-executor", "run"]).as_deref(),
@@ -357,7 +251,7 @@ mod tests {
     /// The help text must not echo the variable's value.
     #[test]
     fn run_help_hides_the_environment_value() {
-        let _env = lock_admin_credential_env();
+        let _env = lock_env();
         std::env::set_var("AD4M_ADMIN_CREDENTIAL", "s3cret-value");
         let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--help"])
             .expect_err("--help exits through an error");
@@ -365,5 +259,59 @@ mod tests {
         std::env::remove_var("AD4M_ADMIN_CREDENTIAL");
         assert!(help.contains("AD4M_ADMIN_CREDENTIAL"), "{help}");
         assert!(!help.contains("s3cret-value"), "{help}");
+    }
+    fn parse_run(argv: &[&str]) -> RunArgs {
+        match ClapApp::try_parse_from(argv).expect("argv parses").domain {
+            Domain::Run(run) => run,
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+    }
+
+    /// A config file's SMTP block, with the password from the environment,
+    /// reaches the executor's `Ad4mConfig.smtp_config`, so a headless node
+    /// can send verification emails like the launcher does.
+    #[test]
+    fn run_config_takes_smtp_from_the_config_file() {
+        let _env = lock_env();
+        let dir = std::env::temp_dir().join(format!("ad4m-cli-smtp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("executor-config.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "multi_user_config": {
+                    "enabled": true,
+                    "tls_config": null,
+                    "smtp_config": {
+                        "enabled": true,
+                        "host": "smtp.example",
+                        "port": 465,
+                        "username": "ad4m@example",
+                        "from_address": "ad4m@example"
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        std::env::set_var("AD4M_CONFIG", &path);
+        std::env::set_var("AD4M_SMTP_PASSWORD", "smtp-secret");
+        let config = parse_run(&["ad4m-executor", "run"])
+            .resolve(crate::run_config::process_env)
+            .map(|resolved| resolved.config);
+        std::env::remove_var("AD4M_CONFIG");
+        std::env::remove_var("AD4M_SMTP_PASSWORD");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let config = config.expect("the config resolves");
+        assert_eq!(config.enable_multi_user, Some(true));
+        let smtp = config
+            .smtp_config
+            .expect("the config file's SMTP settings reach Ad4mConfig");
+        assert!(smtp.enabled);
+        assert_eq!(smtp.host, "smtp.example");
+        assert_eq!(smtp.port, 465);
+        assert_eq!(smtp.username, "ad4m@example");
+        assert_eq!(smtp.from_address, "ad4m@example");
+        assert_eq!(smtp.password, "smtp-secret");
     }
 }
