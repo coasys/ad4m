@@ -275,14 +275,13 @@ mod tests {
         std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
     }
 
-    /// An empty or "off" variable leaves the mode off without an error, so a
-    /// templated `AD4M_INSECURE_NO_ADMIN_CREDENTIAL=` does not stop a node
-    /// that has a credential from starting. Anything but `true` never enables
-    /// it; unknown values are rejected.
+    /// An "off" variable leaves the mode off. Anything but `true` never
+    /// enables it; unknown values are rejected. An empty variable is an
+    /// error that names it, as for every other `AD4M_<FLAG>`.
     #[test]
     fn only_true_enables_the_testing_flag() {
         let _env = lock_env();
-        for off in ["", "0", "false", "no", "off"] {
+        for off in ["0", "false", "no", "off"] {
             std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", off);
             assert!(
                 !run_insecure_no_admin_credential(&[
@@ -301,6 +300,14 @@ mod tests {
                 "{invalid:?}"
             );
         }
+        std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", "");
+        let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--admin-credential", "secret"])
+            .expect_err("an empty variable is an error");
+        assert!(
+            err.to_string()
+                .contains("AD4M_INSECURE_NO_ADMIN_CREDENTIAL is set but empty"),
+            "{err}"
+        );
         std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
         assert!(!run_insecure_no_admin_credential(&[
             "ad4m-executor",
