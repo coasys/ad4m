@@ -674,11 +674,14 @@ jobs:
           sed -i 's/"private": true/"private": false/' package.json
 
       # The npm tag is chosen from the version in ui/package.json, so every package must be at that
-      # version. `gitHead` is written because `npm publish` records the commit a version was built
-      # from and `pnpm publish` does not.
-      - name: Check versions and set gitHead
+      # version. Trusted publishing refuses a package whose `repository.url` does not match this
+      # repository, so that is checked here too: a failure before the first publish leaves nothing
+      # half-published. `gitHead` is written because `npm publish` records the commit a version was
+      # built from and `pnpm publish` does not.
+      - name: Check versions and repository, and set gitHead
         env:
           VERSION: ${{ steps.extract_version.outputs.version }}
+          REPO_URL: https://github.com/${{ github.repository }}
         run: |
           GIT_HEAD="$(git rev-parse HEAD)"
           for dir in core ad4m-hooks/helpers connect ad4m-hooks/react ad4m-hooks/vue; do
@@ -688,6 +691,11 @@ jobs:
               const pkg = JSON.parse(fs.readFileSync(file, 'utf8'));
               if (pkg.version !== process.env.VERSION) {
                 console.error(pkg.name + ' is at ' + pkg.version + ', but ui/package.json is at ' + process.env.VERSION);
+                process.exit(1);
+              }
+              const url = ((pkg.repository && pkg.repository.url) || '').replace(/^git\+/, '').replace(/\.git$/, '');
+              if (url !== process.env.REPO_URL) {
+                console.error(pkg.name + ' has repository.url ' + JSON.stringify(url) + ', but trusted publishing needs ' + process.env.REPO_URL);
                 process.exit(1);
               }
               pkg.gitHead = process.env.GIT_HEAD;
