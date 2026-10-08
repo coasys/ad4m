@@ -20,6 +20,10 @@ pub enum DevFunctions {
     },
 }
 
+/// The language test's executor port. Not the default port, so a developer's
+/// own executor can stay up while the test runs.
+const TEST_EXECUTOR_PORT: u16 = 4000;
+
 pub async fn run(command: DevFunctions) -> Result<()> {
     match command {
         DevFunctions::PublishAndTestExpressionLanguage {
@@ -40,7 +44,10 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 network_bootstrap_seed: None,
                 language_language_only: Some(false),
                 run_dapp_server: Some(false),
-                port: None,
+                // Off the default port, so a running dev executor is not in the
+                // way. `None` would mean the default (12000), not "find a port
+                // from 4000", and the test below connects to 4000.
+                port: Some(TEST_EXECUTOR_PORT),
                 hc_admin_port: None,
                 hc_app_port: None,
                 hc_use_bootstrap: None,
@@ -65,19 +72,21 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 ..Default::default()
             }));
 
+            // Every step is a `?`: a step that fails must fail the command, not
+            // just print.
             let test = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 let client = ad4m_client::Ad4mClient::connect(
-                    String::from("http://127.0.0.1:4000"),
+                    format!("http://127.0.0.1:{TEST_EXECUTOR_PORT}"),
                     String::from("*"),
                 )
                 .await
-                .expect("could not connect to executor");
-                let me = client.agent.me().await;
+                .map_err(|e| anyhow!("could not connect to executor: {e:?}"))?;
+                let me = client.agent.me().await?;
                 println!("Me: {:?}", me);
-                let agent_generate = client.agent.generate(String::from("test")).await;
+                let agent_generate = client.agent.generate(String::from("test")).await?;
                 println!("Agent generate: {:?}", agent_generate);
-                let publish_language = client
+                let language_info = client
                     .languages
                     .publish(
                         language_path,
@@ -86,21 +95,21 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                         None,
                         None,
                     )
-                    .await;
-                println!("Publish language: {:?}", publish_language);
-                let language_info = publish_language.unwrap();
+                    .await?;
+                println!("Publish language: {:?}", language_info);
                 let language = client
                     .languages
                     .by_address(language_info.address.clone())
-                    .await;
+                    .await?;
                 println!("Language: {:?}", language);
                 let expression = client
                     .expressions
                     .expression_create(data.clone(), language_info.address)
-                    .await;
+                    .await?;
                 println!("Expression create: {:?}", expression);
-                let expression = client.expressions.expression(expression.unwrap()).await;
+                let expression = client.expressions.expression(expression).await?;
                 println!("Expression get: {:?}", expression);
+                Ok(())
             });
             let outcome = run_against_executor(run_handle, test).await;
 
@@ -233,7 +242,11 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     lang_lang_source.clone(),
                 )
                 .await;
+                Ok(())
             });
+            // `start_publishing` exits the process itself, 1 when the unlock
+            // fails and 0 once the seed is written, so only an executor failure
+            // or a panic reaches `exit_with` here.
             let outcome = run_against_executor(run_handle, publish).await;
             exit_with(outcome, "Publish")
         }
@@ -257,38 +270,74 @@ async fn run_executor(config: rust_executor::Ad4mConfig) -> Result<()> {
     }
 }
 
+/// How long a failed workflow waits for the executor to report its own
+/// failure before the workflow's error is reported on its own.
+const EXECUTOR_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The outcome of the executor task: `Err` when it stopped for any reason
+/// before being aborted.
+fn executor_stopped(result: Result<Result<()>, tokio::task::JoinError>) -> Result<()> {
+    match result {
+        Ok(Ok(())) => Err(anyhow!("executor stopped before the workflow finished")),
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(anyhow!("executor task panicked: {e}")),
+    }
+}
+
 /// Runs `workflow` against the executor kept up by `executor`.
 ///
 /// `executor` only completes when the executor stops, so if it completes
 /// first the workflow has been running against nothing: the workflow is
 /// aborted and the executor's error is returned. An executor that stops
 /// cleanly before the workflow is done is an error for the same reason. A
-/// workflow that panics is an error too. Otherwise the workflow's value is
-/// returned and the executor task is dropped; the executor's own threads are
-/// stopped by process exit.
+/// workflow that fails or panics is an error too; if the executor stops
+/// within [`EXECUTOR_GRACE`] after that, its error is reported as the cause,
+/// because the workflow only waits a fixed time before it connects and its
+/// failure is usually the symptom. Otherwise the workflow's value is returned
+/// and the executor task is dropped; the executor's own threads are stopped
+/// by process exit.
 async fn run_against_executor<T>(
     mut executor: JoinHandle<Result<()>>,
-    mut workflow: JoinHandle<T>,
+    mut workflow: JoinHandle<Result<T>>,
 ) -> Result<T> {
     tokio::select! {
-        executor_stopped = &mut executor => {
-            workflow.abort();
-            Err(match executor_stopped {
-                Ok(Ok(())) => anyhow!("executor stopped before the workflow finished"),
-                Ok(Err(e)) => e,
-                Err(e) => anyhow!("executor task panicked: {e}"),
-            })
-        }
+        // A workflow that has already finished is the result, even if the
+        // executor stopped in the same instant.
+        biased;
         finished = &mut workflow => {
-            executor.abort();
-            finished.map_err(|e| anyhow!("workflow panicked: {e}"))
+            let outcome = finished
+                .map_err(|e| anyhow!("workflow panicked: {e}"))
+                .and_then(|result| result);
+            match outcome {
+                Ok(value) => {
+                    executor.abort();
+                    Ok(value)
+                }
+                Err(workflow_error) => {
+                    // The failure is often the symptom of an executor that is
+                    // failing to start, so give the executor a moment to say so.
+                    match tokio::time::timeout(EXECUTOR_GRACE, &mut executor).await {
+                        Ok(stopped) => {
+                            if let Err(cause) = executor_stopped(stopped) {
+                                return Err(cause.context(format!("workflow failed: {workflow_error}")));
+                            }
+                        }
+                        Err(_still_running) => executor.abort(),
+                    }
+                    Err(workflow_error)
+                }
+            }
+        }
+        stopped = &mut executor => {
+            workflow.abort();
+            Err(executor_stopped(stopped).expect_err("the executor task has stopped"))
         }
     }
 }
 
 /// Ends the process with the workflow's outcome. Both workflows leave
 /// executor threads running that would otherwise keep the process alive, and
-/// a failed executor must not end in exit code 0.
+/// a failed executor or workflow must not end in exit code 0.
 fn exit_with(outcome: Result<()>, workflow: &str) -> ! {
     match outcome {
         Ok(()) => {
@@ -308,7 +357,7 @@ mod tests {
     use std::future::pending;
     use std::time::Duration;
     use tokio::task::spawn;
-    use tokio::time::timeout;
+    use tokio::time::{sleep, timeout};
 
     /// Bounds every test: with the executor handle ignored, a workflow that
     /// never finishes would hang instead of failing.
@@ -317,7 +366,7 @@ mod tests {
     #[tokio::test]
     async fn executor_error_fails_the_workflow() {
         let executor = spawn(async { Err(anyhow!("REST API server failed: port taken")) });
-        let workflow = spawn(pending::<()>());
+        let workflow = spawn(pending::<Result<()>>());
 
         let outcome = timeout(BOUND, run_against_executor(executor, workflow))
             .await
@@ -330,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn executor_panic_fails_the_workflow() {
         let executor = spawn(async { panic!("Error awaiting executor main thread") });
-        let workflow = spawn(pending::<()>());
+        let workflow = spawn(pending::<Result<()>>());
 
         let outcome = timeout(BOUND, run_against_executor(executor, workflow))
             .await
@@ -346,7 +395,7 @@ mod tests {
     #[tokio::test]
     async fn executor_stopping_cleanly_fails_an_unfinished_workflow() {
         let executor = spawn(async { Ok(()) });
-        let workflow = spawn(pending::<()>());
+        let workflow = spawn(pending::<Result<()>>());
 
         let outcome = timeout(BOUND, run_against_executor(executor, workflow))
             .await
@@ -359,13 +408,26 @@ mod tests {
     #[tokio::test]
     async fn workflow_result_is_returned_while_executor_runs() {
         let executor = spawn(pending::<Result<()>>());
-        let workflow = spawn(async { 42 });
+        let workflow = spawn(async { Ok(42) });
 
         let outcome = timeout(BOUND, run_against_executor(executor, workflow))
             .await
             .expect("a finished workflow must not wait for the executor");
 
         assert_eq!(outcome.expect("workflow result is passed through"), 42);
+    }
+
+    #[tokio::test]
+    async fn workflow_error_is_returned_while_executor_runs() {
+        let executor = spawn(pending::<Result<()>>());
+        let workflow = spawn(async { Err::<(), _>(anyhow!("publish failed: bad bundle")) });
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("a failed workflow must not wait for the executor");
+
+        let err = outcome.expect_err("workflow error must be an error");
+        assert!(err.to_string().contains("bad bundle"), "{err:?}");
     }
 
     #[tokio::test]
@@ -379,6 +441,28 @@ mod tests {
 
         let err = outcome.expect_err("workflow panic must be an error");
         assert!(err.to_string().contains("workflow panicked"), "{err:?}");
+    }
+
+    /// The workflow connects after a fixed sleep, so an executor that is still
+    /// failing to start shows up as a connection error first and reports its
+    /// own error a moment later. The report must name the executor's error as
+    /// the cause.
+    #[tokio::test]
+    async fn executor_error_is_the_cause_when_it_stops_just_after_the_workflow_failed() {
+        let executor = spawn(async {
+            sleep(Duration::from_millis(100)).await;
+            Err(anyhow!("REST API server failed: port taken"))
+        });
+        let workflow = spawn(async { Err::<(), _>(anyhow!("could not connect to executor")) });
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("must finish with the workflow");
+
+        let err = outcome.expect_err("both failed");
+        let report = format!("{err:?}");
+        assert!(report.contains("could not connect"), "{report}");
+        assert!(report.contains("port taken"), "{report}");
     }
 }
 
