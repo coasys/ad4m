@@ -139,6 +139,70 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
     assert_public_document_present(&unlock_reply, &did, "agent.unlock reply");
 }
 
+/// An app dir holding an `agent.json` as written before the fix, for the
+/// global main agent. Call after `setup_wallet(); setup_agent();`.
+struct PreFixAgentFile {
+    _tmp: tempfile::TempDir,
+    app_path: String,
+    agent_file: String,
+    did: String,
+    signing_key_id: String,
+    keystore: String,
+    secrets: Vec<String>,
+}
+
+impl PreFixAgentFile {
+    fn new() -> Self {
+        let backend = crate::wallet::wallet_backend();
+        let public = backend.get_public_key("main").unwrap();
+        let secret = backend.get_secret_key("main").unwrap();
+        let secrets = private_key_values(&public, &secret);
+        let did = main_did();
+        let signing_key_id =
+            AgentService::with_global_instance(|s| s.signing_key_id.clone().unwrap());
+        let keystore = backend.export("pw-1229");
+
+        // Exactly what the wallet used to produce: did-key's default config.
+        let old_document = {
+            use did_key::DIDCore;
+            let keypair =
+                did_key::from_existing_key::<did_key::Ed25519KeyPair>(&public, Some(&secret));
+            serde_json::to_string(&keypair.get_did_document(did_key::CONFIG_LD_PRIVATE)).unwrap()
+        };
+        assert!(
+            secrets.iter().all(|s| old_document.contains(s.as_str())),
+            "the fixture must be the leaking document"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let app_path = tmp.path().to_str().unwrap().to_string();
+        std::fs::create_dir_all(format!("{app_path}/ad4m")).unwrap();
+        let agent_file = format!("{app_path}/ad4m/agent.json");
+        std::fs::write(
+            &agent_file,
+            json!({
+                "did": did,
+                "didDocument": old_document,
+                "signingKeyId": signing_key_id,
+                "keystore": keystore,
+                "agent": null,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        Self {
+            _tmp: tmp,
+            app_path,
+            agent_file,
+            did,
+            signing_key_id,
+            keystore,
+            secrets,
+        }
+    }
+}
+
 /// An `agent.json` written before the fix stores the document with both
 /// private keys. Loading it must neither serve them (status, before and after
 /// unlock) nor leave them on disk, and must keep the keystore intact.
@@ -146,41 +210,15 @@ async fn lock_reply_status_changed_event_and_unlock_carry_no_private_key() {
 async fn an_agent_json_written_before_the_fix_is_served_and_rewritten_without_private_keys() {
     setup_wallet();
     setup_agent();
-    let backend = crate::wallet::wallet_backend();
-    let public = backend.get_public_key("main").unwrap();
-    let secret = backend.get_secret_key("main").unwrap();
-    let secrets = private_key_values(&public, &secret);
-    let did = main_did();
-    let signing_key_id = AgentService::with_global_instance(|s| s.signing_key_id.clone().unwrap());
-    let keystore = backend.export("pw-1229");
-
-    // Exactly what the wallet used to produce: did-key's default config.
-    let old_document = {
-        use did_key::DIDCore;
-        let keypair = did_key::from_existing_key::<did_key::Ed25519KeyPair>(&public, Some(&secret));
-        serde_json::to_string(&keypair.get_did_document(did_key::CONFIG_LD_PRIVATE)).unwrap()
-    };
-    assert!(
-        secrets.iter().all(|s| old_document.contains(s.as_str())),
-        "the fixture must be the leaking document"
-    );
-
-    let tmp = tempfile::tempdir().unwrap();
-    let app_path = tmp.path().to_str().unwrap().to_string();
-    std::fs::create_dir_all(format!("{app_path}/ad4m")).unwrap();
-    let agent_file = format!("{app_path}/ad4m/agent.json");
-    std::fs::write(
-        &agent_file,
-        json!({
-            "did": did,
-            "didDocument": old_document,
-            "signingKeyId": signing_key_id,
-            "keystore": keystore,
-            "agent": null,
-        })
-        .to_string(),
-    )
-    .unwrap();
+    let PreFixAgentFile {
+        _tmp,
+        app_path,
+        agent_file,
+        did,
+        signing_key_id,
+        keystore,
+        secrets,
+    } = PreFixAgentFile::new();
 
     let mut service = AgentService::new(app_path.clone());
     service.load();
@@ -214,6 +252,82 @@ async fn an_agent_json_written_before_the_fix_is_served_and_rewritten_without_pr
         "stored didDocument",
     );
     assert_eq!(on_disk, on_disk_after_second_load);
+    let agent_dir = std::path::Path::new(&agent_file).parent().unwrap();
+    let mut entries: Vec<_> = std::fs::read_dir(agent_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    entries.sort();
+    assert_eq!(entries, vec!["agent.json"], "the rewrite left a temp file");
+}
+
+/// An operator who hardened `agent.json` to 0600 keeps 0600: the rewrite
+/// replaces the inode, and a new inode would otherwise get the umask default.
+#[cfg(unix)]
+#[tokio::test]
+async fn rewriting_a_hardened_agent_json_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+    setup_wallet();
+    setup_agent();
+    let fixture = PreFixAgentFile::new();
+    let before = std::fs::read_to_string(&fixture.agent_file).unwrap();
+    std::fs::set_permissions(&fixture.agent_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    AgentService::new(fixture.app_path.clone()).load();
+    let after = std::fs::read_to_string(&fixture.agent_file).unwrap();
+    let mode = std::fs::metadata(&fixture.agent_file)
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    setup_agent();
+
+    assert_ne!(before, after, "the fixture must take the rewrite path");
+    assert_eq!(mode, 0o600, "the rewrite loosened a hardened agent.json");
+}
+
+/// If `agent.json` cannot be rewritten (read-only data dir), `load()` still
+/// succeeds and serves a public document; the file is left as it was.
+#[cfg(unix)]
+#[tokio::test]
+async fn when_agent_json_cannot_be_rewritten_load_still_serves_no_private_key() {
+    use std::os::unix::fs::PermissionsExt;
+    setup_wallet();
+    setup_agent();
+    let fixture = PreFixAgentFile::new();
+    let before = std::fs::read_to_string(&fixture.agent_file).unwrap();
+    let agent_dir = std::path::Path::new(&fixture.agent_file)
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Root ignores directory permissions; the branch under test is then
+    // unreachable.
+    let writable = std::fs::write(agent_dir.join("probe"), "").is_ok();
+
+    let mut service = AgentService::new(fixture.app_path.clone());
+    service.load();
+    let status = serde_json::to_string(&service.dump()).unwrap();
+    let after = std::fs::read_to_string(&fixture.agent_file).unwrap();
+    let entries = std::fs::read_dir(&agent_dir).unwrap().count();
+    std::fs::set_permissions(&agent_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    setup_agent();
+
+    if writable {
+        eprintln!("skipped: the data dir stays writable for this user");
+        return;
+    }
+    assert_no_private_keys(
+        &status,
+        &fixture.secrets,
+        "agent.status, file not rewritable",
+    );
+    assert_public_document_present(&status, &fixture.did, "agent.status, file not rewritable");
+    assert_eq!(
+        before, after,
+        "a failed rewrite must leave agent.json as it was"
+    );
+    assert_eq!(entries, 1, "a failed rewrite must not leave a temp file");
 }
 
 /// Multi-user mode: `agent.status` for a managed user and the `AgentData` it
