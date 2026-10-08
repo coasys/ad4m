@@ -338,6 +338,10 @@ export async function spawnExecutor(
         stdio: ['ignore', 'pipe', 'pipe'],
         env: { ...process.env, ...env },
     });
+    // Decode as a stream, so a multibyte character split across two chunks
+    // survives in the startup-failure tail. Every data handler below gets strings.
+    executorProcess.stdout!.setEncoding('utf8');
+    executorProcess.stderr!.setEncoding('utf8');
     // The last output lines, for the error when the executor never gets ready.
     const recentOutput: string[] = [];
     const recordOutput = (data: any) => {
