@@ -3864,7 +3864,8 @@ impl PerspectiveInstance {
     /// SHACL has not yet synced from a remote peer, waits up to
     /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
     /// can query classes registered by another peer without racing
-    /// p-diff-sync (see [`get_shape_or_wait`]).
+    /// p-diff-sync (see [`get_shape_or_wait`]). The same budget, not a
+    /// fresh one, covers the classes the query's `include`s hydrate.
     pub async fn model_query(
         &self,
         class_name: &str,
@@ -3897,12 +3898,10 @@ impl PerspectiveInstance {
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
-        // fail immediately. The subsequent recursive resolves inside
-        // `execute_model_query` use the plain (non-waiting) resolver
-        // because at that point the top-level shape has been resolved so
-        // referenced target-classes are extremely likely to also be
-        // present already — a nested wait per relation would multiply
-        // latency for a case we haven't seen bite in practice.
+        // fail immediately. One budget covers the whole query: the classes
+        // its includes reach get whatever this wait leaves (see the retry
+        // around `execute_model_query` below).
+        let deadline = Instant::now() + shape_wait;
         let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
@@ -3942,13 +3941,43 @@ impl PerspectiveInstance {
             }
         }
 
-        let result = super::model_query::execute_model_query(
-            &self.sparql_store,
-            shape.as_ref(),
-            &query_input,
-            &resolver,
-        )
-        .await?;
+        // Include recursion resolves each target class through the plain,
+        // non-waiting resolver and fails on the first one not stored. A peer
+        // can hold the queried class's SHACL before an included one's (#909),
+        // so on a miss wait for that class with what is left of the budget
+        // and run the query again. Classes are only ever waited for when a
+        // hydration actually needs them, and each at most once: a class that
+        // goes missing again after its wait succeeded fails the query rather
+        // than looping. Local-only perspectives fail at once, as before —
+        // `get_shape_or_wait` does not wait there.
+        let mut waited_for: HashSet<String> = HashSet::new();
+        let result = loop {
+            let err = match super::model_query::execute_model_query(
+                &self.sparql_store,
+                shape.as_ref(),
+                &query_input,
+                &resolver,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(err) => err,
+            };
+            let Some(missing) = err.downcast_ref::<super::model_query::MissingShape>() else {
+                return Err(err);
+            };
+            if !waited_for.insert(missing.class_name.clone()) {
+                return Err(err);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if self
+                .get_shape_or_wait(&missing.class_name, remaining)
+                .await
+                .is_err()
+            {
+                return Err(err);
+            }
+        };
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
