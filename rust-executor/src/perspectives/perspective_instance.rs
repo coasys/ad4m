@@ -404,6 +404,10 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// The agent the subscription reads for. Every result is computed in
+    /// this agent's scope, and the published update names it so the events
+    /// socket delivers to this agent's session only.
+    subscriber_did: String,
     /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
@@ -6183,6 +6187,7 @@ impl PerspectiveInstance {
     async fn send_subscription_update(
         &self,
         subscription_id: String,
+        subscriber_did: String,
         result: String,
         delay: Option<Duration>,
     ) {
@@ -6194,6 +6199,7 @@ impl PerspectiveInstance {
             let filter = PerspectiveQuerySubscriptionFilter {
                 uuid,
                 subscription_id,
+                subscriber_did,
                 result,
             };
             get_global_pubsub()
@@ -6240,6 +6246,8 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
         let result_string = if is_sparql_query(&query) {
             let scope = self.read_scope(&agent_context, None)?;
             self.sparql_query_with_graphs(query.clone(), scope.as_deref())?
@@ -6268,6 +6276,7 @@ impl PerspectiveInstance {
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates,
             model_query_params: None,
             graph_scope,
@@ -6297,6 +6306,8 @@ impl PerspectiveInstance {
             Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
             None => crate::agent::AgentContext::main_agent(),
         };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
         // Requested graphs, resolved for the subscriber (the Local alias becomes
         // a concrete IRI), so change triggers compare against stored graphs.
         let graph_iris = match graph_iris.filter(|g| !g.is_empty()) {
@@ -6370,6 +6381,7 @@ impl PerspectiveInstance {
             last_result: initial_result.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
@@ -6657,7 +6669,11 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        updates_to_send.push((
+                            id,
+                            stored_query.subscriber_did.clone(),
+                            result_string,
+                        ));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6670,8 +6686,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
+        for (id, subscriber_did, result_string) in updates_to_send {
+            self.send_subscription_update(id, subscriber_did, result_string, None)
+                .await;
         }
 
         // Remove timed out queries and notify prolog service
@@ -6699,6 +6716,39 @@ impl PerspectiveInstance {
                 }
             }
         }
+    }
+
+    /// Whether a write since the last check is waiting for one. A write
+    /// records its predicates on a spawned task, so a test waits for this
+    /// before calling [`Self::check_subscriptions_now`].
+    #[cfg(test)]
+    pub(crate) fn subscription_check_pending(&self) -> bool {
+        self.trigger_prolog_subscription_check
+            .load(Ordering::Acquire)
+    }
+
+    /// One subscription check over the changes recorded since the last one.
+    /// The loop calls it after its debounce window; a test calls it directly.
+    pub(crate) async fn check_subscriptions_now(&self) {
+        // Reset the trigger AFTER the loop's debounce sleep, so triggers that
+        // arrived during the window are covered by this check.
+        self.trigger_prolog_subscription_check
+            .swap(false, Ordering::AcqRel);
+        // Drain both fields as a single atomic snapshot (one lock) —
+        // see `changed_predicates_and_graphs` for why this must not
+        // be two separate lock/replace operations.
+        let (changed_preds, changed_graphs) = std::mem::replace(
+            &mut *self.changed_predicates_and_graphs.lock().await,
+            (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
+        );
+
+        log::debug!(
+            "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
+            self.uuid,
+            changed_preds
+        );
+        self.check_subscribed_queries(changed_preds, changed_graphs)
+            .await;
     }
 
     async fn subscribed_queries_loop(&self) {
@@ -6730,26 +6780,7 @@ impl PerspectiveInstance {
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
-
-                // Atomically reset trigger AFTER the sleep, so we catch any
-                // triggers that arrived during the debounce window.
-                self.trigger_prolog_subscription_check
-                    .swap(false, Ordering::AcqRel);
-                // Drain both fields as a single atomic snapshot (one lock) —
-                // see `changed_predicates_and_graphs` for why this must not
-                // be two separate lock/replace operations.
-                let (changed_preds, changed_graphs) = std::mem::replace(
-                    &mut *self.changed_predicates_and_graphs.lock().await,
-                    (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
-                );
-
-                log::debug!(
-                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
-                    self.uuid,
-                    changed_preds
-                );
-                self.check_subscribed_queries(changed_preds, changed_graphs)
-                    .await;
+                self.check_subscriptions_now().await;
             }
 
             // Periodic subscription logging and proactive timeout cleanup

@@ -621,6 +621,81 @@ async fn a_local_graph_link_event_reaches_only_its_agent() {
     );
 }
 
+/// A subscription's update reaches its subscriber's session only. The result
+/// is computed as the subscriber reads, so it carries that agent's Local rows;
+/// a co-owner of the perspective must not get it.
+#[tokio::test]
+async fn a_subscription_update_reaches_only_its_subscriber() {
+    use crate::api::events_ws::matches_query_subscription_owner;
+    use crate::pubsub::PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC;
+
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    // The session filter checks ownership through the global registry.
+    super::register_perspective(p.uuid.clone(), p.clone());
+
+    let (subscription_id, initial) = p
+        .subscribe_and_query(
+            "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string(),
+            alice.user_email.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(!initial.contains("ad4m://s/secret"));
+
+    let mut events = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+    p.add_link(
+        link("secret"),
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !p.subscription_check_pending() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the write was not recorded for the subscription check");
+    p.check_subscriptions_now().await;
+
+    let update = loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no subscription update was published")
+            .unwrap();
+        let v: Value = serde_json::from_str(&msg).unwrap();
+        if v["subscriptionId"].as_str() == Some(subscription_id.as_str()) {
+            break msg;
+        }
+    };
+    let v: Value = serde_json::from_str(&update).unwrap();
+    assert!(
+        v["result"].as_str().unwrap().contains("ad4m://s/secret"),
+        "the update carries Alice's Local row: {update}"
+    );
+    assert!(
+        matches_query_subscription_owner(&update, Some(&alice_did), false),
+        "Alice's session gets her update"
+    );
+    assert!(
+        !matches_query_subscription_owner(&update, Some(&bob_did), false),
+        "Bob co-owns the perspective but didn't subscribe: {update}"
+    );
+    assert!(
+        !matches_query_subscription_owner(&update, None, false),
+        "a session whose DID hasn't resolved gets nothing"
+    );
+    super::unregister_perspective(&p.uuid);
+}
+
 #[tokio::test]
 async fn the_shared_instance_reads_every_graph() {
     let (p, _, _) = two_users_and_shared_links().await;
