@@ -529,6 +529,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
+    /// joined to a neighbourhood, so a test can exercise the cross-peer wait
+    /// without a running link language. Compiled out in non-test builds.
+    #[cfg(test)]
+    force_shape_sync_wait: Arc<AtomicBool>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -592,6 +597,8 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -642,7 +649,7 @@ impl PerspectiveInstance {
         match self.get_shape(class_name) {
             Ok(shape) => return Ok(shape),
             Err(e) => {
-                if self.link_language.read().await.is_none() {
+                if !self.shapes_may_still_sync().await {
                     return Err(e);
                 }
             }
@@ -660,6 +667,16 @@ impl PerspectiveInstance {
                 return Ok(shape);
             }
         }
+    }
+
+    /// Whether a class missing from the store can still arrive from a peer:
+    /// true once the perspective has a link language.
+    async fn shapes_may_still_sync(&self) -> bool {
+        #[cfg(test)]
+        if self.force_shape_sync_wait.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.has_link_language().await
     }
 
     /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
@@ -3853,6 +3870,18 @@ impl PerspectiveInstance {
         class_name: &str,
         query_json: &str,
     ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_within(class_name, query_json, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
+    /// [`Self::model_query`] with the shape-wait budget as a parameter, so
+    /// tests can exercise its expiry without waiting the production 20 s.
+    async fn model_query_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        shape_wait: Duration,
+    ) -> Result<String, deno_core::anyhow::Error> {
         let mut query_input: super::model_query::ModelQueryInput = serde_json::from_str(query_json)
             .map_err(|e| deno_core::anyhow::anyhow!("Failed to parse model query: {}", e))?;
 
@@ -3874,9 +3903,7 @@ impl PerspectiveInstance {
         // referenced target-classes are extremely likely to also be
         // present already — a nested wait per relation would multiply
         // latency for a case we haven't seen bite in practice.
-        let _ = self
-            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
-            .await?;
+        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
 
@@ -8572,6 +8599,153 @@ mod tests {
         assert!(
             msg.contains("No SHACL shape stored for class 'Unknown'"),
             "error should name the class, got: {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // #909: an include's target-class SHACL that has not synced yet gets the
+    // same bounded wait as the queried class's own.
+    // -----------------------------------------------------------------------
+
+    const NESTED_TASK_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+        ]
+    }"#;
+
+    /// A `Board` whose `tasks` relation targets `Task`, one board linked to one
+    /// task, and only `Board`'s SHACL registered — the state a peer is in when
+    /// the queried class has synced and the included one has not.
+    async fn nested_include_fixture() -> PerspectiveInstance {
+        let mut perspective = setup().await;
+        let board_shacl = r#"{
+            "target_class": "board://Board",
+            "properties": [
+                {"path": "board://name", "name": "name", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+                {"path": "board://has_task", "name": "tasks", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Task"}
+            ]
+        }"#;
+        perspective
+            .add_sdna(
+                "Board".into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(board_shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .expect("add Board");
+        let signer = TestSigner::generate();
+        let triples = [
+            ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+            ("ad4m://task1", "task://title", "literal:string:t"),
+            ("ad4m://board1", "board://has_task", "ad4m://task1"),
+        ];
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+        perspective
+    }
+
+    const NESTED_INCLUDE_QUERY: &str = r#"{"include":{"tasks":true}}"#;
+
+    /// On a shared perspective, `Task`'s SHACL arriving while the query waits
+    /// lets the include hydrate instead of failing the whole query.
+    #[tokio::test]
+    async fn test_model_query_waits_for_late_include_target_shape() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_sync = async move {
+            sleep(Duration::from_millis(500)).await;
+            syncing
+                .add_sdna(
+                    "Task".into(),
+                    "".into(),
+                    SdnaType::SubjectClass,
+                    Some(NESTED_TASK_SHACL.into()),
+                    &AgentContext::main_agent(),
+                )
+                .await
+                .expect("add Task");
+        };
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, Duration::from_secs(10)),
+            late_sync
+        );
+
+        let result: serde_json::Value =
+            serde_json::from_str(&result.expect("query waits for Task's shape")).unwrap();
+        let tasks = result["instances"][0]["tasks"]
+            .as_array()
+            .expect("tasks array");
+        assert_eq!(tasks.len(), 1, "one task included: {result}");
+        assert_eq!(tasks[0]["id"], "ad4m://task1", "task hydrated: {result}");
+    }
+
+    /// On a shared perspective, a target-class SHACL that never arrives fails
+    /// the query with the usual message — but only once the budget is spent.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_after_budget() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let budget = Duration::from_millis(800);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task's shape never arrives");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "error only after the budget is spent, came after {elapsed:?}"
+        );
+    }
+
+    /// A local-only perspective has no peer to wait for: a missing target
+    /// class is a caller bug and fails at once, whatever the budget.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_at_once_when_local() {
+        let perspective = nested_include_fixture().await;
+        let budget = Duration::from_secs(10);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, budget)
+            .await
+            .expect_err("Task is not registered");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "local-only must not wait, took {elapsed:?}"
         );
     }
 
