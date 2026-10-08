@@ -15,6 +15,8 @@ pub mod runtime_ws_tests;
 #[cfg(test)]
 pub mod shacl_ws_tests;
 #[cfg(test)]
+pub mod start_server_tests;
+#[cfg(test)]
 pub mod support;
 #[cfg(test)]
 pub mod transcription_feed_tests;

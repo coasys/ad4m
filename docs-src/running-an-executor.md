@@ -84,6 +84,13 @@ ad4m-executor run \
 | `--hc-admin-port` | 2000 | Holochain admin port |
 | `--hc-app-port` | 1337 | Holochain app interface port |
 
+For a long-running node, put these settings in a config file instead
+(`ad4m-executor run --config <file>`), with the admin credential in a file
+named by `AD4M_ADMIN_CREDENTIAL_FILE`. The keys, the `AD4M_<FLAG>` variables
+and their precedence are in `pages/developer-guides/executor-config.mdx`
+("Executor config file"); `ad4m-executor config print` shows what `run`
+would start with.
+
 **For AI agents**: Always run in a screen session with logging:
 
 ```bash
@@ -116,6 +123,11 @@ After restarting the executor, unlock the agent:
 ```bash
 ad4m --executor-url http://localhost:12000 agent unlock --passphrase <passphrase> --holochain true
 ```
+
+A service can skip this step: with `AD4M_UNLOCK_PASSPHRASE_FILE` pointing at
+a mode-600 file holding the passphrase, the executor unlocks the agent
+itself at every start (see "Unlocking at startup" in
+`pages/developer-guides/executor-config.mdx`).
 
 `--holochain true` starts the Holochain conductor during unlock. Same caveat
 as Step 3: this is WS-RPC (`agent.unlock`), not a REST endpoint.

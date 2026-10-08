@@ -215,15 +215,31 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
         auto_permit_cap_requests: auto_permit,
     };
 
+    // A bad certificate or key is not fatal: the API keeps serving on 127.0.0.1,
+    // as when the HTTPS bind fails. The launcher embeds the executor and relies
+    // on this. It starts with a broken TLS path so the user can fix it on the
+    // Hosting page.
     let rustls_config = match &config.tls {
-        Some(tls_config) => Some(
-            axum_server::tls_rustls::RustlsConfig::from_pem_file(
-                &tls_config.cert_file_path,
-                &tls_config.key_file_path,
-            )
-            .await
-            .map_err(|e| deno_core::anyhow::anyhow!("TLS config error: {}", e))?,
-        ),
+        Some(tls_config) => match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+            &tls_config.cert_file_path,
+            &tls_config.key_file_path,
+        )
+        .await
+        {
+            Ok(rustls_config) => Some(rustls_config),
+            Err(e) => {
+                log::error!(
+                    "API HTTPS listener on port {} not started: TLS config error for \
+                     certificate {} and key {}: {e}. The remote API is unavailable: the \
+                     cleartext listener is on 127.0.0.1:{port} because TLS is configured. Fix \
+                     the TLS settings and restart the executor to restore remote access.",
+                    tls_config.tls_port,
+                    tls_config.cert_file_path,
+                    tls_config.key_file_path,
+                );
+                None
+            }
+        },
         None => None,
     };
 
@@ -233,8 +249,12 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     } = bind_api_listeners(
         state,
         port,
-        config.localhost.unwrap_or(true),
-        config.tls.as_ref().map(|tls| tls.tls_port),
+        // With TLS configured, cleartext stays on loopback even when the certificate failed.
+        config.localhost.unwrap_or(true) || config.tls.is_some(),
+        // Only bind the TLS port when there is a certificate to serve on it.
+        rustls_config
+            .as_ref()
+            .and(config.tls.as_ref().map(|tls| tls.tls_port)),
     )
     .await?;
 
