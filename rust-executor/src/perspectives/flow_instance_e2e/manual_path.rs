@@ -932,3 +932,36 @@ async fn a_vote_outside_the_quorum_does_not_claim_a_settle_a_concurrent_pass_rec
         "Bob's vote completed nothing: {reported:?}"
     );
 }
+
+/// A vote on a proposal that settled an edge on an earlier visit to its
+/// state completes nothing, so it reports nothing. In a cyclic flow the
+/// instance is back in `review`, Alice's old `review → changes_requested`
+/// proposal is joinable again by the accept path's checks, and her
+/// `acceptedBy` on it is a new link. The settle it shows up in is history.
+///
+/// Red if the pass after a vote reports a settle of the voted proposal that
+/// was already settled before the vote.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_vote_on_a_proposal_that_settled_an_earlier_visit_reports_nothing() {
+    let mut f = seed_review_flow().await;
+    let first = settle(&mut f, "r-1", "review", "changes_requested").await;
+    settle(&mut f, "c-1", "changes_requested", "review").await;
+    assert_eq!(
+        f.derived().await.state,
+        "review",
+        "precondition: back in review"
+    );
+
+    let fired = accept_flow_proposal(&mut f.perspective, &first, &f.ctx)
+        .await
+        .expect("the accept path's checks pass: the proposal leaves `review`");
+    assert!(
+        we_voted_on(&f, &first).await,
+        "precondition: a new vote was written"
+    );
+    assert!(
+        fired.is_empty(),
+        "a historic settle is not this vote's: {fired:?}"
+    );
+    assert_eq!(f.derived().await.state, "review");
+}
