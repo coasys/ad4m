@@ -2,7 +2,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 
 use super::errors::ApiError;
 use crate::agent::capabilities::{
-    capabilities_from_token, is_admin_credential_token, user_email_from_token, Capability,
+    capabilities_on, is_admin_credential_token_on, user_email_from_token, Capability, ListenerReach,
 };
 use crate::agent::AgentService;
 use crate::types::RequestContext;
@@ -102,10 +102,14 @@ where
         // Track last_seen for multi-user mode
         crate::agent::capabilities::track_last_seen_from_token(auth_header.clone()).await;
 
-        let capabilities =
-            capabilities_from_token(auth_header.clone(), app_state.admin_credential.clone());
+        let reach = listener_reach(parts);
+        let capabilities = capabilities_on(
+            auth_header.clone(),
+            app_state.admin_credential.clone(),
+            reach,
+        );
         let is_admin_credential =
-            is_admin_credential_token(&auth_header, &app_state.admin_credential);
+            is_admin_credential_token_on(&auth_header, &app_state.admin_credential, reach);
 
         Ok(AuthContext {
             capabilities,
@@ -113,6 +117,44 @@ where
             auth_token: auth_header,
             is_admin_credential,
         })
+    }
+}
+
+/// Headers a reverse proxy sets to name the client it forwards for.
+const FORWARDING_HEADERS: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
+
+/// The reach of the caller behind a request: the listener's, as `api::listener_router` marked
+/// it, unless the request says a proxy forwarded it.
+///
+/// An unmarked router reads as `Network`: nothing has shown that its callers are on this
+/// machine, so an anonymous caller there is not the operator.
+///
+/// A proxy on this machine (nginx, Caddy, cloudflared) connects to a loopback listener, so
+/// its clients would read as `Loopback`. A request to a loopback listener that carries a
+/// forwarding header is `Network`. Local tools do not send these headers, and a caller that
+/// forges one can only make itself anonymous. A proxy that sets none of them (a raw TCP
+/// forward, `ssh -R`) still reads as `Loopback`: only an admin credential covers that.
+pub fn listener_reach(parts: &Parts) -> ListenerReach {
+    let marked = parts
+        .extensions
+        .get::<ListenerReach>()
+        .copied()
+        .unwrap_or(ListenerReach::Network);
+    let forwarded = FORWARDING_HEADERS
+        .iter()
+        .any(|name| parts.headers.contains_key(*name));
+    if forwarded {
+        ListenerReach::Network
+    } else {
+        marked
+    }
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ListenerReach {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        Ok(listener_reach(parts))
     }
 }
 

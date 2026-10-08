@@ -305,6 +305,7 @@ Basic usage:
 ad4m-executor init
 
 # Start the executor
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 
 # Create a perspective

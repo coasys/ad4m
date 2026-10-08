@@ -55,14 +55,15 @@ pub async fn ws_rpc(
     State(state): State<AppState>,
     Query(query): Query<WsAuthQuery>,
     axum::extract::Extension(handler_map): axum::extract::Extension<Arc<HandlerMap>>,
+    reach: ListenerReach,
 ) -> impl IntoResponse {
     let token = query.token.unwrap_or_default();
 
     // Build RequestContext once for the lifetime of this connection.
-    let is_admin = is_admin_credential_token(&token, &state.admin_credential);
+    let is_admin = is_admin_credential_token_on(&token, &state.admin_credential, reach);
     let (capabilities, user_email, user_did) = super::auth::resolve_user_session(
         &token,
-        capabilities_from_token(token.clone(), state.admin_credential.clone()),
+        capabilities_on(token.clone(), state.admin_credential.clone(), reach),
     );
 
     // Per-connection base context.  The dispatcher clones this and

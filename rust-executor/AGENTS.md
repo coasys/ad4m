@@ -28,6 +28,7 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
 |---|---|---|
 | `lib.rs` | Boot sequence (`run()`): config → wallet/db backends → `Ad4mDb` → `AIService` → `AgentService` → runtime → V8 → `LanguageController` → perspectives → axum. Order is hand-maintained. | — |
 | `config.rs` | `Ad4mConfig` + global config accessor | — |
+| `config_file.rs` | The `run --config` JSON file shared with the launcher (`launcher-state.json` key names), secret resolution (`AD4M_*_FILE`), and the one mapping to `Ad4mConfig` | `docs-src/pages/developer-guides/executor-config.mdx` |
 | `api/` | axum WS RPC (`/api/v1/ws`), event stream, OpenAI-compatible `/v1` | `src/api/AGENTS.md` |
 | `mcp/` | MCP server + tools (static + SHACL-generated dynamic tools) | `src/mcp/AGENTS.md` |
 | `perspectives/` | Perspective registry, `PerspectiveInstance`, SPARQL store, SHACL/model queries, flows, interpretation, auto-processor | `src/perspectives/AGENTS.md` |
@@ -69,6 +70,13 @@ Some tests in `perspectives/*_e2e.rs` and `flow_context/real_llm_e2e.rs` call re
   perspectives the owner cannot read; `events_ws.rs` sends `notification-triggered` only to sessions
   with the owner's DID. `Ad4mDb::migrate_notification_owners` (run at startup once the agent loads)
   moves rows of older executors from `user_email` to `owner_did`.
+- **Keystore**: the `keystore` field of `agent.json` holds every local key, the main agent's and
+  each managed user's (`wallet.rs`: Argon2id + XChaCha20-Poly1305, fresh salt and nonce per write).
+  The first unlock of a legacy keystore rewrites the file and keeps `agent.json.legacy` until an
+  unlock opens `agent.json` directly (`AgentService::unlock`). Meanwhile every save writes
+  `keystoreFingerprint` (the saved keys) into `agent.json`, and the fallback to the backup runs
+  only while the backup holds exactly those keys. Write the agent file only through
+  `AgentService::save` / `try_save`.
 
 ## Do / don't
 
