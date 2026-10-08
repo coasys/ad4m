@@ -41,13 +41,52 @@ const CACHE_TTL_SECONDS: i64 = 300; // 5 minutes cache TTL
 /// ([`crate::perspectives::auto_processor::watcher::MANAGED_USER_ONLINE_WINDOW_S`], #1070).
 pub const LAST_SEEN_WRITE_THROTTLE_S: i64 = 300;
 
+/// Who can connect to the listener a request arrived on.
+///
+/// Without an admin credential the executor runs the single-user local trust model: a caller
+/// with no token is the operator. That premise holds on a loopback listener and nowhere else,
+/// so it is checked per listener instead of assumed (#1059). The API server attaches each
+/// listener's reach where it binds it (`api::listener_router`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ListenerReach {
+    /// Bound to a loopback address: only processes on this machine connect, including any
+    /// proxy or tunnel running here. The API reads a request that carries a `Forwarded`,
+    /// `X-Forwarded-For` or `X-Real-IP` header as `Network` (`api::auth::listener_reach`). A
+    /// proxy that sets none of them (a raw TCP forward, `ssh -R`) still reads as `Loopback`,
+    /// so its remote clients are the operator: a node behind a proxy needs an admin credential.
+    Loopback,
+    /// Bound to any other address: whoever can route to it connects.
+    Network,
+}
+
+impl ListenerReach {
+    pub fn of(addr: &std::net::SocketAddr) -> Self {
+        if addr.ip().is_loopback() {
+            ListenerReach::Loopback
+        } else {
+            ListenerReach::Network
+        }
+    }
+}
+
+/// [`is_admin_credential_token_on`] for a caller on a loopback listener: for the MCP server,
+/// where [`capabilities_from_token`] explains why loopback holds.
+pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+    is_admin_credential_token_on(token, admin_credential, ListenerReach::Loopback)
+}
+
 /// Returns true if the given token is the admin_credential that grants launcher-level access.
 /// When admin_credential is Some, the token must match it exactly (constant-time).
-/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin.
-pub fn is_admin_credential_token(token: &str, admin_credential: &Option<String>) -> bool {
+/// When admin_credential is None (legacy single-user mode), an empty token is treated as admin,
+/// but only on a loopback listener. On a network listener it is an anonymous caller (#1059).
+pub fn is_admin_credential_token_on(
+    token: &str,
+    admin_credential: &Option<String>,
+    reach: ListenerReach,
+) -> bool {
     match admin_credential {
         Some(cred) => constant_time_eq(token, cred),
-        None => token.is_empty(),
+        None => token.is_empty() && reach == ListenerReach::Loopback,
     }
 }
 
@@ -264,26 +303,32 @@ pub async fn track_last_seen_from_token(token: String) {
     }
 }
 
+/// [`capabilities_on`] for a caller on a loopback listener.
+///
+/// For the MCP server. Loopback holds there because `mcp::server::resolve_host`
+/// binds an MCP server with no admin credential to loopback, and its HTTPS listener does not
+/// start without one. The exception is an explicit `MCP_HOST`, which it warns about.
 pub fn capabilities_from_token(
     token: String,
     admin_credential: Option<String>,
 ) -> Result<Vec<Capability>, String> {
-    match admin_credential {
-        Some(admin_credential) => {
-            // Use constant-time comparison to prevent timing attacks
-            if constant_time_eq(&token, &admin_credential) {
-                return Ok(vec![ALL_CAPABILITY.clone()]);
-            }
-        }
-        None => {
-            if token.is_empty() {
-                return Ok(vec![ALL_CAPABILITY.clone()]);
-            }
-        }
+    capabilities_on(token, admin_credential, ListenerReach::Loopback)
+}
+
+/// The capabilities of a caller that presents `token` on a listener with this reach.
+pub fn capabilities_on(
+    token: String,
+    admin_credential: Option<String>,
+    reach: ListenerReach,
+) -> Result<Vec<Capability>, String> {
+    // The same test that decides `is_admin_credential`, so the two cannot disagree.
+    if is_admin_credential_token_on(&token, &admin_credential, reach) {
+        return Ok(vec![ALL_CAPABILITY.clone()]);
     }
 
     if token.is_empty() {
-        // For empty tokens, check if multi-user mode is enabled
+        // An anonymous caller: the node has an admin credential, or the listener is on the
+        // network. For empty tokens, check if multi-user mode is enabled
         // If so, allow user creation (registration), login, and checking enabled status
         // READ capability is intentionally excluded to prevent unauthenticated user enumeration
         use crate::db::Ad4mDb;
@@ -540,6 +585,60 @@ mod tests {
     fn gen_request_key_joins_the_request_id_and_rand() {
         let key = gen_request_key("my-request-id", "123456");
         assert_eq!(key, "my-request-id-123456");
+    }
+
+    #[test]
+    fn a_listener_is_loopback_only_on_a_loopback_address() {
+        let reach = |addr: &str| ListenerReach::of(&addr.parse().unwrap());
+        assert_eq!(reach("127.0.0.1:12000"), ListenerReach::Loopback);
+        assert_eq!(reach("[::1]:12000"), ListenerReach::Loopback);
+        assert_eq!(reach("0.0.0.0:12000"), ListenerReach::Network);
+        assert_eq!(reach("[::]:12000"), ListenerReach::Network);
+        assert_eq!(reach("192.168.1.5:12000"), ListenerReach::Network);
+    }
+
+    // #1059: without an admin credential, an empty token is the operator only on loopback.
+    // On the network it gets what an anonymous caller gets on a node with a credential:
+    // enough to request a capability, nothing to read with.
+    #[test]
+    fn without_a_credential_an_empty_token_is_the_operator_only_on_loopback() {
+        let empty = String::new();
+        assert!(is_admin_credential_token_on(
+            &empty,
+            &None,
+            ListenerReach::Loopback
+        ));
+        assert!(!is_admin_credential_token_on(
+            &empty,
+            &None,
+            ListenerReach::Network
+        ));
+
+        let local = Ok(capabilities_on(empty.clone(), None, ListenerReach::Loopback).unwrap());
+        assert!(check_capability(&local, &AGENT_READ_CAPABILITY).is_ok());
+
+        // The anonymous set reads the multi-user setting.
+        let _ = crate::db::Ad4mDb::init_global_instance(":memory:");
+        let remote = Ok(capabilities_on(empty, None, ListenerReach::Network).unwrap());
+        assert!(check_capability(&remote, &AGENT_READ_CAPABILITY).is_err());
+        assert!(check_capability(&remote, &AGENT_AUTH_CAPABILITY).is_ok());
+    }
+
+    // The admin credential works on any listener: it is what makes a network listener safe.
+    #[test]
+    fn the_admin_credential_is_the_operator_on_the_network() {
+        let credential = Some("the-admin-credential".to_string());
+        assert!(is_admin_credential_token_on(
+            "the-admin-credential",
+            &credential,
+            ListenerReach::Network
+        ));
+        let capabilities = capabilities_on(
+            "the-admin-credential".to_string(),
+            credential,
+            ListenerReach::Network,
+        );
+        assert!(check_capability(&capabilities, &AGENT_READ_CAPABILITY).is_ok());
     }
 
     #[test]

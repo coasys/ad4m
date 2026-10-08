@@ -1548,6 +1548,32 @@ pub fn parse_shacl_to_links(shacl_json: &str, class_name: &str) -> Result<Vec<Li
         ));
     }
 
+    // `sh:datatype` makes a property's values encoded literals, which
+    // hydration decodes; `sh:class` / `target_class_name` make them instance
+    // URIs, which `include` hydrates against the target shape. One property
+    // cannot be both. The SDK refuses the pair at decoration time; this
+    // catches shapes written without the SDK (MCP `add_model`, raw WS-RPC).
+    let literal_and_instance: Vec<String> = shape
+        .properties
+        .iter()
+        .filter(|prop| {
+            prop.datatype.is_some() && (prop.class.is_some() || prop.target_class_name.is_some())
+        })
+        .map(|prop| {
+            prop.name
+                .clone()
+                .unwrap_or_else(|| extract_local_name(&prop.path))
+        })
+        .collect();
+    if !literal_and_instance.is_empty() {
+        return Err(anyhow::anyhow!(
+            "Property {:?} declares both `datatype` (literal values) and a target class \
+             (`class` / `target_class_name`, model instances) — drop `datatype` to link \
+             instances, or drop the target class to store literals.",
+            literal_and_instance,
+        ));
+    }
+
     let mut links = Vec::new();
 
     // Extract namespace from target_class (e.g., "recipe://Recipe" -> "recipe://")
@@ -2278,6 +2304,43 @@ mod tests {
             "target_class": "book://Post",
             "properties": [
                 { "path": "book://title", "name": "title", "datatype": "xsd://string" }
+            ]
+        }"#;
+        assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
+    }
+
+    #[test]
+    fn parse_shacl_to_links_refuses_datatype_with_a_target_class() {
+        for target in [
+            r#""class": "book://AuthorShape""#,
+            r#""target_class_name": "Author""#,
+        ] {
+            let shacl_json = format!(
+                r#"{{
+                    "target_class": "book://Post",
+                    "properties": [
+                        {{ "path": "book://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "book://writer", "name": "writer",
+                           "datatype": "xsd://string", "relation_kind": "hasOne", {target} }}
+                    ]
+                }}"#
+            );
+            let err = parse_shacl_to_links(&shacl_json, "Post").unwrap_err();
+            assert!(err.to_string().contains(r#"["writer"]"#), "{target}: {err}");
+            assert!(err.to_string().contains("datatype"), "{target}: {err}");
+        }
+    }
+
+    #[test]
+    fn parse_shacl_to_links_keeps_a_literal_relation_and_an_instance_relation() {
+        let shacl_json = r#"{
+            "target_class": "book://Post",
+            "properties": [
+                { "path": "book://tag", "name": "tags", "datatype": "xsd://string",
+                  "node_kind": "Literal", "relation_kind": "hasMany", "collection": true },
+                { "path": "book://writer", "name": "writer", "node_kind": "IRI",
+                  "relation_kind": "hasOne", "class": "book://AuthorShape",
+                  "target_class_name": "Author" }
             ]
         }"#;
         assert!(parse_shacl_to_links(shacl_json, "Post").is_ok());
