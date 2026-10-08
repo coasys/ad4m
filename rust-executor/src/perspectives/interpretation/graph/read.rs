@@ -246,9 +246,15 @@ pub fn build_speaker_name_map(
 /// nothing meaningful to show the model.
 ///
 /// Instances are read through the model-query API (`PerspectiveInstance::
-/// model_query`) — the symmetric counterpart to writing them via
+/// model_query_for_viewer`) — the symmetric counterpart to writing them via
 /// `create_subject` — so class conformance and field decoding go through the
 /// class's own shape/getters rather than hand-matched type-flag links.
+///
+/// The read is in the Shared scope
+/// ([`SHARED_ONLY_VIEWER`](crate::perspectives::link_visibility::SHARED_ONLY_VIEWER)):
+/// the rows are rendered into the prompt and route Create-vs-Update of the
+/// Shared links the pass writes, so an instance or property value that exists
+/// only in Local links, any user's or the runner's own, is not listed.
 ///
 /// A per-class `model_query` failure is propagated. Silently treating it as
 /// "no existing instances" would break [`filter_already_present`]'s deterministic
@@ -306,12 +312,19 @@ pub async fn existing_instance_context(
             })?;
         }
         let query = query_obj.to_string();
-        let result_json = perspective.model_query(&class, &query).await.map_err(|e| {
-            anyhow::anyhow!(
-                "existing_instance_context: model_query({class}) failed — refusing to \
-                 proceed because an empty existing-set here would silently break dedup: {e:#}"
+        let result_json = perspective
+            .model_query_for_viewer(
+                &class,
+                &query,
+                Some(crate::perspectives::link_visibility::SHARED_ONLY_VIEWER),
             )
-        })?;
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "existing_instance_context: model_query({class}) failed — refusing to \
+                 proceed because an empty existing-set here would silently break dedup: {e:#}"
+                )
+            })?;
         let result: serde_json::Value = serde_json::from_str(&result_json).map_err(|e| {
             anyhow::anyhow!("existing_instance_context: bad model_query result for {class}: {e:#}")
         })?;
@@ -686,7 +699,9 @@ mod tests {
             "Task under tree B",
         )
         .await;
-        // Parent edges: <parent> ns://contains <task-base>.
+        // Parent edges: <parent> ns://contains <task-base>. Shared, like the
+        // instances: the context reads Shared links only, so a Local edge
+        // would scope nothing in.
         for (parent, task) in [
             ("soa://parent/a", "soa://tree-a/task/1"),
             ("soa://parent/b", "soa://tree-b/task/1"),
@@ -698,7 +713,7 @@ mod tests {
                         predicate: Some("ns://contains".into()),
                         target: task.into(),
                     },
-                    LinkStatus::Local,
+                    LinkStatus::Shared,
                     None,
                     &ctx,
                 )

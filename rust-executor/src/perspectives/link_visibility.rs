@@ -22,7 +22,7 @@
 //! Every user derives the state for themselves and keeps their own cache
 //! (`flow_instance::viewer_cache`).
 //!
-//! # The two scopes
+//! # The three scopes
 //!
 //! Visibility is expressed as `Option<&str>`:
 //!
@@ -40,6 +40,12 @@
 //!   surface (WS RPC, MCP) is attributed to the DID behind its auth token, and
 //!   sees only its own Local links. The main agent is not special-cased: it is
 //!   an agent like any other and sees the Local links it authored.
+//! - `Some(`[`SHARED_ONLY_VIEWER`]`)` — **Shared scope**. No Local link is
+//!   visible, whoever wrote it. This is the scope of the auto-processor's
+//!   model-query reads whose rows reach its prompt and route its Shared writes
+//!   (`interpretation::existing_instance_context`). Every primitive below
+//!   checks for it before comparing authors, so it never matches an author,
+//!   even one that happens to equal the constant.
 //!
 //! # Where the filter is applied
 //!
@@ -79,6 +85,11 @@ use deno_core::anyhow::Error as AnyError;
 /// The `ad4m://ontology/status` value written for a Local link.
 const STATUS_LOCAL_LITERAL: &str = "Local";
 
+/// The viewer of the Shared scope (see the module docs): it sees Shared links
+/// only, no user's Local link included. Not a DID, so no request resolves to it
+/// (`viewer_did_for_context` returns a DID or an error).
+pub const SHARED_ONLY_VIEWER: &str = "ad4m://viewer/shared-only";
+
 /// Resolve the visibility scope of a request from the agent it is attributed
 /// to — the translation from "who is calling" to the `Option<&str>` the rest
 /// of this module speaks.
@@ -107,6 +118,8 @@ pub fn link_visible_to(
     match viewer_did {
         // Executor scope: the executor's own derivations read the whole row set.
         None => true,
+        // Shared scope: no Local link, whoever wrote it.
+        Some(SHARED_ONLY_VIEWER) => !matches!(status, Some(LinkStatus::Local)),
         // Agent scope: Local links are private to their author; everything
         // else is unaffected.
         Some(did) => !matches!(status, Some(LinkStatus::Local)) || author == did,
@@ -190,6 +203,11 @@ pub fn viewer_reifier_filter(viewer_did: Option<&str>, reifier: &str) -> String 
         return String::new();
     };
     let bare = reifier.trim_start_matches('?');
+    if did == SHARED_ONLY_VIEWER {
+        return format!(
+            " ?{bare} <ad4m://ontology/status> ?{bare}_vs . FILTER(?{bare}_vs != \"{STATUS_LOCAL_LITERAL}\")"
+        );
+    }
     format!(
         " ?{bare} <ad4m://ontology/author> ?{bare}_va . ?{bare} <ad4m://ontology/status> ?{bare}_vs . FILTER(?{bare}_vs != \"{STATUS_LOCAL_LITERAL}\" || ?{bare}_va = \"{}\")",
         escape_sparql_string(did)
@@ -206,6 +224,11 @@ fn author_filter(
     let Some(did) = viewer_did else {
         return String::new();
     };
+    if did == SHARED_ONLY_VIEWER {
+        return format!(
+            "    OPTIONAL {{ ?{reifier_var} <ad4m://ontology/status> ?{status_var} . }}\n    FILTER(!BOUND(?{status_var}) || ?{status_var} != \"{STATUS_LOCAL_LITERAL}\")\n"
+        );
+    }
 
     // The DID lands inside a SPARQL string literal; escape the characters that
     // could otherwise terminate it. DIDs are not attacker-chosen here (they come
@@ -310,6 +333,29 @@ mod tests {
             viewer_did_for_context(&AgentContext::main_agent()).unwrap(),
             Some(did)
         );
+    }
+
+    /// The Shared scope withholds every Local link, its author's too, and
+    /// never compares authors: an author equal to the constant gains nothing.
+    #[test]
+    fn shared_only_viewer_sees_no_local_link() {
+        let v = Some(SHARED_ONLY_VIEWER);
+        assert!(!link_visible_to(ALICE, Some(&LinkStatus::Local), v));
+        assert!(!link_visible_to(
+            SHARED_ONLY_VIEWER,
+            Some(&LinkStatus::Local),
+            v
+        ));
+        assert!(link_visible_to(ALICE, Some(&LinkStatus::Shared), v));
+
+        for filter in [
+            viewer_reifier_filter(v, "?_sr"),
+            viewer_author_filter(v, "_reifier", "author"),
+        ] {
+            assert!(filter.contains("!= \"Local\""), "{filter}");
+            assert!(!filter.contains("author"), "no author clause: {filter}");
+            assert!(!filter.contains(SHARED_ONLY_VIEWER), "{filter}");
+        }
     }
 
     #[test]
