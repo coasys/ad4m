@@ -118,7 +118,6 @@ const ATTR_MAPPED: u16 = 0x0001;
 const HEADER_LEN: usize = 20;
 const FAMILY_V4: u8 = 0x01;
 
-const STUN_SERVER: &str = "stun.l.google.com:19302";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const PROBE_RETRIES: u32 = 2;
 
@@ -216,12 +215,14 @@ fn decode_plain(attr: &[u8]) -> Option<SocketAddr> {
 /// Probe the SFU server's public reachability.
 ///
 /// When the bind IP already falls in a private range, returns
-/// [`SfuReachability::Nat`] immediately.  Otherwise sends a STUN
-/// binding request and compares the server-reflexive address.
+/// [`SfuReachability::Nat`] immediately. Otherwise, with a `stun_server`
+/// (`host:port`) configured, sends it a binding request and compares the
+/// server-reflexive address; without one, sends nothing and reports
+/// [`SfuReachability::Unknown`].
 ///
 /// Timeout: 3 s per attempt, up to 3 attempts (one initial + two
 /// retries).  Non-blocking.
-pub async fn check_reachability(bind_ip: IpAddr) -> SfuReachability {
+pub async fn check_reachability(bind_ip: IpAddr, stun_server: Option<&str>) -> SfuReachability {
     // Fast path — private IP can never be publicly reachable.
     if is_private_ip(bind_ip) {
         return SfuReachability::Nat {
@@ -229,14 +230,19 @@ pub async fn check_reachability(bind_ip: IpAddr) -> SfuReachability {
             reflexive_ip: bind_ip,
         };
     }
+    let Some(stun_server) = stun_server else {
+        return SfuReachability::Unknown {
+            reason: "no STUN server configured (--sfu-stun-server)".to_string(),
+        };
+    };
 
     // Resolve the STUN server.
-    let stun_addr: SocketAddr = match tokio::net::lookup_host(STUN_SERVER).await {
+    let stun_addr: SocketAddr = match tokio::net::lookup_host(stun_server).await {
         Ok(mut addrs) => match addrs.next() {
             Some(a) => a,
             None => {
                 return SfuReachability::Unknown {
-                    reason: format!("{} resolved to no addresses", STUN_SERVER),
+                    reason: format!("{} resolved to no addresses", stun_server),
                 }
             }
         },
@@ -292,7 +298,7 @@ pub async fn check_reachability(bind_ip: IpAddr) -> SfuReachability {
     SfuReachability::Unknown {
         reason: format!(
             "no response from {} after {} attempts",
-            STUN_SERVER,
+            stun_server,
             PROBE_RETRIES + 1
         ),
     }
@@ -414,5 +420,21 @@ mod tests {
         resp[22..24].copy_from_slice(&8u16.to_be_bytes());
 
         assert!(parse_response(&resp, &txn).is_none());
+    }
+
+    /// Without a configured server a public address is not probed: no
+    /// packet leaves, and reachability stays unknown.
+    #[tokio::test]
+    async fn no_stun_server_means_no_probe() {
+        let public: IpAddr = "203.0.113.5".parse().unwrap();
+        assert!(matches!(
+            check_reachability(public, None).await,
+            SfuReachability::Unknown { .. }
+        ));
+        let private: IpAddr = "192.168.1.3".parse().unwrap();
+        assert!(matches!(
+            check_reachability(private, None).await,
+            SfuReachability::Nat { .. }
+        ));
     }
 }

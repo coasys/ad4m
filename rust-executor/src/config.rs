@@ -130,10 +130,14 @@ pub struct Ad4mConfig {
     pub sfu_cascade_peers: Option<Vec<String>>,
     /// IP address the SFU media server binds to (e.g. `203.0.113.5`).
     /// str0m rejects `0.0.0.0` as a candidate, so this must be a real
-    /// interface IP.  When unset, the executor auto-detects the
-    /// machine's outbound IP — on a public server this resolves to
-    /// the correct address automatically.
+    /// interface IP.  When unset, the SFU follows `localhost`: loopback
+    /// by default, the machine's outbound IP with `localhost: false`.
     pub sfu_bind_addr: Option<String>,
+    /// STUN server (`host:port`) the SFU asks, once at startup, whether its
+    /// bind address is publicly reachable. Unset: no probe, and a public
+    /// bind address reports reachability "unknown". Only a public bind
+    /// address is ever probed.
+    pub sfu_stun_server: Option<String>,
     /// Wallet backend type: "local" (default) or "shared".
     /// "local" keeps keys in-process (self-hosted default).
     /// "shared" delegates to an external HTTP wallet service.
@@ -463,6 +467,7 @@ impl Ad4mConfig {
             sfu_cascade_listen: None,
             sfu_cascade_peers: None,
             sfu_bind_addr: None,
+            sfu_stun_server: None,
             wallet_backend: None,
             wallet_backend_url: None,
             wallet_signing_key_name: None,

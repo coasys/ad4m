@@ -33,7 +33,7 @@
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //! | `sfu-call-renegotiation-offer` | (inline)    | `targetDid`            | SFU server-pushed SDP offer          |
 //! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere |
-//! | `sfu-data`                    | (inline)      | neighbourhood member   | SFU data channel message             |
+//! | `sfu-data`                    | (inline)      | participant of the room | SFU data channel message            |
 //!
 //! ## Client → Server messages
 //!
@@ -108,8 +108,6 @@ use crate::pubsub::{
     RUNTIME_MESSAGED_RECEIVED_TOPIC, RUNTIME_NOTIFICATION_TRIGGERED_TOPIC,
     SFU_CALL_RENEGOTIATION_OFFER_TOPIC, SFU_DATA_CHANNEL_TOPIC, SFU_MIGRATE_TOPIC,
 };
-
-use crate::db::Ad4mDb;
 
 use super::auth::{AppState, AuthContext};
 use super::errors::ApiError;
@@ -276,8 +274,22 @@ pub async fn events_ws(
     // must not be silently promoted to admin (CodeRabbit #881 review, Nico
     // 2026-08-19: "do not treat an unresolved DID as administrator access").
     let is_admin = context.is_admin_credential;
+    let sfu_events = sfu_events_allowed(&context);
 
-    Ok(ws.on_upgrade(move |socket| handle_events_ws(socket, auth_token, user_email, is_admin)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_events_ws(socket, auth_token, user_email, is_admin, sfu_events)
+    }))
+}
+
+/// The SFU streams describe calls in neighbourhoods, so they need what the
+/// `sfu.*` reads need: `NEIGHBOURHOOD_READ`, not just the `AGENT_READ` that
+/// opens the event socket.
+pub(crate) fn sfu_events_allowed(ctx: &crate::types::RequestContext) -> bool {
+    check_capability(
+        &ctx.capabilities,
+        &crate::agent::capabilities::NEIGHBOURHOOD_READ_CAPABILITY,
+    )
+    .is_ok()
 }
 
 /// Build the merged event stream for a given user.
@@ -288,6 +300,7 @@ pub(crate) async fn build_event_stream(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    sfu_events: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     // Resolve the DID once at subscription time — avoids repeated JWT decode +
     // DB / AgentService lookups on every single event. If the client connected
@@ -297,7 +310,7 @@ pub(crate) async fn build_event_stream(
         let ctx = AgentContext::from_auth_token(auth_token.clone());
         did_for_context(&ctx).ok()
     };
-    build_event_stream_for(auth_token, resolved_did, user_email, is_admin).await
+    build_event_stream_for(auth_token, resolved_did, user_email, is_admin, sfu_events).await
 }
 
 /// [`build_event_stream`] with the session DID already resolved (tests
@@ -307,6 +320,7 @@ pub(crate) async fn build_event_stream_for(
     resolved_did: Option<String>,
     user_email: Option<String>,
     is_admin: bool,
+    sfu_events: bool,
 ) -> Pin<Box<dyn futures::stream::Stream<Item = String> + Send>> {
     use futures::stream;
     use tokio_stream::wrappers::BroadcastStream;
@@ -627,7 +641,7 @@ pub(crate) async fn build_event_stream_for(
                                 let ctx = AgentContext::from_auth_token(token.clone());
                                 did_for_context(&ctx).ok()
                             };
-                            if matches_sfu_target(msg, did.as_deref()) {
+                            if sfu_events && matches_sfu_target(msg, did.as_deref()) {
                                 Some(wrap_event(events::SFU_CALL_RENEGOTIATION_OFFER, msg))
                             } else {
                                 None
@@ -692,7 +706,7 @@ pub(crate) async fn build_event_stream_for(
                                 let ctx = AgentContext::from_auth_token(token.clone());
                                 did_for_context(&ctx).ok()
                             };
-                            if matches_sfu_target(msg, did.as_deref()) {
+                            if sfu_events && matches_sfu_target(msg, did.as_deref()) {
                                 Some(wrap_event(events::SFU_MIGRATE, msg))
                             } else {
                                 None
@@ -704,10 +718,9 @@ pub(crate) async fn build_event_stream_for(
             })
     };
 
-    // SFU data channel relay — fan out only to room members.
-    // Each event carries `neighbourhoodUrl`; the caller's DID must
-    // appear in that neighbourhood's owner list (same gate as callJoin).
-    // Admin credentials bypass the filter.
+    // SFU data channel relay — fan out only to the message's room: the
+    // caller's DID must be a participant of that call on this node, an
+    // in-memory lookup. Admin credentials bypass the filter.
     let s_sfu_data = {
         let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
         let token = auth_token.clone();
@@ -717,34 +730,19 @@ pub(crate) async fn build_event_stream_for(
             .filter_map(move |result| {
                 let token = token.clone();
                 async move {
-                    match result {
-                        Ok(ref msg) => {
-                            if admin {
-                                return Some(wrap_event(events::SFU_DATA, msg));
-                            }
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
-                            let did = did.as_deref()?;
-                            // Parse the JSON to extract neighbourhoodUrl for
-                            // membership filtering.
-                            let parsed: serde_json::Value = serde_json::from_str(msg).ok()?;
-                            let neighbourhood_url =
-                                parsed.get("neighbourhoodUrl").and_then(|v| v.as_str())?;
-                            let is_member = Ad4mDb::with_global_instance(|db| {
-                                db.get_neighbourhood_owners(neighbourhood_url)
-                            })
-                            .unwrap_or_default()
-                            .contains(&did.to_string());
-                            if is_member {
-                                Some(wrap_event(events::SFU_DATA, msg))
-                            } else {
-                                None
-                            }
-                        }
-                        _ => None,
+                    let msg = result.ok()?;
+                    if !sfu_events {
+                        return None;
                     }
+                    if admin {
+                        return Some(wrap_event(events::SFU_DATA, &msg));
+                    }
+                    let did = did_for_context(&AgentContext::from_auth_token(token)).ok()?;
+                    let data: crate::sfu::SfuDataMessage = serde_json::from_str(&msg).ok()?;
+                    let in_room = crate::sfu::get_sfu_service()?
+                        .is_participant(&data.neighbourhood_url, &data.room_name, &did)
+                        .await;
+                    in_room.then(|| wrap_event(events::SFU_DATA, &msg))
                 }
             })
     };
@@ -788,11 +786,12 @@ async fn handle_events_ws(
     auth_token: String,
     user_email: Option<String>,
     is_admin: bool,
+    sfu_events: bool,
 ) {
     log::info!("Events WebSocket connected");
 
     let interest: super::event_interest::SharedInterest = Default::default();
-    let event_stream = build_event_stream(auth_token, user_email, is_admin).await;
+    let event_stream = build_event_stream(auth_token, user_email, is_admin, sfu_events).await;
     let mut event_stream = Box::pin(super::event_interest::filter_stream(
         event_stream,
         interest.clone(),

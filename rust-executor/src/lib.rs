@@ -564,27 +564,17 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
     {
         info!("Initializing SFU service...");
         let gossip: std::sync::Arc<dyn crate::sfu::CascadeGossip> = build_sfu_gossip(&config).await;
-        let mut sfu_config = crate::sfu::server::SfuServerConfig::default();
-        if let Some(ref addr) = config.sfu_bind_addr {
-            // Parse as IpAddr first, then construct SocketAddr with port 0.
-            // This handles bare IPv6 like "::1" which format!("{}:0") would
-            // turn into "::1:0" — not a valid SocketAddr.
-            match addr.parse::<std::net::IpAddr>() {
-                Ok(ip) => {
-                    sfu_config.bind_addr = std::net::SocketAddr::new(ip, 0);
-                    info!("SFU bind address override: {}", ip);
-                }
-                Err(e) => warn!(
-                    "SFU bind address `{}` parse error: {} — using auto-detected default",
-                    addr, e
-                ),
-            }
-        } else {
-            info!(
-                "SFU bind address auto-detected: {}",
-                sfu_config.bind_addr.ip()
-            );
-        }
+        // An IP, then port 0: a bare IPv6 like "::1" formatted as "{}:0"
+        // would not parse as a SocketAddr.
+        let bind_ip = crate::sfu::server::sfu_bind_ip(
+            config.sfu_bind_addr.as_deref(),
+            config.localhost.unwrap_or(true),
+        );
+        info!("SFU bind address: {}", bind_ip);
+        let sfu_config = crate::sfu::server::SfuServerConfig {
+            bind_addr: std::net::SocketAddr::new(bind_ip, 0),
+            stun_server: config.sfu_stun_server.clone(),
+        };
         match crate::sfu::SfuService::start(sfu_config, gossip).await {
             Ok(svc) => info!(
                 "SFU service ready on UDP {} (reachability: {})",

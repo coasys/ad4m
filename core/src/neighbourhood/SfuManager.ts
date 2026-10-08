@@ -2,9 +2,13 @@
  * SFU (Selective Forwarding Unit) client manager.
  *
  * Framework-agnostic WebRTC client for the AD4M executor's embedded
- * SFU.  Handles topology resolution, SDP negotiation, cascade
- * redirect following, server-pushed renegotiation, simulcast quality
- * preferences, and cascade failover.
+ * SFU.  Handles topology resolution, SDP negotiation, server-pushed
+ * renegotiation, simulcast quality preferences, and reconnecting after
+ * a failed connection.
+ *
+ * The client reaches one SFU: its own executor's. Multi-node calls work
+ * through cascade pipes between executors, so the client never follows
+ * a redirect or a rebalance to another node — it has no way to reach one.
  *
  * Applications (Flux, WE, or any other) wrap this class with their
  * own reactive store and UI layer.  The manager itself only touches
@@ -18,7 +22,6 @@ import type {
     SfuCallRenegotiationOffer,
     SfuConfig,
     SfuDataMessage,
-    SfuMigrateEvent,
     SfuQualityPreference,
 } from "./SfuTypes"
 
@@ -51,10 +54,6 @@ export interface SfuNeighbourhoodApi {
         targetDid: string,
         callback: (event: SfuCallRenegotiationOffer) => void,
     ): () => void
-    subscribeSfuMigrateEvent(
-        targetDid: string,
-        callback: (event: SfuMigrateEvent) => void,
-    ): () => void
     sfuAddIceCandidate(
         neighbourhoodUrl: string,
         roomName: string,
@@ -74,12 +73,6 @@ export interface SfuNeighbourhoodApi {
 
 export type SfuTopology = "sfu" | "mesh" | "cascaded"
 
-export interface SfuNodeState {
-    did: string
-    participantCount: number
-    capacityHint: number
-}
-
 export interface SfuCallState {
     topology: SfuTopology
     roomId: string
@@ -88,8 +81,6 @@ export interface SfuCallState {
     participants: Map<string, SfuParticipantState>
     localStream: MediaStream | null
     peerConnection: RTCPeerConnection | null
-    cascadeNodes: SfuNodeState[]
-    connectedNodeDid: string | null
     /** DIDs of participants already in the room at join time */
     knownParticipantDids: string[]
 }
@@ -186,15 +177,13 @@ export class SfuManager {
     private callbacks: Map<SfuEvent, SfuEventCallback[]> = new Map()
     private iceServers: RTCIceServer[]
     private streamToParticipant: Map<string, string> = new Map()
-    private failoverAttempts: number = 0
+    private reconnectAttempts: number = 0
+    private static readonly MAX_RECONNECTS = 3
     private midToParticipant: Map<string, string> = new Map()
     private trackDidIndex: number = 0
     private renegotiationUnsubscribe: (() => void) | null = null
-    private migrateUnsubscribe: (() => void) | null = null
     private dataChannelUnsubscribe: (() => void) | null = null
     private disconnectedTimer: ReturnType<typeof setTimeout> | null = null
-    private redirectCount: number = 0
-    private static readonly MAX_REDIRECTS = 5
 
     constructor(
         neighbourhood: SfuNeighbourhoodApi,
@@ -216,8 +205,6 @@ export class SfuManager {
             participants: new Map(),
             localStream: null,
             peerConnection: null,
-            cascadeNodes: [],
-            connectedNodeDid: null,
             knownParticipantDids: [],
         }
 
@@ -251,55 +238,38 @@ export class SfuManager {
         this.iceServers = servers.length > 0 ? servers : DEFAULT_ICE_SERVERS
     }
 
-    /** Select the least-loaded SFU node from the cascade. */
-    private selectNode(nodes: SfuNodeState[]): SfuNodeState | null {
-        if (nodes.length === 0) return null
-        return nodes.reduce((best, n) =>
-            n.participantCount < best.participantCount ? n : best,
-        )
-    }
-
-    /** Handle SFU node disconnection in cascaded mode. */
-    private async handleCascadeFailover(): Promise<void> {
-        if (this.state.topology !== "cascaded") return
-
-        this.failoverAttempts++
-        const maxAttempts = Math.max(this.state.cascadeNodes.length, 3)
-        if (this.failoverAttempts >= maxAttempts) {
-            console.error("Cascade failover exhausted — no healthy nodes")
-            this.emit("error", new Error("Cascade failover exhausted"))
+    /**
+     * Rebuild the call after its connection failed: leave, then join again
+     * on this executor, up to `MAX_RECONNECTS` times in a row. Leaving first
+     * matters: the executor still holds this DID's old session until it
+     * notices the connection died.
+     */
+    private async reconnect(): Promise<void> {
+        const stream = this.state.localStream
+        if (!stream) return
+        if (++this.reconnectAttempts > SfuManager.MAX_RECONNECTS) {
+            this.emit("error", new Error("SFU reconnect attempts exhausted"))
             return
         }
-
-        const availableNodes = this.state.cascadeNodes.filter(
-            (n) => n.did !== this.state.connectedNodeDid,
-        )
-        const nextNode = this.selectNode(availableNodes)
-        if (!nextNode) {
-            console.warn(
-                "No cascade nodes available for failover, falling back to mesh",
-            )
-            this.emit("topology-changed", "mesh")
-            return
-        }
-
         console.info(
-            `SFU cascade failover: reconnecting to node ${nextNode.did}`,
+            `SFU: connection failed, reconnecting (${this.reconnectAttempts}/${SfuManager.MAX_RECONNECTS})`,
         )
-        this.state.connectedNodeDid = nextNode.did
-        this.state.sfuPeerDid = nextNode.did
-
-        if (this.state.localStream) {
-            try {
-                if (this.state.peerConnection) {
-                    this.state.peerConnection.close()
-                    this.state.peerConnection = null
-                }
-                await this.join(this.state.localStream)
-            } catch (e) {
-                console.error("Cascade failover failed:", e)
-                this.emit("error", e)
-            }
+        this.releaseServerEvents()
+        if (this.state.peerConnection) {
+            this.state.peerConnection.close()
+            this.state.peerConnection = null
+        }
+        try {
+            await this.neighbourhood.sfuCallLeave(this.neighbourhoodUrl, this.roomId)
+        } catch {
+            /* best-effort: the executor frees a dead session on its own */
+        }
+        this.resetParticipants()
+        try {
+            await this.join(stream)
+        } catch (e) {
+            console.error("SFU reconnect failed:", e)
+            this.emit("error", e)
         }
     }
 
@@ -346,28 +316,27 @@ export class SfuManager {
         const pc = new RTCPeerConnection({ iceServers: this.iceServers })
         this.state.peerConnection = pc
 
-        // ICE state monitoring for cascade failover.
+        // ICE state monitoring for reconnecting.
         // "disconnected" is often transient (network blip, route change) —
-        // delay failover by 3 seconds to let it recover.  "failed" triggers
-        // immediate failover.
+        // wait 3 seconds to let it recover.  "failed" reconnects at once.
         pc.oniceconnectionstatechange = () => {
             if (pc.iceConnectionState === "failed") {
                 if (this.disconnectedTimer) {
                     clearTimeout(this.disconnectedTimer)
                     this.disconnectedTimer = null
                 }
-                this.handleCascadeFailover()
+                this.reconnect()
             } else if (pc.iceConnectionState === "disconnected") {
                 if (!this.disconnectedTimer) {
                     this.disconnectedTimer = setTimeout(() => {
                         this.disconnectedTimer = null
-                        // Only failover if this pc is still the active one
+                        // Only reconnect if this pc is still the active one
                         // and still disconnected.
                         if (
                             this.state.peerConnection === pc &&
                             pc.iceConnectionState === "disconnected"
                         ) {
-                            this.handleCascadeFailover()
+                            this.reconnect()
                         }
                     }, 3000)
                 }
@@ -508,29 +477,6 @@ export class SfuManager {
         }
         this.state.participantId = session.participantId
 
-        // Handle cascade redirect — bounded to prevent infinite loops
-        if (session.redirectTo) {
-            this.redirectCount++
-            if (this.redirectCount > SfuManager.MAX_REDIRECTS) {
-                this.releaseServerEvents()
-                pc.close()
-                this.state.peerConnection = null
-                this.redirectCount = 0
-                throw new Error(
-                    `SFU redirect limit exceeded (${SfuManager.MAX_REDIRECTS})`,
-                )
-            }
-            console.info(
-                `SFU redirect ${this.redirectCount}/${SfuManager.MAX_REDIRECTS}: reconnecting to node ${session.redirectTo}`,
-            )
-            this.state.connectedNodeDid = session.redirectTo
-            this.state.sfuPeerDid = session.redirectTo
-            pc.close()
-            this.state.peerConnection = null
-            return await this.join(localStream)
-        }
-        this.redirectCount = 0
-
         if (
             session.streamMapping &&
             session.streamMapping.length > 0
@@ -553,7 +499,7 @@ export class SfuManager {
             this.releaseServerEvents()
             throw err
         }
-        this.failoverAttempts = 0
+        this.reconnectAttempts = 0
 
         // Flush buffered trickle ICE candidates
         joinComplete = true
@@ -571,27 +517,25 @@ export class SfuManager {
         }
     }
 
-    /** Drop the server-event subscriptions of the current join. */
+    /** Drop the server-event subscription of the current join. */
     private releaseServerEvents(): void {
         this.renegotiationUnsubscribe?.()
         this.renegotiationUnsubscribe = null
-        this.migrateUnsubscribe?.()
-        this.migrateUnsubscribe = null
     }
 
     /**
-     * Subscribe to the server-pushed renegotiation offers and migrate
-     * events for this join.  `join` calls this before `sfuCallJoin`: the
+     * Subscribe to the server-pushed renegotiation offers for this
+     * join.  `join` calls this before `sfuCallJoin`: the
      * executor sends a socket only the events it watches, and a call
      * carries the pending watch ahead of itself, so no event the join
      * causes is lost.  Events that arrive before `isJoined()` turns true
      * are dropped — the peer connection cannot apply them yet.
      */
     private subscribeServerEvents(isJoined: () => boolean): void {
-        // Join may run more than once (cascade redirect/failover).  The
-        // prior subscriptions go after the new ones exist, so the event
+        // Join may run more than once (a reconnect).  The prior
+        // subscription goes after the new one exists, so the event
         // socket never drops to zero listeners in between.
-        const previous = [this.renegotiationUnsubscribe, this.migrateUnsubscribe]
+        const previous = this.renegotiationUnsubscribe
 
         // Subscribe to server-initiated renegotiation offers
         this.renegotiationUnsubscribe =
@@ -641,78 +585,7 @@ export class SfuManager {
                 },
             )
 
-        // Subscribe to cascade rebalance migration events.
-        // The server tells this participant to leave the current
-        // (overloaded) node and rejoin on a less-loaded peer.
-        // Same flow as cascade failover: leave → set target → rejoin.
-        this.migrateUnsubscribe =
-            this.neighbourhood.subscribeSfuMigrateEvent(
-                this.agentDid,
-                async (event) => {
-                    if (!isJoined()) return
-                    if (event.neighbourhoodUrl !== this.neighbourhoodUrl)
-                        return
-                    if (event.roomName !== this.roomId) return
-
-                    console.info(
-                        `SFU rebalance: migrating to node ${event.migrateToDid}`,
-                    )
-
-                    const stream = this.state.localStream
-                    if (!stream) return
-
-                    // Clean up current connection without calling
-                    // the full leave() — we still hold the local
-                    // stream for the rejoin.
-                    if (this.renegotiationUnsubscribe) {
-                        try {
-                            this.renegotiationUnsubscribe()
-                        } catch {
-                            /* swallow */
-                        }
-                        this.renegotiationUnsubscribe = null
-                    }
-                    if (this.state.peerConnection) {
-                        this.state.peerConnection.close()
-                        this.state.peerConnection = null
-                    }
-                    try {
-                        await this.neighbourhood.sfuCallLeave(
-                            this.neighbourhoodUrl,
-                            this.roomId,
-                        )
-                    } catch {
-                        /* best-effort — the server already expects
-                         * us to leave */
-                    }
-
-                    // Clear participant state for the rejoin
-                    for (const [, participant] of this.state.participants) {
-                        this.emit("participant-left", participant)
-                    }
-                    this.state.participants.clear()
-                    this.state.participantId = null
-                    this.midToParticipant.clear()
-                    this.streamToParticipant.clear()
-                    this.trackDidIndex = 0
-                    this.state.knownParticipantDids = []
-
-                    // Point at the target node and rejoin
-                    this.state.connectedNodeDid = event.migrateToDid
-                    this.state.sfuPeerDid = event.migrateToDid
-                    try {
-                        await this.join(stream)
-                    } catch (err) {
-                        console.error(
-                            "SFU rebalance: rejoin failed:",
-                            err,
-                        )
-                        this.emit("error", err)
-                    }
-                },
-            )
-
-        for (const unsubscribe of previous) unsubscribe?.()
+        previous?.()
     }
 
     async leave(): Promise<void> {
@@ -723,14 +596,6 @@ export class SfuManager {
                 /* swallow */
             }
             this.renegotiationUnsubscribe = null
-        }
-        if (this.migrateUnsubscribe) {
-            try {
-                this.migrateUnsubscribe()
-            } catch {
-                /* swallow */
-            }
-            this.migrateUnsubscribe = null
         }
         if (this.dataChannelUnsubscribe) {
             try {
@@ -752,6 +617,11 @@ export class SfuManager {
         } catch (e) {
             console.error("Error leaving SFU call:", e)
         }
+        this.resetParticipants()
+    }
+
+    /** Forget the call's participants, telling listeners each one left. */
+    private resetParticipants(): void {
         for (const [, participant] of this.state.participants) {
             this.emit("participant-left", participant)
         }

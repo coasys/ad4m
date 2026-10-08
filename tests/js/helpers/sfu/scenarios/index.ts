@@ -38,6 +38,7 @@ export { f6NonMemberJoin } from "./f6-non-member-join.js";
 export { f7BadCapability } from "./f7-bad-capability.js";
 export { f8StuckRenegotiationRecovery } from "./f8-stuck-renegotiation-recovery.js";
 export { f9CascadeNodeCrashCleanup } from "./f9-cascade-node-crash-cleanup.js";
+export { f10NonMemberRpcs } from "./f10-non-member-rpcs.js";
 
 // SFU scale
 export { s1Sfu20Peer } from "./s1-sfu-20peer.js";

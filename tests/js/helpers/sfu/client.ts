@@ -90,6 +90,12 @@ export class InstrumentedClient {
    * SFU surface in the WebRTC scenarios).
    */
   async call<T = any>(method: string, params: any = {}): Promise<T> {
+    // The harness holds a client for every node, so unlike an SDK client
+    // it can follow a cascade redirect; the executor sends one only to a
+    // caller that says so.
+    if (method === "sfu.callJoin" && params.acceptRedirect === undefined) {
+      params = { ...params, acceptRedirect: true };
+    }
     return this.wsCall<T>(method, params);
   }
 

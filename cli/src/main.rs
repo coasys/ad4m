@@ -194,6 +194,10 @@ enum Domain {
         /// machine's LAN or public IP for cross-machine media.
         #[arg(long)]
         sfu_bind_addr: Option<String>,
+        /// STUN server (`host:port`) that checks a public bind address is
+        /// reachable. Unset: no probe.
+        #[arg(long)]
+        sfu_stun_server: Option<String>,
     },
     Eve {
         #[command(subcommand)]
@@ -280,6 +284,7 @@ async fn main() -> Result<()> {
         sfu_cascade_listen,
         sfu_cascade_peers,
         sfu_bind_addr,
+        sfu_stun_server,
     } = args.domain
     {
         // Not compiled: cli/Cargo.toml's [[bin]] "ad4m" is src/ad4m.rs, which
@@ -313,6 +318,7 @@ async fn main() -> Result<()> {
                 sfu_cascade_listen,
                 sfu_cascade_peers,
                 sfu_bind_addr,
+                sfu_stun_server,
                 localhost: None,
                 auto_permit_cap_requests: None,
                 tls: None,
@@ -396,6 +402,7 @@ async fn main() -> Result<()> {
             sfu_cascade_listen: _,
             sfu_cascade_peers: _,
             sfu_bind_addr: _,
+            sfu_stun_server: _,
         } => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),
     }

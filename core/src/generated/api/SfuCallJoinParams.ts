@@ -4,4 +4,10 @@ export type SfuCallJoinParams = { neighbourhoodUrl: string, roomName: string,
 /**
  * JSON-encoded `RTCSessionDescriptionInit`.
  */
-sdpOffer: string, };
+sdpOffer: string, 
+/**
+ * The caller can reach other cascade nodes, so a busy room may answer
+ * with `redirectTo` instead of a session. Off by default: an SDK client
+ * reaches only this executor.
+ */
+acceptRedirect?: boolean, };
