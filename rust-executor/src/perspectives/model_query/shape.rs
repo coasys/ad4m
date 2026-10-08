@@ -21,6 +21,26 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+/// No SHACL is stored for `class_name`. Typed so a caller holding the error
+/// can tell which class to wait for: on a shared perspective it may still be
+/// syncing (see `PerspectiveInstance::model_query`).
+#[derive(Debug)]
+pub(crate) struct MissingShape {
+    pub(crate) class_name: String,
+}
+
+impl std::fmt::Display for MissingShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
+            self.class_name
+        )
+    }
+}
+
+impl std::error::Error for MissingShape {}
+
 /// Public (crate-level) entry point for loading a shape from the SHACL store.
 ///
 /// Delegates to [`load_shape`].
@@ -62,10 +82,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
-        return Err(anyhow!(
-            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
-            class_name
-        ));
+        return Err(MissingShape {
+            class_name: class_name.to_string(),
+        }
+        .into());
     }
 
     let shape_uri = results[0]["shapeUri"]

@@ -248,6 +248,81 @@ mod tests {
         );
     }
 
+    fn run_insecure_no_admin_credential(argv: &[&str]) -> bool {
+        let app = ClapApp::try_parse_from(argv).expect("argv parses");
+        match app.domain {
+            Domain::Run(run) => run.insecure_no_admin_credential,
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+    }
+
+    /// The testing flag is off unless set on the command line or through
+    /// AD4M_INSECURE_NO_ADMIN_CREDENTIAL with a truthy value.
+    #[test]
+    fn run_reads_the_testing_flag_from_argv_and_environment() {
+        let _env = lock_env();
+        std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
+        assert!(!run_insecure_no_admin_credential(&["ad4m-executor", "run"]));
+        assert!(run_insecure_no_admin_credential(&[
+            "ad4m-executor",
+            "run",
+            "--insecure-no-admin-credential"
+        ]));
+        std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", "true");
+        assert!(run_insecure_no_admin_credential(&["ad4m-executor", "run"]));
+        std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", "false");
+        assert!(!run_insecure_no_admin_credential(&["ad4m-executor", "run"]));
+        std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
+    }
+
+    /// An "off" variable leaves the mode off. Anything but `true` never
+    /// enables it; unknown values are rejected. An empty variable is an
+    /// error that names it, as for every other `AD4M_<FLAG>`.
+    #[test]
+    fn only_true_enables_the_testing_flag() {
+        let _env = lock_env();
+        for off in ["0", "false", "no", "off"] {
+            std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", off);
+            assert!(
+                !run_insecure_no_admin_credential(&[
+                    "ad4m-executor",
+                    "run",
+                    "--admin-credential",
+                    "secret"
+                ]),
+                "{off:?}"
+            );
+        }
+        for invalid in ["1", "TRUE", "yes"] {
+            std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", invalid);
+            assert!(
+                ClapApp::try_parse_from(["ad4m-executor", "run"]).is_err(),
+                "{invalid:?}"
+            );
+        }
+        std::env::set_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL", "");
+        let err = ClapApp::try_parse_from(["ad4m-executor", "run", "--admin-credential", "secret"])
+            .expect_err("an empty variable is an error");
+        assert!(
+            err.to_string()
+                .contains("AD4M_INSECURE_NO_ADMIN_CREDENTIAL is set but empty"),
+            "{err}"
+        );
+        std::env::remove_var("AD4M_INSECURE_NO_ADMIN_CREDENTIAL");
+        assert!(!run_insecure_no_admin_credential(&[
+            "ad4m-executor",
+            "run",
+            "--insecure-no-admin-credential=false"
+        ]));
+        assert!(run_insecure_no_admin_credential(&[
+            "ad4m-executor",
+            "run",
+            "--insecure-no-admin-credential",
+            "--localhost",
+            "true"
+        ]));
+    }
+
     /// The help text must not echo the variable's value.
     #[test]
     fn run_help_hides_the_environment_value() {
