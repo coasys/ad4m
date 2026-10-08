@@ -234,7 +234,13 @@ export class FlowInstance {
   }
 
   /**
-   * Mint a new `FlowInstance` on the given perspective (design doc §4.3).
+   * Start `flowName` on `baseExpression`: mint a new `FlowInstance` on the
+   * given perspective (design doc §4.3), or return the one already running
+   * there. Calling it twice, or from two clients, does not leave two runs;
+   * where two mints raced, every caller gets the earliest.
+   *
+   * A flow runs on a subject once: a run that has reached its last state is
+   * returned too, not replaced by a new one.
    *
    * Idempotently registers the hardwired `FlowInstanceRecord` +
    * `FlowTransitionProposal` @Model classes on first call — the on-graph
@@ -283,6 +289,25 @@ export class FlowInstance {
     // flow author who wants a specific state as the entry point must give
     // it the lowest `value` in the set.
     //
+    // A run already on this subject for this flow is the one to return:
+    // minting another would leave two runs, each with its own state, and
+    // every reader choosing between them. Two clients starting at the same
+    // moment can still both mint; the earliest run (then the lowest id) is
+    // the one each of them gets back from here on.
+    const existing = await FlowInstanceRecord.findAll(perspective, {
+      where: { flowUri: flow.flowUri, subject: baseExpression },
+    });
+    if (existing.length > 0) {
+      const startedAt = (r: FlowInstanceRecord) => {
+        const v = (r as any).createdAt;
+        return typeof v === "number" ? v : Number.POSITIVE_INFINITY;
+      };
+      const [first] = [...existing].sort(
+        (a, b) => startedAt(a) - startedAt(b) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      );
+      return FlowInstance.wrap(perspective, flow, first);
+    }
+
     // Store the flow's URI, not the bare name — see FlowInstanceRecord's
     // docstring for the collision-across-modules argument (James PR #929 R5).
     const record = await FlowInstanceRecord.create(perspective, {
