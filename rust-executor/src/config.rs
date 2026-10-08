@@ -326,7 +326,7 @@ pub fn non_empty_credential(credential: Option<String>) -> Option<String> {
 /// Why `run` refused to start; names both ways out.
 pub const NO_ADMIN_CREDENTIAL_ERROR: &str =
     "Refusing to start: no admin credential is set, and without one every caller \
-     gets full admin access. Set AD4M_ADMIN_CREDENTIAL (or --admin-credential, \
+     on a loopback listener gets full admin access. Set AD4M_ADMIN_CREDENTIAL (or --admin-credential, \
      `adminCredential` in the config) to a secret, or, for tests and local \
      development only, pass --insecure-no-admin-credential \
      (AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true).";

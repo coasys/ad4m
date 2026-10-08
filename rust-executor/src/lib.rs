@@ -548,8 +548,9 @@ pub async fn run(mut config: Ad4mConfig) -> JoinHandle<Result<(), AnyError>> {
         // Only reachable with insecure_no_admin_credential (checked above).
         warn!("╔══════════════════════════════════════════════════════════════╗");
         warn!("║  SECURITY WARNING: --insecure-no-admin-credential is set     ║");
-        warn!("║  Every request — including unauthenticated ones — receives  ║");
-        warn!("║  ALL_CAPABILITY (full admin access to this executor).        ║");
+        warn!("║  A caller with no token gets ALL_CAPABILITY (full admin      ║");
+        warn!("║  access) on a loopback listener. On --localhost false, TLS,  ║");
+        warn!("║  or a request with a forwarding header it is anonymous.      ║");
         warn!("║  This mode is intended for local testing ONLY.               ║");
         warn!("╚══════════════════════════════════════════════════════════════╝");
     }

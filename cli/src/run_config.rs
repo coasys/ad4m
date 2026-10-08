@@ -175,8 +175,10 @@ pub struct RunArgs {
     )]
     pub admin_credential: Option<String>,
     /// For tests and local development only: start without an admin
-    /// credential. An empty token then has full admin access, so anyone
-    /// who can reach the executor's port controls it.
+    /// credential. An empty token then has full admin access on a loopback
+    /// listener, so anyone who can reach it there (or through a proxy that
+    /// sets no forwarding header) controls the executor. On `--localhost
+    /// false`, the TLS listener, or with a forwarding header it is anonymous.
     /// AD4M_INSECURE_NO_ADMIN_CREDENTIAL enables it only with `true`;
     /// `false`, `0`, `no` or `off` leave it off. Must not be empty.
     #[arg(
