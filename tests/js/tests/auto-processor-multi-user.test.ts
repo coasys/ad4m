@@ -34,6 +34,7 @@ import {
   startExecutor,
   runHcLocalServices,
   gracefulShutdown,
+  resetAppDataPath,
 } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { waitUntil } from "../helpers/index";
@@ -84,9 +85,7 @@ describeIfLLM("AutoProcessor runs for managed users on a hosted node", function 
   before(async () => {
     [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
     registerPorts([apiPort, hcAdminPort, hcAppPort]);
-    if (!fs.existsSync(appDataPath)) {
-      fs.mkdirSync(appDataPath, { recursive: true });
-    }
+    resetAppDataPath(appDataPath);
 
     const localServices = await runHcLocalServices();
     proxyUrl = localServices.proxyUrl;

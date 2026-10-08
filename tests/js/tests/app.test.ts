@@ -4,7 +4,7 @@ import fs from "fs";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, startExecutor, quitExecutor, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from "child_process";
 
@@ -36,8 +36,7 @@ describe("Apps integration tests", () => {
     }
     if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
         fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-    if(!fs.existsSync(appDataPath))
-        fs.mkdirSync(appDataPath)
+    resetAppDataPath(appDataPath);
 
     executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,
       apiPort, hcAdminPort, hcAppPort , false, "123");

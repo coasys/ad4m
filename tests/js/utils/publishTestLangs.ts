@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { exit } from "process";
 import { execSync } from "child_process";
 import { fileURLToPath } from 'url';
-import { baseUrl, pollUntil, startExecutor, runHcLocalServices } from "./utils";
+import { baseUrl, pollUntil, startExecutor, runHcLocalServices, resetAppDataPath } from "./utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -55,9 +55,7 @@ function killExecutorPorts(ports: number[]) {
 }
 
 function createTestingAgent() {
-    if (!fs.existsSync(appDataPath)) {
-        fs.mkdirSync(appDataPath);
-    }
+    resetAppDataPath(appDataPath);
 }
 
 function injectSystemLanguages() {
