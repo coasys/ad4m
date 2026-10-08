@@ -24,14 +24,68 @@ references:
 
 commands:
   fix_workdir:
-    description: "Recover from corrupted .git directory (e.g. after disk-full)"
+    description: "Recover from a corrupted or incomplete .git and stale local branches before checkout (#1325)"
     steps:
       - run:
           name: Fix corrupted working directory
+          # Runs before `checkout` in every job. Each runner instance keeps one persistent
+          # workdir, so the .git found here is whatever the previous job left behind.
+          # scripts/ci-fix-workdir.test.sh extracts this block from the config and runs it
+          # against scratch repositories; keep the step name and the `command: |` line as is.
           command: |
-            if [ -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
-              echo "Corrupted .git directory detected, removing for fresh clone..."
+            heal() {
+              echo "fix_workdir: $1 -- removing .git for a fresh clone"
               rm -rf .git
+            }
+            if [ -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+              heal "corrupted .git (git rev-parse fails)"
+            fi
+            # A .git that opens but lacks objects its refs reach passes the check above and then
+            # fails checkout with "pack has N unresolved deltas": checkout offers the local refs as
+            # haves, GitHub sends a thin pack against them, and the bases are not there. A
+            # connectivity check walks the same refs and finds the gap in about a second.
+            # The ci-workdir clones are blob:none partial clones. fsck accepts their missing blobs
+            # as long as the packs' .promisor marker files exist (the config keys do not matter:
+            # a clone with promisor/partialClone config removed still passes, one with the markers
+            # removed fails). Log both, with the fsck output, so a broken pack can be told from
+            # lost partial-clone metadata afterwards.
+            if [ -d .git ]; then
+              fsck_out="$(git fsck --connectivity-only --no-progress 2>&1)" || {
+                echo "fix_workdir: git fsck --connectivity-only failed:"
+                echo "$fsck_out" | head -20
+                echo "fix_workdir: partial-clone state:" \
+                  "extensions.partialClone=$(git config --get extensions.partialClone || echo unset)" \
+                  "remote.origin.promisor=$(git config --get remote.origin.promisor || echo unset)" \
+                  "promisor packs=$(ls .git/objects/pack/*.promisor 2>/dev/null | wc -l)"
+                heal "missing objects reachable from refs"
+              }
+            fi
+            # Stale local branches: checkout creates refs/heads/$CIRCLE_BRANCH and fails with
+            # 'a branch named "refs/heads/<branch>" already exists' when an earlier job on the
+            # same branch left it behind; the workdirs had 25-235 of them. Nothing else holds
+            # these refs (one job per workdir, no linked worktrees), so drop them all in one
+            # transaction; the fetched objects stay, so the next fetch is no larger. Detach HEAD
+            # first: deleting the checked-out branch would otherwise leave the repo on an unborn
+            # branch until checkout runs, and git log/status in a debugging session would show
+            # an empty repo.
+            if [ -d .git ]; then
+              if head_sha="$(git rev-parse --verify -q HEAD)"; then
+                git update-ref --no-deref HEAD "$head_sha"
+              fi
+              stale="$(git for-each-ref --format='%(refname)' refs/heads | wc -l)"
+              if [ "$stale" -gt 0 ]; then
+                git for-each-ref --format='delete %(refname)' refs/heads | git update-ref --stdin
+                echo "fix_workdir: removed $stale stale local branch ref(s)"
+              fi
+            fi
+            # Checkout refuses a non-empty directory that is not a repository, and these runners
+            # keep untracked caches (target/, node_modules/) beside the checkout. An empty
+            # repository with origin set lets checkout fetch everything and check out over the
+            # old files, keeping the caches. (Ported from feat/embedded-sfu.)
+            if [ ! -d .git ] && [ -n "$(ls -A)" ]; then
+              echo "fix_workdir: files but no .git -- initialising an empty repository for checkout"
+              git init -q
+              git remote add origin "$CIRCLE_REPOSITORY_URL"
             fi
       - run:
           # tests/js/utils/utils.ts starts each executor in /tmp/ad4m-<hash>
@@ -288,6 +342,11 @@ jobs:
           # Local git repo + fake cargo, no network; about a second.
           name: Test install-hc-toolchain.sh
           command: bash scripts/install-hc-toolchain.test.sh
+      - run:
+          # Scratch git repos, no network; about two seconds. Runs the fix_workdir
+          # block above against healthy and deliberately broken workdirs (#1325).
+          name: Test the fix_workdir step
+          command: bash scripts/ci-fix-workdir.test.sh
       - build_adam
       - build_integration_inputs
       - run:
