@@ -227,17 +227,29 @@ impl Default for SfuServerConfig {
 ///   loopback-only (the default), the outbound interface once the API is
 ///   exposed (`--localhost false`), so other machines can reach the media.
 ///
-/// A malformed address falls back to loopback, never to a wider interface.
+/// A malformed address, or an unspecified one (`0.0.0.0`, `::`: str0m cannot
+/// offer it as a candidate), falls back to loopback, never to a wider
+/// interface.
 pub fn sfu_bind_ip(explicit: Option<&str>, localhost: bool) -> std::net::IpAddr {
     let loopback = std::net::Ipv4Addr::LOCALHOST.into();
     match explicit {
-        Some(addr) => addr.parse().unwrap_or_else(|e| {
-            warn!(
-                "SFU bind address `{}` parse error: {} — binding loopback",
-                addr, e
-            );
-            loopback
-        }),
+        Some(addr) => match addr.parse::<std::net::IpAddr>() {
+            Ok(ip) if !ip.is_unspecified() => ip,
+            Ok(_) => {
+                warn!(
+                    "SFU bind address `{}` is unspecified; it needs a real interface IP — binding loopback",
+                    addr
+                );
+                loopback
+            }
+            Err(e) => {
+                warn!(
+                    "SFU bind address `{}` parse error: {} — binding loopback",
+                    addr, e
+                );
+                loopback
+            }
+        },
         None if localhost => loopback,
         None => super::detect_outbound_ip(),
     }
@@ -1254,9 +1266,10 @@ mod tests {
             "::1".parse::<std::net::IpAddr>().unwrap()
         );
         assert_eq!(
-            sfu_bind_ip(Some("0.0.0.0"), true),
-            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+            sfu_bind_ip(Some("10.1.2.3"), true),
+            "10.1.2.3".parse::<std::net::IpAddr>().unwrap()
         );
+        assert_eq!(sfu_bind_ip(Some("0.0.0.0"), false), loopback);
         assert_eq!(sfu_bind_ip(Some("not-an-ip"), false), loopback);
         assert_eq!(sfu_bind_ip(None, false), crate::sfu::detect_outbound_ip());
     }

@@ -32,7 +32,7 @@
 //! | `auto-processor-event`        | (inline)      | pass owner DID         | Auto-processor pass step signal      |
 //! | `auto-processor-neighbourhood-state` | (inline) | perspective owner DID | Coarse-grained neighbourhood view of "someone is auto-processing" |
 //! | `sfu-call-renegotiation-offer` | (inline)    | `targetDid`            | SFU server-pushed SDP offer          |
-//! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere |
+//! | `sfu-migrate`                 | (inline)      | `targetDid`            | SFU cascade rebalance: rejoin elsewhere (`acceptRedirect` joins only) |
 //! | `sfu-data`                    | (inline)      | participant of the room | SFU data channel message            |
 //!
 //! ## Client → Server messages
@@ -344,9 +344,11 @@ pub(crate) async fn build_event_stream_for(
     // events once the DID resolves — the filter re-tries on every event while
     // the cache is empty and stops trying once a DID is observed (CodeRabbit
     // #881: "Resolve the DID after it becomes available"). Both auto-processor
-    // streams share the same lazy cell — one resolution serves both.
+    // streams and the three SFU streams share the same lazy cell — one
+    // resolution serves all.
     let d_auto_processor = Arc::new(LazyDid::new(auth_token.clone(), resolved_did));
     let d_auto_processor_state = d_auto_processor.clone();
+    let d_sfu = d_auto_processor.clone();
 
     let pubsub = get_global_pubsub().await;
 
@@ -629,18 +631,15 @@ pub(crate) async fn build_event_stream_for(
     // description, then post the answer via `sfu.callAnswerServerOffer`.
     let s_sfu_reneg = {
         let rx = pubsub.subscribe(&SFU_CALL_RENEGOTIATION_OFFER_TOPIC).await;
-        let token = auth_token.clone();
+        let did_cell = d_sfu.clone();
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let did_cell = did_cell.clone();
                 async move {
                     match result {
                         Ok(ref msg) => {
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
+                            let did = did_cell.get();
                             if sfu_events && matches_sfu_target(msg, did.as_deref()) {
                                 Some(wrap_event(events::SFU_CALL_RENEGOTIATION_OFFER, msg))
                             } else {
@@ -690,22 +689,20 @@ pub(crate) async fn build_event_stream_for(
 
     // ── SFU cascade rebalance migration events ──
     // Same pattern as renegotiation offers — targeted at one specific
-    // participant via `targetDid`.  The client should leave and rejoin
-    // on the indicated node (same flow as cascade failover).
+    // participant via `targetDid`, and only one that joined with
+    // `acceptRedirect` (it can reach the indicated node): it leaves and
+    // rejoins there.
     let s_sfu_migrate = {
         let rx = pubsub.subscribe(&SFU_MIGRATE_TOPIC).await;
-        let token = auth_token.clone();
+        let did_cell = d_sfu.clone();
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let did_cell = did_cell.clone();
                 async move {
                     match result {
                         Ok(ref msg) => {
-                            let did = {
-                                let ctx = AgentContext::from_auth_token(token.clone());
-                                did_for_context(&ctx).ok()
-                            };
+                            let did = did_cell.get();
                             if sfu_events && matches_sfu_target(msg, did.as_deref()) {
                                 Some(wrap_event(events::SFU_MIGRATE, msg))
                             } else {
@@ -723,12 +720,12 @@ pub(crate) async fn build_event_stream_for(
     // in-memory lookup. Admin credentials bypass the filter.
     let s_sfu_data = {
         let rx = pubsub.subscribe(&SFU_DATA_CHANNEL_TOPIC).await;
-        let token = auth_token.clone();
+        let did_cell = d_sfu.clone();
         let admin = is_admin;
         BroadcastStream::new(rx)
             .filter_map(|r| async { handle_broadcast_result(r) })
             .filter_map(move |result| {
-                let token = token.clone();
+                let did_cell = did_cell.clone();
                 async move {
                     let msg = result.ok()?;
                     if !sfu_events {
@@ -737,7 +734,7 @@ pub(crate) async fn build_event_stream_for(
                     if admin {
                         return Some(wrap_event(events::SFU_DATA, &msg));
                     }
-                    let did = did_for_context(&AgentContext::from_auth_token(token)).ok()?;
+                    let did = did_cell.get()?;
                     let data: crate::sfu::SfuDataMessage = serde_json::from_str(&msg).ok()?;
                     let in_room = crate::sfu::get_sfu_service()?
                         .is_participant(&data.neighbourhood_url, &data.room_name, &did)

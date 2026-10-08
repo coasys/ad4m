@@ -60,12 +60,20 @@ fn parse<P: DeserializeOwned>(params: Value) -> Result<P, WsRpcError> {
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))
 }
 
-/// The DID the caller acts as: a user token's own DID, otherwise the main
-/// agent's — how every other API resolves a token (`AgentContext::from_auth_token`).
-/// That covers the admin credential and, on a single-user node, the app tokens
-/// ad4m-connect hands out. Handlers check a capability first, so an anonymous
-/// caller never reaches this.
+/// The DID the caller acts as: a user token's own DID; a token that names
+/// no user acts as the main agent, as everywhere else
+/// (`AgentContext::from_auth_token`) — the admin credential and, on a
+/// single-user node, the app tokens ad4m-connect hands out. A user token
+/// whose DID could not be resolved is refused, never promoted to the main
+/// agent. Handlers check a capability first, so an anonymous caller never
+/// reaches this.
 fn caller_did(ctx: &RequestContext) -> Result<String, WsRpcError> {
+    if ctx.user_email.is_some() {
+        return ctx
+            .user_did
+            .clone()
+            .ok_or_else(|| WsRpcError::unauthorized("Caller's user DID not resolved"));
+    }
     if let Some(did) = ctx.user_did.clone() {
         return Ok(did);
     }
@@ -741,5 +749,28 @@ mod tests {
                 "sfu.status",
             ]
         );
+    }
+
+    /// A user token stays that user: when its DID cannot be resolved the
+    /// call is refused rather than run as the main agent.
+    #[test]
+    fn a_user_token_never_acts_as_the_main_agent() {
+        let user = |did: Option<&str>| RequestContext {
+            capabilities: Ok(vec![crate::agent::capabilities::ALL_CAPABILITY.clone()]),
+            auto_permit_cap_requests: false,
+            auth_token: "jwt".into(),
+            is_admin_credential: false,
+            user_email: Some("alice@example.com".into()),
+            user_did: did.map(String::from),
+            cancel_token: None,
+        };
+        assert_eq!(caller_did(&user(None)).unwrap_err().code, 401);
+        assert_eq!(
+            member_did(&user(None), "neighbourhood://n")
+                .unwrap_err()
+                .code,
+            401
+        );
+        assert_eq!(caller_did(&user(Some("did:alice"))).unwrap(), "did:alice");
     }
 }

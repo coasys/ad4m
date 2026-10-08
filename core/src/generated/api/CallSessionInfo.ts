@@ -6,8 +6,9 @@
  */
 export type CallSessionInfo = { roomName: string, neighbourhoodUrl: string, participantId: string, sdpAnswer: string, 
 /**
- * When set, the joining peer should reconnect to this DID's SFU
- * node (cascaded mode load redirect).
+ * When set, the join was not served here: the caller should join this
+ * DID's SFU node instead (cascade load redirect). Only a `callJoin` with
+ * `acceptRedirect` gets one.
  */
 redirectTo?: string, 
 /**

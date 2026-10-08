@@ -7,9 +7,10 @@
 //! it to all other participants in the room, reducing per-peer upload from O(N) to O(1).
 //!
 //! Cascaded multi-node SFU is supported via [`cascade`]: SFU nodes form a
-//! cluster, announce their capacity, and redirect new joins to the
-//! least-loaded peer.  Inter-node media flows over str0m-to-str0m pipe
-//! transports.
+//! cluster and announce their capacity, and inter-node media flows over
+//! str0m-to-str0m pipe transports. A caller that can reach other nodes
+//! (`acceptRedirect`) may be redirected to the least-loaded peer; an SDK
+//! client reaches only its own executor and is always served there.
 
 pub mod cascade;
 pub mod gossip;

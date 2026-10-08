@@ -95,11 +95,13 @@ impl TcpGossip {
         let mut tasks: Vec<JoinHandle<()>> = Vec::new();
 
         // Which DIDs may speak from which address. Inbound connections come
-        // from an ephemeral port, so only the IP identifies a peer.
+        // from an ephemeral port, so only the IP identifies a peer — in
+        // canonical form, as a dual-stack listener reports an IPv4 peer as
+        // `::ffff:a.b.c.d`.
         let mut allowed: HashMap<IpAddr, HashSet<String>> = HashMap::new();
         for peer in peers.iter().filter(|p| p.did != local_did) {
             allowed
-                .entry(peer.addr.ip())
+                .entry(peer.addr.ip().to_canonical())
                 .or_default()
                 .insert(peer.did.clone());
         }
@@ -112,7 +114,7 @@ impl TcpGossip {
                 loop {
                     match listener.accept().await {
                         Ok((socket, peer_addr)) => {
-                            let Some(dids) = allowed.get(&peer_addr.ip()) else {
+                            let Some(dids) = allowed.get(&peer_addr.ip().to_canonical()) else {
                                 warn!(
                                     "TcpGossip: refusing {}, no peer is configured there",
                                     peer_addr

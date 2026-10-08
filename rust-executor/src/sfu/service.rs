@@ -26,6 +26,12 @@ static SFU_SERVICE: OnceCell<Arc<SfuService>> = OnceCell::new();
 /// Most rooms one node holds at once. A join or `startRoom` that would open
 /// another is refused.
 pub const MAX_ROOMS_PER_NODE: usize = 256;
+/// Most rooms one neighbourhood holds on this node, so one neighbourhood's
+/// owner cannot use up the node's allowance.
+pub const MAX_ROOMS_PER_NEIGHBOURHOOD: usize = 16;
+/// An empty room — one `startRoom` opened that nobody joined — closes after
+/// this long. A room whose last participant leaves closes at once.
+pub const EMPTY_ROOM_TTL: Duration = Duration::from_secs(600);
 /// Most calls one DID is in at once on this node.
 pub const MAX_CALLS_PER_DID: usize = 4;
 /// Most neighbourhoods with a stored call config.
@@ -615,6 +621,7 @@ impl SfuService {
                     }
                 }
                 _ = sweep_interval.tick() => {
+                    self.reap_empty_rooms().await;
                     let mut pipes_to_drop: Vec<ParticipantId> = Vec::new();
                     {
                         let mut mgr = self.cascade_manager.write().await;
@@ -655,12 +662,15 @@ impl SfuService {
                             if let Some(target_did) =
                                 mgr.suggest_rebalance(&room_id_str, local_count)
                             {
-                                // Pick the most-recently-joined non-pipe
-                                // participant — least disruption to
-                                // established sessions.
+                                // Pick the most-recently-joined participant
+                                // that can reach another node — least
+                                // disruption to established sessions. A
+                                // client that reaches only this node is
+                                // never asked to move.
                                 if let Some(victim) = room
                                     .participants
                                     .values()
+                                    .filter(|p| p.accepts_redirect)
                                     .max_by_key(|p| p.joined_at)
                                 {
                                     events.push(SfuMigrateEvent {
@@ -738,6 +748,49 @@ impl SfuService {
 
     // ---- Room management ----
 
+    /// Whether `room_id` may be opened: refused once the node, or the room's
+    /// neighbourhood, holds its maximum of rooms.
+    fn check_new_room(rooms: &RoomManager, room_id: &RoomId) -> Result<(), String> {
+        let all = rooms.list_rooms();
+        if all.len() >= MAX_ROOMS_PER_NODE {
+            return Err(format!(
+                "This node already holds {} rooms",
+                MAX_ROOMS_PER_NODE
+            ));
+        }
+        let in_neighbourhood = all
+            .iter()
+            .filter(|r| r.id.neighbourhood_url == room_id.neighbourhood_url)
+            .count();
+        if in_neighbourhood >= MAX_ROOMS_PER_NEIGHBOURHOOD {
+            return Err(format!(
+                "This neighbourhood already has {} rooms on this node",
+                MAX_ROOMS_PER_NEIGHBOURHOOD
+            ));
+        }
+        Ok(())
+    }
+
+    /// Close rooms that have stayed empty for [`EMPTY_ROOM_TTL`].
+    async fn reap_empty_rooms(&self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let ttl_ms = EMPTY_ROOM_TTL.as_millis() as u64;
+        let mut rooms = self.rooms.write().await;
+        let stale: Vec<RoomId> = rooms
+            .list_rooms()
+            .iter()
+            .filter(|r| r.is_empty() && now_ms.saturating_sub(r.created_at) >= ttl_ms)
+            .map(|r| r.id.clone())
+            .collect();
+        for id in stale {
+            info!("SFU: closing room {}, empty for {:?}", id, EMPTY_ROOM_TTL);
+            rooms.destroy_room(&id).ok();
+        }
+    }
+
     /// Create or get an SFU room for a neighbourhood call.
     pub async fn start_room(
         &self,
@@ -746,11 +799,8 @@ impl SfuService {
     ) -> Result<SfuRoomInfo, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         let mut rooms = self.rooms.write().await;
-        if rooms.get_room(&room_id).is_none() && rooms.list_rooms().len() >= MAX_ROOMS_PER_NODE {
-            return Err(format!(
-                "This node already holds {} rooms",
-                MAX_ROOMS_PER_NODE
-            ));
+        if rooms.get_room(&room_id).is_none() {
+            Self::check_new_room(&rooms, &room_id)?;
         }
 
         // Get config for max participants
@@ -819,8 +869,10 @@ impl SfuService {
     /// client reaches only its own executor and never sets it: it is served
     /// here or refused with `RoomFull`.
     ///
-    /// A DID already in the room replaces its old session — a reconnect
-    /// can arrive before this node notices the old connection died.
+    /// A DID already in the room is refused (`AlreadyJoined`): replacing its
+    /// session would let two windows of one agent evict each other. A
+    /// reconnecting client leaves first, and a session whose connection died
+    /// is freed by the dead-peer sweep.
     pub async fn call_join(
         &self,
         neighbourhood_url: &str,
@@ -874,14 +926,11 @@ impl SfuService {
         // SDP and RTC succeeded — create the room if needed and register
         // the participant in a single write-lock scope, so the capacity and
         // cap checks hold against concurrent joins.
-        let (created, replaced) = {
+        let created = {
             let mut rooms = self.rooms.write().await;
             let created = rooms.get_room(&room_id).is_none();
-            if created && rooms.list_rooms().len() >= MAX_ROOMS_PER_NODE {
-                return Err(format!(
-                    "This node already holds {} rooms",
-                    MAX_ROOMS_PER_NODE
-                ));
+            if created {
+                Self::check_new_room(&rooms, &room_id)?;
             }
             let other_calls = rooms
                 .list_rooms()
@@ -900,25 +949,13 @@ impl SfuService {
             let room = rooms
                 .get_room_mut(&room_id)
                 .ok_or_else(|| RoomError::NotFound.to_string())?;
-            let replaced = room.participant_id_for_did(agent_did);
-            if let Some(old) = &replaced {
-                room.remove_participant(old);
-            }
             room.add_participant(pid.clone(), agent_did.to_string())
                 .map_err(|e| e.to_string())?;
-            (created, replaced)
+            if accept_redirect {
+                room.mark_redirectable(&pid);
+            }
+            created
         };
-        if let Some(old) = replaced {
-            info!(
-                "SFU: {} rejoined {}, replacing session {}",
-                agent_did, room_id, old
-            );
-            let _ = self
-                .server
-                .command_tx
-                .send(SfuCommand::RemovePeer(old))
-                .await;
-        }
 
         // Create the SFU peer and send it to the event loop
         let peer = SfuPeer::new(
@@ -1067,8 +1104,16 @@ impl SfuService {
         }
 
         // Clean up local quality preference tracking and re-propagate
-        // the aggregate to pipe peers (the max may have changed).
-        {
+        // the aggregate to pipe peers (the max may have changed). Kept when
+        // the DID is back in the room already: a fast rejoin's preference
+        // is the new session's.
+        let rejoined = self
+            .rooms
+            .read()
+            .await
+            .get_room(room_id)
+            .is_some_and(|room| room.participant_id_for_did(agent_did).is_some());
+        if !rejoined {
             let mut prefs = self.local_quality_preferences.write().await;
             if let Some(room_prefs) = prefs.get_mut(&room_key) {
                 room_prefs.remove(agent_did);
