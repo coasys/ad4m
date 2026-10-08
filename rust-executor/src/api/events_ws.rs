@@ -358,6 +358,25 @@ pub(crate) async fn build_event_stream_for(
         };
     }
 
+    // `did_stream!` for a filter that waits on a lock (`perspective_is_owned_by`).
+    macro_rules! did_stream_async {
+        ($rx:expr, $ty:expr, $did:expr, $filter_fn:expr) => {
+            BroadcastStream::new($rx)
+                .filter_map(|r| async { handle_broadcast_result(r) })
+                .filter_map(move |result| {
+                    let current_did = $did.clone();
+                    async move {
+                        let msg = result.ok()?;
+                        if $filter_fn(&msg, current_did.as_deref()).await {
+                            Some(wrap_event($ty, &msg))
+                        } else {
+                            None
+                        }
+                    }
+                })
+        };
+    }
+
     macro_rules! did_stream_nested {
         ($rx:expr, $ty:expr, $key:expr, $did:expr, $filter_fn:expr) => {
             BroadcastStream::new($rx)
@@ -515,7 +534,7 @@ pub(crate) async fn build_event_stream_for(
         events::MESSAGE_RECEIVED,
         "message"
     );
-    let s_notif = did_stream!(
+    let s_notif = did_stream_async!(
         pubsub
             .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
             .await,
@@ -542,7 +561,7 @@ pub(crate) async fn build_event_stream_for(
     );
 
     // ── Query subscriptions ──
-    let s_query_sub = did_stream!(
+    let s_query_sub = did_stream_async!(
         pubsub
             .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
             .await,
@@ -576,17 +595,12 @@ pub(crate) async fn build_event_stream_for(
                 let did_cell = d_auto_processor.clone();
                 async move {
                     let current_did = did_cell.get();
-                    match result {
-                        Ok(ref msg)
-                            if matches_auto_processor_pass_owner(
-                                msg,
-                                current_did.as_deref(),
-                                admin,
-                            ) =>
-                        {
-                            Some(wrap_event(events::AUTO_PROCESSOR_EVENT, msg))
-                        }
-                        _ => None,
+                    let msg = result.ok()?;
+                    if matches_auto_processor_pass_owner(&msg, current_did.as_deref(), admin).await
+                    {
+                        Some(wrap_event(events::AUTO_PROCESSOR_EVENT, &msg))
+                    } else {
+                        None
                     }
                 }
             })
@@ -611,17 +625,17 @@ pub(crate) async fn build_event_stream_for(
                 let did_cell = d_auto_processor_state.clone();
                 async move {
                     let current_did = did_cell.get();
-                    match result {
-                        Ok(ref msg)
-                            if matches_auto_processor_neighbourhood_state_reader(
-                                msg,
-                                current_did.as_deref(),
-                                admin,
-                            ) =>
-                        {
-                            Some(wrap_event(events::AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, msg))
-                        }
-                        _ => None,
+                    let msg = result.ok()?;
+                    if matches_auto_processor_neighbourhood_state_reader(
+                        &msg,
+                        current_did.as_deref(),
+                        admin,
+                    )
+                    .await
+                    {
+                        Some(wrap_event(events::AUTO_PROCESSOR_NEIGHBOURHOOD_STATE, &msg))
+                    } else {
+                        None
                     }
                 }
             })
@@ -848,14 +862,17 @@ pub(crate) fn matches_transcription_user(msg: &str, current_did: Option<&str>) -
 /// Multi-user: only events about a perspective the session owns. An event
 /// without `perspectiveUuid`, or one that does not parse, reaches nobody: every
 /// publisher of these topics sets the field.
-pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
+pub(crate) async fn matches_perspective_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Some(did) = current_did else {
         return true;
     };
-    serde_json::from_str::<serde_json::Value>(msg)
+    let uuid = serde_json::from_str::<serde_json::Value>(msg)
         .ok()
-        .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string))
-        .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
+        .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string));
+    match uuid {
+        Some(uuid) => perspective_is_owned_by(&uuid, did).await,
+        None => false,
+    }
 }
 
 /// Auto-processor events are delivered ONLY to the DID whose pass produced
@@ -873,107 +890,147 @@ pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) ->
 /// administrator access."
 ///
 /// Neighbourhood-state filter is similarly gated below.
-pub(crate) fn matches_auto_processor_neighbourhood_state_reader(
+pub(crate) async fn matches_auto_processor_neighbourhood_state_reader(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
 ) -> bool {
-    matches_auto_processor_neighbourhood_state_reader_with(
-        msg,
-        current_did,
-        is_admin,
-        perspective_is_owned_by,
-    )
+    match auto_processor_neighbourhood_state_gate(msg, current_did, is_admin) {
+        OwnerGate::Deliver => true,
+        OwnerGate::Drop => false,
+        OwnerGate::IfOwned(uuid) => perspective_is_owned_by(&uuid, current_did.unwrap()).await,
+    }
 }
 
+/// The part of an auto-processor filter that needs no registry lookup:
+/// everything the event and the session alone decide, and otherwise the
+/// perspective whose ownership settles it. `IfOwned` is only produced with a
+/// resolved DID.
+#[derive(Debug, PartialEq)]
+enum OwnerGate {
+    Deliver,
+    Drop,
+    IfOwned(String),
+}
+
+fn auto_processor_neighbourhood_state_gate(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+) -> OwnerGate {
+    if is_admin {
+        return OwnerGate::Deliver;
+    }
+    // Non-admin + unresolved DID fails closed — same reasoning as
+    // `matches_auto_processor_pass_owner`.
+    if current_did.is_none() {
+        return OwnerGate::Drop;
+    }
+    let map = match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return OwnerGate::Drop,
+    };
+    match map.get("perspectiveUuid") {
+        Some(serde_json::Value::String(u)) => OwnerGate::IfOwned(u.clone()),
+        _ => OwnerGate::Drop,
+    }
+}
+
+/// [`matches_auto_processor_neighbourhood_state_reader`] with the ownership
+/// lookup injected, for tests of the parse and attribution logic.
+#[cfg(test)]
 fn matches_auto_processor_neighbourhood_state_reader_with(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
     owned_check: impl Fn(&str, &str) -> bool,
 ) -> bool {
-    if is_admin {
-        return true;
+    match auto_processor_neighbourhood_state_gate(msg, current_did, is_admin) {
+        OwnerGate::Deliver => true,
+        OwnerGate::Drop => false,
+        OwnerGate::IfOwned(uuid) => owned_check(&uuid, current_did.unwrap()),
     }
-    // Non-admin + unresolved DID fails closed — same reasoning as
-    // `matches_auto_processor_pass_owner`.
-    let Some(did) = current_did else {
-        return false;
-    };
-    let map = match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return false,
-    };
-    let uuid = match map.get("perspectiveUuid") {
-        Some(serde_json::Value::String(u)) => u.as_str(),
-        _ => return false,
-    };
-    owned_check(uuid, did)
 }
 
-pub(crate) fn matches_auto_processor_pass_owner(
+pub(crate) async fn matches_auto_processor_pass_owner(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
 ) -> bool {
-    matches_auto_processor_pass_owner_with(msg, current_did, is_admin, perspective_is_owned_by)
+    match auto_processor_pass_owner_gate(msg, current_did, is_admin) {
+        OwnerGate::Deliver => true,
+        OwnerGate::Drop => false,
+        OwnerGate::IfOwned(uuid) => perspective_is_owned_by(&uuid, current_did.unwrap()).await,
+    }
 }
 
+fn auto_processor_pass_owner_gate(
+    msg: &str,
+    current_did: Option<&str>,
+    is_admin: bool,
+) -> OwnerGate {
+    if is_admin {
+        return OwnerGate::Deliver;
+    }
+    // Non-admin + unresolved DID: fail closed. The previous behaviour
+    // (`None => true`) leaked every event to any ordinary session whose
+    // DID hadn't finished resolving.
+    let Some(did) = current_did else {
+        return OwnerGate::Drop;
+    };
+    let map = match serde_json::from_str::<serde_json::Value>(msg) {
+        Ok(serde_json::Value::Object(map)) => map,
+        _ => return OwnerGate::Drop,
+    };
+    let uuid = match map.get("perspectiveUuid") {
+        Some(serde_json::Value::String(u)) => u.clone(),
+        _ => return OwnerGate::Drop,
+    };
+    // Agent-DID filter: only the DID whose pass produced this event sees it.
+    // A pass by a managed user is delivered to that user's client, not to the
+    // hosting agent, even though both share the executor.
+    match map.get("agentDid") {
+        Some(serde_json::Value::String(agent)) if agent == did => OwnerGate::IfOwned(uuid),
+        // No `agentDid` on the event → malformed or executor-side pass with
+        // no attribution; fail closed rather than leak to every observer.
+        _ => OwnerGate::Drop,
+    }
+}
+
+/// [`matches_auto_processor_pass_owner`] with the ownership lookup injected,
+/// for tests of the parse and attribution logic.
+#[cfg(test)]
 fn matches_auto_processor_pass_owner_with(
     msg: &str,
     current_did: Option<&str>,
     is_admin: bool,
     owned_check: impl Fn(&str, &str) -> bool,
 ) -> bool {
-    if is_admin {
-        return true;
-    }
-    // Non-admin + unresolved DID: fail closed. The previous behaviour
-    // (`None => true`) leaked every event to any ordinary session whose
-    // DID hadn't finished resolving.
-    let Some(did) = current_did else {
-        return false;
-    };
-    let map = match serde_json::from_str::<serde_json::Value>(msg) {
-        Ok(serde_json::Value::Object(map)) => map,
-        _ => return false,
-    };
-    let uuid = match map.get("perspectiveUuid") {
-        Some(serde_json::Value::String(u)) => u.as_str(),
-        _ => return false,
-    };
-    if !owned_check(uuid, did) {
-        return false;
-    }
-    // Agent-DID filter: only the DID whose pass produced this event sees it.
-    // A pass by a managed user is delivered to that user's client, not to the
-    // hosting agent, even though both share the executor.
-    match map.get("agentDid") {
-        Some(serde_json::Value::String(agent)) => agent == did,
-        // No `agentDid` on the event → malformed or executor-side pass with
-        // no attribution; fail closed rather than leak to every observer.
-        _ => false,
+    match auto_processor_pass_owner_gate(msg, current_did, is_admin) {
+        OwnerGate::Deliver => true,
+        OwnerGate::Drop => false,
+        OwnerGate::IfOwned(uuid) => owned_check(&uuid, current_did.unwrap()),
     }
 }
 
-fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
+/// Whether `did` may see events about perspective `uuid`: the perspective is
+/// registered and either unowned (single-user) or lists `did` as an owner.
+///
+/// Fails closed when ownership cannot be verified: a perspective missing from
+/// the registry delivers nothing (CodeRabbit #903). It waits for the handle's
+/// lock rather than treating contention as "not the owner": the lock is
+/// taken briefly by every link write and every RPC's access check, and an
+/// event filtered at that instant was dropped for good (#1333: a live-query
+/// update is pushed once, so the client's callback never fired). The event
+/// task runs one filter at a time per connection, so waiting here only
+/// delays that connection's events by the holder's critical section.
+async fn perspective_is_owned_by(uuid: &str, did: &str) -> bool {
     use crate::perspectives::get_perspective;
-    // Fail closed when we cannot verify ownership. Previously this returned
-    // `true` for a missing perspective / lock contention, which let non-admin
-    // sessions receive events (notably auto-processor neighbourhood-state,
-    // CodeRabbit #903 fix) without a successful access check. Intentionally
-    // public unowned perspectives still deliver via the `is_unowned()` branch.
     match get_perspective(uuid) {
-        Some(instance) => match instance.persisted.try_lock() {
-            Ok(handle) => {
-                if handle.is_unowned() {
-                    true
-                } else {
-                    handle.is_owned_by(did)
-                }
-            }
-            Err(_) => false,
-        },
+        Some(instance) => {
+            let handle = instance.persisted.lock().await;
+            handle.is_unowned() || handle.is_owned_by(did)
+        }
         None => false,
     }
 }
@@ -986,11 +1043,11 @@ mod auto_processor_filter_tests {
     //! user's pass. `is_admin` (from `AuthContext.is_admin_credential`) is
     //! the only escape hatch — an unresolved DID is NOT silently promoted.
     //!
-    //! `perspective_is_owned_by` now fails closed when the perspective is not
-    //! in the global registry or the lock is contended (CodeRabbit #903);
-    //! these tests inject a stub `owned_check` so we exercise the
-    //! DID-attribution portion in isolation. `perspective_is_owned_by`
-    //! itself is covered separately in `perspective_is_owned_by_tests`.
+    //! `perspective_is_owned_by` fails closed when the perspective is not in
+    //! the global registry (CodeRabbit #903); these tests inject a stub
+    //! `owned_check` so we exercise the DID-attribution portion in isolation.
+    //! `perspective_is_owned_by` itself is covered separately in
+    //! `perspective_is_owned_by_tests`.
     use super::matches_auto_processor_pass_owner_with;
 
     /// Stub owner-check: always grants access. Isolates the DID-attribution
@@ -1000,7 +1057,7 @@ mod auto_processor_filter_tests {
     }
 
     /// Stub owner-check: always denies access. Simulates the fail-closed path
-    /// when the perspective is missing or the lock is contended.
+    /// when the perspective is missing.
     fn owns_nothing(_uuid: &str, _did: &str) -> bool {
         false
     }
@@ -1097,8 +1154,7 @@ mod auto_processor_filter_tests {
 
     /// Regression for CodeRabbit #903 CR #2: even when the DID-attribution
     /// check would pass (agent-did matches session-did), a failing ownership
-    /// check MUST drop the event. Simulates a stale/missing perspective or
-    /// lock contention.
+    /// check MUST drop the event. Simulates a stale/missing perspective.
     #[test]
     fn perspective_ownership_denied_drops_event() {
         let msg = r#"{"perspectiveUuid":"missing","agentDid":"did:key:alice"}"#;
@@ -1121,10 +1177,9 @@ mod auto_processor_neighbourhood_state_tests {
     //! ordinary session is treated as fail-closed (CodeRabbit
     //! second-round #881).
     //!
-    //! `perspective_is_owned_by` now fails closed for missing perspectives
-    //! and lock contention (CodeRabbit #903 CR #2); these tests inject a
-    //! stub `owned_check` to exercise the parse + missing-field portion
-    //! in isolation.
+    //! `perspective_is_owned_by` fails closed for missing perspectives
+    //! (CodeRabbit #903 CR #2); these tests inject a stub `owned_check` to
+    //! exercise the parse + missing-field portion in isolation.
     use super::matches_auto_processor_neighbourhood_state_reader_with;
 
     fn owns(_uuid: &str, _did: &str) -> bool {
@@ -1202,10 +1257,10 @@ mod auto_processor_neighbourhood_state_tests {
     }
 
     /// Regression for CodeRabbit #903 CR #2: perspective missing from the
-    /// registry / lock contended → fail closed instead of delivering. Before
-    /// the fix, `perspective_is_owned_by` returned `true` in both cases,
-    /// which let non-admin readers receive neighbourhood-state events for
-    /// perspectives they can't access.
+    /// registry → fail closed instead of delivering. Before the fix,
+    /// `perspective_is_owned_by` returned `true` in that case, which let
+    /// non-admin readers receive neighbourhood-state events for perspectives
+    /// they can't access.
     #[test]
     fn ownership_check_denied_drops_event() {
         let msg =
@@ -1223,28 +1278,25 @@ mod auto_processor_neighbourhood_state_tests {
 mod perspective_is_owned_by_tests {
     //! Regression for CodeRabbit #903 CR #2. The prod `perspective_is_owned_by`
     //! must fail closed when the perspective is not in the global registry
-    //! or when the try_lock fails. This unit test covers the missing branch
-    //! directly (the global `PERSPECTIVES` registry is empty in this test
-    //! context, so `get_perspective(uuid)` returns None); the lock-contention
-    //! branch is exercised by the same code path — both `Err(_)` and `None`
-    //! return `false` — and end-to-end by any tests that hold a persisted
-    //! lock while events fire.
+    //! (empty in this test context, so `get_perspective(uuid)` returns None).
+    //! A held `persisted` lock is waited for, not failed:
+    //! `api::tests::connection_tests::query_update_survives_a_held_perspective_lock`
+    //! (#1333).
     use super::perspective_is_owned_by;
 
-    #[test]
-    fn missing_perspective_returns_false() {
-        assert!(!perspective_is_owned_by(
-            "not-a-registered-perspective-uuid",
-            "did:key:alice"
-        ));
+    #[tokio::test]
+    async fn missing_perspective_returns_false() {
+        assert!(
+            !perspective_is_owned_by("not-a-registered-perspective-uuid", "did:key:alice").await
+        );
     }
 
-    #[test]
-    fn missing_perspective_returns_false_for_any_did() {
+    #[tokio::test]
+    async fn missing_perspective_returns_false_for_any_did() {
         // No DID is special here — even one that looks admin-like fails
         // closed when the perspective can't be looked up.
-        assert!(!perspective_is_owned_by("missing", ""));
-        assert!(!perspective_is_owned_by("missing", "did:key:admin"));
+        assert!(!perspective_is_owned_by("missing", "").await);
+        assert!(!perspective_is_owned_by("missing", "did:key:admin").await);
     }
 }
 
@@ -1411,20 +1463,23 @@ mod event_spec_tests {
 mod perspective_owner_filter_tests {
     use super::matches_perspective_owner;
 
-    #[test]
-    fn filters_by_the_flat_perspective_uuid() {
+    #[tokio::test]
+    async fn filters_by_the_flat_perspective_uuid() {
         let unknown = r#"{"perspectiveUuid":"no-such-perspective","notification":{}}"#;
         assert!(
-            !matches_perspective_owner(unknown, Some("did:x")),
+            !matches_perspective_owner(unknown, Some("did:x")).await,
             "an unverifiable owner fails closed"
         );
-        assert!(matches_perspective_owner(unknown, None), "single-user");
         assert!(
-            !matches_perspective_owner(r#"{"notification":{}}"#, Some("did:x")),
+            matches_perspective_owner(unknown, None).await,
+            "single-user"
+        );
+        assert!(
+            !matches_perspective_owner(r#"{"notification":{}}"#, Some("did:x")).await,
             "an event without perspectiveUuid fails closed"
         );
         assert!(
-            !matches_perspective_owner("not json", Some("did:x")),
+            !matches_perspective_owner("not json", Some("did:x")).await,
             "an event that does not parse fails closed"
         );
     }

@@ -255,3 +255,54 @@ async fn query_updates_of_an_owned_perspective_reach_only_its_owner() {
         "Bob got Alice's live-query update: {leaked:?}"
     );
 }
+
+#[tokio::test]
+async fn query_update_survives_a_held_perspective_lock() {
+    // #1333: the owner check reads the perspective's `persisted` handle. A
+    // writer (every link write, every RPC's access check) can hold that lock
+    // at the instant the event task filters the update. The check must wait
+    // for the lock, not treat contention as "not the owner" and drop the
+    // update: a live query pushes each result once, so a dropped push is a
+    // callback that never fires.
+    let p = registered_perspective(&[]).await;
+    let inst = crate::perspectives::get_perspective(&p.0).unwrap();
+    inst.persisted.lock().await.owners = Some(vec![DID.to_string()]);
+    let mut bob = Socket::open_as("did:key:bob").await;
+    let mut alice = Socket::open().await;
+
+    // Hold the lock across the publish and the event task's filter run.
+    let holder = {
+        let inst = inst.clone();
+        tokio::spawn(async move {
+            let _guard = inst.persisted.lock().await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    assert!(inst.persisted.try_lock().is_err(), "the lock is held");
+
+    let sub = uuid::Uuid::new_v4().to_string();
+    let update =
+        json!({ "perspectiveUuid": p.0, "uuid": p.0, "subscriptionId": sub, "result": "[]" });
+    get_global_pubsub()
+        .await
+        .publish(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC, &update.to_string())
+        .await;
+
+    let got = alice.next_of(|m| m["subscriptionId"] == sub).await;
+    assert_eq!(
+        got["perspectiveUuid"], p.0,
+        "the owner gets it once the lock is free"
+    );
+    // Waiting for the lock must not weaken the check itself.
+    let leaked = tokio::time::timeout(
+        Duration::from_millis(500),
+        bob.next_of(|m| m["subscriptionId"] == sub),
+    )
+    .await;
+    assert!(
+        leaked.is_err(),
+        "Bob got Alice's live-query update: {leaked:?}"
+    );
+    holder.await.unwrap();
+}
