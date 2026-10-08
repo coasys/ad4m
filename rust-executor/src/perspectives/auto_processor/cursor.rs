@@ -745,6 +745,199 @@ mod tests {
         );
     }
 
+    /// Seed a co-owner's Local message, the runner's own Local message and two
+    /// Shared ones ("shared hello" before "shared hi"), then run `query`
+    /// through the gather.
+    async fn gather_probe(query: &str) -> anyhow::Result<Vec<String>> {
+        use crate::agent::{AgentContext, AgentService};
+        use crate::perspectives::interpretation::gather_transcript_sparql;
+        use crate::types::{Link, LinkStatus};
+
+        let (mut p, _shapes, main_ctx) = setup_perspective_no_llm(&[]).await;
+        let email = "exists-probe-coowner@test";
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let alice_ctx = AgentContext::for_user_email(email.to_string());
+        for (ctx, msg, body, status) in [
+            (
+                &alice_ctx,
+                "msg://alice-local",
+                "alice private draft",
+                LinkStatus::Local,
+            ),
+            (
+                &main_ctx,
+                "msg://runner-local",
+                "runner private draft",
+                LinkStatus::Local,
+            ),
+            (
+                &main_ctx,
+                "msg://shared-1",
+                "shared hello",
+                LinkStatus::Shared,
+            ),
+            (&main_ctx, "msg://shared-2", "shared hi", LinkStatus::Shared),
+        ] {
+            p.add_link(
+                Link {
+                    source: msg.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                status,
+                None,
+                ctx,
+            )
+            .await
+            .expect("seed body link");
+            // Distinct timestamps, so `ORDER BY ?timestamp` is deterministic.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        Ok(gather_transcript_sparql(&p, query)
+            .await?
+            .into_iter()
+            .map(|t| t.text)
+            .collect())
+    }
+
+    /// The reifier pattern every probe starts from: `?b` is the body, `?speaker`
+    /// and `?timestamp` come off its reifier.
+    const PROBE_BODY: &str = "?m <ns://body> ?b . \
+        ?r <http://www.w3.org/1999/02/22-rdf-syntax-ns#reifies> <<( ?m <ns://body> ?b )>> . \
+        ?r <ad4m://ontology/author> ?speaker . \
+        ?r <ad4m://ontology/timestamp> ?timestamp .";
+
+    /// An `EXISTS` pattern that holds iff a body containing "alice" is
+    /// readable. Only the co-owner's Local message has one.
+    const ALICE_EXISTS: &str =
+        "EXISTS { ?x <ns://body> ?s . FILTER(CONTAINS(STR(?s), \"alice\")) }";
+
+    async fn assert_probe(query: String, expected: &[&str]) {
+        let gathered = gather_probe(&query).await.expect("gather");
+        assert_eq!(
+            gathered,
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "an EXISTS inside an expression read a Local link; query:\n{query}"
+        );
+    }
+
+    /// Data's probe (#1058 review, item 4): `BIND(IF(EXISTS …))` binds the
+    /// verdict of a read over Local links into `?text`.
+    #[tokio::test]
+    async fn gather_exists_in_bind_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} \
+                 BIND(IF({ALICE_EXISTS}, \"ORACLE: a Local body containing alice exists\", ?b) AS ?text) }} \
+                 ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gather_not_exists_in_filter_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} BIND(?b AS ?text) \
+                 FILTER(NOT {ALICE_EXISTS}) }} ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    /// Ascending by body length unless the oracle holds, then descending.
+    #[tokio::test]
+    async fn gather_exists_in_order_by_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} BIND(?b AS ?text) }} \
+                 ORDER BY (IF({ALICE_EXISTS}, 0 - STRLEN(STR(?text)), STRLEN(STR(?text))))"
+            ),
+            &["shared hi", "shared hello"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gather_not_exists_in_having_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} BIND(?b AS ?text) }} \
+                 GROUP BY ?speaker ?text ?timestamp HAVING (NOT {ALICE_EXISTS}) \
+                 ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gather_exists_in_aggregate_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker (SAMPLE(IF({ALICE_EXISTS}, \"ORACLE\", ?b)) AS ?text) ?timestamp \
+                 WHERE {{ {PROBE_BODY} }} GROUP BY ?speaker ?timestamp ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn gather_exists_in_sub_select_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ \
+                 {{ SELECT ?speaker ?timestamp (IF({ALICE_EXISTS}, \"ORACLE\", ?b) AS ?text) \
+                 WHERE {{ {PROBE_BODY} }} }} }} ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    /// A `FILTER` inside `OPTIONAL` is the left join's own expression.
+    #[tokio::test]
+    async fn gather_exists_in_optional_filter_reads_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} \
+                 OPTIONAL {{ ?m <ns://body> ?b2 . FILTER({ALICE_EXISTS}) }} \
+                 BIND(IF(BOUND(?b2), \"ORACLE\", ?b) AS ?text) }} ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
+    /// `EXISTS` nested in an `EXISTS`, inside a function argument, and over
+    /// `VALUES`.
+    #[tokio::test]
+    async fn gather_nested_exists_and_values_read_shared_only() {
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} \
+                 BIND(COALESCE(IF(EXISTS {{ ?y <ns://body> ?z . FILTER({ALICE_EXISTS}) }}, \"ORACLE\", ?b)) AS ?text) }} \
+                 ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+        assert_probe(
+            format!(
+                "SELECT ?speaker ?text ?timestamp WHERE {{ {PROBE_BODY} \
+                 BIND(IF(EXISTS {{ VALUES ?needle {{ \"alice\" \"runner\" }} ?x <ns://body> ?s . \
+                 FILTER(CONTAINS(STR(?s), ?needle)) }}, \"ORACLE\", ?b) AS ?text) }} \
+                 ORDER BY ?timestamp"
+            ),
+            &["shared hello", "shared hi"],
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn tick_drops_turns_older_than_source_window() {
         use crate::perspectives::auto_processor::config::{

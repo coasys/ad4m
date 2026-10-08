@@ -312,7 +312,7 @@ Each user's data is fully isolated within the shared executor:
 
   Live queries (`subscribe()` on a model query, `modelSubscribe`, `subscribeQuery`) re-run as the user who opened them, so an update can carry that user's local links. Each `query-subscription-update` event names that user's DID in its `owner` field and goes only to that user's connections. Another user who also owns the perspective does not receive it.
 
-  An auto-processor reads shared links only. Its `sourceScopeQuery` runs over the shared store alone, without the local graph of the user it runs as, because what it extracts is written as shared links that every member gets. A message stored as a local link is never sent to the LLM or recorded as a source of an interpretation run.
+  An auto-processor reads shared links only. Its `sourceScopeQuery` runs over the shared store alone, without the local graph of the user it runs as, because what it extracts is written as shared links that every member gets. A message stored as a local link is never sent to the LLM or recorded as a source of an interpretation run. This holds for `EXISTS` and `NOT EXISTS` anywhere in the query too, inside `BIND`, `FILTER`, `ORDER BY`, `HAVING`, aggregates and sub-selects. The existing instances the processor shows the LLM, and matches its extractions against to decide between creating and updating, are read from the shared store in the same way, so an instance or property value that exists only in local links, the runner's own included, is neither shown nor updated.
 
 ## For App Developers: No Changes Required
 

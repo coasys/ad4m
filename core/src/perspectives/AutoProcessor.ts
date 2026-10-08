@@ -154,7 +154,9 @@ export interface AddAutoProcessorConfig {
    *
    * The query reads shared links only. A local link, including one written
    * by the agent the processor runs as, matches nothing, because what the
-   * processor extracts is written as shared links.
+   * processor extracts is written as shared links. That includes every
+   * `EXISTS` / `NOT EXISTS` in the query, in `BIND`, `FILTER`, `ORDER BY`,
+   * `HAVING` and aggregates.
    */
   sourceScopeQuery: string;
   /**
