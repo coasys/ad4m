@@ -15,6 +15,7 @@
  */
 
 import { execSync } from "node:child_process";
+import os from "node:os";
 
 import { Scenario, ScenarioContext, ScenarioResult } from "../scenario.js";
 import { WebRtcPeer } from "../peer.js";
@@ -96,6 +97,8 @@ export const s4SfuMemoryChurn: Scenario = {
       const initialRss = readRssKb(executorPid);
       rssTimeline.push({ t: 0, rssKb: initialRss });
       metrics["initialRssKb"] = initialRss;
+      const memDetail: string[] = [`start ${readMemDetail(executorPid)}`];
+      metrics["memDetail"] = memDetail;
 
       const loopStart = Date.now();
       while (Date.now() - loopStart < CHURN_DURATION_MS) {
@@ -115,6 +118,7 @@ export const s4SfuMemoryChurn: Scenario = {
 
         const rss = readRssKb(executorPid);
         rssTimeline.push({ t: elapsed, rssKb: rss });
+        if (nextIdx <= 2) memDetail.push(`join${nextIdx} ${readMemDetail(executorPid)}`);
         samples.push({
           name: `churn_iter_${nextIdx - 1}`,
           durationMs: Date.now() - iterStart,
@@ -128,6 +132,7 @@ export const s4SfuMemoryChurn: Scenario = {
       }
 
       const finalRss = readRssKb(executorPid);
+      memDetail.push(`end ${readMemDetail(executorPid)}`);
       rssTimeline.push({
         t: Date.now() - loopStart,
         rssKb: finalRss,
@@ -199,7 +204,8 @@ export const s4SfuMemoryChurn: Scenario = {
               ? null
               : Math.round((p.rssKb - (metrics["initialRssKb"] as number)) / 1024),
           ) ?? [],
-        )}`,
+        )} ` +
+        `nproc=${os.cpus().length} memDetail=${JSON.stringify(metrics["memDetail"] ?? [])}`,
     };
   },
 };
@@ -282,6 +288,17 @@ function readRssKb(pid: string): number | null {
     return match ? parseInt(match[1], 10) : null;
   } catch {
     return null;
+  }
+}
+
+/** RssAnon / RssFile (MB) and thread count, to tell heap growth from mapped code and per-thread arenas. */
+function readMemDetail(pid: string): string {
+  try {
+    const out = execSync(`cat /proc/${pid}/status 2>/dev/null`, { timeout: 2000 }).toString();
+    const kb = (k: string) => Number(out.match(new RegExp(`${k}:\\s+(\\d+)`))?.[1] ?? NaN);
+    return `anon=${Math.round(kb("RssAnon") / 1024)} file=${Math.round(kb("RssFile") / 1024)} threads=${kb("Threads")}`;
+  } catch {
+    return "n/a";
   }
 }
 
