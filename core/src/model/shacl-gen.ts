@@ -352,8 +352,12 @@ export function buildSHACL(
         }
 
         // Adder / Remover actions — only meaningful for relations backed
-        // by a real link predicate.  Getter-only relations are read-only.
-        if (relMeta.predicate) {
+        // by a real link predicate.  Getter-only relations are read-only,
+        // and so is one declared `readOnly`, which keeps its predicate as
+        // the shape's path but must offer no way to write it.
+        if (relMeta.readOnly) {
+            relShape.writable = false;
+        } else if (relMeta.predicate) {
             relShape.adder = [{
                 action: "addLink",
                 source: "this",
