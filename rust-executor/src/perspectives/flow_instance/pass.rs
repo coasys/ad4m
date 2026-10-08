@@ -70,8 +70,10 @@ use crate::perspectives::model_query::types::Scope;
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{Link, LinkQuery, LinkStatus};
 
-/// One consensus event this replica recorded for the first time: the atoms
-/// that settled an edge, now marked, with the cache advanced to match.
+/// One consensus event recorded on this replica: the atoms that settled an
+/// edge, now marked, with the cache advanced to match. A pass reports it
+/// when it records it for the first time; the pass after a vote also
+/// reports the one that vote completed ([`run_pass_after_vote`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
