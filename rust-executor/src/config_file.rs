@@ -562,6 +562,52 @@ mod tests {
         }
     }
 
+    /// `"app_data_path": ""` would parse and keep the executor's default
+    /// unapplied (`prepare()` fills in only `None`), so an empty or
+    /// whitespace-only string is an error that names its key, at any depth.
+    #[test]
+    fn an_empty_or_whitespace_only_string_value_is_rejected() {
+        let tls = |cert: &str| {
+            format!(
+                r#"{{"multi_user_config": {{"enabled": true, "smtp_config": null,
+                    "tls_config": {{"enabled": true, "cert_file_path": "{cert}",
+                                   "key_file_path": "/k", "tls_port": null}}}}}}"#
+            )
+        };
+        for blank in ["", " ", "\t", " \n "] {
+            let blank_json = serde_json::to_string(blank).unwrap();
+            for (json, key) in [
+                (
+                    format!(r#"{{"app_data_path": {blank_json}}}"#),
+                    "app_data_path",
+                ),
+                (
+                    tls(blank_json.trim_matches('"')),
+                    "multi_user_config.tls_config.cert_file_path",
+                ),
+                (
+                    SMTP_FILE.replace(r#""smtp.example""#, &blank_json),
+                    "multi_user_config.smtp_config.host",
+                ),
+                (
+                    format!(r#"{{"log_config": {{"holochain": {blank_json}}}}}"#),
+                    "log_config.holochain",
+                ),
+            ] {
+                let err = parse(&json)
+                    .err()
+                    .unwrap_or_else(|| panic!("{key} = {blank:?} parsed"))
+                    .to_string();
+                assert!(
+                    err.contains(&format!("`{key}`")),
+                    "{key} = {blank:?}: {err}"
+                );
+                assert!(err.contains("empty"), "{key} = {blank:?}: {err}");
+            }
+        }
+        assert!(parse(&tls("/c")).is_ok());
+    }
+
     #[test]
     fn an_inline_smtp_password_is_rejected() {
         let err = parse(&SMTP_FILE.replace(r#""port": 465,"#, r#""port": 465, "password": "x","#))
