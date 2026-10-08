@@ -123,8 +123,8 @@ describeIfLLM("AutoProcessor observability — events + debug output (PR #903)",
     await InterpretationRun.register(p);
     events = [];
     nbEvents = [];
-    p.addAutoProcessorEventListener((e) => events.push(e));
-    p.addAutoProcessorNeighbourhoodStateListener((e) => nbEvents.push(e));
+    p.on("auto-processor-event", (e) => events.push(e));
+    p.on("auto-processor-neighbourhood-state", (e) => nbEvents.push(e));
   });
 
   afterEach(async () => {
