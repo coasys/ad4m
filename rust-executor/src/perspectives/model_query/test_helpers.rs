@@ -23,6 +23,8 @@ pub fn prop(name: &str, predicate: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        local: false,
+        ordering: None,
     }
 }
 
@@ -46,6 +48,8 @@ pub fn relation(name: &str, predicate: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        local: false,
+        ordering: None,
     }
 }
 
@@ -89,6 +93,8 @@ pub fn flag(name: &str, predicate: &str, initial: &str) -> ShapeProperty {
         transform: None,
         interpretation_hint: None,
         identity: false,
+        local: false,
+        ordering: None,
     }
 }
 

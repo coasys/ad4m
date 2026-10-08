@@ -1,4 +1,4 @@
-import { Ad4mClient, ExceptionInfo, ExceptionType, Notification as NotificationType } from "@coasys/ad4m";
+import { Ad4mClient, ExceptionType, Notification as NotificationType } from "@coasys/ad4m";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { sendNotification } from "@tauri-apps/plugin-notification";
@@ -158,7 +158,7 @@ export function Ad4minProvider({ children }: any) {
       }));
 
       if (login) {
-        client.runtime.addExceptionCallback((exception: ExceptionInfo) => {
+        client.on("exception-occurred", ({ exception }) => {
           if (exception.type === ExceptionType.AgentIsUntrusted) {
             setState((prev) => ({
               ...prev,
@@ -189,11 +189,9 @@ export function Ad4minProvider({ children }: any) {
           });
           console.log(exception);
           invoke("show_main_window");
-          return null;
         });
 
-        // @ts-ignore
-        client.runtime.addNotificationTriggeredCallback((notification) => {
+        client.on("notification-triggered", ({ notification }) => {
           console.log("Notification triggered: ", notification);
           const match = notification.triggerMatch;
           const parsed = JSON.parse(match);

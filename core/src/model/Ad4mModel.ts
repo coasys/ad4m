@@ -2,11 +2,12 @@ import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
 import { PerspectiveProxy } from "../perspectives/PerspectiveProxy";
+import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
 import type { PropertyOptions, PropertyMetadataEntry, RelationMetadataEntry } from "./decorators";
 import { formatQueryValue, compileWhereClause } from "./query-utils";
-import { resolveParentPredicate } from "./query-common";
+import { requireSingleParent, resolveParentPredicate } from "./query-common";
 import { isArrayType, determinePredicate, determineNamespace, buildModelFromJSONSchema } from "./json-schema";
 import type { SHACLShape } from "../shacl/SHACLShape";
 import type { JSONSchemaProperty, JSONSchema, JSONSchemaToModelOptions } from "./json-schema";
@@ -21,8 +22,9 @@ import type {
   GetOptions, AllInstancesResult, ResultsWithTotalCount,
   PaginationResult, PropertyMetadata, RelationMetadata, ModelMetadata,
   IncludeProjection,
-  TypedQuery, IncludeExtras, IncludeOf,
+  TypedQuery, IncludeExtras, IncludeOf, LinksMap,
 } from "./types";
+import { isTraverseScope } from "./types";
 
 
 
@@ -35,6 +37,208 @@ import type {
  * Rust endpoint.  Recursively converts included relation values (which come
  * back as plain JSON objects) into proper model class instances.
  */
+/**
+ * Key under which the executor returns a polymorphically-hydrated instance's
+ * concrete class.
+ *
+ * Half of a wire contract: the writer is `SUBJECT_CLASS_KEY` in
+ * `rust-executor/src/perspectives/model_query/relations.rs`, and the two are
+ * separate literals in separate languages. Renaming one alone does not fail to
+ * compile — it degrades to every instance staying plain JSON, which looks
+ * identical to a relation that declared no classes to build.
+ * `tests/js/tests/model/model-polymorphic.test.ts` drives both ends against one
+ * executor, so the drift fails a test rather than a user's query.
+ *
+ * The executor also returns `__subjectClasses`, the whole set this one names the
+ * head of. Nothing here reads it — it rides onto the instance with every other
+ * JSON key, for a caller that wants to know a choice was made.
+ */
+const SUBJECT_CLASS_KEY = '__subjectClass';
+
+/**
+ * Turn on `polymorphic` for every relation that declares it, at every depth of
+ * an include map.
+ *
+ * A relation being heterogeneous is a fact about the data, not about one query,
+ * so the declaration lives on the model and the call site writes
+ * `include: { children: true }`. That has to hold just as much one level down:
+ * in `include: { posts: { include: { children: true } } }`, `children` is a
+ * relation on `Post`, so the walk carries the class it is reading against down
+ * with it. Without that, a nested include of an untyped polymorphic relation
+ * reaches the executor with no shape to resolve and fails the query outright.
+ *
+ * An explicit `polymorphic: false` at any level still wins — `undefined` is the
+ * only state the default fills in.
+ *
+ * The walk stops descending *through* a polymorphic relation, because there is
+ * nothing to descend into: its targets are of several classes by definition, so
+ * no single class's metadata could say what a deeper include means. The
+ * executor resolves those nested includes against each concrete class instead.
+ */
+function applyPolymorphicIncludeDefaults(includes: IncludeMap, ctor: Function): void {
+  const relMeta = getRelationsMetadata(ctor);
+  for (const [relName, val] of Object.entries(includes)) {
+    // `$`-prefixed keys are projections, not relations.
+    if (relName.startsWith('$')) continue;
+    const meta = relMeta[relName];
+    if (!meta) continue;
+
+    let subQuery = val as any;
+    if (meta.polymorphic) {
+      if (val === true) {
+        subQuery = { polymorphic: true };
+        includes[relName] = subQuery;
+      } else if (typeof val === 'object' && val !== null && subQuery.polymorphic === undefined) {
+        subQuery.polymorphic = true;
+      }
+      // The classes this call site can build are also the classes it wants its
+      // targets read as, so the declaration answers both questions and the call
+      // site repeats neither. Sent as part of the query rather than applied to
+      // the results: a preference in the request is reproducible by anyone who
+      // sends it, where one applied afterwards would make the same data read
+      // differently depending on which classes the caller happened to import.
+      //
+      // It ranks and does not narrow — a target matching none of them still
+      // arrives — so declaring what you can construct never costs you a member
+      // of a relation that is heterogeneous by definition.
+      if (
+        typeof subQuery === 'object' &&
+        subQuery !== null &&
+        subQuery.polymorphic &&
+        subQuery.preferClasses === undefined &&
+        meta.instantiateAs
+      ) {
+        const names = (meta.instantiateAs() ?? [])
+          .map((cls) => (cls as any)?.className)
+          .filter((name): name is string => typeof name === 'string');
+        if (names.length) subQuery.preferClasses = names;
+      }
+    }
+
+    if (typeof subQuery !== 'object' || subQuery === null) continue;
+    const nested = subQuery.include as IncludeMap | undefined;
+    if (!nested || subQuery.polymorphic) continue;
+
+    // The thunk is only evaluated here, at query time, so a self-referential or
+    // circularly-imported target that is not yet defined costs the nested
+    // default rather than the whole query.
+    let TargetClass: any;
+    try {
+      TargetClass = meta.target?.();
+    } catch (e) {
+      // A class not yet initialised throws `ReferenceError` from the temporal
+      // dead zone, which is the expected cost of an import cycle and not worth
+      // saying anything about. Anything else — a thunk closing over nothing,
+      // typically — is a broken declaration that would otherwise cost the nested
+      // default in silence, so it gets said out loud.
+      const circularImport = e instanceof ReferenceError;
+      const say = circularImport ? console.debug : console.warn;
+      say(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      continue;
+    }
+    if (TargetClass) applyPolymorphicIncludeDefaults(nested, TargetClass);
+  }
+}
+
+/**
+ * Split an include map into its relations and its `$`-prefixed projections.
+ *
+ * The two travel in different fields: a relation is hydrated, a projection is
+ * computed over one. Both halves are new objects, so the caller's query is left
+ * as it was written and can be sent again.
+ */
+function splitIncludeProjections(include: IncludeMap): {
+  includes: IncludeMap;
+  projections: Record<string, IncludeProjection>;
+} {
+  const includes: IncludeMap = {};
+  const projections: Record<string, IncludeProjection> = {};
+  for (const [key, val] of Object.entries(include)) {
+    if (key.startsWith('$')) {
+      projections[key] = { ...(val as IncludeProjection) };
+    } else {
+      includes[key] = val;
+    }
+  }
+  return { includes, projections };
+}
+
+/**
+ * Tag each projection with its target class name, so the executor can resolve
+ * the target shape through its in-memory cache when applying a projection's
+ * where-clause. `ctor` is the class the projections are read against; without
+ * one (the members of a polymorphic relation) nothing is tagged, and the
+ * executor resolves each projection against each member's own class.
+ */
+function tagProjectionTargets(projections: Record<string, IncludeProjection>, ctor: Function | undefined): void {
+  if (!ctor) return;
+  const allRelMeta = getRelationsMetadata(ctor);
+  for (const proj of Object.values(projections)) {
+    const relMeta = allRelMeta[proj.from];
+    if (!proj.targetClassName && relMeta?.target) {
+      try {
+        const TargetClass = relMeta.target();
+        const targetMeta = (TargetClass as any).getModelMetadata?.();
+        if (targetMeta?.className) {
+          proj.targetClassName = targetMeta.className;
+        }
+      } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
+    }
+  }
+}
+
+/**
+ * Move the `$`-prefixed keys of every nested include into that sub-query's own
+ * `projections`, at every depth.
+ *
+ * The executor reads a sub-query exactly as it reads a top-level query, so a
+ * projection on related records belongs in the sub-query's `projections` field,
+ * as it does at the top. Left inside `include` it named a relation that does not
+ * exist and was skipped: the query succeeded and the field was simply absent, so
+ * `include: { posts: { include: { $likeCount: … } } }` came back without counts
+ * and said nothing.
+ *
+ * Copies every sub-query it changes rather than editing it, so a query object
+ * the caller keeps (a subscription re-preparing its query, say) still says what
+ * it said.
+ */
+function liftNestedProjections(includes: IncludeMap, ctor: Function | undefined): IncludeMap {
+  const relMeta = ctor ? getRelationsMetadata(ctor) : {};
+  const out: IncludeMap = {};
+  for (const [relName, val] of Object.entries(includes)) {
+    if (typeof val !== 'object' || val === null || relName.startsWith('$')) {
+      out[relName] = val;
+      continue;
+    }
+    const subQuery: any = { ...val };
+    // The class the nested keys are read against. A polymorphic relation's
+    // members are of several classes, so there is none to name: its nested
+    // projections go untagged and the executor resolves them per member class.
+    let TargetClass: Function | undefined;
+    if (!subQuery.polymorphic) {
+      try {
+        TargetClass = relMeta[relName]?.target?.();
+      } catch (e) {
+        console.debug(`prepareModelQueryParams: target class unavailable for include '${relName}':`, e);
+      }
+    }
+    if (subQuery.include && typeof subQuery.include === 'object') {
+      const { includes: nestedIncludes, projections } = splitIncludeProjections(subQuery.include);
+      if (Object.keys(nestedIncludes).length > 0) {
+        subQuery.include = liftNestedProjections(nestedIncludes, TargetClass);
+      } else {
+        delete subQuery.include;
+      }
+      if (Object.keys(projections).length > 0) {
+        tagProjectionTargets(projections, TargetClass);
+        subQuery.projections = { ...(subQuery.projections ?? {}), ...projections };
+      }
+    }
+    out[relName] = subQuery;
+  }
+  return out;
+}
+
 function jsonToModelInstance<T extends Ad4mModel>(
   ModelClass: typeof Ad4mModel & (new (...args: any[]) => T),
   perspective: PerspectiveProxy,
@@ -87,8 +291,56 @@ function jsonToModelInstance<T extends Ad4mModel>(
     for (const [relName, includeVal] of Object.entries(include)) {
       if (!includeVal) continue;
       const meta = relMeta[relName];
-      if (!meta?.target) continue;
-      const TargetClass = meta.target() as any;
+      // A polymorphic relation may legitimately declare no target at all —
+      // that is the case it exists for — so it must not be gated on one.
+      if (!meta) continue;
+      if (!meta.target && !meta.polymorphic) continue;
+      const TargetClass = meta.target?.() as any;
+      // For a polymorphic relation the executor sends each child's concrete
+      // class back on the instance, because it had to know it in order to
+      // hydrate against the right shape at all. What it cannot send is the
+      // constructor, so `instantiateAs` names the classes this side can build
+      // and the name → class map is derived from them: `@Model` records each
+      // class's name on the class itself, so listing the classes and listing
+      // their names would be the same list written twice, free to disagree.
+      //
+      // Built on first use rather than at decoration time, because the thunk
+      // exists to be called late: a class defined further round a circular
+      // import graph is not there yet when the decorator runs.
+      let byClassName: Record<string, any> | undefined;
+      // May resolve to nothing: a polymorphic relation is allowed to declare no
+      // target at all, and the list may not name the class that arrived — it
+      // says what this call site can construct, not what the relation may hold.
+      // The item then stays plain JSON — correct data, carrying its class name
+      // for a caller that wants to dispatch on it — rather than being forced
+      // through a constructor that does not exist.
+      const resolveChildClass = (item: any): any => {
+        if (!meta.polymorphic) return TargetClass;
+        const concrete = item?.[SUBJECT_CLASS_KEY];
+        // No concrete class means this was not read polymorphically after all —
+        // an explicit `polymorphic: false` at the call site — so the relation's
+        // own declared target is the right shape.
+        if (typeof concrete !== 'string') return TargetClass;
+        if (meta.instantiateAs) {
+          if (!byClassName) {
+            byClassName = {};
+            for (const cls of meta.instantiateAs() ?? []) {
+              const name = (cls as any)?.className;
+              if (typeof name === 'string') byClassName[name] = cls;
+            }
+          }
+          if (byClassName[concrete]) return byClassName[concrete];
+        }
+        // The declared target is not a fallback, and having named no classes to
+        // build does not make it one. Where a relation both declares a target
+        // and reads polymorphically, a child of some third class was hydrated
+        // against *its own* shape, so constructing the declared class over that
+        // JSON produces an instance that answers `instanceof` for a class it is
+        // not, carrying fields that class never declared — the exact
+        // mislabelling polymorphic reads exist to prevent. It fits only when it
+        // is the class the executor named.
+        return (TargetClass as any)?.className === concrete ? TargetClass : undefined;
+      };
       const nestedInclude =
         typeof includeVal === 'object' && includeVal !== null
           ? (includeVal as any).include
@@ -101,15 +353,19 @@ function jsonToModelInstance<T extends Ad4mModel>(
       const raw = instance[relName];
       if (Array.isArray(raw)) {
         instance[relName] = raw.map((item: any) => {
-          if (typeof item === 'object' && item !== null && item.id) {
-            return jsonToModelInstance(TargetClass, perspective, item, nestedInclude, nestedProperties);
+          const ChildClass = resolveChildClass(item);
+          if (ChildClass && typeof item === 'object' && item !== null && item.id) {
+            return jsonToModelInstance(ChildClass, perspective, item, nestedInclude, nestedProperties);
           }
           return item;
         });
       } else if (typeof raw === 'object' && raw !== null && raw.id) {
-        instance[relName] = jsonToModelInstance(
-          TargetClass, perspective, raw, nestedInclude, nestedProperties,
-        );
+        const ChildClass = resolveChildClass(raw);
+        if (ChildClass) {
+          instance[relName] = jsonToModelInstance(
+            ChildClass, perspective, raw, nestedInclude, nestedProperties,
+          );
+        }
       }
     }
   }
@@ -236,6 +492,11 @@ export class Ad4mModel {
   author: string;
   createdAt: any;
   updatedAt: any;
+  /**
+   * Per-link rows for the entries asked for with `Query.links`, keyed as they
+   * were asked. Absent when the query did not ask for any.
+   */
+  declare __links?: LinksMap;
 
   /**
    * Backwards compatibility alias for createdAt.
@@ -376,12 +637,14 @@ export class Ad4mModel {
         predicate: options.predicate || "",
         ...(options.local !== undefined && { local: options.local }),
         ...(options.getter !== undefined && { getter: options.getter }),
+        ...(options.readOnly && { readOnly: true }),
         direction: (options.kind === 'belongsToMany' || options.kind === 'belongsToOne') ? 'reverse' : 'forward',
         ...(options.kind !== undefined && { kind: options.kind }),
         ...(options.maxCount !== undefined && { maxCount: options.maxCount }),
         ...(options.target !== undefined && { target: options.target }),
         ...(options.filter !== undefined && { filter: options.filter }),
         ...(options.where !== undefined && { where: options.where }),
+        ...(options.ordering !== undefined && { ordering: options.ordering }),
       };
     }
     
@@ -691,10 +954,22 @@ export class Ad4mModel {
       const original = this._snapshot[field];
 
       if (Array.isArray(current) || Array.isArray(original)) {
-        // Order-insensitive comparison (sorted) so reordering alone
-        // doesn't mark a relation as dirty.
-        const a = Array.isArray(current) ? [...current].sort() : [];
-        const b = Array.isArray(original) ? [...original].sort() : [];
+        // For an ordered relation the sequence *is* the state, so a reorder is
+        // the whole change and must mark the field dirty — sorting first would
+        // make `save()` a no-op for the one edit the ordering feature exists to
+        // support.
+        //
+        // Everything else compares order-insensitively, because an unordered
+        // relation is a set: the executor returns its members by link timestamp,
+        // and a caller who assigned the same members in another order has not
+        // changed anything.
+        const ordered = !!(metadata.relations as any)[field]?.ordering;
+        const a = Array.isArray(current) ? [...current] : [];
+        const b = Array.isArray(original) ? [...original] : [];
+        if (!ordered) {
+          a.sort();
+          b.sort();
+        }
         if (a.length !== b.length || a.some((v: any, i: number) => v !== b[i])) {
           changed.push(field);
         }
@@ -821,39 +1096,47 @@ export class Ad4mModel {
     const queryInput: any = {};
     if (query.parent) {
       const parentPredicate = resolveParentPredicate(query.parent, this);
-      queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      // A traversal keeps its own shape on the wire: the executor reads `ids`,
+      // and flattening it to one `id` here is how a request for a whole level
+      // would quietly become a request for one parent's children.
+      //
+      // Its fields are named rather than spread, because `model` — the class
+      // itself — is how the scope may name its predicate, and that is a
+      // constructor, not something to put in a query variable. The predicate is
+      // resolved above; what travels is the result.
+      if (isTraverseScope(query.parent)) {
+        const t = query.parent;
+        const traverse: Record<string, unknown> = {
+          ids: t.ids,
+          predicate: parentPredicate,
+        };
+        if (t.transitive !== undefined) traverse.transitive = t.transitive;
+        if (t.direction !== undefined) traverse.direction = t.direction;
+        if (t.limitPerAnchor !== undefined) traverse.limitPerAnchor = t.limitPerAnchor;
+        if (t.levels !== undefined) traverse.levels = t.levels;
+        queryInput.parent = traverse;
+      } else {
+        queryInput.parent = { id: query.parent.id, predicate: parentPredicate };
+      }
     }
     if (query.properties) queryInput.properties = query.properties;
     if (query.include) {
-      // Split include keys: $-prefixed / IncludeProjection values → queryInput.projections
-      // All other keys (boolean | RelationSubQuery) → queryInput.include
-      const normalIncludes: IncludeMap = {};
-      const projections: Record<string, IncludeProjection> = {};
-      for (const [key, val] of Object.entries(query.include)) {
-        if (key.startsWith('$')) {
-          projections[key] = val as IncludeProjection;
-        } else {
-          normalIncludes[key] = val;
-        }
+      // $-prefixed keys → queryInput.projections; all other keys (boolean |
+      // RelationSubQuery) → queryInput.include.
+      const { includes: normalIncludes, projections } = splitIncludeProjections(query.include);
+      // A relation declared `polymorphic` reads that way by default, so the
+      // caller writes `include: { children: true }` and still gets each child
+      // hydrated as the class it actually is. Declaring it on the model rather
+      // than repeating it at every call site is the point — the relation being
+      // heterogeneous is a fact about the data, not about one query — but an
+      // explicit `polymorphic: false` at the call site still wins. Applied at
+      // every depth, since a nested include is a fact about the data too.
+      if (Object.keys(normalIncludes).length > 0) {
+        applyPolymorphicIncludeDefaults(normalIncludes, this as any);
+        queryInput.include = liftNestedProjections(normalIncludes, this as any);
       }
-      if (Object.keys(normalIncludes).length > 0) queryInput.include = normalIncludes;
       if (Object.keys(projections).length > 0) {
-        // Tag each projection with its target class name so the executor can
-        // resolve the target shape through its in-memory cache when applying
-        // projection where-clause filters.
-        const allRelMeta = getRelationsMetadata(this as any);
-        for (const [, proj] of Object.entries(projections)) {
-          const relMeta = allRelMeta[proj.from];
-          if (!proj.targetClassName && relMeta?.target) {
-            try {
-              const TargetClass = relMeta.target();
-              const targetMeta = (TargetClass as any).getModelMetadata?.();
-              if (targetMeta?.className) {
-                proj.targetClassName = targetMeta.className;
-              }
-            } catch (e) { console.debug(`prepareModelQueryParams: target class unavailable for projection:`, e); }
-          }
-        }
+        tagProjectionTargets(projections, this as any);
         queryInput.projections = projections;
       }
     }
@@ -864,7 +1147,10 @@ export class Ad4mModel {
     if (query.offset !== undefined) queryInput.offset = query.offset;
     if (query.limit !== undefined) queryInput.limit = query.limit;
     if (query.count !== undefined) queryInput.count = query.count;
+    if (query.links) queryInput.links = query.links;
     queryInput.deepQuery = query.deepQuery ?? true;
+    if (query.linkStatus != null) queryInput.linkStatus = query.linkStatus;
+    if (query.includeUnverified !== undefined) queryInput.includeUnverified = query.includeUnverified;
 
     // Conformance getters, where filters, and target shapes for includes
     // are all resolved by the executor from the perspective's SHACL triples
@@ -911,6 +1197,7 @@ export class Ad4mModel {
     perspective: PerspectiveProxy,
     query: Query = {},
     classNameOverride?: string | null,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T>> {
     // Delegate query input building to the shared prepareModelQueryParams
     // helper.  The executor resolves the shape from SHACL server-side.
@@ -918,7 +1205,7 @@ export class Ad4mModel {
       query, classNameOverride,
     );
 
-    const result = await perspective.modelQuery(className, queryJson);
+    const result = await perspective.modelQuery(className, queryJson, options);
 
     // Convert JSON instances to model class instances, recursively constructing
     // class instances for any included relations resolved by Rust.
@@ -969,13 +1256,14 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>)[]> {
     const q = (query ?? {}) as Query;
     if (q.properties && q.properties.length === 0) {
       throw new Error("properties[] must not be empty — omit the field to return all properties, or specify at least one field name");
     }
 
-    const { results } = await this.executeModelQuery(perspective, q);
+    const { results } = await this.executeModelQuery(perspective, q, undefined, options);
     return results as (T & IncludeExtras<T, IncludeOf<Q>>)[];
   }
 
@@ -1003,9 +1291,10 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<(T & IncludeExtras<T, IncludeOf<Q>>) | null> {
     const limitedQuery = { ...((query ?? {}) as Query), limit: 1 } as Q;
-    const results = await this.findAll<T, Q>(perspective, limitedQuery);
+    const results = await this.findAll<T, Q>(perspective, limitedQuery, options);
     return results[0] ?? null;
   }
 
@@ -1030,8 +1319,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: Q,
+    options?: CallOptions,
   ): Promise<ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>> {
-    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query);
+    const out = await this.executeModelQuery(perspective, (query ?? {}) as Query, undefined, options);
     return out as ResultsWithTotalCount<T & IncludeExtras<T, IncludeOf<Q>>>;
   }
 
@@ -1058,9 +1348,10 @@ export class Ad4mModel {
     pageSize: number,
     pageNumber: number,
     query?: Q,
+    options?: CallOptions,
   ): Promise<PaginationResult<T & IncludeExtras<T, IncludeOf<Q>>>> {
     const paginationQuery = { ...((query ?? {}) as Query), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery);
+    const { results, totalCount } = await this.executeModelQuery(perspective, paginationQuery, undefined, options);
     return { results: results as (T & IncludeExtras<T, IncludeOf<Q>>)[], totalCount, pageSize, pageNumber };
   }
 
@@ -1094,8 +1385,9 @@ export class Ad4mModel {
     this: typeof Ad4mModel & (new (...args: any[]) => T),
     perspective: PerspectiveProxy,
     query?: TypedQuery<T>,
+    options?: CallOptions,
   ): Promise<number> {
-    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 });
+    const { totalCount } = await this.executeModelQuery(perspective, { ...((query ?? {}) as Query), limit: 0 }, undefined, options);
     return totalCount;
   }
 
@@ -1254,51 +1546,47 @@ export class Ad4mModel {
       batchId = await this.perspective.createBatch()
       batchCreatedHere = true;
     }
-    
 
-    // Check if the model has any constructor actions (required properties,
-    // flags, or properties with initial values).  Models whose properties are
-    // all optional, have no @Flag, and have no initial values produce an empty
-    // SHACL constructor, so calling createSubject would fail on the Rust side
-    // ("No SHACL constructor found").  In that case we skip createSubject
-    // entirely and let innerUpdate write the links directly.
     const metadata = (this.constructor as typeof Ad4mModel).getModelMetadata();
-    const hasConstructor = Object.values(metadata.properties).some(
-      (p) => p.required || p.flag || p.initial !== undefined
-    );
 
     // Track properties resolved through expression_create — a signed literal
     // envelope or a custom (non-"literal") resolveLanguage. These may fail
     // inside a batch context, so defer them to setProperty after createSubject.
     const deferredExpressionProps: string[] = [];
 
-    if (hasConstructor) {
-      const initialValues = {};
-      for (const [key, value] of Object.entries(this)) {
-        if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
-          const propMeta = metadata.properties[key];
-          if (propMeta && effectiveLiteralStorage(propMeta).kind !== "deterministic") {
-            deferredExpressionProps.push(key);
-            continue;
-          }
-          initialValues[key] = value;
+    const initialValues = {};
+    for (const [key, value] of Object.entries(this)) {
+      if (value !== undefined && value !== null && !(Array.isArray(value) && value.length > 0) && !value?.action) {
+        const propMeta = metadata.properties[key];
+        // Only offer keys with a declared, settable model property. This
+        // excludes ORM bookkeeping fields (_baseExpression, _perspective —
+        // enumerable instance fields, not model properties), relations
+        // (@HasOne also registers a property, but innerUpdate writes it as a
+        // relation), and read-only properties/flags (readOnly: true). None of
+        // these have an `ad4m://setter` on the Rust side, which otherwise logs
+        // a "declares no setter" warning per key on every save().
+        if (!propMeta || propMeta.readOnly || metadata.relations[key]) {
+          continue;
         }
+        if (effectiveLiteralStorage(propMeta).kind !== "deterministic") {
+          deferredExpressionProps.push(key);
+          continue;
+        }
+        initialValues[key] = value;
       }
-
-      const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
-
-      await this.perspective.createSubject(
-        className,
-        this._baseExpression,
-        initialValues,
-        batchId
-      );
     }
 
-    // Set properties and relations via innerUpdate.
-    // When createSubject was skipped (no constructor actions), we must enable
-    // property writing so that scalar values are persisted as links.
-    await this.innerUpdate(!hasConstructor, batchId)
+    const className = await this.perspective.stringOrTemplateObjectToSubjectClassName(this);
+
+    await this.perspective.createSubject(
+      className,
+      this._baseExpression,
+      initialValues,
+      batchId
+    );
+
+    // Relations via innerUpdate; createSubject wrote the scalar properties.
+    await this.innerUpdate(false, batchId)
 
     for (const key of deferredExpressionProps) {
       const value = (this as any)[key];
@@ -1363,13 +1651,14 @@ export class Ad4mModel {
       // Skip unchanged fields when a snapshot is available
       if (dirty && !dirty.has(key)) continue;
 
-      // Skip read-only computed relations — explicit getters never write links.
+      // Skip read-only relations — explicit getters never write links, and
+      // neither does a relation declared `readOnly`.
       // For target+filter relations, skip only when another relation on this
       // model claims the same predicate (i.e., this is a filtered *view* of a
       // base relation and writing would collide).
       const relMeta = metadata.relations[key];
       if (relMeta) {
-        if (relMeta.getter) continue;
+        if (relMeta.getter || relMeta.readOnly) continue;
         if (relMeta.target && relMeta.filter !== false) {
           // Check for predicate collision with a sibling relation
           const hasCollision = Object.entries(metadata.relations).some(
@@ -1684,9 +1973,10 @@ export class Ad4mModel {
     if (options?.parent && !options?.batchId) {
       const batchId = await perspective.createBatch();
       await instance.save(batchId);
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });
@@ -1702,9 +1992,10 @@ export class Ad4mModel {
 
     // Create parent → child link if a parent scope was provided
     if (options?.parent) {
-      const predicate = resolveParentPredicate(options.parent, this);
+      const parent = requireSingleParent(options.parent);
+      const predicate = resolveParentPredicate(parent, this);
       const link = new Link({
-        source: options.parent.id,
+        source: parent.id,
         predicate,
         target: instance.id,
       });

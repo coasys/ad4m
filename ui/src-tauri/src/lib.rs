@@ -7,7 +7,7 @@ extern crate env_logger;
 #[cfg(not(target_os = "windows"))]
 use libc::{rlimit, setrlimit, RLIMIT_NOFILE};
 use log::{debug, error, info};
-use rust_executor::config::TlsConfig as ExecutorTlsConfig;
+use rust_executor::config_file::ExecutorSecrets;
 use rust_executor::logging::{get_default_log_config, init_launcher_logging};
 use rust_executor::utils::find_port;
 use rust_executor::Ad4mConfig;
@@ -15,8 +15,8 @@ use std::env;
 use std::fs;
 use std::fs::File;
 use std::io;
-use std::sync::Mutex;
 use tauri::{Emitter, Listener, WebviewWindow};
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 //use tauri::Size;
 use tracing_subscriber::fmt::format;
 use tracing_subscriber::EnvFilter;
@@ -27,7 +27,6 @@ use config::app_url;
 use menu::build_menu;
 use system_tray::build_system_tray;
 use tauri::{AppHandle, RunEvent};
-use tokio::sync::broadcast;
 use uuid::Uuid;
 
 mod app_state;
@@ -47,7 +46,6 @@ use crate::commands::app::{
     set_selected_agent, set_smtp_config, set_tls_config, show_main_window, test_smtp_config,
     validate_tls_config,
 };
-use crate::commands::proxy::{get_proxy, login_proxy, setup_proxy, stop_proxy};
 use crate::commands::state::{get_port, request_credential};
 use crate::config::log_path;
 
@@ -59,15 +57,6 @@ use tauri::Manager;
 #[derive(Clone, serde::Serialize)]
 struct Payload {
     message: String,
-}
-
-pub struct ProxyState(Mutex<ProxyService>);
-
-#[derive(Default)]
-pub struct ProxyService {
-    credential: Option<String>,
-    endpoint: Option<String>,
-    shutdown_signal: Option<broadcast::Sender<()>>,
 }
 
 pub struct AppState {
@@ -113,6 +102,32 @@ fn rlim_execute() {
         "Updated RLIMIT_NOFILE: current: {}, max: {}",
         rlim.rlim_cur, rlim_max
     );
+}
+
+/// The executor runs inside the launcher process, so a failed REST API must
+/// not exit it (`rust_executor::run` never does). Log the failure and tell the
+/// user, instead of leaving a launcher whose API silently never answers.
+fn report_api_failure<E: std::fmt::Debug + Send + 'static>(
+    api_thread: std::thread::JoinHandle<Result<(), E>>,
+    handle: AppHandle,
+) {
+    std::thread::spawn(move || {
+        let reason = match api_thread.join() {
+            Ok(Ok(())) => return,
+            Ok(Err(e)) => format!("{:?}", e),
+            Err(_) => String::from("the REST API thread panicked"),
+        };
+        error!("ad4m-executor REST API failed: {}", reason);
+        handle
+            .dialog()
+            .message(format!(
+                "The AD4M executor's API is not running:\n\n{reason}\n\n\
+                 Apps cannot connect until you fix the cause and restart the launcher."
+            ))
+            .kind(MessageDialogKind::Error)
+            .title("AD4M executor API failed")
+            .show(|_| {});
+    });
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -251,14 +266,9 @@ pub fn run() {
         .plugin(tauri_plugin_positioner::init())
         .plugin(tauri_plugin_notification::init())
         .manage(app_state)
-        .manage(ProxyState(Default::default()))
         .invoke_handler(tauri::generate_handler![
             get_port,
             request_credential,
-            login_proxy,
-            setup_proxy,
-            get_proxy,
-            stop_proxy,
             close_application,
             close_main_window,
             show_main_window,
@@ -306,74 +316,26 @@ pub fn run() {
             build_menu(app.handle())?;
             build_system_tray(app.handle())?;
 
-            // Convert TlsConfig and SmtpConfig if enabled
             let launcher_state = LauncherState::load().unwrap();
-
-            // Prefer multi_user_config over deprecated tls_config
-            let (tls_config, smtp_config, enable_multi_user) =
-                if let Some(multi_user_config) = &launcher_state.multi_user_config {
-                    let tls = multi_user_config.tls_config.as_ref().and_then(|config| {
-                        if config.enabled {
-                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
-                            Some(ExecutorTlsConfig {
-                                cert_file_path: config.cert_file_path.clone(),
-                                key_file_path: config.key_file_path.clone(),
-                                tls_port,
-                            })
-                        } else {
-                            None
-                        }
-                    });
-
-                    let smtp = multi_user_config.smtp_config.as_ref().map(|config| {
-                        rust_executor::config::SmtpConfig {
-                            enabled: config.enabled,
-                            host: config.host.clone(),
-                            port: config.port,
-                            username: config.username.clone(),
-                            password: config.password.clone(),
-                            from_address: config.from_address.clone(),
-                        }
-                    });
-
-                    (tls, smtp, Some(multi_user_config.enabled))
-                } else {
-                    // Fallback to deprecated tls_config for backwards compatibility
-                    let tls = launcher_state.tls_config.as_ref().and_then(|config| {
-                        if config.enabled {
-                            let tls_port = config.tls_port.unwrap_or(free_port + 1);
-                            Some(ExecutorTlsConfig {
-                                cert_file_path: config.cert_file_path.clone(),
-                                key_file_path: config.key_file_path.clone(),
-                                tls_port,
-                            })
-                        } else {
-                            None
-                        }
-                    });
-                    (tls, None, None)
-                };
-
-            // TLS enabled = bind to 0.0.0.0, TLS disabled = bind to 127.0.0.1
-            let localhost = tls_config.is_none();
-
-            let config = rust_executor::Ad4mConfig {
-                admin_credential: Some(req_credential.to_string()),
-                app_data_path: Some(String::from(app_path.to_str().unwrap())),
-                port: Some(free_port),
-                network_bootstrap_seed: None,
-                run_dapp_server: Some(true),
-                hc_use_bootstrap: Some(true),
-                hc_use_mdns: Some(false),
-                hc_use_proxy: Some(true),
-                tls: tls_config,
-                localhost: Some(localhost),
-                enable_multi_user,
-                smtp_config,
-                enable_mcp: launcher_state.mcp_enabled,
-                mcp_port: launcher_state.mcp_port,
-                ..Default::default()
-            };
+            let (config_file, smtp_password) =
+                launcher_state.executor_config(String::from(app_path.to_str().unwrap()), free_port);
+            // to_ad4m_config fails only on inputs the launcher does not
+            // produce: an SMTP password is always set (possibly "", which is
+            // valid here), and free_port + 1 cannot overflow. Should that
+            // change, setup fails with the reason logged instead of a panic.
+            let mut config = config_file
+                .to_ad4m_config(&ExecutorSecrets {
+                    admin_credential: Some(req_credential.to_string()),
+                    smtp_password,
+                    unlock_passphrase: None,
+                })
+                .map_err(|e| {
+                    error!("Cannot start the executor with the launcher's settings: {e}");
+                    e
+                })?;
+            config.hc_use_bootstrap = Some(true);
+            config.hc_use_mdns = Some(false);
+            config.hc_use_proxy = Some(true);
 
             let handle = app.handle().clone();
 
@@ -382,7 +344,8 @@ pub fn run() {
                 splashscreen_clone: WebviewWindow,
                 handle: &AppHandle,
             ) {
-                rust_executor::run(config.clone()).await;
+                let api_thread = rust_executor::run(config.clone()).await;
+                report_api_failure(api_thread, handle.clone());
                 let url = app_url();
                 info!("Executor clone on: {:?}", url);
                 let _ = splashscreen_clone.hide();

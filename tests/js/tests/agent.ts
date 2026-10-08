@@ -1,6 +1,6 @@
 import { Perspective, LinkExpression, Link, ExpressionProof, EntanglementProofInput } from "@coasys/ad4m";
-import { TestContext } from './integration.test'
-import { sleep } from '../utils/utils'
+import { TestContext } from './test-context'
+import { pollUntil } from '../utils/utils'
 import { expect } from "chai";
 import * as sinon from "sinon";
 
@@ -25,36 +25,28 @@ export default function agentTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
+                ad4mClient.on('agent-status-changed', ({ agent }) => agentUpdated(agent))
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
                 expect(generate.isInitialized).to.be.true;
                 expect(generate.isUnlocked).to.be.true;
 
-                await sleep(1000)
+                await pollUntil(() => agentUpdated.calledOnce, { timeoutMs: 5000, label: "agent status changed after generate" });
                 expect(agentUpdated.calledOnce).to.be.true;
-    
-                // //Should be able to create a perspective
-                // const create = await ad4mClient.perspective.add("test");
-                // expect(create.name).to.equal("test");
-    
+
                 const lockAgent = await ad4mClient.agent.lock("passphrase");
-                
+
                 expect(lockAgent.isInitialized).to.be.true;
                 expect(lockAgent.isUnlocked).to.be.false;
 
-                await sleep(1000)
+                await pollUntil(() => agentUpdated.calledTwice, { timeoutMs: 5000, label: "agent status changed after lock" });
                 expect(agentUpdated.calledTwice).to.be.true;
-    
-                // //Should not be able to create a perspective
-                // const createLocked = await ad4mClient.perspective.add("test2");
-                // console.log(createLocked);
-    
+
                 const unlockAgent = await ad4mClient.agent.unlock("passphrase");
                 expect(unlockAgent.isInitialized).to.be.true;
                 expect(unlockAgent.isUnlocked).to.be.true;
 
-                await sleep(1000)
+                await pollUntil(() => agentUpdated.calledThrice, { timeoutMs: 5000, label: "agent status changed after unlock" });
                 expect(agentUpdated.calledThrice).to.be.true;
     
                 // //Should be able to create a perspective
@@ -71,7 +63,7 @@ export default function agentTests(testContext: TestContext) {
                 await ensureAgentIsReady(testContext)
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addUpdatedListener(agentUpdated)
+                ad4mClient.on('agent-updated', ({ agent }) => agentUpdated(agent))
 
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).not.to.be.undefined;
@@ -88,7 +80,7 @@ export default function agentTests(testContext: TestContext) {
                 expect(currentAgent.perspective).not.to.be.undefined
                 expect(updatePerspective.perspective!.links.length).to.equal(1);
 
-                await sleep(500)
+                await pollUntil(() => agentUpdated.calledOnce, { timeoutMs: 5000, label: "agent updated after perspective change" });
                 expect(agentUpdated.calledOnce).to.be.true;
                 expect(agentUpdated.getCall(0).args[0]).to.deep.equal(updatePerspective)
 
@@ -97,7 +89,7 @@ export default function agentTests(testContext: TestContext) {
                 expect(updatePublicLanguage.perspective!.links.length).to.equal(1);
                 expect(updatePublicLanguage.directMessageLanguage).to.equal("newlang");
 
-                await sleep(500)
+                await pollUntil(() => agentUpdated.calledTwice, { timeoutMs: 5000, label: "agent updated after DM language change" });
                 expect(agentUpdated.calledTwice).to.be.true;
                 expect(agentUpdated.getCall(1).args[0]).to.deep.equal(updatePublicLanguage)
 
@@ -147,6 +139,25 @@ export default function agentTests(testContext: TestContext) {
                 const currentAgentPostDeletion = await ad4mClient.agent.me();
                 expect(currentAgentPostDeletion.perspective).not.to.be.undefined;
                 expect(currentAgentPostDeletion.perspective!.links.length).to.equal(1);
+            })
+            it('mutatePublicPerspective leaves no temporary perspective behind', async () => {
+                const ad4mClient = testContext.ad4mClient!;
+                const before = (await ad4mClient.perspective.all()).length;
+
+                await ad4mClient.agent.mutatePublicPerspective({
+                    additions: [new Link({
+                        source: "test://source-temp",
+                        predicate: "test://predicate-temp",
+                        target: "test://target-temp"
+                    })],
+                    removals: []
+                });
+
+                expect((await ad4mClient.perspective.all()).length).to.equal(before);
+
+                const added = (await ad4mClient.agent.me()).perspective!.links
+                    .filter(l => l.data.source === "test://source-temp");
+                await ad4mClient.agent.mutatePublicPerspective({ additions: [], removals: added });
             })
             it('can create entanglementProofPreFlight', async () => {
                 const ad4mClient = testContext.ad4mClient!;

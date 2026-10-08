@@ -8,12 +8,12 @@ use url::Url;
 use super::domain::{
     LinkExpressionInput, LinkInput, LinkStatus, NotificationInput, PerspectiveInput,
 };
-use crate::agent::signatures::verify;
+use crate::agent::signatures::verify_or_false;
 use regex::Regex;
 
-#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
-pub struct Expression<T: Serialize> {
+pub struct Expression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -27,8 +27,8 @@ pub struct ExpressionProof {
     pub signature: String,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
-pub struct VerifiedExpression<T: Serialize> {
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, TS)]
+pub struct VerifiedExpression<T> {
     pub author: String,
     pub timestamp: String,
     pub data: T,
@@ -46,7 +46,7 @@ pub struct DecoratedExpressionProof {
 
 impl<T: Serialize> From<Expression<T>> for VerifiedExpression<T> {
     fn from(expr: Expression<T>) -> Self {
-        let valid = verify(&expr).unwrap_or(false);
+        let valid = verify_or_false(&expr, "VerifiedExpression::from");
         let invalid = !valid;
         VerifiedExpression {
             author: expr.author,
@@ -190,6 +190,23 @@ impl LinkExpression {
             status: input.status,
         }
     }
+
+    /// Derive the signature verdict for this link — the same recipe as
+    /// [`DecoratedLinkExpression::compute_proof_valid`], for the plain form
+    /// whose proof carries no verdict field at all. Code that hands links
+    /// across a trust boundary carries `LinkExpression` precisely so a
+    /// verdict cannot travel with them; the receiving side calls this instead
+    /// of believing anyone. Normalizing `data` first is not optional: the
+    /// signature was produced over the normalized link.
+    pub fn compute_proof_valid(&self) -> bool {
+        let link_expr = Expression::<Link> {
+            author: self.author.clone(),
+            timestamp: self.timestamp.clone(),
+            data: self.data.normalize(),
+            proof: self.proof.clone(),
+        };
+        verify_or_false(&link_expr, "LinkExpression::compute_proof_valid")
+    }
 }
 
 impl From<LinkExpression> for Expression<Link> {
@@ -228,7 +245,18 @@ pub struct DecoratedLinkExpression {
 }
 
 impl DecoratedLinkExpression {
-    pub fn verify_signature(&mut self) {
+    /// Derive the signature verdict for this link, without touching
+    /// `self.proof.valid`.
+    ///
+    /// `proof.valid` is a *read view* over the signature, not a stored fact, so
+    /// every place that needs the verdict recomputes it from here rather than
+    /// trusting a value someone handed along. Normalizing `data` first is not
+    /// optional: the signature was produced over the normalized link, so
+    /// verifying the raw form reports a valid link as invalid.
+    ///
+    /// A verification error counts as "not verified" — see
+    /// [`verify_or_false`](crate::agent::signatures::verify_or_false).
+    pub fn compute_proof_valid(&self) -> bool {
         let link_expr = Expression::<Link> {
             author: self.author.clone(),
             timestamp: self.timestamp.clone(),
@@ -238,7 +266,11 @@ impl DecoratedLinkExpression {
                 signature: self.proof.signature.clone(),
             },
         };
-        let valid = verify(&link_expr).unwrap_or(false);
+        verify_or_false(&link_expr, "DecoratedLinkExpression::compute_proof_valid")
+    }
+
+    pub fn verify_signature(&mut self) {
+        let valid = self.compute_proof_valid();
         self.proof.valid = Some(valid);
         self.proof.invalid = Some(!valid);
     }
@@ -292,14 +324,14 @@ impl From<PerspectiveInput> for Perspective {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Neighbourhood {
     pub link_language: String,
     pub meta: Perspective,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct NeighbourhoodExpression {
     pub author: String,
     pub data: Neighbourhood,
@@ -309,13 +341,13 @@ pub struct NeighbourhoodExpression {
 
 pub type Address = String;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct LanguageRef {
-    pub name: String,
     pub address: Address,
+    pub name: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct ExpressionRef {
     pub language: LanguageRef,
     pub expression: Address,
@@ -394,7 +426,7 @@ impl Display for ExpressionRef {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 pub struct PerspectiveDiff {
     pub additions: Vec<LinkExpression>,
     pub removals: Vec<LinkExpression>,
@@ -430,7 +462,7 @@ impl PerspectiveDiff {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Notification {
     pub id: String,
@@ -446,14 +478,14 @@ pub struct Notification {
     pub user_email: Option<String>, // NULL for main agent, Some(email) for managed users
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AIPromptExamples {
     pub input: String,
     pub output: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AITask {
     pub name: String,
@@ -488,7 +520,7 @@ impl Notification {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TriggeredNotification {
     pub notification: Notification,
@@ -496,10 +528,21 @@ pub struct TriggeredNotification {
     pub trigger_match: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+/// The `notification-triggered` event: the triggered notification plus the
+/// perspective it fired in.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationTriggeredEvent {
+    pub perspective_uuid: String,
+    pub notification: TriggeredNotification,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ModelApiType {
     OpenAi,
+    Anthropic,
+    Ollama,
 }
 
 impl FromStr for ModelApiType {
@@ -512,6 +555,12 @@ impl FromStr for ModelApiType {
             "openAi" => Ok(ModelApiType::OpenAi),
             "OpenAi" => Ok(ModelApiType::OpenAi),
             "OPEN_AI" => Ok(ModelApiType::OpenAi),
+            "anthropic" => Ok(ModelApiType::Anthropic),
+            "Anthropic" => Ok(ModelApiType::Anthropic),
+            "ANTHROPIC" => Ok(ModelApiType::Anthropic),
+            "ollama" => Ok(ModelApiType::Ollama),
+            "Ollama" => Ok(ModelApiType::Ollama),
+            "OLLAMA" => Ok(ModelApiType::Ollama),
             _ => Err(format!("Unknown ModelApiType: {}", s)),
         }
     }
@@ -522,20 +571,31 @@ impl ToString for ModelApiType {
     fn to_string(&self) -> String {
         match self {
             ModelApiType::OpenAi => "OPEN_AI".to_string(),
+            ModelApiType::Anthropic => "ANTHROPIC".to_string(),
+            ModelApiType::Ollama => "OLLAMA".to_string(),
         }
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApi {
     pub base_url: Url,
     pub api_key: String,
     pub model: String,
     pub api_type: ModelApiType,
+    /// Ceiling for the context window requested from the provider, in tokens.
+    ///
+    /// Only the Ollama provider reads this today: `num_ctx` sizes the KV
+    /// cache at model load, so the right ceiling depends on how much VRAM
+    /// the operator of that Ollama host can spend — a per-model decision,
+    /// not a compile-time one. Unset falls back to the provider's built-in
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_num_ctx: Option<u32>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModel {
     pub file_name: String,
@@ -544,7 +604,7 @@ pub struct LocalModel {
     pub revision: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TokenizerSource {
     pub repo: String,
@@ -575,7 +635,7 @@ impl Display for ModelType {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct Model {
     pub id: String,
@@ -588,7 +648,7 @@ pub struct Model {
 
 // Internal User struct - NOT exposed via REST API
 // Contains sensitive data like password_hash that should never be returned to clients
-#[derive(Default, Deserialize, Serialize, Clone)]
+#[derive(Default, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct User {
     pub username: String,
@@ -612,7 +672,7 @@ impl std::fmt::Debug for User {
 
 // Public UserInfo struct - safe to return from public APIs
 // Does NOT contain password_hash
-#[derive(Default, Debug, Deserialize, Serialize, Clone)]
+#[derive(Default, Debug, Deserialize, Serialize, Clone, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInfo {
     pub username: String,

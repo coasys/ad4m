@@ -2,13 +2,13 @@
 //!
 //! The watch loop and [`super::watcher::run_one_pass`] publish an
 //! [`AutoProcessorEvent`] at each meaningful step of a pass onto the global
-//! [`AUTO_PROCESSOR_EVENT_TOPIC`] PubSub topic. This is the same mechanism
-//! every GraphQL subscription already rides, so:
+//! [`AUTO_PROCESSOR_EVENT_TOPIC`] PubSub topic. This is the same PubSub
+//! mechanism the WS-RPC layer already rides for its own subscriptions, so:
 //!   * **tests** can `subscribe()` and `await` a specific step instead of
 //!     polling the graph or sleeping — the whole pass is observable without
 //!     manually driving interpretation, and
-//!   * **the WebSocket layer (#881)** can forward the topic to clients as a
-//!     GraphQL subscription for near-free, so a Flux-style UI can show
+//!   * **the WS-RPC layer** can forward the topic to clients as a
+//!     WS subscription for near-free, so a Flux-style UI can show
 //!     "collecting → running LLM → done" and await the next batch.
 //!
 //! Emission is fire-and-forget: a pass never fails or blocks because nobody is
@@ -24,7 +24,7 @@ use tokio::sync::broadcast;
 /// pass emits a subset (e.g. `BatchReady → BackedOff` when a peer already holds
 /// the claim, or `BatchReady → Claimed → GatheringTranscript →
 /// RunningInterpretation → Processed` for the peer that wins).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum AutoProcessorStep {
     /// A debounced batch reached its threshold and a pass is about to run.
@@ -88,7 +88,7 @@ pub enum AutoProcessorStep {
 }
 
 /// A single step-signal from one auto-processor pass on one perspective.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoProcessorEvent {
     /// UUID of the perspective the processor runs on.
@@ -314,7 +314,7 @@ where
 /// Coarse-grained pass phase for the observability stream. Distinct from
 /// `AutoProcessorStep` — that has 10 fine-grained steps for the pass owner;
 /// this has just the two transitions a neighbour cares about.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub enum NeighbourhoodPhase {
     /// This executor wrote a `ProcessingClaim` — a pass has started on this
@@ -331,7 +331,7 @@ pub enum NeighbourhoodPhase {
 /// purpose: perspective + processor + claimant DID + batch key + phase.
 /// Consumers merge these across ticks + across peers (via link-added on
 /// `has_claim`) to render "who is currently processing what."
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AutoProcessorNeighbourhoodState {
     /// UUID of the perspective the pass runs on.

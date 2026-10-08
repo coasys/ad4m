@@ -48,6 +48,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
+                    run_holochain: None,
                     admin_credential: Some(String::from("*")),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
@@ -61,10 +62,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             let test_res = tokio::task::spawn(async move {
@@ -187,6 +190,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 temp_publish_bootstrap_path.to_str().unwrap()
             );
 
+            // The publishing executor holds the agent that signs the seed; a
+            // throwaway credential shared only with start_publishing() keeps
+            // its API closed to everyone else on the host.
+            let admin_credential = random_admin_credential();
+            let publish_credential = admin_credential.clone();
+
             tokio::task::spawn(async move {
                 rust_executor::run(rust_executor::Ad4mConfig {
                     app_data_path: Some(data_path.to_str().unwrap().to_string()),
@@ -203,7 +212,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     hc_use_mdns: None,
                     hc_use_proxy: None,
                     connect_holochain: None,
-                    admin_credential: None,
+                    run_holochain: None,
+                    admin_credential: Some(admin_credential),
                     hc_proxy_url: None,
                     hc_bootstrap_url: None,
                     hc_relay_url: None,
@@ -216,10 +226,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     mcp_port: None,
                     smtp_config: None,
                     pid_file: None,
+                    ..Default::default()
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
@@ -228,6 +240,7 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 green_ln!("AD4M ready for publishing\n");
                 start_publishing(
+                    publish_credential,
                     passphrase.clone(),
                     seed_proto.clone(),
                     lang_lang_source.clone(),
@@ -250,4 +263,12 @@ pub async fn run(command: DevFunctions) -> Result<()> {
         }
     };
     Ok(())
+}
+
+/// 32 random bytes, hex-encoded.
+fn random_admin_credential() -> String {
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

@@ -36,6 +36,8 @@ export interface RelationMetadataEntry {
      * The expression can reference 'Base' which will be replaced with the instance's base expression.
      */
     getter?: string;
+    /** No writer for this relation; see `RelationOptions.readOnly`. */
+    readOnly?: boolean;
     /**
      * Whether to auto-generate a conformance filter when `target` is set.
      * Defaults to `true` — set to `false` to opt out of DB-level type filtering
@@ -57,6 +59,12 @@ export interface RelationMetadataEntry {
      * instances — those pass through byte-for-byte.
      */
     datatype?: string;
+    /** Hydrate targets as the class each one actually is — see `RelationOptions.polymorphic`. */
+    polymorphic?: boolean;
+    /** Model classes this relation's polymorphic results can be constructed as. */
+    instantiateAs?: () => Ad4mModelLike[];
+    /** CRDT ordering config — see `RelationOptions.ordering`. */
+    ordering?: { strategy: 'linkedList' };
     /**
      * Natural-language hint describing what this relation MEANS semantically.
      * Emitted as an `ad4m://interpretation_hint` link on the SHACL property
@@ -589,6 +597,9 @@ export interface ModelConfig {
  * - Generates the necessary SDNA code for the model's properties and relations
  * - Enables the use of other model decorators (@Property, @HasMany, etc.)
  * - Provides static query methods through the Ad4mModel base class
+ *
+ * Schema generation calls the class constructor once, without a perspective, to read
+ * field defaults, so keep constructors free of side effects.
  * 
  * @example
  * ```typescript
@@ -811,7 +822,7 @@ export interface RelationOptions {
     /**
      * The predicate URI used to link the two models.
      * Defaults to `'ad4m://has_child'` when omitted.
-     * Cannot be combined with `getter`.
+     * Cannot be combined with `getter`, except on a `readOnly` relation.
      */
     through?: string;
     /** The target model class (use a thunk to avoid circular-dependency issues). Optional for untyped string relations.
@@ -824,7 +835,9 @@ export interface RelationOptions {
      *
      * Mutually exclusive with `through` — a getter replaces link-based resolution,
      * so there is no predicate to add to or remove from. When `getter` is provided
-     * the relation is read-only (no adder/remover actions are generated).
+     * the relation is read-only (no adder/remover actions are generated). The
+     * exception is `readOnly: true`, where `through` names the predicate the
+     * getter reads and becomes the shape's path.
      *
      * **Combines with `target`**, which names the class the traversal's values
      * hydrate into — without it `include` has no shape to resolve and the relation
@@ -845,6 +858,14 @@ export interface RelationOptions {
      * ```
      */
     getter?: string;
+    /**
+     * A relation read through `through` that this model must not write: no
+     * `add*`/`remove*`/`set*` methods and no adder or remover actions. Pair
+     * it with `getter` when the stored links need filtering on the way out
+     * (only those signed by their target, say) but the predicate should
+     * still be the shape's path, so a subscription re-runs when one lands.
+     */
+    readOnly?: boolean;
     /** Whether the link is stored locally (not shared on the network) */
     local?: boolean;
     /**
@@ -883,6 +904,9 @@ export interface RelationOptions {
      * this to decode `literal:<type>:<value>` wire form on hydration.
      * Omit for URI relations that point at other model instances.
      *
+     * Mutually exclusive with `target`: a relation holds either literals or
+     * model instances. Combines with `through` or `getter`.
+     *
      * @example
      * ```typescript
      * @HasMany({ through: "run://source", datatype: "xsd:string" })
@@ -890,6 +914,91 @@ export interface RelationOptions {
      * ```
      */
     datatype?: string;
+    /**
+     * Hydrate each target as the class it actually **is**, rather than as the
+     * class this relation declares.
+     *
+     * A heterogeneous relation has no single right target. Declaring the base
+     * class loses every subclass property — the executor hydrates against the
+     * shape it is given, so an `ImagePost` read as a `Post` arrives with its own
+     * fields simply absent, not merely mislabelled. Declaring nothing leaves
+     * `include` with no shape to resolve at all.
+     *
+     * With this set, the targets are classified, grouped by concrete class, and
+     * hydrated against their own shapes — one query per distinct class present,
+     * not per instance.
+     *
+     * Pair with `instantiateAs` so the results become instances of the right
+     * model class rather than plain objects.
+     *
+     * @example
+     * ```typescript
+     * @HasMany({
+     *   through: "we://children",
+     *   polymorphic: true,
+     *   instantiateAs: () => [TextBlock, ImageBlock],
+     * })
+     * children: Post[] = [];
+     * ```
+     */
+    polymorphic?: boolean;
+    /**
+     * The model classes a `polymorphic` result may be constructed as.
+     *
+     * Classification happens in the executor, structurally — there is no
+     * `rdf:type` triple to read, so a target's class is derived from the flags
+     * and required properties it carries. What cannot cross the wire is the
+     * TypeScript constructor, so this names the classes this side can build.
+     * `@Model` already records each class's name on the class itself, so the
+     * name → class mapping is derived from the list rather than restated
+     * alongside it.
+     *
+     * **This is advisory, not a constraint.** It never narrows what the query
+     * returns and never excludes a target: a class missing from the list arrives
+     * as plain JSON carrying its class name, so partial knowledge degrades
+     * instead of failing. Declaring what this call site can *construct* is a
+     * different statement from declaring what the relation may *contain* — a
+     * heterogeneous relation is open by definition, and a list that silently
+     * dropped unrecognised members would defeat the point of reading it
+     * polymorphically at all. Constraining a read to particular classes belongs
+     * in the query, not here.
+     *
+     * A thunk rather than an array, for the same reason `target` is one: it is
+     * evaluated at query time, so a class defined later in a circular import
+     * graph still resolves.
+     */
+    instantiateAs?: () => Ad4mModelLike[];
+    /**
+     * Give this collection a user-controlled order that survives concurrent edits.
+     *
+     * A `@HasMany` is a set of links, and hydration sorts them by link timestamp.
+     * That is right for an append-only collection — a transcript, a message
+     * thread — where timestamp order *is* the order. It cannot express a sequence
+     * somebody chose: a kanban column, a playlist, the blocks of a post.
+     *
+     * **Declaration only, for now.** Setting this emits `ad4m://ordering` on the
+     * property shape, where the executor reads it back — but no read or write
+     * path acts on it yet, so a relation declaring it still hydrates by link
+     * timestamp exactly as one that does not. Wiring save and hydration to the
+     * declaration is the next change; nothing about how you write the relation
+     * will change when it lands — assign the array in the order you want and
+     * save.
+     *
+     * Ordering is declared in the type system, rather than passed per query, so
+     * that *every* writer gets it once it is wired: the ORM, MCP agents, raw
+     * WS-RPC callers, another app sharing the neighbourhood. Implemented
+     * client-side it would order only what this client wrote.
+     *
+     * @example
+     * ```typescript
+     * @HasMany(() => Task, {
+     *   through: "kanban://has_task",
+     *   ordering: { strategy: "linkedList" },
+     * })
+     * tasks: Task[] = [];
+     * ```
+     */
+    ordering?: { strategy: 'linkedList' };
     /**
      * Natural-language hint describing what this relation MEANS semantically —
      * the sentence-level rationale for when to use it, not just its structural
@@ -952,13 +1061,33 @@ function resolveRelationArgs(
         );
     }
 
-    // getter is mutually exclusive with through
+    // `datatype` makes the relation's values encoded literals; `target` makes
+    // them model instances. `buildSHACL` would emit `sh:nodeKind sh:Literal`
+    // and `sh:class` on the same property shape, so the executor would decode
+    // the values as literals while `include` tried to hydrate them as
+    // instances. Checked before the getter path returns, so a getter
+    // relation is held to the same rule.
+    if (opts.datatype && opts.target) {
+        throw new Error(
+            'Relation decorator: `datatype` and `target` are mutually exclusive. ' +
+            '`datatype` declares a relation of literal values; `target` declares a ' +
+            'relation to model instances. Drop `datatype` to link instances, or drop ' +
+            '`target` to store literals.'
+        );
+    }
+
+    // getter is mutually exclusive with a WRITABLE through: the relation would
+    // write raw links and read back whatever the getter lets through. With
+    // `readOnly` there is nothing to write, and `through` only names the
+    // predicate the getter reads — the shape's path, which is what makes a
+    // subscription re-run when one of those links lands.
     if (opts.getter) {
-        if (opts.through) {
+        if (opts.through && !opts.readOnly) {
             throw new Error(
                 'Relation decorator: `getter` and `through` are mutually exclusive. ' +
-                'Use `getter` alone for custom read-only relations, or `through` ' +
-                '(with optional `target`) for standard link-based relations.'
+                'Use `getter` alone for custom read-only relations, `through` ' +
+                '(with optional `target`) for standard link-based relations, or ' +
+                'both with `readOnly: true` to read that predicate through the getter.'
             );
         }
         // `target` and `where` are NOT mutually exclusive with `getter`.
@@ -1054,13 +1183,17 @@ export function HasMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
         // Only add mutation methods when a predicate is available
-        // (getter-only relations are read-only)
-        if (opts.through) {
+        // (getter-only relations are read-only) and writing is allowed
+        if (opts.through && !opts.readOnly) {
             (target as any)[`add${capitalize(relKey)}`] = async function(this: any, arg: any, batchId?: string) {
                 return (this as any).addRelationValue(relKey, arg, batchId);
             };
@@ -1106,6 +1239,15 @@ export function HasOne(
     second?: Omit<RelationOptions, 'target'>,
 ): PropertyDecorator {
     const opts = resolveRelationArgs(first, second);
+    // `readOnly` lets `through` and `getter` stand together on `@HasMany`.
+    // `@HasOne` reads through its predicate as a property and carries no
+    // getter, so the pair would read the predicate unfiltered.
+    if (opts.through && opts.getter) {
+        throw new Error(
+            '@HasOne: `through` with `getter` is not supported, even with `readOnly`. ' +
+            'Use `@HasMany` for a read-only relation read through a getter.'
+        );
+    }
     return function <T>(target: T, key: keyof T) {
         const ctor = (target as any).constructor;
         if (!relationRegistry.has(ctor)) relationRegistry.set(ctor, {});
@@ -1119,11 +1261,21 @@ export function HasOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
+            ...(opts.readOnly && { readOnly: true }),
         };
 
         const relKey = key as string;
-        if (opts.through) {
+        if (opts.through && opts.readOnly) {
+            applyPropertyMetadata({
+                through: opts.through,
+                readOnly: true,
+                local: opts.local,
+            })(target, key);
+        } else if (opts.through) {
             // Register as a writable property
             applyPropertyMetadata({
                 through: opts.through,
@@ -1199,6 +1351,9 @@ export function BelongsToOne(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 
@@ -1259,6 +1414,9 @@ export function BelongsToMany(
             ...(opts.filter !== undefined && { filter: opts.filter }),
             ...(opts.where && { where: opts.where }),
             ...(opts.datatype && { datatype: opts.datatype }),
+            ...(opts.polymorphic && { polymorphic: opts.polymorphic }),
+            ...(opts.instantiateAs && { instantiateAs: opts.instantiateAs }),
+            ...(opts.ordering && { ordering: opts.ordering }),
             ...(opts.interpretationHint && { interpretationHint: opts.interpretationHint }),
         };
 

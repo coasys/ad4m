@@ -1,6 +1,6 @@
 use cid::Cid;
 use deno_core::op2;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use multibase::Base;
 use multihash_codetable::{Code, MultihashDigest};
 
@@ -23,7 +23,11 @@ fn hash(#[string] data: String) -> Result<String, AnyhowWrapperError> {
 #[op2]
 #[string]
 fn console_log(#[string] data: String) -> Result<String, AnyhowWrapperError> {
-    info!("[JSCORE]: {}", data);
+    // JS `console.log` maps to Rust `debug` — mirroring browser semantics,
+    // where console.log is developer chatter, not an operator-facing event.
+    // JS callers that need info-level visibility should use `console.info`
+    // (routed via a follow-up op) or emit through a structured channel.
+    debug!("[JSCORE]: {}", data);
 
     Ok(String::from("temp"))
 }

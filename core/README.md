@@ -15,6 +15,7 @@ on the user's machine.
 The easiest way to get that is to use ad4m-cli:
 ```sh
 cargo install ad4m
+export AD4M_ADMIN_CREDENTIAL="$(cat /path/to/admin-credential)"   # required
 ad4m-executor run
 ```
 

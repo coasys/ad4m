@@ -186,7 +186,7 @@ impl Ad4mMcpHandler {
 
     /// Get the current agent's public profile
     #[tool(
-        description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and Flux users see in neighbourhoods."
+        description = "Get the current agent's public profile (username, name, bio, profile picture URLs). This is the identity that other agents and human users see in neighbourhoods."
     )]
     pub async fn get_agent_profile(&self, _params: Parameters<GetAgentProfileParams>) -> String {
         let token = self.get_auth_token().await.unwrap_or_default();
@@ -227,7 +227,7 @@ impl Ad4mMcpHandler {
 
     /// Set the current agent's public profile fields
     #[tool(
-        description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and Flux users in neighbourhoods. Only provided fields are updated; omitted fields keep their current values."
+        description = "Set the current agent's public profile (username, name, bio, email). These fields are visible to other agents and to the human users of whichever app renders the neighbourhood. Only provided fields are updated; omitted fields keep their current values."
     )]
     pub async fn set_agent_profile(&self, params: Parameters<SetAgentProfileParams>) -> String {
         let _capabilities = match self.get_capabilities().await {
@@ -324,7 +324,7 @@ impl Ad4mMcpHandler {
 
     /// Set the agent's profile picture
     #[tool(
-        description = "Set the current agent's profile picture. Provide raw base64-encoded image data (NOT a data URI). The image will be uploaded to the centralized file store and linked in the agent's public profile. For best results, use a square image (Flux will display it as a circle)."
+        description = "Set the current agent's profile picture. Provide raw base64-encoded image data (NOT a data URI). The image will be uploaded to the centralized file store and linked in the agent's public profile. For best results, use a square image (apps usually crop profile pictures to a circle)."
     )]
     pub async fn set_agent_profile_picture(
         &self,
@@ -434,7 +434,7 @@ impl Ad4mMcpHandler {
             Ok(_) => json!({
                 "success": true,
                 "profile_image": profile_img,
-                "message": "Profile picture updated. For best results in Flux, use a square image."
+                "message": "Profile picture updated. Use a square image for best results — apps usually crop it to a circle."
             })
             .to_string(),
             Err(e) => json!({"error": format!("Failed to update profile: {}", e)}).to_string(),

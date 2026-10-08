@@ -1,16 +1,22 @@
 //! AI WS-native handlers.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
+use crate::ai_service::providers::http::{is_transport_safe, CLEARTEXT_KEY_REFUSAL};
 use crate::ai_service::AIService;
 use crate::db::Ad4mDb;
-use crate::types::{AITask, AITaskInput, ModelInput, ModelType, RequestContext};
+use crate::types::{
+    AIModelLoadingStatus, AITask, AITaskInput, Model, ModelInput, ModelType, RequestContext,
+    VoiceActivityParamsInput,
+};
 use base64::Engine;
 
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 fn check_compute_credits_ws(auth_token: &str) -> Result<(), WsRpcError> {
     let global_free =
@@ -47,6 +53,90 @@ async fn list_models(_params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     Ok(serde_json::to_value(models)?)
 }
 
+/// `ai.discoverModels` — what does this endpoint serve, and does this key work?
+///
+/// Takes the credentials of a model that does not exist yet: an operator is
+/// filling in the form and wants the list to pick from, before there is
+/// anything to list. Answers the provider's own model ids.
+///
+/// Gated on AI_CREATE rather than AI_READ. It reads nothing of this node's,
+/// but it makes an outbound request to an arbitrary URL with an
+/// arbitrary key, which is the same authority adding a model carries and more
+/// than reading the models already configured.
+///
+/// That includes the failure body. `list_models` puts the upstream response
+/// verbatim into its error, so a caller can point `baseUrl` at a host this
+/// node can reach and read what it answers. Deliberate, on two grounds: a
+/// holder of AI_CREATE can already name an arbitrary URL and send it
+/// credentials, so this widens reach and not authority; and the body is the
+/// reason the endpoint is worth having, because a status alone does not
+/// separate a bad key from a bad model name from a host that is not an LLM.
+/// Revisit it if AI_CREATE is ever granted more widely than to the operator of
+/// the node — the reach is a cleaner read primitive than `addModel` plus a
+/// prompt, needing no model and no completion.
+async fn discover_models(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
+    check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
+        .map_err(|e| WsRpcError::forbidden(e))?;
+
+    let base_url = params.require_str("baseUrl")?;
+    let base_url = url::Url::parse(&base_url)
+        .map_err(|e| WsRpcError::bad_request(format!("Invalid baseUrl: {e}")))?;
+
+    // Defaults to OpenAI, which is what every endpoint that is not Anthropic
+    // speaks, and what the field meant before there was a choice.
+    let api_type = match params.get("apiType").and_then(|v| v.as_str()) {
+        Some(raw) => raw
+            .parse::<crate::types::ModelApiType>()
+            .map_err(WsRpcError::bad_request)?,
+        None => crate::types::ModelApiType::OpenAi,
+    };
+
+    let api_key = params
+        .get("apiKey")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+
+    // A key sent over plain HTTP crosses the network in the clear, and the
+    // OpenAI path sends it as a bearer token. Refuse that rather than leak it
+    // on the operator's behalf.
+    //
+    // Loopback is exempt, because a local Ollama, vLLM or gateway is reached
+    // over http by design and nothing leaves the machine. Keyless discovery
+    // against any host stays available, which is the case that made this
+    // endpoint worth having.
+    if !api_key.is_empty() && !is_transport_safe(&base_url) {
+        return Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL));
+    }
+
+    let models = crate::ai_service::providers::list_models(&api_type, api_key, base_url)
+        .await
+        .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+
+    Ok(serde_json::to_value(models)?)
+}
+
+/// Refuse a model whose key would cross the network in the clear.
+///
+/// The same rule as discovery, applied where it matters more: discovery sends
+/// a key once, and a saved model sends it with every completion for as long as
+/// the model exists. A base URL that does not parse is left for the service to
+/// reject with its own error.
+///
+/// `AIService::build_remote_client` refuses the same model again. This check
+/// is the one that keeps it out of the database and answers the caller.
+pub(super) fn refuse_cleartext_credential(model: &ModelInput) -> Result<(), WsRpcError> {
+    let Some(api) = &model.api else {
+        return Ok(());
+    };
+    if api.api_key.is_empty() {
+        return Ok(());
+    }
+    match url::Url::parse(&api.base_url) {
+        Ok(url) if !is_transport_safe(&url) => Err(WsRpcError::bad_request(CLEARTEXT_KEY_REFUSAL)),
+        _ => Ok(()),
+    }
+}
+
 async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AI_CREATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
@@ -54,6 +144,7 @@ async fn add_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsR
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
@@ -75,6 +166,7 @@ async fn update_model(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let model: ModelInput =
         serde_json::from_value(params.get("model").cloned().unwrap_or(Value::Null))
             .map_err(|e| WsRpcError::bad_request(e.to_string()))?;
+    refuse_cleartext_credential(&model)?;
 
     let service = AIService::global_instance()
         .await
@@ -121,7 +213,13 @@ async fn set_default_model(params: Value, ctx: Arc<RequestContext>) -> Result<Va
     service
         .set_default_model(body.model_type, id)
         .await
-        .map_err(|e| WsRpcError::internal(e.to_string()))?;
+        .map_err(|e| {
+            if e.downcast_ref::<crate::db::InvalidDefaultModel>().is_some() {
+                WsRpcError::bad_request(e.to_string())
+            } else {
+                WsRpcError::internal(e.to_string())
+            }
+        })?;
 
     Ok(Value::Bool(true))
 }
@@ -291,7 +389,7 @@ async fn open_transcription_stream(
         .map_err(|e| WsRpcError::forbidden(e))?;
     check_compute_credits_ws(&ctx.auth_token)?;
 
-    let body: OpenTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionOpenParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -317,7 +415,7 @@ async fn close_transcription_stream(
     check_capability(&ctx.capabilities, &AI_TRANSCRIBE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: CloseTranscriptionRequest = serde_json::from_value(params)
+    let body: AiTranscriptionCloseParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
     let service = AIService::global_instance()
@@ -333,21 +431,45 @@ async fn close_transcription_stream(
 }
 
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("ai.models", list_models);
-    map.register("ai.addModel", add_model);
-    map.register("ai.updateModel", update_model);
-    map.register("ai.removeModel", remove_model);
-    map.register("ai.setDefaultModel", set_default_model);
-    map.register("ai.getDefaultModel", get_default_model);
-    map.register("ai.modelLoadingStatus", get_model_loading_status);
-    map.register("ai.tasks", list_tasks);
-    map.register("ai.addTask", add_task);
-    map.register("ai.updateTask", update_task);
-    map.register("ai.removeTask", remove_task);
-    map.register("ai.prompt", ai_prompt);
-    map.register("ai.embed", ai_embed);
-    map.register("ai.transcriptionOpen", open_transcription_stream);
-    map.register("ai.transcriptionClose", close_transcription_stream);
+    map.method::<NoParams, Vec<Model>>("ai.models", list_models)
+        .read();
+    // The provider's own model ids.
+    map.method::<AiDiscoverModelsParams, Vec<String>>("ai.discoverModels", discover_models)
+        .read();
+    // The new model's id.
+    map.method::<AiAddModelParams, String>("ai.addModel", add_model)
+        .long();
+    map.method::<AiUpdateModelParams, bool>("ai.updateModel", update_model);
+    map.method::<AiIdParams, bool>("ai.removeModel", remove_model);
+    map.method::<AiSetDefaultModelParams, bool>("ai.setDefaultModel", set_default_model);
+    map.method::<AiGetDefaultModelParams, Option<Model>>("ai.getDefaultModel", get_default_model)
+        .read();
+    map.method::<AiModelLoadingStatusParams, AIModelLoadingStatus>(
+        "ai.modelLoadingStatus",
+        get_model_loading_status,
+    )
+    .read();
+    map.method::<NoParams, Vec<AITask>>("ai.tasks", list_tasks)
+        .read();
+    map.method::<AiAddTaskParams, AITask>("ai.addTask", add_task);
+    map.method::<AiUpdateTaskParams, AITask>("ai.updateTask", update_task);
+    map.method::<AiIdParams, bool>("ai.removeTask", remove_task);
+    // The completion text.
+    map.method::<PromptRequest, String>("ai.prompt", ai_prompt)
+        .long();
+    // The embedding vector as JSON, zlib-deflated, base64-encoded.
+    map.method::<EmbedRequest, String>("ai.embed", ai_embed)
+        .long();
+    // The new stream's id.
+    map.method::<AiTranscriptionOpenParams, String>(
+        "ai.transcriptionOpen",
+        open_transcription_stream,
+    );
+    // Always the string `"true"`.
+    map.method::<AiTranscriptionCloseParams, String>(
+        "ai.transcriptionClose",
+        close_transcription_stream,
+    );
 }
 
 // ── HTTP-only: binary transcription feed ────────────────────────────────────
@@ -429,12 +551,121 @@ pub async fn feed_transcription_stream(
         }
     }
 
-    if errors.len() == stream_ids.len() {
+    feed_outcome(&errors, stream_ids.len())?;
+    Ok(Json("true".to_string()))
+}
+
+/// Whether a feed to `stream_count` streams succeeded, given the streams that failed.
+///
+/// Any failure fails the request. When only some streams failed, the audio has already reached
+/// the others, so the message says so and names the failures: a caller retrying the whole feed
+/// would give the streams that took it the same audio twice.
+pub(crate) fn feed_outcome(errors: &[String], stream_count: usize) -> Result<(), ApiError> {
+    if errors.is_empty() {
+        return Ok(());
+    }
+    if errors.len() == stream_count {
         return Err(ApiError::Internal(format!(
             "All streams failed: {}",
             errors.join("; ")
         )));
     }
+    Err(ApiError::Internal(format!(
+        "{} of {} streams failed; the others were fed: {}",
+        errors.len(),
+        stream_count,
+        errors.join("; ")
+    )))
+}
 
-    Ok(Json("true".to_string()))
+// ── Contracts ──
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiIdParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiDiscoverModelsParams {
+    pub base_url: String,
+    /// Parsed leniently (`openai`, `OpenAi`, `OPEN_AI`, ...); defaults to OpenAI.
+    #[ts(optional)]
+    pub api_type: Option<String>,
+    #[ts(optional)]
+    pub api_key: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddModelParams {
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateModelParams {
+    pub id: String,
+    pub model: ModelInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiSetDefaultModelParams {
+    pub id: String,
+    pub model_type: ModelType,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiGetDefaultModelParams {
+    pub model_type: ModelType,
+}
+
+/// One of `model` or `modelId` is required; `model` wins when both are set.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiModelLoadingStatusParams {
+    #[ts(optional)]
+    pub model: Option<String>,
+    #[ts(optional)]
+    pub model_id: Option<String>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiAddTaskParams {
+    pub task: AITaskInput,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiUpdateTaskParams {
+    pub task: AITask,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionOpenParams {
+    pub model_id: String,
+    #[ts(optional)]
+    pub params: Option<VoiceActivityParamsInput>,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AiTranscriptionCloseParams {
+    pub stream_id: String,
 }

@@ -163,6 +163,10 @@ enum Domain {
         enable_mcp: Option<bool>,
         #[arg(long, action)]
         mcp_port: Option<u16>,
+        /// Expose dynamic per-class SHACL tools over MCP in addition to the
+        /// static instance_* tools. Default: false.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        dynamic_class_tools: Option<bool>,
         /// Write the executor PID to this file on startup (removed on clean shutdown).
         #[arg(long)]
         pid_file: Option<String>,
@@ -245,10 +249,15 @@ async fn main() -> Result<()> {
         enable_multi_user,
         enable_mcp,
         mcp_port,
+        dynamic_class_tools,
         pid_file,
     } = args.domain
     {
-        let _ = tokio::spawn(async move {
+        // Not compiled: cli/Cargo.toml's [[bin]] "ad4m" is src/ad4m.rs, which
+        // replaces this auto-discovered main.rs (and its `mod eve` no longer
+        // exists). Kept in line with ad4m_executor.rs so a revival does not
+        // bring back a process that runs on with no API.
+        let startup = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
@@ -268,6 +277,7 @@ async fn main() -> Result<()> {
                 enable_multi_user,
                 enable_mcp,
                 mcp_port,
+                dynamic_class_tools,
                 pid_file,
                 localhost: None,
                 auto_permit_cap_requests: None,
@@ -275,8 +285,12 @@ async fn main() -> Result<()> {
                 log_holochain_metrics: None,
                 hc_relay_url: None,
                 smtp_config: None,
+                ..Default::default()
             }).await
         }).await;
+        if let Ok(api_thread) = startup {
+            rust_executor::exit_when_api_fails(api_thread);
+        }
         
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
@@ -341,6 +355,7 @@ async fn main() -> Result<()> {
             enable_multi_user: _,
             enable_mcp: _,
             mcp_port: _,
+            dynamic_class_tools: _,
             pid_file: _,
         } => unreachable!(),
         Domain::Eve { command: _ } => unreachable!(),

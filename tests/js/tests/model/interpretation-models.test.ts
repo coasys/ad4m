@@ -30,7 +30,15 @@ import { startAgent } from "../../helpers/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
+// LLM E2E gate — this suite drives the executor's real LLM path. Skipped by
+// default (unset `LLM_E2E`); the nightly `llm-e2e` workflow on `dev` runs it
+// against Marvin's Ollama. Run locally with `LLM_E2E=1`, or the umbrella
+// `./scripts/run-llm-e2e.sh` at the repo root.
+const describeIfLLM: Mocha.SuiteFunction = (process.env.LLM_E2E === "1"
+  ? describe
+  : (describe.skip as unknown as Mocha.SuiteFunction));
+
+describeIfLLM("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @Model", function () {
   this.timeout(120_000);
 
   let ad4m: Ad4mClient;
@@ -175,22 +183,28 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
     expect(configs[0].batchMax).to.equal("16");
     expect(configs[0].interpretationClasses).to.deep.equal(["ad4m://Task"]);
   });
+});
 
-  // ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────
-  //
-  // The hardwired classes carry a SHACL declaration on both sides: the Rust
-  // executor `include_str!`s `rust-executor/src/perspectives/hardwired_sdna/
-  // *.json`; the TS side generates its shape from the `@Model` decorators in
-  // `InterpretationModels.ts`. They MUST agree — a TS-written instance that
-  // uses a different setter name from the Rust reader silently no-ops the
-  // write (2026-08-20 debug: paths matched, names diverged, and every earlier
-  // hardcoded-reference-set parity test happily passed).
-  //
-  // The tests below defend against that by loading the SAME JSON files the
-  // executor uses and comparing (path, name) pairs. Path = the RDF predicate
-  // on the link; name = the `create_subject({name: value})` setter lookup
-  // key. Both must match for a write to land.
-
+// ── SDNA parity — TS @Model shape agrees with Rust hardwired SDNA ──────────
+//
+// The hardwired classes carry a SHACL declaration on both sides: the Rust
+// executor `include_str!`s `rust-executor/src/perspectives/hardwired_sdna/
+// *.json`; the TS side generates its shape from the `@Model` decorators in
+// `InterpretationModels.ts`. They MUST agree — a TS-written instance that
+// uses a different setter name from the Rust reader silently no-ops the
+// write (2026-08-20 debug: paths matched, names diverged, and every earlier
+// hardcoded-reference-set parity test happily passed).
+//
+// The tests below defend against that by loading the SAME JSON files the
+// executor uses and comparing (path, name) pairs. Path = the RDF predicate
+// on the link; name = the `create_subject({name: value})` setter lookup
+// key. Both must match for a write to land.
+//
+// Unlike the suite above, these are pure static checks — no agent, no LLM —
+// so they run on every push rather than sitting behind `describeIfLLM`
+// (#1320: that gate was why the `flows` drift #1318 fixed was only caught by
+// the nightly LLM_E2E run).
+describe("InterpretationModels @Model shapes match Rust hardwired SDNA", () => {
   const SDNA_DIR = path.resolve(
     __dirname,
     "../../../../rust-executor/src/perspectives/hardwired_sdna",
@@ -252,5 +266,80 @@ describe("InterpretationOverlay / InterpretationRun / AutoProcessorConfig — @M
       .to.equal(expectedTargetClass);
     expect(actual, "TS shape must match Rust SDNA path→name pairs")
       .to.deep.equal(expected);
+  });
+});
+
+// ── Request-type field parity — AddAutoProcessorConfig (TS) vs
+//    PerspectiveAddAutoProcessorParams (Rust) ─────────────────────────────────────────
+//
+// `PerspectiveClient.addAutoProcessor` builds the wire payload as
+// `{ uuid, ...config }` (`PerspectiveClient.ts`) — there is no per-field
+// mapping, so whatever's on the TS `AddAutoProcessorConfig` interface goes
+// over the wire verbatim under its own key. That means a field the Rust
+// request gained but the TS config didn't is invisible to every other test:
+// nothing calls it, nothing fails to compile, it just can't be set from TS.
+//
+// This test parses both source files (not a hand-written key list, which
+// could itself drift) and compares field-name sets. `uuid` is excluded: it's
+// `addAutoProcessor`'s own parameter, not part of `config`.
+//
+// #1320: `max_tool_calls` was added to the Rust request without a matching
+// TS field — this is the check that would have caught it, and would have
+// caught `flows` the same way (#1318).
+describe("AddAutoProcessorConfig / PerspectiveAddAutoProcessorParams field parity", () => {
+  function snakeToCamel(name: string): string {
+    return name.replace(/_([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+  }
+
+  // Slices the `{ ... }` body of the first struct/interface found after
+  // `openMarker`, up to the first line that is just a closing brace. None of
+  // the fields in either type nest braces, so this simple scan is exact.
+  function extractBraceBody(src: string, openMarker: string): string {
+    const markerAt = src.indexOf(openMarker);
+    if (markerAt === -1) throw new Error(`marker not found: ${openMarker}`);
+    const braceAt = src.indexOf("{", markerAt);
+    const closeAt = src.indexOf("\n}", braceAt);
+    if (closeAt === -1) throw new Error(`closing brace not found for: ${openMarker}`);
+    return src.slice(braceAt + 1, closeAt);
+  }
+
+  function rustAutoProcessorRequestFields(): Set<string> {
+    const src = fs.readFileSync(
+      path.resolve(__dirname, "../../../../rust-executor/src/api/perspectives_ws.rs"),
+      "utf-8",
+    );
+    const body = extractBraceBody(src, "pub struct PerspectiveAddAutoProcessorParams");
+    const fields = new Set<string>();
+    for (const m of body.matchAll(/^\s*pub\s+(\w+)\s*:/gm)) {
+      if (m[1] !== "uuid") fields.add(snakeToCamel(m[1]));
+    }
+    return fields;
+  }
+
+  function tsAutoProcessorConfigFields(): Set<string> {
+    const src = fs.readFileSync(
+      path.resolve(__dirname, "../../../../core/src/perspectives/AutoProcessor.ts"),
+      "utf-8",
+    );
+    const body = extractBraceBody(src, "export interface AddAutoProcessorConfig");
+    const fields = new Set<string>();
+    // Doc-comment lines are indented `/**`, ` *`, or `*/` — never a bare
+    // identifier — so this does not need to special-case comment bodies.
+    for (const m of body.matchAll(/^\s*(\w+)\??\s*:/gm)) {
+      fields.add(m[1]);
+    }
+    return fields;
+  }
+
+  it("every Rust PerspectiveAddAutoProcessorParams field (minus uuid) has a TS AddAutoProcessorConfig counterpart", () => {
+    const rustFields = [...rustAutoProcessorRequestFields()].sort();
+    const tsFields = [...tsAutoProcessorConfigFields()].sort();
+
+    expect(
+      tsFields,
+      "AddAutoProcessorConfig (TS) must have exactly the camelCase of every " +
+        "PerspectiveAddAutoProcessorParams (Rust) field other than uuid — add the " +
+        "missing field(s) to core/src/perspectives/AutoProcessor.ts",
+    ).to.deep.equal(rustFields);
   });
 });

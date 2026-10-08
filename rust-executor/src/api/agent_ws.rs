@@ -2,8 +2,10 @@
 //!
 //! 19 handlers covering agent info, auth, trust, entanglement, and profile.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::{
@@ -12,16 +14,35 @@ use crate::agent::{
 use crate::entanglement_service::{
     add_entanglement_proofs, delete_entanglement_proof, get_entanglement_proofs, sign_device_key,
 };
+use crate::holochain_service::conductor_startup::spawn_conductor_startup;
 use crate::languages::LanguageController;
 use crate::pubsub::{get_global_pubsub, AGENT_STATUS_CHANGED_TOPIC, AGENT_UPDATED_TOPIC};
 use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
+/// Convert a client-supplied profile link into the decorated form, **deriving
+/// the validity verdict on this replica** rather than believing the caller.
+///
+/// The wire type [`ExpressionProof`] carries only `key` and `signature`: it has
+/// no validity field, precisely so that a peer cannot assert one.
+/// `LinkExpressionInput` does carry `valid`/`invalid`, and copying them across
+/// re-introduces by hand the field the wire format deliberately omits — a
+/// caller could then hand us a garbage signature with `valid: true` and we
+/// would store that verdict. Routing through
+/// `DecoratedLinkExpression::from((LinkExpression, LinkStatus))` runs
+/// `verify()` here and fails closed when verification errors, which is what
+/// every other ingest path already does.
+///
+/// A missing key or signature is still accepted, as before — it simply cannot
+/// verify, so it lands as `valid: false`. This is deliberately not an error:
+/// rejecting the write would change which profile updates succeed, and the
+/// defect being fixed is the trustworthiness of the verdict, not the
+/// tolerance of the endpoint.
 fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLinkExpression {
-    DecoratedLinkExpression {
+    let unverified = LinkExpression {
         author: lei.author.clone(),
         timestamp: lei.timestamp.clone(),
         data: Link {
@@ -29,14 +50,18 @@ fn link_expression_input_to_decorated(lei: &LinkExpressionInput) -> DecoratedLin
             target: lei.data.target.clone(),
             predicate: lei.data.predicate.clone(),
         },
-        proof: DecoratedExpressionProof {
+        proof: ExpressionProof {
             key: lei.proof.key.clone().unwrap_or_default(),
             signature: lei.proof.signature.clone().unwrap_or_default(),
-            valid: lei.proof.valid,
-            invalid: lei.proof.invalid,
         },
         status: lei.status.clone(),
-    }
+    };
+    // `LinkStatus::Shared` is the enum's own `#[default]`, and the conversion
+    // stores `Some(status)`. Profile links from a client that sent no status
+    // therefore become `SHARED` instead of staying `None`, which matches what
+    // every other link in the store looks like.
+    let status = lei.status.clone().unwrap_or_default();
+    DecoratedLinkExpression::from((unverified, status))
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -269,6 +294,20 @@ async fn update_profile(params: Value, ctx: Arc<RequestContext>) -> Result<Value
     Ok(serde_json::to_value(agent)?)
 }
 
+/// Publishes the main agent to the agent language without holding up the caller.
+///
+/// The publish is best-effort (a failure is only logged) and reaches a remote
+/// server, so awaiting it made generate/unlock take as long as that server took
+/// to answer or time out. `publish_agent_to_language` serializes publishes, so a
+/// profile update made right after this still wins.
+fn spawn_main_agent_publish() {
+    tokio::spawn(async {
+        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
+            log::warn!("Error publishing agent expression: {}", e);
+        }
+    });
+}
+
 /// agent.generate — generate agent identity
 async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, WsRpcError> {
     check_capability(&ctx.capabilities, &AGENT_CREATE_CAPABILITY)
@@ -293,37 +332,32 @@ async fn generate_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value
         agent_service.dump().clone()
     });
 
-    // Start Holochain conductor
-    let config = crate::config::get_global_config();
-    let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-        &config,
-        body.passphrase.clone(),
-    );
-
     let mut init_errors: Vec<String> = Vec::new();
-
-    if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-        log::error!("Error initializing Holochain: {:?}", e);
-        init_errors.push(format!("Holochain init failed: {}", e));
-    } else {
-        log::info!("Holochain init complete");
-    }
-
+    let config = crate::config::get_global_config();
     let language_language_only = config.language_language_only.unwrap_or(false);
-    let controller = LanguageController::global_instance();
-    if let Err(e) = controller
-        .load_system_languages(language_language_only)
-        .await
-    {
-        log::error!("Error loading system languages: {:?}", e);
-        init_errors.push(format!("Failed to load system languages: {}", e));
+
+    if config.run_holochain.unwrap_or(true) {
+        let startup = spawn_conductor_startup(body.passphrase.clone());
+        if let Err(e) = startup.load_core_languages(language_language_only).await {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
     } else {
-        log::info!("System languages loaded");
+        log::info!("Skipping Holochain conductor (run_holochain=false)");
+        if let Err(e) = LanguageController::global_instance()
+            .load_core_system_languages(language_language_only)
+            .await
+        {
+            log::error!("Error loading system languages: {:?}", e);
+            init_errors.push(format!("Failed to load system languages: {}", e));
+        } else {
+            log::info!("System languages loaded");
+        }
     }
 
-    if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-        log::warn!("Error publishing agent expression: {}", e);
-    }
+    spawn_main_agent_publish();
 
     if !init_errors.is_empty() {
         agent.error = Some(init_errors.join("; "));
@@ -379,6 +413,18 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let agent = unlock_main_agent(body.passphrase).await?;
+    Ok(serde_json::to_value(agent)?)
+}
+
+/// Unlocks the main agent's wallet with `passphrase`, then starts what an
+/// unlocked agent needs (system languages, the Holochain conductor, the
+/// agent's profile publish) and announces the new status. Shared by
+/// `agent.unlock` and the executor's own unlock at startup
+/// ([`crate::unlock_agent_at_startup`]). Errs when the wallet rejects the
+/// passphrase; the returned status carries `error` when the wallet stayed
+/// locked or a service failed to start.
+pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus, WsRpcError> {
     let agent_instance = AgentService::global_instance();
     {
         let mut agent_service = agent_instance
@@ -388,7 +434,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             .as_mut()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref
-            .unlock(body.passphrase.clone())
+            .unlock(passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
     }
 
@@ -402,43 +448,33 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         .is_unlocked();
 
     if is_unlocked {
-        if crate::holochain_service::maybe_get_holochain_service()
-            .await
-            .is_none()
-        {
-            log::info!("Holochain service not initialized. Initializing...");
-            let config = crate::config::get_global_config();
-            let hc_config = crate::holochain_service::LocalConductorConfig::from_ad4m_config(
-                &config,
-                body.passphrase.clone(),
-            );
-
-            if let Err(e) = crate::holochain_service::HolochainService::init(hc_config).await {
-                log::error!("Error initializing Holochain: {:?}", e);
-                init_errors.push(format!("Holochain init failed: {}", e));
-            } else {
-                log::info!("Holochain init complete");
-            }
-        }
-
         let config = crate::config::get_global_config();
         let language_language_only = config.language_language_only.unwrap_or(false);
-        let controller = LanguageController::global_instance();
-        if let Err(e) = controller
-            .load_system_languages(language_language_only)
-            .await
-        {
-            log::error!("Error loading system languages: {:?}", e);
-            init_errors.push(format!("Failed to load system languages: {}", e));
+
+        if config.run_holochain.unwrap_or(true) {
+            let startup = spawn_conductor_startup(passphrase);
+            if let Err(e) = startup.load_core_languages(language_language_only).await {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
         } else {
-            log::info!("System languages loaded");
+            log::info!("Skipping Holochain conductor (run_holochain=false)");
+            if let Err(e) = LanguageController::global_instance()
+                .load_core_system_languages(language_language_only)
+                .await
+            {
+                log::error!("Error loading system languages: {:?}", e);
+                init_errors.push(format!("Failed to load system languages: {}", e));
+            } else {
+                log::info!("System languages loaded");
+            }
         }
 
         log::info!("AD4M init complete");
 
-        if let Err(e) = AgentService::publish_agent_to_language(&AgentContext::main_agent()).await {
-            log::warn!("Error publishing agent expression: {}", e);
-        }
+        spawn_main_agent_publish();
     }
 
     let mut agent = {
@@ -468,7 +504,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         )
         .await;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(agent)
 }
 
 /// agent.sign — sign a message
@@ -513,17 +549,39 @@ async fn request_capability(params: Value, ctx: Arc<RequestContext>) -> Result<V
     let request_id = crate::agent::capabilities::request_capability(auth_info.clone()).await;
 
     if ctx.auto_permit_cap_requests {
-        println!("======================================");
-        println!("Got capability request: \n{:?}", auth_info);
+        log::debug!(
+            "🔐 auto-permitting capability request (request_id={}, app_name={:?})",
+            request_id,
+            auth_info.app_name
+        );
         let random_number_challenge =
             crate::agent::capabilities::permit_capability(AuthInfoExtended {
                 request_id: request_id.clone(),
                 auth: auth_info,
             })
             .map_err(|e| WsRpcError::internal(e))?;
-        println!("--------------------------------------");
-        println!("Random number challenge: {}", random_number_challenge);
-        println!("======================================");
+
+        // Dev-mode auto-permit needs `rand` to call agent.generateJwt.
+        // Print it to stdout ONLY when AD4M_LOG_SECRETS=1 (dev opt-in),
+        // matching the gate used by email_service/mcp-auth. Wire response
+        // stays Value::String(request_id) so existing clients and the
+        // integration tests are unaffected. Non-opt-in operators still see
+        // a diagnostic log line telling them how to obtain the value.
+        if std::env::var("AD4M_LOG_SECRETS")
+            .map(|v| v == "1")
+            .unwrap_or(false)
+        {
+            println!(
+                "AD4M_LOG_SECRETS=1: auto-permitted request_id={} rand={}",
+                request_id, random_number_challenge
+            );
+        } else {
+            log::debug!(
+                "🔐 capability request auto-permitted (request_id={}, rand=<redacted; set AD4M_LOG_SECRETS=1 to print>)",
+                request_id
+            );
+        }
+        // Fall through to Value::String(request_id) below.
     }
 
     Ok(Value::String(request_id))
@@ -692,16 +750,10 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EntanglementProofsWrapper = serde_json::from_value(params.clone())
+    let body: AgentAddEntanglementProofsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // Check for preflight mode
-    let preflight = params
-        .get("preflight")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if preflight {
+    if body.preflight.unwrap_or(false) {
         let signed = sign_device_key(
             body.proofs
                 .first()
@@ -807,30 +859,198 @@ async fn entanglement_proof_preflight(
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("agent.get", get_agent);
-    map.register("agent.getApps", get_apps);
-    map.register("agent.byDid", get_agent_by_did);
-    map.register("agent.updateProfile", update_profile);
-    map.register("agent.generate", generate_agent);
-    map.register("agent.import", import_agent);
-    map.register("agent.lock", lock_agent);
-    map.register("agent.unlock", unlock_agent);
-    map.register("agent.sign", sign_message);
-    map.register("agent.removeApp", remove_app);
-    map.register("agent.requestCapability", request_capability);
-    map.register("agent.permitCapability", permit_capability_handler);
-    map.register("agent.generateJwt", generate_jwt);
-    map.register("agent.revokeToken", revoke_token);
-    map.register("agent.status", get_agent_status);
-    map.register("agent.isLocked", is_locked);
-    map.register("agent.getTrustedAgents", get_trusted_agents);
-    map.register("agent.addTrustedAgents", add_trusted_agents);
-    map.register("agent.deleteTrustedAgents", delete_trusted_agents);
-    map.register("agent.getEntanglementProofs", get_entanglement);
-    map.register("agent.addEntanglementProofs", add_entanglement);
-    map.register("agent.deleteEntanglementProofs", delete_entanglement);
-    map.register(
+    map.method::<NoParams, Agent>("agent.get", get_agent).read();
+    map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
+        .read();
+    map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
+        .read();
+    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
+    map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
+        .long();
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
+    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
+    map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
+        .long();
+    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
+    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app);
+    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
+    map.method::<PermitCapabilityRequest, String>(
+        "agent.permitCapability",
+        permit_capability_handler,
+    );
+    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
+    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token);
+    map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
+        .read();
+    map.method::<NoParams, bool>("agent.isLocked", is_locked)
+        .read();
+    map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
+        .read();
+    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents);
+    map.method::<TrustedAgentsWrapper, Vec<String>>(
+        "agent.deleteTrustedAgents",
+        delete_trusted_agents,
+    );
+    map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
+        .read();
+    map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
+        "agent.addEntanglementProofs",
+        add_entanglement,
+    );
+    map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
+        "agent.deleteEntanglementProofs",
+        delete_entanglement,
+    );
+    map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
-    );
+    )
+    .read();
+}
+
+// ── Contracts ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentByDidParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRemoveAppParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRevokeTokenParams {
+    pub token: String,
+}
+
+/// `{ proofs }`, plus `preflight: true` to sign the first proof's device key
+/// instead of storing the proofs.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentAddEntanglementProofsParams {
+    pub proofs: Vec<EntanglementProofInput>,
+    #[ts(optional)]
+    pub preflight: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::signatures::TestSigner;
+    use crate::types::domain::{ExpressionProofInput, LinkInput};
+
+    /// Build the wire input a client sends, with whatever verdict it cares to claim.
+    fn input_claiming(
+        author: &str,
+        timestamp: &str,
+        signature: &str,
+        claimed_valid: Option<bool>,
+    ) -> LinkExpressionInput {
+        LinkExpressionInput {
+            author: author.to_string(),
+            timestamp: timestamp.to_string(),
+            data: LinkInput {
+                source: "did:key:alice".into(),
+                target: "literal://string:hello".into(),
+                predicate: Some("ad4m://has_name".into()),
+            },
+            proof: ExpressionProofInput {
+                key: Some("#z6Mk-key".into()),
+                signature: Some(signature.to_string()),
+                valid: claimed_valid,
+                invalid: claimed_valid.map(|v| !v),
+            },
+            status: None,
+        }
+    }
+
+    /// The defect: a caller could assert `valid: true` over a signature that
+    /// does not verify, and the executor stored that verdict verbatim.
+    #[test]
+    fn a_forged_valid_verdict_is_overruled_by_local_verification() {
+        let signer = TestSigner::generate();
+        let input = input_claiming(
+            &signer.did,
+            "2026-09-17T06:00:00.000Z",
+            // Well-formed hex so `verify` gets past `hex::decode` and actually
+            // checks the signature — a non-hex string would fail earlier and
+            // pass this test for the wrong reason.
+            &"ab".repeat(64),
+            Some(true),
+        );
+
+        let decorated = link_expression_input_to_decorated(&input);
+
+        assert_eq!(
+            decorated.proof.valid,
+            Some(false),
+            "a signature that does not verify must be recorded invalid no matter what the caller claimed"
+        );
+        assert_eq!(decorated.proof.invalid, Some(true));
+    }
+
+    /// The other direction, and the reason this pair is a contract rather than
+    /// a mirror: a fix that simply hardcoded `valid: false` would satisfy the
+    /// test above. A genuinely signed link must come out valid even when the
+    /// caller claims the opposite, which pins that the verdict is *computed*
+    /// and that the caller's field is ignored in both directions.
+    #[test]
+    fn a_genuine_signature_is_honoured_even_when_the_caller_claims_invalid() {
+        let signer = TestSigner::generate();
+        let link = Link {
+            source: "did:key:alice".into(),
+            target: "literal://string:hello".into(),
+            predicate: Some("ad4m://has_name".into()),
+        }
+        .normalize();
+        let signed = signer.sign(link.clone());
+
+        let mut input = input_claiming(
+            &signed.author,
+            &signed.timestamp,
+            &signed.proof.signature,
+            Some(false),
+        );
+        input.data = LinkInput {
+            source: link.source.clone(),
+            target: link.target.clone(),
+            predicate: link.predicate.clone(),
+        };
+
+        let decorated = link_expression_input_to_decorated(&input);
+
+        assert_eq!(
+            decorated.proof.valid,
+            Some(true),
+            "a signature that verifies must be recorded valid even though the caller said invalid"
+        );
+        assert_eq!(decorated.proof.invalid, Some(false));
+    }
+
+    /// A client that sends no status gets the store's default rather than a
+    /// hole, matching every other link in the system.
+    #[test]
+    fn a_missing_status_becomes_shared() {
+        let signer = TestSigner::generate();
+        let input = input_claiming(
+            &signer.did,
+            "2026-09-17T06:00:00.000Z",
+            &"ab".repeat(64),
+            None,
+        );
+        assert_eq!(
+            link_expression_input_to_decorated(&input).status,
+            Some(LinkStatus::Shared)
+        );
+    }
 }

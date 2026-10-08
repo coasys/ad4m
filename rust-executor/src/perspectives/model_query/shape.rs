@@ -21,6 +21,26 @@ use deno_core::anyhow::{anyhow, Error};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
+/// No SHACL is stored for `class_name`. Typed so a caller holding the error
+/// can tell which class to wait for: on a shared perspective it may still be
+/// syncing (see `PerspectiveInstance::model_query`).
+#[derive(Debug)]
+pub(crate) struct MissingShape {
+    pub(crate) class_name: String,
+}
+
+impl std::fmt::Display for MissingShape {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
+            self.class_name
+        )
+    }
+}
+
+impl std::error::Error for MissingShape {}
+
 /// Public (crate-level) entry point for loading a shape from the SHACL store.
 ///
 /// Delegates to [`load_shape`].
@@ -62,10 +82,10 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
     let results: Vec<Value> = serde_json::from_str(&result_json)?;
 
     if results.is_empty() {
-        return Err(anyhow!(
-            "No SHACL shape stored for class '{}'. Call ensureSubjectClasses / addSdna first.",
-            class_name
-        ));
+        return Err(MissingShape {
+            class_name: class_name.to_string(),
+        }
+        .into());
     }
 
     let shape_uri = results[0]["shapeUri"]
@@ -89,7 +109,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             ?getter ?hasValue ?className
             ?relationKind ?targetClassName
             ?whereFilter ?wherePredicates ?filterEnabled
-            ?transform ?interpretationHint ?identity
+            ?transform ?interpretationHint ?identity ?ordering
         WHERE {{
             <{shape_uri}> <sh://property> ?propUri .
             ?propUri <sh://path> ?path .
@@ -103,6 +123,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
             OPTIONAL {{ ?propUri <ad4m://writable> ?writable . }}
             OPTIONAL {{ ?propUri <ad4m://local> ?local . }}
             OPTIONAL {{ ?propUri <ad4m://getter> ?getter . }}
+            OPTIONAL {{ ?propUri <ad4m://ordering> ?ordering . }}
             OPTIONAL {{ ?propUri <sh://hasValue> ?hasValue . }}
             OPTIONAL {{ ?propUri <sh://class> ?className . }}
             OPTIONAL {{ ?propUri <ad4m://relationKind> ?relationKind . }}
@@ -156,6 +177,7 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         let writable = parse_bool_literal_target(first["writable"].as_str());
         let local = parse_bool_literal_target(first["local"].as_str());
         let getter = first["getter"].as_str().map(decode_literal_string_target);
+        let ordering = first["ordering"].as_str().map(decode_literal_string_target);
         let has_value = first["hasValue"].as_str().map(decode_literal_target_value);
         let target_class_uri = first["className"].as_str().map(|s| s.to_string());
         let relation_kind = first["relationKind"]
@@ -212,6 +234,17 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // multi-valued cardinality, not link-typed semantics.
         let is_relation =
             relation_kind.is_some() || target_class_uri.is_some() || target_class_name.is_some();
+        // `parse_shacl_to_links` refuses this pair at registration (#908),
+        // but a shape can also arrive by sync, raw link writes or import.
+        // Such a stored shape still loads (kept as a relation with its
+        // `datatype`, as before), so legacy classes keep working; this only
+        // makes it visible.
+        if datatype.is_some() && (target_class_uri.is_some() || target_class_name.is_some()) {
+            log::warn!(
+                "SHACL shape for class '{class_name}': property '{prop_uri}' sets both \
+                 `datatype` and a target class; treating it as a relation (#908)"
+            );
+        }
         // All relations are marked `is_collection` so the query pipeline
         // hydrates them as arrays during link grouping; the
         // `is_scalar_relation` flag then tells the renderer to unwrap
@@ -247,8 +280,12 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
         // expressed through the absence of a setter action; just keep
         // the flag available on ShapeProperty for downstream consumers.
         let _ = writable;
-        let _ = local;
         let _ = filter_enabled;
+
+        // `ad4m://local` marks a property whose links are written with
+        // `LinkStatus::Local` (executor-private, never gossiped). Absent or
+        // `false` means shared, which is the default for every property.
+        let is_local = local.unwrap_or(false);
 
         if is_relation {
             // Relations participate in the standard ShapeProperty list so
@@ -271,6 +308,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform: transform.clone(),
                 interpretation_hint: interpretation_hint.clone(),
                 identity,
+                ordering: ordering.clone(),
+                local: is_local,
             });
 
             let resolved_target_class_name = target_class_name.clone().unwrap_or_else(|| {
@@ -312,6 +351,8 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
                 transform,
                 interpretation_hint,
                 identity,
+                ordering: ordering.clone(),
+                local: is_local,
             });
         }
     }
@@ -588,6 +629,8 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform,
                 interpretation_hint: None,
                 identity: false,
+                ordering: None,
+                local: prop_meta["local"].as_bool().unwrap_or(false),
             });
         }
     }
@@ -596,6 +639,7 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
         for (name, rel_meta) in rels {
             let predicate = rel_meta["predicate"].as_str().unwrap_or("").to_string();
             let getter = rel_meta["getter"].as_str().map(|s| s.to_string());
+            let ordering = rel_meta["ordering"].as_str().map(|s| s.to_string());
 
             if predicate.is_empty() && getter.is_none() {
                 continue;
@@ -637,6 +681,8 @@ pub(crate) fn parse_shape_from_json(json: &str, class_name: &str) -> Result<Mode
                 transform: None,
                 interpretation_hint: None,
                 identity: false,
+                ordering: ordering.clone(),
+                local: rel_meta["local"].as_bool().unwrap_or(false),
             });
 
             if rel_meta.get("targetShape").is_some() || rel_meta.get("targetClassName").is_some() {

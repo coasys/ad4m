@@ -15,13 +15,15 @@
 //! reifier metadata (author/timestamp).
 
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use super::sparql_builder::LinkGuard;
 use super::types::{
     ModelQueryInput, ModelShape, OrderDirection, ProjectionInput, ShapeResolver, WhereCondition,
 };
 use super::utils::{
     escape_sparql_string, format_literal_number, looks_like_absolute_iri, validate_iri,
+    values_or_str_filter,
 };
 
 const XSD_STRING: &str = "http://www.w3.org/2001/XMLSchema#string";
@@ -41,6 +43,7 @@ fn typed_number_literal(n: f64) -> Option<String> {
     Some(format!("\"{s}\"^^<{dt}>"))
 }
 use crate::perspectives::sparql_store::SparqlStore;
+use crate::types::LinkStatus;
 
 /// Resolve all projections for a set of parent instances.
 ///
@@ -50,7 +53,8 @@ use crate::perspectives::sparql_store::SparqlStore;
 ///
 /// When `proj.target_shape` is set, raw target IRIs are replaced with fully
 /// hydrated model instances via a recursive `execute_model_query_inner` call
-/// (one batch per projection key, eliminating TS-side round-trips).
+/// (one batch per projection key, eliminating TS-side round-trips). That call
+/// inherits the parent query's `link_status` and `include_unverified`.
 pub(super) async fn resolve_projections(
     store: &SparqlStore,
     instances: &mut Vec<Value>,
@@ -58,6 +62,8 @@ pub(super) async fn resolve_projections(
     shape: &ModelShape,
     resolver: &dyn ShapeResolver,
     depth: u8,
+    link_status: Option<&LinkStatus>,
+    include_unverified: Option<bool>,
 ) -> Result<(), deno_core::anyhow::Error> {
     if instances.is_empty() || projections.is_empty() {
         return Ok(());
@@ -73,11 +79,11 @@ pub(super) async fn resolve_projections(
         return Ok(());
     }
 
-    let values_clause = parent_ids
-        .iter()
-        .map(|id| format!("<{id}>"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let parent_constraint = values_or_str_filter("parent", &parent_ids);
+    let guard = LinkGuard {
+        status: link_status,
+        include_unverified,
+    };
 
     for (key, proj) in projections {
         let predicate = match shape.properties.iter().find(|p| p.name == proj.from) {
@@ -112,23 +118,89 @@ pub(super) async fn resolve_projections(
             }
         };
 
-        let where_patterns = build_projection_where_patterns(proj, resolver);
+        // A projection's `where` names the counted records' properties, and
+        // `author` there is the projected link's. A per-link `author` nested
+        // under a property has no reading here, and this builder drops
+        // operators it does not know, so it is refused rather than ignored.
+        if proj.where_clause.as_ref().is_some_and(|wc| {
+            wc.values()
+                .any(|c| matches!(c, WhereCondition::Ops(o) if o.author.is_some()))
+        }) {
+            return Err(deno_core::anyhow::anyhow!(
+                "IncludeProjection '{key}': a nested `author` is not supported in a projection's \
+                 `where`; use its top-level `author` for the projected link's author"
+            ));
+        }
+        let where_patterns =
+            build_projection_where_patterns(&with_where_target(proj, shape), resolver, guard);
         let reifier_patterns = build_projection_reifier_patterns(proj, &safe_pred);
+        let verified = projection_verified_pattern(
+            proj.transitive,
+            !reifier_patterns.is_empty(),
+            &safe_pred,
+            guard,
+        );
 
-        if proj.count {
+        // A transitive projection counts (or lists) everything reachable, which
+        // is what "42 replies" on a collapsed branch means to a reader. The
+        // query is already grouped per parent and already asked of every row at
+        // once, so the whole cost is one character in the emitted path.
+        //
+        // It cannot be combined with a link-author or link-timestamp filter:
+        // those match the reification of a single link, and a path is a
+        // reachability test with no one link to reify. Refused rather than
+        // ignored — silently counting the whole subtree when the caller asked
+        // for "replies by this author" is a wrong number, not a loose one.
+        let path = if proj.transitive { "+" } else { "" };
+        if proj.transitive && !reifier_patterns.is_empty() {
+            log::warn!(
+                "IncludeProjection '{}': transitive projections cannot filter on link author or \
+                 timestamp — a property path has no single link to reify. Skipping.",
+                key
+            );
+            continue;
+        }
+        // For the same reason a path cannot be restricted to the links the
+        // guard admits. Unless the guard is open, the walk is done here, one
+        // guarded step at a time (#1120).
+        let walked = if proj.transitive && !guard.is_open() {
+            Some(walk_guarded(
+                store,
+                &parent_ids,
+                &safe_pred,
+                &where_patterns,
+                proj,
+                guard,
+            )?)
+        } else {
+            None
+        };
+
+        if let Some(ref pairs) = walked.as_ref().filter(|_| proj.count) {
+            for inst in instances.iter_mut() {
+                if let Some(obj) = inst.as_object_mut() {
+                    let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let cnt = pairs.iter().filter(|(p, _)| p == id).count() as u64;
+                    obj.insert(key.clone(), Value::Number(cnt.into()));
+                }
+            }
+        } else if proj.count {
             let sparql = format!(
                 concat!(
                     "SELECT ?parent (COUNT(DISTINCT ?t) AS ?n) WHERE {{\n",
-                    "    VALUES ?parent {{ {values_clause} }}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    {parent_constraint}\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}} GROUP BY ?parent"
                 ),
-                values_clause = values_clause,
+                parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
             );
 
             let result_json = store.query(&sparql)?;
@@ -162,21 +234,29 @@ pub(super) async fn resolve_projections(
             let sparql = format!(
                 concat!(
                     "SELECT ?parent ?t WHERE {{\n",
-                    "    VALUES ?parent {{ {values_clause} }}\n",
-                    "    ?parent <{safe_pred}> ?t .\n",
+                    "    {parent_constraint}\n",
+                    "    ?parent <{safe_pred}>{path} ?t .\n",
                     "{where_patterns}",
                     "{reifier_patterns}",
+                    "{verified}",
                     "}}{order_clause}"
                 ),
-                values_clause = values_clause,
+                parent_constraint = parent_constraint,
                 safe_pred = safe_pred,
+                path = path,
                 where_patterns = where_patterns,
                 reifier_patterns = reifier_patterns,
+                verified = verified,
                 order_clause = order_clause,
             );
 
-            let result_json = store.query(&sparql)?;
-            let rows: Vec<Value> = serde_json::from_str(&result_json)?;
+            let rows: Vec<Value> = match walked {
+                Some(pairs) => pairs
+                    .into_iter()
+                    .map(|(parent, t)| serde_json::json!({ "parent": parent, "t": t }))
+                    .collect(),
+                None => serde_json::from_str(&store.query(&sparql)?)?,
+            };
 
             // Collapse duplicate targets per parent.
             //
@@ -244,6 +324,8 @@ pub(super) async fn resolve_projections(
                             let sub_query = ModelQueryInput {
                                 where_clause: Some(sub_where),
                                 deep_query: Some(true),
+                                link_status: link_status.cloned(),
+                                include_unverified,
                                 ..ModelQueryInput::default()
                             };
 
@@ -313,6 +395,38 @@ pub(super) async fn resolve_projections(
     Ok(())
 }
 
+/// The projection to read a `where` against: `proj` itself, or, when it names
+/// no target class, a copy naming the target `shape` declares for `from`.
+///
+/// The SDK leaves a projection under a polymorphic include untagged, because
+/// the members are of several classes. `hydrate_polymorphic` runs each class's
+/// members with that class's own shape, so `shape` here is the member's class
+/// and its relation names the right target. Without one, every property
+/// condition matched no predicate and was dropped: a count came back too high
+/// and said nothing.
+///
+/// Only the `where` reads it. A list projection without a target stays a list
+/// of IRIs rather than becoming hydrated records.
+fn with_where_target<'a>(
+    proj: &'a ProjectionInput,
+    shape: &ModelShape,
+) -> std::borrow::Cow<'a, ProjectionInput> {
+    if proj.target_class_name.is_some() || proj.where_clause.is_none() {
+        return std::borrow::Cow::Borrowed(proj);
+    }
+    match shape
+        .include_relations
+        .iter()
+        .find(|r| r.name == proj.from && !r.target_class_name.is_empty())
+    {
+        Some(rel) => std::borrow::Cow::Owned(ProjectionInput {
+            target_class_name: Some(rel.target_class_name.clone()),
+            ..proj.clone()
+        }),
+        None => std::borrow::Cow::Borrowed(proj),
+    }
+}
+
 /// Build SPARQL where-clause patterns for a projection's `where` filter.
 ///
 /// Translates property-level conditions (string, number, bool, array) into
@@ -323,6 +437,7 @@ pub(super) async fn resolve_projections(
 pub(super) fn build_projection_where_patterns(
     proj: &ProjectionInput,
     resolver: &dyn ShapeResolver,
+    guard: LinkGuard,
 ) -> String {
     let Some(ref wc) = proj.where_clause else {
         return String::new();
@@ -386,6 +501,15 @@ pub(super) fn build_projection_where_patterns(
 
     let mut patterns = Vec::new();
     let mut filter_idx = 0usize;
+    // `?t <pred> object .`, kept only when a link the guard admits asserts it:
+    // a withheld link on a target neither counts it nor lists it. Each
+    // condition's reifier is named after its `?_pwN` variable.
+    let triple = |var: &str, pred: &str, object: &str| {
+        format!(
+            "    ?t <{pred}> {object} .{}\n",
+            guard.join(&format!("?{var}r"), "?t", &format!("<{pred}>"), object)
+        )
+    };
 
     for (prop_name, condition) in wc {
         // OR/AND/NOT combinators are not supported in projection where clauses
@@ -395,7 +519,7 @@ pub(super) fn build_projection_where_patterns(
         }
 
         if prop_name == "id" || prop_name == "base" {
-            match condition {
+            match condition.eq_normalized() {
                 WhereCondition::String(val) => {
                     let escaped = escape_sparql_string(val);
                     patterns.push(format!("    FILTER(STR(?t) = \"{escaped}\")\n"));
@@ -429,7 +553,7 @@ pub(super) fn build_projection_where_patterns(
         let var = format!("_pw{filter_idx}");
         filter_idx += 1;
 
-        match condition {
+        match condition.eq_normalized() {
             WhereCondition::String(val) => {
                 if is_literal_prop {
                     let escaped = escape_sparql_string(val);
@@ -438,10 +562,10 @@ pub(super) fn build_projection_where_patterns(
                         items.push(format!("<{val}>"));
                     }
                     patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                 } else {
                     let escaped = escape_sparql_string(val);
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                     patterns.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{escaped}\")\n",
                     ));
@@ -449,10 +573,10 @@ pub(super) fn build_projection_where_patterns(
             }
             WhereCondition::Bool(b) => {
                 if is_literal_prop {
-                    patterns.push(format!("    ?t <{pred}> \"{b}\"^^<{XSD_BOOLEAN}> .\n"));
+                    patterns.push(triple(&var, &pred, &format!("\"{b}\"^^<{XSD_BOOLEAN}>")));
                 } else {
                     let bval = if *b { "true" } else { "false" };
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                     patterns.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{bval}\")\n",
                     ));
@@ -461,12 +585,12 @@ pub(super) fn build_projection_where_patterns(
             WhereCondition::Number(n) => {
                 if is_literal_prop {
                     if let Some(typed) = typed_number_literal(*n) {
-                        patterns.push(format!("    ?t <{pred}> {typed} .\n"));
+                        patterns.push(triple(&var, &pred, &typed));
                     } else {
                         patterns.push("    FILTER(false)\n".to_string());
                     }
                 } else {
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                     patterns.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>(?{var}) = \"{n}\")\n",
                     ));
@@ -483,14 +607,14 @@ pub(super) fn build_projection_where_patterns(
                         }
                     }
                     patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                 } else {
                     let list = vals
                         .iter()
                         .map(|v| format!("\"{}\"", escape_sparql_string(v)))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                     patterns.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",
                     ));
@@ -506,7 +630,7 @@ pub(super) fn build_projection_where_patterns(
                         patterns.push("    FILTER(false)\n".to_string());
                     } else {
                         patterns.push(format!("    VALUES ?{var} {{ {} }}\n", items.join(" ")));
-                        patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                        patterns.push(triple(&var, &pred, &format!("?{var}")));
                     }
                 } else {
                     let list = vals
@@ -514,7 +638,7 @@ pub(super) fn build_projection_where_patterns(
                         .map(|n| format!("\"{n}\""))
                         .collect::<Vec<_>>()
                         .join(", ");
-                    patterns.push(format!("    ?t <{pred}> ?{var} .\n"));
+                    patterns.push(triple(&var, &pred, &format!("?{var}")));
                     patterns.push(format!(
                         "    FILTER(<ad4m://fn/parse_literal>(?{var}) IN ({list}))\n",
                     ));
@@ -555,6 +679,91 @@ pub(super) fn build_projection_order_clause(proj: &ProjectionInput) -> String {
         let joined = terms.join(" ");
         format!("\nORDER BY {joined}")
     }
+}
+
+/// The query's [`LinkGuard`] for one projection's `?parent <predicate> ?t`
+/// link: its `linkStatus` and #1113 verdict.
+///
+/// With an `author` / `timestamp` filter the query already joins that link's
+/// reifier as `?_prj_reif`, so the checks are read off the same reifier: a
+/// passing link by someone else must not stand in for the one the filter
+/// matched. Without one, [`LinkGuard::join`] joins a reifier of its own; two
+/// passing links over one target yield it twice, which `COUNT(DISTINCT ?t)`
+/// and the list's per-parent deduplication absorb.
+///
+/// Empty for a transitive projection, which [`walk_guarded`] answers instead,
+/// and when the guard is open.
+pub(super) fn projection_verified_pattern(
+    transitive: bool,
+    joins_reifier: bool,
+    safe_pred: &str,
+    guard: LinkGuard,
+) -> String {
+    if transitive || guard.is_open() {
+        String::new()
+    } else if joins_reifier {
+        format!("   {}\n", guard.on_reifier("?_prj_reif"))
+    } else {
+        format!(
+            "   {}\n",
+            guard.join("?_prj_link", "?parent", &format!("<{safe_pred}>"), "?t")
+        )
+    }
+}
+
+/// A transitive projection's `(parent, target)` pairs, reached over links the
+/// guard admits only ([`super::query::guarded_reach`]), in the projection's
+/// `order` and deduplicated.
+///
+/// A property path (`<p>+`) has no link per hop whose status or verdict it
+/// could read, so the walk is done in Rust, one guarded step per depth. The
+/// projection's `where` is applied afterwards to the reached targets, with the
+/// same guarded patterns the non-transitive form uses.
+fn walk_guarded(
+    store: &SparqlStore,
+    parent_ids: &[String],
+    safe_pred: &str,
+    where_patterns: &str,
+    proj: &ProjectionInput,
+    guard: LinkGuard,
+) -> Result<Vec<(String, String)>, deno_core::anyhow::Error> {
+    let mut pairs = super::query::guarded_reach(
+        store,
+        parent_ids,
+        safe_pred,
+        super::types::ScopeDirection::Out,
+        guard,
+    )?;
+
+    if !where_patterns.is_empty() && !pairs.is_empty() {
+        let targets: Vec<String> = pairs
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let sparql = format!(
+            "SELECT DISTINCT ?t WHERE {{\n    {}\n{where_patterns}}}",
+            values_or_str_filter("t", &targets)
+        );
+        let rows: Vec<Value> = serde_json::from_str(&store.query(&sparql)?)?;
+        let passing: HashSet<&str> = rows.iter().filter_map(|r| r["t"].as_str()).collect();
+        pairs.retain(|(_, t)| passing.contains(t.as_str()));
+    }
+
+    // `build_projection_order_clause` orders by `?t` alone; the same here.
+    let direction = proj.order.as_ref().and_then(|order| {
+        order
+            .iter()
+            .find(|(k, _)| k == "id" || k == "base")
+            .map(|(_, d)| d)
+    });
+    match direction {
+        Some(OrderDirection::ASC) => pairs.sort_by(|a, b| a.1.cmp(&b.1)),
+        Some(OrderDirection::DESC) => pairs.sort_by(|a, b| b.1.cmp(&a.1)),
+        None => {}
+    }
+    Ok(pairs)
 }
 
 /// Build SPARQL patterns that filter projection targets by reifier metadata.

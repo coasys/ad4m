@@ -118,11 +118,31 @@ export function buildSHACL(
 
     let destructorActions: any[] = [];
 
+    // Class-field initialisers (`count = 0`) run in the constructor, not on the
+    // prototype, so read them from one instance built without a perspective.
+    let instance: any;
+    try { instance = new target(); } catch {}
+    const fieldValue = (propName: string): unknown => {
+        try { return obj[propName] ?? instance?.[propName]; } catch { return undefined; }
+    };
+
     // ── Convert properties to SHACL property shapes ────────────────────
     for (const propName in properties) {
         const propMeta = properties[propName];
 
         if (!propMeta.through) continue; // Skip properties without predicates
+
+        // `@BelongsToOne`/`@BelongsToMany` register in both maps: the relation
+        // registry describes the edge, and `applyPropertyMetadata` marks the
+        // accessor read-only so the non-owning side gets no setter. Both loops
+        // then emitted a shape for it, so an inverse relation appeared twice in
+        // the generated SHACL — once thinly, from here, and once with its target
+        // class, polymorphism and ordering, from the relation loop below.
+        //
+        // The relation loop is the complete description, so this one stands
+        // aside. Skipping by presence in the relation map rather than by kind
+        // keeps it right for any future decorator that registers in both.
+        if (allRelationsMeta[propName]) continue;
 
         const propShape: SHACLPropertyShape = {
             name: propName,
@@ -151,9 +171,10 @@ export function buildSHACL(
             const isLiteral =
                 propMeta.resolveLanguage === undefined || propMeta.resolveLanguage === "literal";
             if ((propMeta.initial !== undefined || isLiteral) && !propMeta.getter) {
-                const initialType = typeof obj[propName];
+                const initialType = typeof fieldValue(propName);
                 if (initialType === "number") {
-                    propShape.datatype = "xsd://integer";
+                    // decimal, not integer: a `= 0` default must not make 0.5 invalid.
+                    propShape.datatype = "xsd://decimal";
                 } else if (initialType === "boolean") {
                     propShape.datatype = "xsd://boolean";
                 } else if (initialType === "string" || isLiteral) {
@@ -309,6 +330,12 @@ export function buildSHACL(
             relShape.filter = false;
         }
 
+        // Ordering is declared in the type system so the executor can act on it
+        // for every writer, not just this client.
+        if (relMeta.ordering) {
+            relShape.ordering = relMeta.ordering.strategy;
+        }
+
         // AD4M-specific metadata
         if (relMeta.local !== undefined) {
             relShape.local = relMeta.local;
@@ -325,8 +352,12 @@ export function buildSHACL(
         }
 
         // Adder / Remover actions — only meaningful for relations backed
-        // by a real link predicate.  Getter-only relations are read-only.
-        if (relMeta.predicate) {
+        // by a real link predicate.  Getter-only relations are read-only,
+        // and so is one declared `readOnly`, which keeps its predicate as
+        // the shape's path but must offer no way to write it.
+        if (relMeta.readOnly) {
+            relShape.writable = false;
+        } else if (relMeta.predicate) {
             relShape.adder = [{
                 action: "addLink",
                 source: "this",
@@ -465,11 +496,28 @@ export function buildSHACL(
         shape.addProperty(relShape);
     }
 
-    // Always set constructor and destructor actions on the shape, even
-    // when empty.  An empty array serialises to `literal:string:[]`
-    // which the Rust executor parses as a valid (no-op) command list,
-    // avoiding "No SHACL constructor found" errors for models whose
-    // properties are all optional and have no @Flag.
+    // ── Ordering links ─────────────────────────────────────────────────
+    // Ordering entries are stored on the *parent*, under one shared predicate,
+    // so that reconstruction needs no extra query: they arrive with the
+    // instance's own links. That only works if the instance query asks for them,
+    // and it builds its predicate filter from the shape's declared paths — so a
+    // class owning any ordered collection has to declare the predicate, or the
+    // very links the ordering depends on are filtered out of the read that needs
+    // them.
+    //
+    // One entry covers every ordered relation on the class; each entry names the
+    // relation it belongs to.
+    const hasOrderedRelation = Object.values(allRelationsMeta).some((m) => m.ordering);
+    if (hasOrderedRelation) {
+        shape.addProperty({
+            name: '_collectionOrder',
+            path: 'ad4m://collection_order',
+            nodeKind: 'IRI',
+        });
+    }
+
+    // Empty lists are valid: the executor stores them as `literal:string:[]`,
+    // so `createSubject` works for all-optional models without a @Flag.
     shape.setConstructorActions(constructorActions);
     shape.setDestructorActions(destructorActions);
 

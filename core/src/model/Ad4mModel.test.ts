@@ -1448,6 +1448,301 @@ describe("ModelQueryBuilder paginateSubscribe", () => {
     expect(callArg).toHaveProperty("pageSize", 10);
     expect(callArg).toHaveProperty("pageNumber", 1);
   });
+
+  it("paginateSubscribe coalesces overlapping dispatches into a trailing fetch", async () => {
+    // Two server dispatches arrive while the first re-fetch is still in
+    // flight. A generation counter (#1020) would start both and could keep
+    // the one that read 1 model while dropping the one that read 2. The
+    // server then has nothing further to dispatch — "Paginate callback did
+    // not see second model save". Coalesce: one in-flight read, then a
+    // trailing fetch after the last dispatch.
+    const mockSubscriptionId = "paginate-stale-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    // First call is the initial fetch (resolves immediately, empty). Later
+    // re-fetches are deferred so the test can see coalescing.
+    const deferred: Array<(v: any) => void> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise(resolve => { deferred.push(resolve); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "StaleTest" })
+    class StaleTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://stale" })
+      type: string = "test://stale";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = StaleTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    // In-flight read saw only the first model.
+    deferred[0]({ instances: [{ id: "m1" }], totalCount: 1 });
+    await new Promise(r => setTimeout(r, 10));
+    // Trailing fetch started because a dispatch arrived during that read.
+    expect(deferred.length).toBe(2);
+
+    deferred[1]({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe still runs the trailing fetch when the in-flight read rejects", async () => {
+    const mockSubscriptionId = "paginate-reject-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "RejectTest" })
+    class RejectTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://reject" })
+      type: string = "test://reject";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = RejectTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    deferred[0].reject(new Error("re-fetch failed"));
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(2);
+
+    deferred[1].resolve({ instances: [{ id: "m1" }, { id: "m2" }], totalCount: 2 });
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(userCallback).toHaveBeenCalled();
+    const lastArg = userCallback.mock.calls[userCallback.mock.calls.length - 1][0];
+    expect(lastArg.totalCount).toBe(2);
+    expect(lastArg.results.length).toBe(2);
+
+    builder.dispose();
+  });
+
+  it("paginateSubscribe handles a rejection from the trailing fetch", async () => {
+    // The trailing fetch is started from the in-flight read's finally block,
+    // detached from any caller. If it also rejects, only its own .catch()
+    // observes the error; without one it is an unhandled rejection.
+    const errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const mockSubscriptionId = "paginate-reject-twice-sub";
+      let capturedCallback: ((result: any) => void) | null = null;
+
+      const mockClient = {
+        modelSubscribe: jest.fn().mockResolvedValue({
+          subscriptionId: mockSubscriptionId,
+          result: { instances: [], totalCount: 0 },
+        }),
+        subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+          capturedCallback = cb;
+          return () => {};
+        }),
+        keepAliveQuery: jest.fn().mockResolvedValue(true),
+        disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+      };
+
+      const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+      let call = 0;
+      const mockPerspective = {
+        uuid: "test-uuid",
+        client: mockClient,
+        modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+          return mockClient.modelSubscribe("test-uuid", className, queryJson);
+        }),
+        modelQuery: jest.fn().mockImplementation(() => {
+          call++;
+          if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+          return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+        }),
+      } as any;
+
+      const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+      @Model({ name: "RejectTwiceTest" })
+      class RejectTwiceTest extends Ad4mModel {
+        @Flag({ through: "test://type", value: "test://reject-twice" })
+        type: string = "test://reject-twice";
+        @Property({ through: "test://name" })
+        name: string = "";
+      }
+
+      const userCallback = jest.fn();
+      const builder = RejectTwiceTest.query(mockPerspective);
+      await builder.paginateSubscribe(10, 1, userCallback);
+
+      capturedCallback!({});
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+
+      deferred[0].reject(new Error("in-flight read failed"));
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(2);
+
+      deferred[1].reject(new Error("trailing read failed"));
+      await new Promise(r => setTimeout(r, 10));
+
+      const logged = errorSpy.mock.calls
+        .filter(args => args[0] === "Paginate subscription error:")
+        .map(args => (args[1] as Error).message);
+      expect(logged).toEqual(["in-flight read failed", "trailing read failed"]);
+      expect(userCallback).not.toHaveBeenCalled();
+
+      builder.dispose();
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("paginateSubscribe delivers nothing and starts no trailing fetch after dispose", async () => {
+    // dispose() while a read is in flight and a trailing fetch is pending.
+    const mockSubscriptionId = "paginate-dispose-sub";
+    let capturedCallback: ((result: any) => void) | null = null;
+
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: mockSubscriptionId,
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockImplementation((_id: string, cb: any) => {
+        capturedCallback = cb;
+        return () => {};
+      }),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockResolvedValue(true),
+    };
+
+    const deferred: Array<{ resolve: (v: any) => void; reject: (e: any) => void }> = [];
+    let call = 0;
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      modelQuery: jest.fn().mockImplementation(() => {
+        call++;
+        if (call === 1) return Promise.resolve({ instances: [], totalCount: 0 });
+        return new Promise((resolve, reject) => { deferred.push({ resolve, reject }); });
+      }),
+    } as any;
+
+    const { Ad4mModel, Model, Flag, Property } = require("./index");
+
+    @Model({ name: "DisposeMidReadTest" })
+    class DisposeMidReadTest extends Ad4mModel {
+      @Flag({ through: "test://type", value: "test://dispose-mid-read" })
+      type: string = "test://dispose-mid-read";
+      @Property({ through: "test://name" })
+      name: string = "";
+    }
+
+    const userCallback = jest.fn();
+    const builder = DisposeMidReadTest.query(mockPerspective);
+    await builder.paginateSubscribe(10, 1, userCallback);
+
+    capturedCallback!({});
+    capturedCallback!({});
+    await new Promise(r => setTimeout(r, 10));
+    expect(deferred.length).toBe(1);
+
+    builder.dispose();
+
+    // The in-flight read's finally block still sees pending === true, so the
+    // coalescing log must not claim a trailing fetch that the disposed guard
+    // then drops.
+    const debugSpy = jest.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      deferred[0].resolve({ instances: [{ id: "m1" }], totalCount: 1 });
+      await new Promise(r => setTimeout(r, 10));
+
+      expect(userCallback).not.toHaveBeenCalled();
+      expect(deferred.length).toBe(1);
+      expect(
+        debugSpy.mock.calls.filter(args =>
+          String(args[0]).includes("coalesced into one trailing fetch")
+        )
+      ).toEqual([]);
+
+      // A dispatch that races the unsubscribe starts no read either.
+      capturedCallback!({});
+      await new Promise(r => setTimeout(r, 10));
+      expect(deferred.length).toBe(1);
+    } finally {
+      debugSpy.mockRestore();
+    }
+  });
 });
 
 // ============================================================================
@@ -2348,6 +2643,121 @@ describe("IncludeProjection type guard and key splitting", () => {
     expect(qi.projections?.$commentCount?.targetClassName).toBeUndefined();
   });
 
+  // --- $-keys inside a nested include ---
+  //
+  // The executor reads a sub-query as it reads a top-level query, so a nested
+  // projection belongs in the sub-query's own `projections`. Left in `include`
+  // it named no relation and was skipped: no error, and no field.
+
+  @Model({ name: "Thread" })
+  class Thread extends Ad4mModel {
+    @HasMany({ through: "thread://post", target: () => Post })
+    posts: Post[] = [];
+  }
+
+  @Model({ name: "Board" })
+  class Board extends Ad4mModel {
+    @HasMany({ through: "board://post", target: () => Post })
+    posts: Post[] = [];
+
+    @HasMany({ through: "board://thread", target: () => Thread })
+    threads: Thread[] = [];
+
+    @HasMany({ through: "board://item", polymorphic: true })
+    items: string[] = [];
+
+    // Polymorphic, but with a declared target: members may still be of other classes.
+    @HasMany({ through: "board://pinned", target: () => Post, polymorphic: true })
+    pinned: Post[] = [];
+  }
+
+  it("moves a $-key inside a nested include into that sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { posts: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Read against the relation's target, so it is tagged as a top-level one would be.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("keeps the nested relations beside the projections it moves", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        posts: { include: { signals: true, $signalCount: { from: "signals", count: true } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.posts;
+
+    expect(posts.include).toEqual({ signals: true });
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+  });
+
+  it("moves a $-key two include levels down into the innermost sub-query's projections", async () => {
+    await Board.findAll(mockPerspective, {
+      include: {
+        threads: { include: { posts: { include: { $signalCount: { from: "signals", count: true } } } } },
+      },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const posts = JSON.parse(queryJson).include.threads.include.posts;
+
+    expect(posts.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    expect(posts.include).toBeUndefined();
+    // Tagged against Post, the class two relations down.
+    expect(posts.projections.$signalCount.targetClassName).toBe("Signal");
+  });
+
+  it("leaves a projection untagged under a polymorphic relation that declares a target", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { pinned: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const pinned = JSON.parse(queryJson).include.pinned;
+
+    expect(pinned.polymorphic).toBe(true);
+    expect(pinned.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // Tagging from the declared target (Post → Signal) would name one class for
+    // members of several; the executor reads each member's own class instead.
+    expect(pinned.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("moves it under a polymorphic relation too, untagged, for the executor to read per class", async () => {
+    await Board.findAll(mockPerspective, {
+      include: { items: { include: { $signalCount: { from: "signals", count: true } } } },
+    });
+
+    const [, queryJson] = mockPerspective.modelQuery.mock.calls[0];
+    const items = JSON.parse(queryJson).include.items;
+
+    expect(items.polymorphic).toBe(true);
+    expect(items.projections?.$signalCount).toMatchObject({ from: "signals", count: true });
+    // The members are of several classes, so there is no one target to name.
+    expect(items.projections.$signalCount.targetClassName).toBeUndefined();
+  });
+
+  it("leaves the projections in the caller's query where the caller wrote them", async () => {
+    const query = {
+      include: {
+        $postCount: { from: "posts", count: true },
+        posts: { include: { $signalCount: { from: "signals", count: true } } },
+      },
+    } as const;
+    const before = JSON.stringify(query);
+
+    await Board.findAll(mockPerspective, query);
+
+    expect(JSON.stringify(query)).toBe(before);
+  });
+
   // --- result passthrough ---
 
   it("returns $-keyed projection values attached by Rust on instances", async () => {
@@ -2514,20 +2924,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
     target?: string;
   }
 
-  // A coverage fixture for a branch that already exists in `save()`, not a
-  // modelling pattern being endorsed. No required property, no flag and no
-  // initial value means `buildSHACL` emits the node shape and its property
-  // shapes as normal but with an *empty* constructor-action list, which the
-  // Rust side rejects as "No SHACL constructor found" — so `save()` skips
-  // `createSubject` and calls `innerUpdate(true)` instead. The base expression
-  // exists either way: the `Ad4mModel` constructor mints one, and
-  // `createSubject` writes onto a base rather than creating it.
-  //
-  // Worth naming the real caveat, which is about conformance rather than
-  // writes: a class with no required property and no flag states no criteria,
-  // so nothing structurally distinguishes an instance of it from any other
-  // base expression. That makes it an overlay rather than a class, and it is a
-  // question about SDNA modelling generally rather than about this file.
+  // No required property, no flag and no initial value: an empty constructor.
   @Model({ name: "TestNoConstructor" })
   class TestNoConstructor extends Ad4mModel {
     @HasOne({ through: "we://placed_node" })
@@ -2610,7 +3007,7 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
       expect(writtenTargets(scalar)).toEqual(writtenTargets(array));
     });
 
-    it("still writes the relation when there is no SHACL constructor", async () => {
+    it("writes the relation when the constructor is empty", async () => {
       const perspective = makePerspective();
 
       await TestNoConstructor.create(
@@ -2619,8 +3016,96 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
         { batchId: "batch-1" }
       );
 
-      expect(perspective.createSubject).not.toHaveBeenCalled();
       expect(writtenTargets(perspective)).toContain("we://block/a");
+    });
+  });
+
+  // The failure this closes: every `save()` of a new instance logged one
+  // Rust-side "declares no setter" warning per ORM-internal field, per flag,
+  // and per empty HasMany relation — none of which are real model data, so
+  // none of them should ever have been offered to `createSubject` at all.
+  describe("initialValues sent to createSubject", () => {
+    @Model({ name: "TestNoisyPost" })
+    class TestNoisyPost extends Ad4mModel {
+      @Flag({ through: "test://post_type", value: "test://post" })
+      type: string = "test://post";
+
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+
+      @HasOne({ through: "test://in_channel" })
+      channel: string = "";
+    }
+
+    it("offers only settable scalar properties: no bookkeeping, flags or relations", async () => {
+      const perspective = makePerspective();
+
+      await TestNoisyPost.create(perspective, { title: "hello", channel: "test://channel/1" }, { batchId: "batch-1" });
+
+      expect(perspective.createSubject.mock.calls[0][2]).toEqual({ title: "hello" });
+      // The @HasOne value is still written, as a relation.
+      expect(writtenTargets(perspective)).toContain("test://channel/1");
+    });
+  });
+
+  // `readOnly` keeps `through` as the predicate the relation reads. Writing it
+  // from save() would be the setter the shape refuses to offer, and on a create
+  // the `= []` initialiser turns that write into a clear.
+  describe("readOnly relations without a getter", () => {
+    @Model({ name: "TestReadOnlyRelations" })
+    class TestReadOnlyRelations extends Ad4mModel {
+      @Property({ through: "test://title", required: true })
+      title: string = "";
+
+      @HasMany({ through: "test://voted_by", readOnly: true })
+      votedBy: string[] = [];
+
+      @HasOne({ through: "test://resolved_by", readOnly: true })
+      resolvedBy?: string;
+
+      // The control: an ordinary relation on the same model is still written.
+      @HasMany({ through: "test://has_tag" })
+      tags: string[] = [];
+    }
+
+    /** Predicates written by `executeAction`, across every call. */
+    const writtenPredicates = (perspective: any): string[] =>
+      perspective.executeAction.mock.calls.flatMap((call: any[]) =>
+        (call[0] ?? []).map((action: any) => action.predicate)
+      );
+
+    it("are not written by create(), not even as the empty initialiser", async () => {
+      const perspective = makePerspective();
+
+      await TestReadOnlyRelations.create(
+        perspective,
+        { title: "t", tags: ["test://tag/1"] },
+        { batchId: "batch-1" }
+      );
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+    });
+
+    it("are not written by save() even when the caller sets them", async () => {
+      const perspective = makePerspective();
+      const instance = new TestReadOnlyRelations(perspective);
+      instance.title = "t";
+      instance.tags = ["test://tag/1"];
+      instance.votedBy = ["did:key:a"];
+      instance.resolvedBy = "did:key:b";
+
+      await instance.save("batch-1");
+
+      expect(writtenPredicates(perspective)).toContain("test://has_tag");
+      expect(writtenPredicates(perspective)).not.toContain("test://voted_by");
+      expect(writtenPredicates(perspective)).not.toContain("test://resolved_by");
+      expect(writtenTargets(perspective)).not.toContain("did:key:a");
+      expect(writtenTargets(perspective)).not.toContain("did:key:b");
     });
   });
 
@@ -2646,5 +3131,736 @@ describe("Relation writes: to-one batching and scalar coercion", () => {
 
       expect(batchIds(perspective)).toEqual([undefined]);
     });
+  });
+});
+
+describe("Polymorphic relations", () => {
+  @Model({ name: "PolyTextBlock" })
+  class PolyTextBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://text_block" })
+    flag: string = "";
+    @Property({ through: "we://text" })
+    text: string = "";
+  }
+
+  @Model({ name: "PolyImageBlock" })
+  class PolyImageBlock extends Ad4mModel {
+    @Flag({ through: "we://flag", value: "we://image_block" })
+    flag: string = "";
+    @Property({ through: "we://src" })
+    src: string = "";
+  }
+
+  @Model({ name: "PolyCollection" })
+  class PolyCollection extends Ad4mModel {
+    // No target class — the members are of genuinely different types, which is
+    // the situation `polymorphic` exists for.
+    @HasMany({
+      through: "we://children",
+      polymorphic: true,
+      instantiateAs: () => [PolyTextBlock, PolyImageBlock],
+    })
+    children: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("constructs each child as the class the executor says it is", () => {
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://i/1", __subjectClass: "PolyImageBlock", src: "cat.png" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1]).toBeInstanceOf(PolyImageBlock);
+    // The property that only exists on the concrete class — what a base-class
+    // hydration would have dropped before the value ever reached here.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[1].src).toBe("cat.png");
+  });
+
+  it("maps a child to its class by the name the class itself declares", () => {
+    // The mapping is derived from `@Model({ name })`, not restated beside the
+    // class list — the two cannot drift apart because there is only one of them.
+    expect((PolyTextBlock as any).className).toBe("PolyTextBlock");
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("carries the readings a child was chosen over onto the typed instance", () => {
+    // A base expression can conform to two unrelated classes at once, and the
+    // executor has to pick one to hydrate against. The set it picked from rides
+    // back with the child, so a caller can see there was a choice — and fetch
+    // the other reading by asking that class for this id.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            {
+              id: "we://b/1",
+              __subjectClass: "PolyTextBlock",
+              __subjectClasses: ["PolyTextBlock", "PolyBookmark"],
+              text: "hello",
+            },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const child = collection.children[0];
+    expect(child).toBeInstanceOf(PolyTextBlock);
+    expect(child.__subjectClasses).toEqual(["PolyTextBlock", "PolyBookmark"]);
+  });
+
+  it("leaves children as data when no instantiateAs is given", () => {
+    @Model({ name: "PolyCollectionNoClasses" })
+    class PolyCollectionNoClasses extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollectionNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    // Still correct data, just untyped — the concrete class name is present for
+    // a caller that wants to do its own dispatch.
+    expect(collection.children[0].text).toBe("hello");
+    expect(collection.children[0].__subjectClass).toBe("PolyTextBlock");
+  });
+
+  it("keeps a child whose class is not listed, rather than dropping it", () => {
+    // `instantiateAs` says what this call site can construct, not what the
+    // relation may contain. A heterogeneous relation is open by definition, so
+    // an unlisted class must arrive as data — narrowing a read to particular
+    // classes is a thing to ask for in the query, never a side effect of
+    // declaring which constructors happen to be in scope.
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" },
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children).toHaveLength(2);
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+    expect(collection.children[1].done).toBe(true);
+    expect(collection.children[1].__subjectClass).toBe("PolyTaskBlock");
+  });
+
+  it("does not construct an unlisted child as the relation's declared target", () => {
+    // A relation may declare a target *and* read polymorphically — the target
+    // says what the members usually are, not what they must be. A child of some
+    // third class was hydrated against its own shape, so building the declared
+    // class over that JSON would answer `instanceof` for a class it is not,
+    // carrying fields that class never declares.
+    @Model({ name: "PolyBaseBlock" })
+    class PolyBaseBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedCollection" })
+    class PolyTypedCollection extends Ad4mModel {
+      @HasMany(() => PolyBaseBlock, {
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => [PolyTextBlock],
+      })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).toBeDefined();
+    expect(unlisted).not.toBeInstanceOf(PolyBaseBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    // The declared target is still right when it is the class the executor named.
+    expect(declared).toBeInstanceOf(PolyBaseBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("does not use the declared target for another class when no classes are named", () => {
+    // Naming no classes to build is not the same as authorising the declared
+    // target to stand in for all of them. Without `instantiateAs` there is
+    // simply nothing this side can construct for a class it was not told about.
+    @Model({ name: "PolyBaseOnlyBlock" })
+    class PolyBaseOnlyBlock extends Ad4mModel {
+      @Property({ through: "we://base" })
+      base: string = "";
+    }
+
+    @Model({ name: "PolyTypedNoClasses" })
+    class PolyTypedNoClasses extends Ad4mModel {
+      @HasMany(() => PolyBaseOnlyBlock, { through: "we://children", polymorphic: true })
+      children: any[] = [];
+    }
+
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [
+            { id: "we://k/1", __subjectClass: "PolyTaskBlock", done: true },
+            { id: "we://b/1", __subjectClass: "PolyBaseOnlyBlock", base: "declared" },
+          ],
+        },
+      ],
+    };
+
+    const [collection] = PolyTypedNoClasses.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    const [unlisted, declared] = collection.children;
+    expect(unlisted).not.toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(unlisted.done).toBe(true);
+    expect(unlisted.__subjectClass).toBe("PolyTaskBlock");
+    expect(declared).toBeInstanceOf(PolyBaseOnlyBlock);
+    expect(declared.base).toBe("declared");
+  });
+
+  it("calls instantiateAs late, so a circular import can still resolve", () => {
+    let defined = false;
+    @Model({ name: "PolyLateCollection" })
+    class PolyLateCollection extends Ad4mModel {
+      // Evaluated at decoration time this would throw, the way an array literal
+      // naming a class from further round an import cycle would.
+      @HasMany({
+        through: "we://children",
+        polymorphic: true,
+        instantiateAs: () => {
+          if (!defined) throw new ReferenceError("class not defined yet");
+          return [PolyTextBlock];
+        },
+      })
+      children: string[] = [];
+    }
+
+    defined = true;
+    const raw = {
+      instances: [
+        {
+          id: "we://c/1",
+          children: [{ id: "we://t/1", __subjectClass: "PolyTextBlock", text: "hello" }],
+        },
+      ],
+    };
+
+    const [collection] = PolyLateCollection.parseModelResult(mockPerspective, raw, {
+      children: true,
+    }) as any[];
+
+    expect(collection.children[0]).toBeInstanceOf(PolyTextBlock);
+  });
+
+  it("asks the executor for polymorphic hydration without the caller repeating it", () => {
+    // The relation being heterogeneous is a fact about the data, so declaring it
+    // on the model should be enough — `include: { children: true }` must still
+    // arrive at the executor as a polymorphic read.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    expect(JSON.parse(queryJson).include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("sends the classes it can build as the classes it wants, in declaration order", () => {
+    // The two questions have one answer: what this call site can construct is
+    // what it wants its targets read as. Sent with the query rather than applied
+    // to the results, so the same request gives the same reading to anyone.
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Declaration order is the preference order — a target conforming to two of
+    // them is read as whichever was named first.
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual([
+      "PolyTextBlock",
+      "PolyImageBlock",
+    ]);
+  });
+
+  it("lets an explicit preference at the call site win over the declaration", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { preferClasses: ["PolyBookmark"] } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.preferClasses).toEqual(["PolyBookmark"]);
+  });
+
+  it("sends no preference for a polymorphic relation that names no classes", () => {
+    @Model({ name: "PolyCollectionUndeclared" })
+    class PolyCollectionUndeclared extends Ad4mModel {
+      @HasMany({ through: "we://children", polymorphic: true })
+      children: string[] = [];
+    }
+
+    const { queryJson } = (PolyCollectionUndeclared as any).prepareModelQueryParams({
+      include: { children: true },
+    });
+
+    // Nothing to prefer, so nothing is sent and the executor ranks by
+    // specificity exactly as it did before any of this existed.
+    expect(JSON.parse(queryJson).include.children).toEqual({ polymorphic: true });
+  });
+
+  it("lets an explicit false at the call site win", () => {
+    const { queryJson } = (PolyCollection as any).prepareModelQueryParams({
+      include: { children: { polymorphic: false } },
+    });
+
+    expect(JSON.parse(queryJson).include.children.polymorphic).toBe(false);
+  });
+
+  it("applies the default at every depth of a nested include", () => {
+    // `sections` is a plain typed relation, so the nested `children` is read off
+    // PolyCollection rather than off the class being queried. Left to the top
+    // level, the default would never reach it and the include would arrive at
+    // the executor with no shape to resolve — the query fails outright.
+    @Model({ name: "PolyPage" })
+    class PolyPage extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPage as any).prepareModelQueryParams({
+      include: { sections: { include: { children: true } } },
+    });
+
+    const include = JSON.parse(queryJson).include;
+    expect(include.sections.include.children).toEqual({
+      polymorphic: true,
+      preferClasses: ["PolyTextBlock", "PolyImageBlock"],
+    });
+  });
+
+  it("lets an explicit false win at depth too", () => {
+    @Model({ name: "PolyPageExplicit" })
+    class PolyPageExplicit extends Ad4mModel {
+      @HasMany(() => PolyCollection, { through: "we://sections" })
+      sections: any[] = [];
+    }
+
+    const { queryJson } = (PolyPageExplicit as any).prepareModelQueryParams({
+      include: { sections: { include: { children: { polymorphic: false } } } },
+    });
+
+    expect(JSON.parse(queryJson).include.sections.include.children.polymorphic).toBe(false);
+  });
+});
+
+describe("Ordered relations", () => {
+  @Model({ name: "OrderedColumn" })
+  class OrderedColumn extends Ad4mModel {
+    @HasMany({ through: "kanban://has_task", ordering: { strategy: "linkedList" } })
+    tasks: string[] = [];
+
+    @HasMany({ through: "kanban://archived" })
+    archived: string[] = [];
+  }
+
+  const mockPerspective = { uuid: "test" } as any;
+
+  it("declares its ordering in SHACL", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const tasks = shape.properties.find((p: any) => p.name === "tasks");
+    expect(tasks.ordering).toBe("linkedList");
+  });
+
+  it("declares the predicate the ordering entries are stored under", () => {
+    // Entries live on the parent under one shared predicate. The instance query
+    // builds its predicate filter from the shape's declared paths, so without
+    // this the read that needs the ordering links filters them out.
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const orderProp = shape.properties.find(
+      (p: any) => p.path === "ad4m://collection_order"
+    );
+    expect(orderProp).toBeDefined();
+  });
+
+  it("omits that predicate when nothing on the class is ordered", () => {
+    @Model({ name: "UnorderedOnly" })
+    class UnorderedOnly extends Ad4mModel {
+      @HasMany({ through: "kanban://archived" })
+      archived: string[] = [];
+    }
+    const { shape } = (UnorderedOnly as any).generateSHACL();
+    expect(
+      shape.properties.find((p: any) => p.path === "ad4m://collection_order")
+    ).toBeUndefined();
+  });
+
+  it("treats a reorder as a change", () => {
+    // The whole point: for an ordered relation the sequence *is* the state, so
+    // sorting before comparing would make save() a no-op for the one edit this
+    // feature exists to support.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.tasks = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.tasks = ["c", "a", "b"];
+    expect(column.changedFields()).toContain("tasks");
+  });
+
+  it("still treats a reorder of an unordered relation as no change", () => {
+    // An unordered relation is a set — the executor returns it by link
+    // timestamp, so assigning the same members in another order changed nothing.
+    const column = new OrderedColumn(mockPerspective, "kanban://col/1") as any;
+    column.archived = ["a", "b", "c"];
+    column.takeSnapshot();
+
+    column.archived = ["c", "a", "b"];
+    expect(column.changedFields()).not.toContain("archived");
+  });
+
+  it("round-trips ordering through SHACL links", () => {
+    const { shape } = (OrderedColumn as any).generateSHACL();
+    const links = shape.toLinks().map((l: any) => ({
+      source: l.source,
+      predicate: l.predicate,
+      target: l.target,
+    }));
+    const reconstructed = SHACLShape.fromLinks(links as any, shape.nodeShapeUri);
+    const tasks = reconstructed.properties.find((p: any) => p.name === "tasks");
+    expect(tasks!.ordering).toBe("linkedList");
+  });
+});
+
+/**
+ * A traversal names its predicate the same two ways every other scope does.
+ *
+ * The feature shipped with only the raw spelling, so every caller reading a
+ * thread wrote `'test://has_comment'` by hand — the literal `resolveParentPredicate`
+ * exists to keep out of call sites, reintroduced by the newest scope.
+ */
+describe("Ad4mModel.prepareModelQueryParams() — traverse scope", () => {
+  @Model({ name: "TraverseComment" })
+  class TraverseComment extends Ad4mModel {
+    @Property({ through: "test://body" })
+    body: string = "";
+  }
+
+  @Model({ name: "TraversePost" })
+  class TraversePost extends Ad4mModel {
+    @HasMany(() => TraverseComment, { through: "test://has_comment" })
+    comments: TraverseComment[] = [];
+
+    @HasOne(() => TraverseComment, { through: "test://pinned_comment" })
+    pinned: TraverseComment | null = null;
+  }
+
+  const parentOf = (query: any) =>
+    JSON.parse((TraverseComment as any).prepareModelQueryParams(query).queryJson).parent;
+
+  it("keeps the raw spelling exactly as written", () => {
+    expect(
+      parentOf({ parent: { ids: ["we://a", "we://b"], predicate: "test://has_comment" } }),
+    ).toEqual({ ids: ["we://a", "we://b"], predicate: "test://has_comment" });
+  });
+
+  it("resolves the predicate from the model that declares the relation", () => {
+    expect(parentOf({ parent: { ids: "we://a", model: TraversePost } })).toEqual({
+      ids: "we://a",
+      predicate: "test://has_comment",
+    });
+  });
+
+  it("takes `field` when one parent has two relations to the same child", () => {
+    // Without it the scan finds `comments` first and a request for the pinned
+    // comment's subtree would quietly read the wrong edge.
+    expect(
+      parentOf({ parent: { ids: "we://a", model: TraversePost, field: "pinned" } }),
+    ).toEqual({ ids: "we://a", predicate: "test://pinned_comment" });
+  });
+
+  it("sends the traversal's own options and nothing else", () => {
+    // `model` is a constructor; spreading the scope would put a class into a
+    // query variable. What travels is the resolved predicate and the options.
+    expect(
+      parentOf({
+        parent: {
+          ids: ["we://a"],
+          model: TraversePost,
+          field: "comments",
+          transitive: true,
+          direction: "in",
+          limitPerAnchor: 5,
+        },
+      }),
+    ).toEqual({
+      ids: ["we://a"],
+      predicate: "test://has_comment",
+      transitive: true,
+      direction: "in",
+      limitPerAnchor: 5,
+    });
+  });
+
+  it("omits the options the caller did not set rather than sending defaults", () => {
+    // An absent `transitive` is not `false` on the wire: the executor's serde
+    // defaults own that, and sending our own would be a second opinion.
+    const parent = parentOf({ parent: { ids: "we://a", model: TraversePost, levels: [10, 5] } });
+    expect(parent).toEqual({ ids: "we://a", predicate: "test://has_comment", levels: [10, 5] });
+    expect(parent).not.toHaveProperty("transitive");
+    expect(parent).not.toHaveProperty("limitPerAnchor");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// linkStatus — read from links of one status only (#1116)
+// ──────────────────────────────────────────────────────────
+
+describe("linkStatus — wire format", () => {
+  @Model({ name: "LinkStatusWireCard" })
+  class LinkStatusWireCard extends Ad4mModel {
+    @Flag({ through: "lsw://type", value: "lsw://card" })
+    type: string = "";
+
+    @Property({ through: "lsw://title" })
+    title: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so both statuses are read", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("drops `linkStatus: null`, which reads both statuses like unset", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: null,
+    });
+    expect(JSON.parse(queryJson)).not.toHaveProperty("linkStatus");
+  });
+
+  it("travels as `linkStatus` when set, from the query and the builder", () => {
+    const { queryJson } = (LinkStatusWireCard as any).prepareModelQueryParams({
+      linkStatus: "shared",
+    });
+    expect(JSON.parse(queryJson).linkStatus).toBe("shared");
+
+    const builder = LinkStatusWireCard.query({} as any).linkStatus("local");
+    expect((builder as any).queryParams.linkStatus).toBe("local");
+  });
+});
+
+// ──────────────────────────────────────────────────────────
+// includeUnverified — opt-in to links whose signature did not verify (#1113)
+// ──────────────────────────────────────────────────────────
+
+describe("includeUnverified — wire format", () => {
+  @Model({ name: "UnverifiedWireRecipe" })
+  class UnverifiedWireRecipe extends Ad4mModel {
+    @Flag({ through: "uv://type", value: "uv://recipe" })
+    type: string = "";
+
+    @Property({ through: "uv://name" })
+    name: string = "";
+  }
+
+  it("is omitted unless the caller sets it, so the executor's default applies", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({});
+    expect(JSON.parse(queryJson)).not.toHaveProperty("includeUnverified");
+  });
+
+  it("travels as `includeUnverified` when set, from the query and the builder", () => {
+    const { queryJson } = (UnverifiedWireRecipe as any).prepareModelQueryParams({
+      includeUnverified: true,
+    });
+    expect(JSON.parse(queryJson).includeUnverified).toBe(true);
+
+    const builder = UnverifiedWireRecipe.query({} as any).includeUnverified();
+    expect((builder as any).queryParams.includeUnverified).toBe(true);
+  });
+});
+
+// ── Subscribe awaits the previous executor dispose ────────────────────
+describe("ModelQueryBuilder subscribe ordering", () => {
+  function deferred<T>() {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  }
+
+  function makePerspective() {
+    const disposeGate = deferred<boolean>();
+    const mockClient = {
+      modelSubscribe: jest.fn().mockResolvedValue({
+        subscriptionId: "shared-sub",
+        result: { instances: [], totalCount: 0 },
+      }),
+      subscribeToQueryUpdates: jest.fn().mockReturnValue(() => {}),
+      keepAliveQuery: jest.fn().mockResolvedValue(true),
+      disposeQuerySubscription: jest.fn().mockReturnValue(disposeGate.promise),
+    };
+    const mockPerspective = {
+      uuid: "test-uuid",
+      client: mockClient,
+      modelSubscribe: jest.fn().mockImplementation(async (className: string, queryJson: string) => {
+        return mockClient.modelSubscribe("test-uuid", className, queryJson);
+      }),
+      getLinks: jest.fn().mockResolvedValue([]),
+      modelQuery: jest.fn().mockResolvedValue({ instances: [], totalCount: 0 }),
+    } as any;
+    return { mockPerspective, mockClient, disposeGate };
+  }
+
+  const { Ad4mModel, Model, Property, Flag } = require("./index");
+
+  @Model({ name: "OrderingTest" })
+  class OrderingTest extends Ad4mModel {
+    @Flag({ through: "test://type", value: "test://ordering" })
+    type: string = "test://ordering";
+    @Property({ through: "test://name" })
+    name: string = "";
+  }
+
+  const flush = () => new Promise((r) => setTimeout(r, 0));
+
+  it("re-subscribe waits for the executor to release the previous subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    const second = builder.subscribe(() => {});
+    await flush();
+    // The executor has not acknowledged the dispose yet: no new registration.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "shared-sub");
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(1);
+
+    disposeGate.resolve(true);
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("re-subscribe proceeds when the executor dispose fails", async () => {
+    const { mockPerspective, disposeGate } = makePerspective();
+    const builder = OrderingTest.query(mockPerspective);
+
+    await builder.subscribe(() => {});
+    const second = builder.subscribe(() => {});
+    disposeGate.reject(new Error("Subscription not found"));
+    await second;
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+  });
+
+  it("overlapping subscribe() calls leave exactly one live subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribes: jest.Mock[] = [];
+    let n = 0;
+    mockClient.modelSubscribe.mockImplementation(async () => ({
+      subscriptionId: `sub-${++n}`,
+      result: { instances: [], totalCount: 0 },
+    }));
+    mockClient.subscribeToQueryUpdates.mockImplementation(() => {
+      const u = jest.fn();
+      unsubscribes.push(u);
+      return u;
+    });
+    mockClient.disposeQuerySubscription.mockResolvedValue(true);
+    disposeGate.resolve(true);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await Promise.all([builder.subscribe(() => {}), builder.subscribe(() => {})]);
+
+    expect(mockPerspective.modelSubscribe).toHaveBeenCalledTimes(2);
+    // The second call ran after the first and disposed its subscription.
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-1");
+    expect(unsubscribes).toHaveLength(2);
+    expect(unsubscribes[0]).toHaveBeenCalledTimes(1);
+    expect(unsubscribes[1]).not.toHaveBeenCalled();
+    // And the builder can still release the survivor.
+    await builder.dispose();
+    expect(unsubscribes[1]).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledWith("test-uuid", "sub-2");
+  });
+
+  it("dispose() cleans up locally at once and resolves without a subscription", async () => {
+    const { mockPerspective, mockClient, disposeGate } = makePerspective();
+    const unsubscribe = jest.fn();
+    mockClient.subscribeToQueryUpdates.mockReturnValue(unsubscribe);
+    const builder = OrderingTest.query(mockPerspective);
+
+    await expect(builder.dispose()).resolves.toBeUndefined();
+
+    await builder.subscribe(() => {});
+    const done = builder.dispose();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
+    disposeGate.resolve(true);
+    await expect(done).resolves.toBeUndefined();
+    // Idempotent: a second dispose does not call the executor again.
+    await builder.dispose();
+    expect(mockClient.disposeQuerySubscription).toHaveBeenCalledTimes(1);
   });
 });

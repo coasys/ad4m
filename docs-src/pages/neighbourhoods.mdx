@@ -237,8 +237,8 @@ const { uuid } = await ad4m.neighbourhood.joinFromUrl(url);
 const shared = await ad4m.perspective.byUUID(uuid);
 
 // Listen for changes
-shared.addListener((links) => {
-    console.log("New links:", links);
+shared.on("link-added", ({ link }) => {
+    console.log("New link:", link);
 });
 ```
 

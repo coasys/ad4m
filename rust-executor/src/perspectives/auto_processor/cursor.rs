@@ -324,19 +324,12 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "cursor-skip".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
@@ -372,7 +365,7 @@ mod tests {
         .expect("mint prior sources");
 
         let mut watcher = WatcherState::new();
-        p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
+        let had_pending = p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await;
         assert_eq!(
             watcher
                 .pending_for("cursor-skip")
@@ -380,6 +373,163 @@ mod tests {
                 .unwrap_or(0),
             0,
             "in-window sources must suppress re-enqueue after a RAM-empty restart"
+        );
+        assert!(
+            !had_pending,
+            "a tick whose only turn is already processed is idle, so the loop may back off (#1072)"
+        );
+    }
+
+    /// The tick's return value drives the watch loop's idle back-off (#1072):
+    /// no processor declared → idle; a new unprocessed turn still inside its
+    /// debounce window → pending, so the loop stays at the base rate.
+    #[tokio::test]
+    async fn tick_reports_pending_only_while_a_new_turn_waits() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_message(
+            &mut p,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        assert!(
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "no processor declared: nothing can be pending"
+        );
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "idle-backoff".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            // Longer than the test, so the batch never drains and no pass runs.
+            debounce_ms: 600_000,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "an unprocessed turn waiting out its debounce keeps the loop at the base rate"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 500, &ctx)
+                .await,
+            "still pending on the next tick"
+        );
+    }
+
+    /// A drained batch whose pass does not retire it (here `ShapesMissing`: no
+    /// class shape is registered, so no LLM is reached) is retried, so the
+    /// loop must stay at the base rate on the draining tick and on the tick
+    /// that re-records it (#1072).
+    #[tokio::test]
+    async fn tick_stays_pending_across_a_drained_retry_batch() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        seed_message(
+            &mut p,
+            &ctx,
+            "msg://1",
+            "did:key:alice",
+            "hello",
+            "ns://body",
+        )
+        .await;
+        let cfg = AutoProcessorConfig {
+            processor_id: "retry-pending".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "recording tick"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 51, &ctx)
+                .await,
+            "the draining tick of a batch that will be retried must not report idle"
+        );
+        assert!(
+            watcher
+                .pending_for("retry-pending")
+                .is_none_or(|e| e.items.is_empty()),
+            "precondition: the batch was drained"
+        );
+        assert!(
+            p.run_auto_processor_tick(&mut watcher, now_ms + 102, &ctx)
+                .await,
+            "the unretired turn is re-recorded on the next tick"
+        );
+    }
+
+    /// A queue left behind by a processor that is no longer declared must not
+    /// pin the loop at the base rate (#1072): a declared processor with
+    /// nothing to do reports idle even while a stale queue exists.
+    #[tokio::test]
+    async fn tick_ignores_the_queue_of_an_undeclared_processor() {
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::{PendingTurn, WatcherState};
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+
+        let (mut p, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+        let cfg = AutoProcessorConfig {
+            processor_id: "declared".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &ctx)
+            .await
+            .expect("write_processor");
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut watcher = WatcherState::new();
+        watcher.record_item(
+            "removed",
+            PendingTurn {
+                id: "stale".into(),
+                speaker: "did:key:alice".into(),
+                text: "left behind".into(),
+                timestamp: "1".into(),
+            },
+            now_ms,
+        );
+        assert!(
+            !p.run_auto_processor_tick(&mut watcher, now_ms, &ctx).await,
+            "a removed processor's queue must not keep the loop at the base rate"
         );
     }
 
@@ -403,19 +553,12 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "incremental".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
@@ -494,19 +637,12 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "repeated-text".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
@@ -553,19 +689,12 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "capped".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 2,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
@@ -590,6 +719,11 @@ mod tests {
         .await
         .expect("BatchReady signal");
         assert_eq!(
+            ready.agent_did.as_deref(),
+            Some(crate::agent::did_for_context(&ctx).unwrap().as_str()),
+            "BatchReady names the acting agent, as every later step does"
+        );
+        assert_eq!(
             ready.item_ids.len(),
             2,
             "the pass transcript must be capped at batch_max; got {:?}",
@@ -603,6 +737,73 @@ mod tests {
             3,
             "the overflow stays queued for the next pass"
         );
+    }
+
+    /// `BatchReady` names the agent whose tick it is, not the main agent: a
+    /// managed user's pass has to reach that user's own (non-admin) session,
+    /// which drops an event with no `agentDid` or someone else's.
+    #[tokio::test]
+    async fn batch_ready_names_a_managed_user_running_the_tick() {
+        use crate::agent::{did_for_context, AgentContext, AgentService};
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::events::{
+            next_event_matching, subscribe, AutoProcessorStep,
+        };
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY;
+        use crate::perspectives::interpretation_test_support::seed_message;
+
+        let (mut p, _shapes, main_ctx) = setup_perspective_no_llm(&[]).await;
+        let email = "batch-ready-user@test";
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let user_ctx = AgentContext::for_user_email(email.to_string());
+        let user_did = did_for_context(&user_ctx).expect("user did");
+        assert_ne!(
+            Some(user_did.as_str()),
+            did_for_context(&main_ctx).ok().as_deref(),
+            "the test needs a DID distinct from the main agent's"
+        );
+
+        seed_message(
+            &mut p,
+            &main_ctx,
+            "msg://u1",
+            "did:key:alice",
+            "one",
+            "ns://body",
+        )
+        .await;
+        let cfg = AutoProcessorConfig {
+            processor_id: "as-user".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 2,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &main_ctx)
+            .await
+            .expect("write_processor");
+
+        let uuid = p.uuid.clone();
+        let mut rx = subscribe().await;
+        let mut watcher = WatcherState::new();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &user_ctx)
+            .await;
+        p.run_auto_processor_tick(&mut watcher, now_ms + 51, &user_ctx)
+            .await;
+
+        let ready = next_event_matching(&mut rx, std::time::Duration::from_secs(5), |e| {
+            e.perspective_uuid == uuid
+                && e.processor_id == "as-user"
+                && e.step == AutoProcessorStep::BatchReady
+        })
+        .await
+        .expect("BatchReady signal");
+        assert_eq!(ready.agent_did.as_deref(), Some(user_did.as_str()));
     }
 
     #[tokio::test]
@@ -627,19 +828,13 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "window-drop".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
             source_window_ms: Some(1), // 1ms — anything not stamped this millisecond is old
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await
@@ -685,19 +880,12 @@ mod tests {
         let cfg = AutoProcessorConfig {
             processor_id: "no-window".into(),
             source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
-            base_prefix: None,
             interpretation_classes: vec!["ns://Task".into()],
             debounce_ms: 50,
             batch_min: 1,
             batch_max: 32,
-            max_wait_ms: None,
             claim_ttl_ms: 60_000,
-            dedup_strategy_json: None,
-            source_window_ms: None,
-            existing_scope: None,
-            mint_scope: None,
-            max_tool_calls: None,
-            emit_debug_events: false,
+            ..Default::default()
         };
         write_processor(&mut p, &cfg, Some(false), &ctx)
             .await

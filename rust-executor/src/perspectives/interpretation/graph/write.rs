@@ -685,6 +685,8 @@ mod tests {
             &[shape.clone()],
             &[TranscriptTurn::from_speaker_text("Nico", "block it")],
             &no_existing(),
+            &[],
+            &HashMap::new(),
         );
         let v: serde_json::Value = serde_json::from_str(&input).unwrap();
         let field_names: Vec<&str> = v["classes"][0]["fields"]

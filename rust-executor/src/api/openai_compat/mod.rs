@@ -30,6 +30,7 @@ pub mod errors;
 pub mod harness_bridge;
 pub mod model_selector;
 pub mod models;
+pub mod native_tools;
 pub mod realtime;
 pub mod router;
 pub mod tool_grammar;
