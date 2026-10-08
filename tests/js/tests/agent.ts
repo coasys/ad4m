@@ -25,7 +25,7 @@ export default function agentTests(testContext: TestContext) {
                 const ad4mClient = testContext.ad4mClient!
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addAgentStatusChangedListener(agentUpdated)
+                ad4mClient.on('agent-status-changed', ({ agent }) => agentUpdated(agent))
                 
                 const generate = await ad4mClient.agent.generate("passphrase")
                 expect(generate.isInitialized).to.be.true;
@@ -63,7 +63,7 @@ export default function agentTests(testContext: TestContext) {
                 await ensureAgentIsReady(testContext)
 
                 const agentUpdated = sinon.fake()
-                ad4mClient.agent.addUpdatedListener(agentUpdated)
+                ad4mClient.on('agent-updated', ({ agent }) => agentUpdated(agent))
 
                 const currentAgent = await ad4mClient.agent.me();
                 expect(currentAgent.perspective).not.to.be.undefined;

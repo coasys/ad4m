@@ -348,6 +348,49 @@ impl WatcherState {
             .and_then(|m| m.get(id))
             .is_some_and(|until| *until > now_ms)
     }
+
+    /// Whether any processor has turns waiting to be batched, declared or
+    /// not. Used only when the declared processors could not be loaded.
+    pub fn has_pending(&self) -> bool {
+        self.per_processor.values().any(|p| !p.items.is_empty())
+    }
+
+    /// Whether any of the declared `processor_ids` has turns waiting to be
+    /// batched. While this holds the watch loop polls at
+    /// [`AUTO_PROCESSOR_TICK_MS`], so `debounce_ms` and `max_wait_ms` keep
+    /// their resolution. Scoped to declared processors because a removed
+    /// processor's queue is never drained again and must not pin the loop at
+    /// the base rate.
+    pub fn has_pending_for<'a>(&self, processor_ids: impl IntoIterator<Item = &'a str>) -> bool {
+        processor_ids.into_iter().any(|id| {
+            self.per_processor
+                .get(id)
+                .is_some_and(|p| !p.items.is_empty())
+        })
+    }
+}
+
+/// Poll interval of an auto-processor watch loop while turns are pending.
+pub const AUTO_PROCESSOR_TICK_MS: u64 = 500;
+
+/// Longest interval an idle watch loop backs off to (#1072). Every tick costs
+/// a `load_processors` store query plus, per config, the transcript and cursor
+/// queries, whether or not anything changed; one loop runs per perspective and
+/// online user. Backing off cuts an idle loop from 2 ticks/s to one per 4 s.
+/// The price is up to this much extra delay before the first new turn after a
+/// quiet spell is noticed.
+pub const AUTO_PROCESSOR_IDLE_TICK_MAX_MS: u64 = 4_000;
+
+/// Delay before the next watch-loop tick: [`AUTO_PROCESSOR_TICK_MS`] after a
+/// tick that left turns pending, otherwise double the previous delay, capped at
+/// [`AUTO_PROCESSOR_IDLE_TICK_MAX_MS`].
+pub fn next_tick_delay_ms(previous_ms: u64, had_pending: bool) -> u64 {
+    if had_pending {
+        return AUTO_PROCESSOR_TICK_MS;
+    }
+    previous_ms
+        .saturating_mul(2)
+        .clamp(AUTO_PROCESSOR_TICK_MS, AUTO_PROCESSOR_IDLE_TICK_MAX_MS)
 }
 
 /// Result of a single [`run_one_pass`] call.
@@ -1356,6 +1399,54 @@ mod tests {
     }
 
     // ---- WatcherState -------------------------------------------------------
+
+    /// Idle ticks double the delay up to the ceiling; one tick that leaves
+    /// turns pending drops straight back to the base rate (#1072).
+    #[test]
+    fn tick_delay_backs_off_while_idle_and_resets_when_turns_are_pending() {
+        let mut delay = AUTO_PROCESSOR_TICK_MS;
+        let mut idle_delays = Vec::new();
+        for _ in 0..6 {
+            delay = next_tick_delay_ms(delay, false);
+            idle_delays.push(delay);
+        }
+        assert_eq!(idle_delays, vec![1_000, 2_000, 4_000, 4_000, 4_000, 4_000]);
+        assert_eq!(
+            next_tick_delay_ms(AUTO_PROCESSOR_IDLE_TICK_MAX_MS, true),
+            AUTO_PROCESSOR_TICK_MS
+        );
+        assert_eq!(next_tick_delay_ms(0, false), AUTO_PROCESSOR_TICK_MS);
+        assert_eq!(
+            next_tick_delay_ms(u64::MAX, false),
+            AUTO_PROCESSOR_IDLE_TICK_MAX_MS
+        );
+    }
+
+    /// `has_pending` is what keeps the loop at the base rate: true from the
+    /// first recorded turn until the queue is drained.
+    #[test]
+    fn has_pending_follows_record_and_drain() {
+        let mut w = WatcherState::new();
+        assert!(!w.has_pending());
+        rec(&mut w, "p", "a", 1_000);
+        assert!(w.has_pending());
+        let c = cfg("p", 100, 32);
+        assert_eq!(w.drain_ready_batch(&c, 1_050), None, "debounce not settled");
+        assert!(w.has_pending());
+        assert!(w.drain_ready_batch(&c, 1_100).is_some());
+        assert!(!w.has_pending());
+    }
+
+    /// A queue left behind by a processor that is no longer declared is never
+    /// drained, so it must not count as pending for the declared ones.
+    #[test]
+    fn has_pending_for_ignores_undeclared_processors() {
+        let mut w = WatcherState::new();
+        rec(&mut w, "removed", "a", 1_000);
+        assert!(w.has_pending());
+        assert!(!w.has_pending_for(["kept"]));
+        assert!(w.has_pending_for(["kept", "removed"]));
+    }
 
     /// Nothing recorded → `drain_ready_batch` returns None regardless of the
     /// elapsed time. The watcher-loop caller should just keep waiting.
