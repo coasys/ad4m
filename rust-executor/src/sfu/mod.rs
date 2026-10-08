@@ -13,6 +13,7 @@
 //! client reaches only its own executor and is always served there.
 
 pub mod cascade;
+pub mod config_store;
 pub mod gossip;
 pub mod reachability;
 pub mod relay;

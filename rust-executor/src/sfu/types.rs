@@ -8,7 +8,8 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-/// Social DNA SFU configuration for a neighbourhood.
+/// A neighbourhood's call configuration, stored as a link in the
+/// neighbourhood (see `sfu::config_store`).
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]

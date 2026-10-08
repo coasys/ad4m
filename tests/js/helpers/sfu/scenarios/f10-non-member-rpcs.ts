@@ -12,8 +12,10 @@
  *
  * Verifies:
  *   - the outsider is refused by each of the 12 neighbourhood-scoped RPCs;
- *   - a member who is not the owner is refused room and config writes;
- *   - the owner may write config;
+ *   - a member who is not the owner is refused room and config writes (the
+ *     config only the neighbourhood's creator may write; a synthetic
+ *     neighbourhood has none, and the Rust tests in `sfu::config_store`
+ *     cover the creator's write);
  *   - `listRooms` and `qualityPreferences` show the outsider nothing of this
  *     neighbourhood, while the owner sees the room.
  */
@@ -37,7 +39,7 @@ async function refused(
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
     // A refusal from the guard, not an unrelated failure further in.
-    return { refused: /member|owner|forbidden/i.test(error), error };
+    return { refused: /member|owner|creator|forbidden/i.test(error), error };
   }
 }
 
@@ -118,12 +120,6 @@ export const f10NonMemberRpcs: Scenario = {
         if (!r.refused) failures.push(`member ${method}: ${r.error ?? "accepted"}`);
       }
       metrics["member"] = memberResults;
-
-      try {
-        await owner.client.call("sfu.setConfig", { ...nh, config: { mode: "mesh" } });
-      } catch (e) {
-        failures.push(`owner sfu.setConfig refused: ${e instanceof Error ? e.message : String(e)}`);
-      }
 
       const outsiderRooms = await outsider.client.call<{ neighbourhoodUrl: string }[]>("sfu.listRooms", {});
       if (outsiderRooms.some((r) => r.neighbourhoodUrl === NEIGHBOURHOOD)) {
