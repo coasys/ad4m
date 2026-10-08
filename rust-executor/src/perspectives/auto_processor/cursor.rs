@@ -649,6 +649,102 @@ mod tests {
         assert_eq!(ready.agent_did.as_deref(), Some(user_did.as_str()));
     }
 
+    /// The pass writes what it extracts as Shared, so what it gathers must be
+    /// Shared too. A co-owner's Local message, and the runner's own, must not
+    /// reach the queue (and so neither the LLM nor `InterpretationRun.sources`)
+    /// even though the processor's scope query matches it. A Shared message is
+    /// the control.
+    #[tokio::test]
+    async fn tick_gathers_shared_messages_only() {
+        use crate::agent::{did_for_context, AgentContext, AgentService};
+        use crate::perspectives::auto_processor::config::{write_processor, AutoProcessorConfig};
+        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::interpretation::{
+            gather_transcript_sparql, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY,
+        };
+        use crate::types::{Link, LinkStatus};
+
+        let (mut p, _shapes, main_ctx) = setup_perspective_no_llm(&[]).await;
+        let email = "local-gather-coowner@test";
+        AgentService::ensure_user_key_exists(email).expect("user key");
+        let alice_ctx = AgentContext::for_user_email(email.to_string());
+        assert_ne!(
+            did_for_context(&alice_ctx).ok(),
+            did_for_context(&main_ctx).ok(),
+            "the test needs a co-owner distinct from the runner"
+        );
+
+        for (ctx, msg, body, status) in [
+            (
+                &alice_ctx,
+                "msg://alice-local",
+                "alice private draft",
+                LinkStatus::Local,
+            ),
+            (
+                &main_ctx,
+                "msg://runner-local",
+                "runner private draft",
+                LinkStatus::Local,
+            ),
+            (
+                &main_ctx,
+                "msg://shared",
+                "shared hello",
+                LinkStatus::Shared,
+            ),
+        ] {
+            p.add_link(
+                Link {
+                    source: msg.into(),
+                    predicate: Some("ns://body".into()),
+                    target: format!("literal:string:{body}"),
+                },
+                status,
+                None,
+                ctx,
+            )
+            .await
+            .expect("seed body link");
+        }
+
+        let cfg = AutoProcessorConfig {
+            processor_id: "shared-only".into(),
+            source_scope_query: BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY.into(),
+            interpretation_classes: vec!["ns://Task".into()],
+            debounce_ms: 50,
+            batch_min: 1,
+            batch_max: 32,
+            claim_ttl_ms: 60_000,
+            ..Default::default()
+        };
+        write_processor(&mut p, &cfg, Some(false), &main_ctx)
+            .await
+            .expect("write_processor");
+
+        let gathered: Vec<String> = gather_transcript_sparql(&p, BODY_AUTHOR_TIMESTAMP_SCOPE_QUERY)
+            .await
+            .expect("gather")
+            .into_iter()
+            .map(|t| t.text)
+            .collect();
+        assert_eq!(gathered, vec!["shared hello".to_string()], "the gather");
+
+        let mut watcher = WatcherState::new();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        p.run_auto_processor_tick(&mut watcher, now_ms, &main_ctx)
+            .await;
+        let queued: Vec<String> = watcher
+            .pending_for("shared-only")
+            .map(|e| e.items.iter().map(|i| i.text.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(
+            queued,
+            vec!["shared hello".to_string()],
+            "only the Shared message may be queued for the pass"
+        );
+    }
+
     #[tokio::test]
     async fn tick_drops_turns_older_than_source_window() {
         use crate::perspectives::auto_processor::config::{
