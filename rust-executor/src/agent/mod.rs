@@ -122,6 +122,77 @@ fn did_document_without_secrets(did_document: &str) -> Option<String> {
     }
 }
 
+/// Replace `path` with `value` serialised as JSON, so that `path` holds either
+/// the old or the new contents after a crash or power loss, never a truncated
+/// file:
+///
+/// - The temp file sits next to `path` (a rename is atomic only within one
+///   filesystem) and has a name unique to this process and call, so two
+///   executors on one data dir never write the same temp file.
+/// - It is created 0600, then takes the mode of the file it replaces, so an
+///   operator's `chmod 600` survives the rename instead of falling back to
+///   the umask.
+/// - Its data is synced before the rename, and the directory after it:
+///   without the first, some filesystems can commit the rename before the
+///   data and leave an empty file; without the second, the rename itself can
+///   be lost.
+/// - On any error the temp file is removed and `path` is untouched.
+///
+/// #1163 hardens `AgentService::save` the same way. Once both are on `dev`,
+/// `save` and the load-time rewrite should share one of the two.
+fn write_json_atomically<T: Serialize>(path: &path::Path, value: &T) -> Result<(), AnyError> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT_TMP: AtomicU64 = AtomicU64::new(0);
+
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => path::Path::new("."),
+    };
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| anyhow!("{} has no file name", path.display()))?
+        .to_string_lossy();
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        NEXT_TMP.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let write_tmp = || -> Result<(), AnyError> {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&tmp)?;
+        if let Ok(meta) = std::fs::metadata(path) {
+            file.set_permissions(meta.permissions())?;
+        }
+        let mut writer = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut writer, value)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    };
+    if let Err(e) = write_tmp().and_then(|()| Ok(std::fs::rename(&tmp, path)?)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+
+    // The rename is done; a failed directory sync only weakens durability.
+    #[cfg(unix)]
+    if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+        log::warn!(
+            "Could not sync {} after writing {}: {}",
+            dir.display(),
+            path.display(),
+            e
+        );
+    }
+    Ok(())
+}
+
 pub fn did_document_for_context(context: &AgentContext) -> Result<did_key::Document, AnyError> {
     if context.is_main_agent {
         let backend = wallet_backend();
@@ -781,15 +852,6 @@ impl AgentService {
             .expect("Failed to write agent file");
     }
 
-    /// Replace `agent.json` with `store` through a temporary file and a rename,
-    /// so a crash mid-write cannot cost the only copy of the keystore.
-    fn rewrite_agent_file(&self, store: &AgentStore) -> Result<(), AnyError> {
-        let tmp = format!("{}.tmp", self.file);
-        std::fs::write(&tmp, serde_json::to_string(store)?)?;
-        std::fs::rename(&tmp, &self.file)?;
-        Ok(())
-    }
-
     pub fn load(&mut self) {
         if !self.is_initialized() {
             return;
@@ -803,8 +865,11 @@ impl AgentService {
             // Rewrite the file now rather than at the next save(): save() runs
             // on lock and profile changes, so a node that is only ever unlocked
             // would keep its private keys on disk in plaintext indefinitely.
-            // Everything else, the keystore included, is written back verbatim.
-            if let Err(e) = self.rewrite_agent_file(&dump) {
+            // The file is re-serialised from `AgentStore`, as save() does: the
+            // keystore string is kept byte for byte, but a top-level key that
+            // `AgentStore` does not model is dropped. The write cannot cost
+            // the only copy of the keystore; see `write_json_atomically`.
+            if let Err(e) = write_json_atomically(path::Path::new(&self.file), &dump) {
                 log::error!(
                     "Could not remove private keys from the DID document in {}: {}",
                     self.file,
@@ -878,6 +943,83 @@ mod tests {
             setup_wallet();
             setup_agent();
         });
+    }
+
+    /// Serialises one map entry, then fails: a write that breaks partway.
+    struct FailsPartway;
+    impl Serialize for FailsPartway {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            use serde::ser::{Error, SerializeMap};
+            let mut map = serializer.serialize_map(None)?;
+            map.serialize_entry("keystore", "half")?;
+            Err(S::Error::custom("disk full"))
+        }
+    }
+
+    fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn write_json_atomically_replaces_the_file_and_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "old").unwrap();
+
+        write_json_atomically(&file, &json!({"keystore": "new"})).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            r#"{"keystore":"new"}"#
+        );
+        assert_eq!(dir_entries(dir.path()), vec!["agent.json"]);
+    }
+
+    #[test]
+    fn write_json_atomically_keeps_the_original_and_removes_the_temp_file_when_the_write_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "the only keystore").unwrap();
+
+        let result = write_json_atomically(&file, &FailsPartway);
+
+        assert!(result.is_err(), "a failed write must be reported");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "the only keystore",
+            "a failed write must leave the original untouched"
+        );
+        assert_eq!(
+            dir_entries(dir.path()),
+            vec!["agent.json"],
+            "a failed write must not leave its temp file behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_json_atomically_keeps_the_mode_of_the_file_it_replaces() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let dir = tempfile::tempdir().unwrap();
+
+        // 0640 differs from both the 0600 the temp file starts with and the
+        // umask default, so only copying the mode gets it right.
+        let file = dir.path().join("agent.json");
+        std::fs::write(&file, "old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o640)).unwrap();
+        write_json_atomically(&file, &json!({})).unwrap();
+        assert_eq!(mode(&file), 0o640);
+
+        // A new file is created private, not with the umask default.
+        let new_file = dir.path().join("new.json");
+        write_json_atomically(&new_file, &json!({})).unwrap();
+        assert_eq!(mode(&new_file), 0o600);
     }
 
     #[test]
