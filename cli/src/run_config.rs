@@ -15,12 +15,12 @@ use rust_executor::config_file::{ExecutorConfigFile, ExecutorSecrets, REDACTED};
 use rust_executor::Ad4mConfig;
 use std::path::PathBuf;
 
-/// Refuses an empty value, then parses with `P`. clap hands an empty
-/// `AD4M_<FLAG>` to the parser as `""`, so without this
+/// Refuses an empty or whitespace-only value, then parses with `P`. clap
+/// hands an empty `AD4M_<FLAG>` to the parser as `""`, so without this
 /// `AD4M_APP_DATA_PATH=${DATA_DIR}` with `DATA_DIR` unset would lay `""`
-/// over the file and put the data directory under the working directory.
-/// The error names the variable or the flag the value came from, never the
-/// value.
+/// over the file and put the data directory under the working directory
+/// (and `" "` would create a directory named ` ` there). The error names the
+/// variable or the flag the value came from, never the value.
 #[derive(Clone)]
 struct NonEmpty<P>(P);
 
@@ -47,7 +47,8 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
         value: &std::ffi::OsStr,
         source: ValueSource,
     ) -> Result<Self::Value, clap::Error> {
-        if !value.is_empty() {
+        let blank = value.to_str().is_some_and(|value| value.trim().is_empty());
+        if !blank {
             return self.0.parse_ref_(cmd, arg, value, source);
         }
         let var = arg
@@ -56,10 +57,12 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
         let flag = arg.and_then(|arg| arg.get_long());
         let message = match (source, var, flag) {
             (ValueSource::EnvVariable, Some(var), _) => {
-                format!("{var} is set but empty: unset it or give it a value")
+                format!("{var} is set but empty or only whitespace: unset it or give it a value")
             }
-            (_, _, Some(flag)) => format!("--{flag} needs a value, not an empty string"),
-            _ => "an empty value is not allowed".to_string(),
+            (_, _, Some(flag)) => {
+                format!("--{flag} needs a value, not an empty or whitespace-only string")
+            }
+            _ => "an empty or whitespace-only value is not allowed".to_string(),
         };
         Err(clap::Error::raw(ErrorKind::ValueValidation, message).format(&mut cmd.clone()))
     }
@@ -67,7 +70,8 @@ impl<P: TypedValueParser> TypedValueParser for NonEmpty<P> {
 
 /// Flags of `ad4m-executor run`. Each also reads `AD4M_<FLAG>`, e.g.
 /// `--mcp-port` reads `AD4M_MCP_PORT`. Each goes through [`non_empty`], so
-/// an empty variable or flag value is an error rather than a value.
+/// an empty or whitespace-only variable or flag value is an error rather
+/// than a value.
 #[derive(clap::Args, Debug)]
 pub struct RunArgs {
     /// JSON config file with the launcher's key names (see the docs'
