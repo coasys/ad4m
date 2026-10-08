@@ -66,7 +66,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             let test_res = tokio::task::spawn(async move {
@@ -229,7 +230,8 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 })
                 .await
                 .join()
-                .expect("Error awaiting executor main thread");
+                .expect("Error awaiting executor main thread")
+                .expect("REST API server failed");
             });
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening

@@ -36,11 +36,13 @@ describe("Authentication integration tests", () => {
             fs.removeSync(appDataPath);
         })
 
-        async function runWithoutCredential(extraArgs: string[]) {
+        async function runWithoutCredential(extraArgs: string[], extraEnv: Record<string, string> = {}) {
             const [apiPort] = await getFreePorts(1);
-            const childEnv = { ...process.env };
+            const childEnv: NodeJS.ProcessEnv = { ...process.env };
             delete childEnv.AD4M_ADMIN_CREDENTIAL;
+            delete childEnv.AD4M_ADMIN_CREDENTIAL_FILE;
             delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;
+            Object.assign(childEnv, extraEnv);
             const child = spawn(executorBin, [
                 "run",
                 "--app-data-path", appDataPath,
@@ -73,15 +75,24 @@ describe("Authentication integration tests", () => {
             expectRefusal(await runWithoutCredential([]));
         })
 
-        it("an empty credential counts as no credential", async () => {
-            expectRefusal(await runWithoutCredential(["--admin-credential", ""]));
+        // An empty credential never becomes a credential: the CLI rejects
+        // the empty value itself and names where it came from (a library
+        // caller's Some("") is turned into None by Ad4mConfig::prepare()).
+        it("an empty credential is refused, naming the flag or the variable", async () => {
+            const flag = await runWithoutCredential(["--admin-credential", ""]);
+            expect(flag.exited, `executor kept running:\n${flag.output.slice(-2000)}`).to.be.true;
+            expect(flag.code).to.not.equal(0);
+            expect(flag.output).to.contain("--admin-credential needs a value");
+
+            const variable = await runWithoutCredential([], { AD4M_ADMIN_CREDENTIAL: "" });
+            expect(variable.exited, `executor kept running:\n${variable.output.slice(-2000)}`).to.be.true;
+            expect(variable.code).to.not.equal(0);
+            expect(variable.output).to.contain("AD4M_ADMIN_CREDENTIAL is set but empty");
         })
 
-        // With the testing flag, an empty credential is the same as none for
-        // every reader, not only the startup check: MCP binds loopback and
-        // lets a tokenless caller read, as REST does. Before, MCP took "" for
-        // a real credential, bound 0.0.0.0 and rejected the caller.
-        it("an empty credential with the testing flag is no credential for MCP either", async () => {
+        // With the testing flag and no credential, MCP binds loopback and
+        // lets a tokenless caller read, as REST does.
+        it("without a credential the testing flag opens MCP to a tokenless caller on loopback", async () => {
             const [apiPort, mcpPort] = await getFreePorts(2);
             registerPorts([apiPort, mcpPort]);
             const childEnv = { ...process.env };
@@ -94,7 +105,6 @@ describe("Authentication integration tests", () => {
                 "--port", String(apiPort),
                 "--run-dapp-server", "false",
                 "--run-holochain", "false",
-                "--admin-credential", "",
                 "--insecure-no-admin-credential",
                 "--enable-mcp", "true",
                 "--mcp-port", String(mcpPort),
