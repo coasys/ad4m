@@ -37,7 +37,7 @@ Without a credential, or with an empty one, `run` exits with an error naming bot
 ad4m-executor run --insecure-no-admin-credential   # or AD4M_INSECURE_NO_ADMIN_CREDENTIAL=true
 ```
 
-In that mode an empty token is the operator: any client that can reach the executor's port has full admin access. Never use it on an executor other users or other machines can reach.
+In that mode an empty token is the operator on a loopback-bound API: any client that can reach the executor's loopback port, including a proxy or tunnel on the same host that sets no forwarding header, has full admin access. On a network-bound API (`--localhost false`, or TLS) a caller with no token is anonymous. Never use it on an executor other users or other machines can reach.
 
 ### Configuration Parameters
 

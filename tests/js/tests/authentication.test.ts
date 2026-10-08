@@ -97,6 +97,7 @@ describe("Authentication integration tests", () => {
             registerPorts([apiPort, mcpPort]);
             const childEnv = { ...process.env };
             delete childEnv.AD4M_ADMIN_CREDENTIAL;
+            delete childEnv.AD4M_ADMIN_CREDENTIAL_FILE;
             delete childEnv.AD4M_INSECURE_NO_ADMIN_CREDENTIAL;
             delete childEnv.MCP_HOST;
             const child = spawn(executorBin, [
