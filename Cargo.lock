@@ -68,6 +68,7 @@ dependencies = [
  "axum-server",
  "base64 0.21.7",
  "candle-core",
+ "chacha20poly1305",
  "chat-gpt-lib-rs",
  "chrono",
  "cid",
@@ -139,6 +140,7 @@ dependencies = [
  "secp256k1",
  "semver",
  "serde",
+ "serde_ignored",
  "serde_json",
  "serde_yaml",
  "sha2 0.10.9",
@@ -152,6 +154,7 @@ dependencies = [
  "tokio",
  "tokio-rustls 0.26.4",
  "tokio-stream",
+ "tokio-tungstenite 0.29.0",
  "tokio-util",
  "tower",
  "tower-http",
@@ -164,6 +167,7 @@ dependencies = [
  "voice_activity_detector",
  "webbrowser",
  "x509-parser 0.16.0",
+ "zeroize",
  "zip 0.6.6",
 ]
 
@@ -18356,6 +18360,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -22069,8 +22083,11 @@ version = "12.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
+ "chrono",
+ "serde_json",
  "thiserror 2.0.20",
  "ts-rs-macros",
+ "url",
 ]
 
 [[package]]

@@ -57,11 +57,12 @@ pub struct BootstrapSeed {
 //Generates an ad4m client, unlocks the agent and then publishes the languages found in the seed proto.
 //After that it will generate a new bootstrap seed and save to the current directory
 pub async fn start_publishing(
+    admin_credential: String,
     passphrase: String,
     seed_proto: SeedProto,
     language_language_bundle: String,
 ) {
-    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), "".to_string())
+    let ad4m_client = Ad4mClient::connect("http://localhost:12000".to_string(), admin_credential)
         .await
         .expect("could not connect to executor");
 
