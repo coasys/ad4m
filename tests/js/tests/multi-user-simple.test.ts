@@ -830,6 +830,81 @@ describe("Multi-User Simple integration tests", () => {
             );
         });
 
+        // A live query re-runs in the scope of the user who opened it, so its
+        // updates can carry that user's Local links. They go to that user's
+        // sockets only: a co-owner of the neighbourhood perspective gets none
+        // of them, even though the SDK would drop them by subscription id.
+        it("delivers live-query updates only to the user who subscribed", async function () {
+            this.timeout(300000);
+
+            const { Model, Property, Flag, Ad4mModel, Literal } = await import("@coasys/ad4m");
+
+            @Model({ name: "PrivLive" })
+            class PrivLive extends Ad4mModel {
+                @Flag({ through: "priv://type", value: "priv://live" })
+                type = "priv://live";
+                // No default: `create` writes no value, so Alice's Local link
+                // is the sole value and ordering cannot hide it.
+                @Property({ through: "priv://live-body" })
+                body!: string;
+            }
+
+            await adminAd4mClient!.runtime.setMultiUserEnabled(true);
+            await createTestUser("privlive1@example.com", "password1");
+            await createTestUser("privlive2@example.com", "password2");
+            const alice = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privlive1@example.com", "password1"), false);
+            const bob = new Ad4mClient(baseUrl(apiPort), await adminAd4mClient!.agent.loginUser("privlive2@example.com", "password2"), false);
+
+            const aliceHandle = await alice.perspective.add("Local Link Privacy: live queries");
+            const linkLanguage = await alice.languages.applyTemplateAndPublish(
+                DIFF_SYNC_OFFICIAL,
+                JSON.stringify({ uid: uuidv4(), name: "Local Link Privacy: live queries" }),
+            );
+            const neighbourhoodUrl = await alice.neighbourhood.publishFromPerspective(
+                aliceHandle.uuid,
+                linkLanguage.address,
+                new Perspective([]),
+            );
+            await sleep(1000);
+            await bob.neighbourhood.joinFromUrl(neighbourhoodUrl);
+            await sleep(2000);
+            const bobHandle = (await bob.perspective.all()).find((p) => p.sharedUrl === neighbourhoodUrl);
+            expect(bobHandle, "Bob joined the neighbourhood").to.not.be.undefined;
+
+            const pa = (await alice.perspective.byUUID(aliceHandle.uuid))!;
+            const pb = (await bob.perspective.byUUID(bobHandle!.uuid))!;
+            await (PrivLive as any).register(pa);
+            await (PrivLive as any).register(pb);
+
+            // Every update each socket receives, by subscription id.
+            const aliceGot: { id: string; result: string }[] = [];
+            const bobGot: { id: string; result: string }[] = [];
+            alice.on("query-subscription-update", (e) => { aliceGot.push({ id: e.subscriptionId, result: e.result }); });
+            bob.on("query-subscription-update", (e) => { bobGot.push({ id: e.subscriptionId, result: e.result }); });
+
+            const { subscriptionId: aliceSub } = await pa.modelSubscribe("PrivLive", JSON.stringify({}));
+            const { subscriptionId: bobSub } = await pb.modelSubscribe("PrivLive", JSON.stringify({}));
+            expect(aliceSub).to.not.equal(bobSub);
+
+            // A Shared instance changes both results; Alice's Local body on it
+            // then changes hers alone.
+            const item = await (PrivLive as any).create(pa, {});
+            const secret = Literal.from("alice-live-secret").toUrl();
+            await alice.perspective.addLink(aliceHandle.uuid, new Link({ source: item.id, predicate: "priv://live-body", target: secret }), "local");
+
+            const aliceSawSecret = () => aliceGot.some((u) => u.id === aliceSub && u.result.includes("alice-live-secret"));
+            const bobSawShared = () => bobGot.some((u) => u.id === bobSub && u.result.includes(item.id));
+            for (let i = 0; i < 100 && !(aliceSawSecret() && bobSawShared()); i++) {
+                await sleep(200);
+            }
+            expect(aliceSawSecret(), `Alice's live query shows her Local value: ${JSON.stringify(aliceGot)}`).to.be.true;
+            expect(bobSawShared(), `Bob's own live query still updates: ${JSON.stringify(bobGot)}`).to.be.true;
+            await sleep(1000);
+            expect(bobGot.filter((u) => u.id === aliceSub), "Bob's socket gets no update for Alice's subscription").to.deep.equal([]);
+            expect(bobGot.filter((u) => u.result.includes("alice-live-secret")), "no update to Bob carries Alice's Local value").to.deep.equal([]);
+            expect(aliceGot.filter((u) => u.id === bobSub), "and Alice's gets none of Bob's").to.deep.equal([]);
+        });
+
         // Two users can hold the identical Local link. In the store that is
         // one bare triple with one reifier per author; removing my link must
         // take neither the co-owner's reifier nor the bare triple with it.

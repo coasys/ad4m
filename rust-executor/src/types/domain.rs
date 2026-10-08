@@ -1397,6 +1397,11 @@ pub struct PerspectiveQuerySubscriptionFilter {
     pub uuid: String,
     pub subscription_id: String,
     pub result: String,
+    /// DID of the agent the subscription runs as. The result is computed in
+    /// that agent's visibility scope, so it can hold that agent's Local links:
+    /// the events socket delivers it to this DID only, not to every owner of
+    /// the perspective (`events_ws::matches_subscription_owner`).
+    pub owner: String,
 }
 
 impl GetValue for PerspectiveQuerySubscriptionFilter {

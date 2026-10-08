@@ -10,8 +10,9 @@
 //! - `null` takes every event of that type; a list takes only events about
 //!   those perspectives.
 //! - Live query updates (`query-subscription-update`) are not filtered: a
-//!   socket keeps getting the updates of its owner's live queries without a
-//!   watch.
+//!   socket keeps getting the updates of its agent's own live queries without
+//!   a watch. Which agent that is, is decided before this filter
+//!   (`events_ws::matches_subscription_owner`).
 
 use futures::stream::{Stream, StreamExt};
 use serde_json::{json, Value};
