@@ -127,12 +127,12 @@ describe('requestPayment', () => {
   it('calls agent.requestPayment with string amount', async () => {
     const mockClient = {
       agent: {
-        requestPayment: vi.fn().mockResolvedValue({ success: true, message: 'OK' }),
+        requestPayment: vi.fn().mockResolvedValue({ success: true, amountHOT: '100' }),
       },
     } as any;
 
     const result = await requestPayment(mockClient, 100);
     expect(mockClient.agent.requestPayment).toHaveBeenCalledWith('100');
-    expect(result).toEqual({ success: true, message: 'OK' });
+    expect(result).toEqual({ success: true, amountHOT: '100' });
   });
 });

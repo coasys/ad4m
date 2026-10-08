@@ -413,7 +413,7 @@ Each relation decorator supports two calling conventions:
 | Decorator | Cardinality | Generated methods | Ownership |
 |-----------|------------|-------------------|-----------|
 | `@HasMany` | One-to-many | `add*`, `remove*`, `set*` | Parent owns |
-| `@HasOne` | One-to-one | Property setter | Parent owns |
+| `@HasOne` | One-to-one | `set*` (also `add*`, `remove*`), or assign and `save()` | Parent owns |
 | `@BelongsToOne` | Many-to-one | Read-only | Child references |
 | `@BelongsToMany` | Many-to-many | Read-only | Child references |
 <Callout type="info" emoji="ℹ️">
@@ -445,6 +445,69 @@ const batchId = await perspective.createBatch();
 await recipe.addComments(comment, batchId);
 await perspective.commitBatch(batchId);
 ```
+
+`@HasOne` with a `through` gets the same three methods. Use `set*` to point it somewhere: it takes
+an ID or a model instance and replaces whatever the relation held. Writing works the same whether
+or not the relation names a target class, so a `polymorphic` to-one is written the same way.
+
+`add*` writes a second link and leaves the first in place. A read then returns the newest link,
+unless the relation names a `target` class that has a flag or a required property, and does not set
+`filter: false`. Such a read goes through a type-checking query and returns whichever row that query
+yields first. Either way the old link stays in the graph.
+
+```typescript
+@Model({ name: "Note" })
+class Note extends Ad4mModel {
+  @HasOne({ through: "note://about", polymorphic: true })
+  about: string = "";
+}
+
+// At creation: an ID, an instance, or a one-element array
+const note = await Note.create(perspective, { about: recipe.id });
+
+// Later
+await note.setAbout(otherRecipe);
+await note.setAbout([]); // clears it
+```
+
+The generated methods are added at runtime and are not declared on the class, so TypeScript does
+not know about them. Declare them on the class or call them through a cast.
+
+#### Ordered relations
+
+A `@HasMany` is a set by default. Assigning the same members in another order is not a change, and
+reads come back in link order (or in no stated order, when the relation is read through a
+type-checking query, below), never in an order someone chose. Add `ordering` to make the sequence part of the data:
+
+```typescript
+@HasMany({
+  through: "board://task",
+  target: () => Task,
+  ordering: { strategy: "linkedList" },
+})
+tasks: string[] = [];
+```
+
+Assigning the array (`board.tasks = [c, a, b]` then `save()`, or `setTasks([c, a, b])`) writes
+ordering entries alongside the member links. Concurrent reorders by different agents merge rather
+than overwrite each other.
+
+The member links decide what is in the relation; the entries decide only where things go. A member
+with no entry is still returned, after every positioned member. A member has no entry when it was
+written:
+
+- by `add*`, which writes the member link only
+- by raw `addLink`, an MCP tool, or a peer that does not know the strategy
+- before the relation had `ordering`
+
+Where those members go depends on how the relation is read:
+
+- **Through a type-checking query**, which is the case when the relation names a `target` class
+  that has a flag or a required property, and does not set `filter: false`: the query carries no
+  order, so their order among themselves is unspecified. A collection with no entries at all, such
+  as one written before `ordering` was added, therefore reads in an unspecified order until the
+  next assignment writes a full sequence.
+- **Otherwise:** oldest link first.
 
 ### Flags
 

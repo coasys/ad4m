@@ -1,4 +1,4 @@
-import { Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle, Literal } from "@coasys/ad4m";
+import { PerspectiveExpression, Link, Perspective, LinkExpression, ExpressionProof, LinkQuery, PerspectiveState, NeighbourhoodProxy, PerspectiveUnsignedInput, PerspectiveProxy, PerspectiveHandle, Literal } from "@coasys/ad4m";
 import { Ad4mModel, Model, Property, Flag } from "@coasys/ad4m";
 import { TestContext } from './test-context'
 import { assertStaysFalse, pollUntil, sleep } from "../utils/utils";
@@ -74,6 +74,28 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     console.log(`[publish-and-join-locally] attempt ${++attempt}: state=${state}`);
                     return state === PerspectiveState.Synced;
                 }, { timeoutMs: 60000, intervalMs: 1000, label: "locally published perspective reaches Synced" });
+            })
+
+            it('a sync-state-change listener fires for its own perspective only @alice', async () => {
+                const alice = testContext.alice!;
+                const shared = await alice.perspective.add("sync-state-shared");
+                const other = await alice.perspective.add("sync-state-other");
+                const sharedStates: PerspectiveState[] = [];
+                const otherStates: PerspectiveState[] = [];
+                shared.on('sync-state-change', ({ state }) => { sharedStates.push(state); });
+                other.on('sync-state-change', ({ state }) => { otherStates.push(state); });
+                try {
+                    const socialContext = await publishLinkLanguage(alice, getLinkLang(), "Alice's sync-state listener test");
+                    await alice.neighbourhood.publishFromPerspective(shared.uuid, socialContext.address, new Perspective());
+
+                    await pollUntil(() => sharedStates.length > 0, { timeoutMs: 30000, intervalMs: 500, label: "sync-state-change for the shared perspective" });
+                    // Each state is a PerspectiveState value, not a JSON-encoded string.
+                    for (const state of sharedStates) expect(Object.values(PerspectiveState)).to.include(state);
+                    expect(otherStates).to.be.empty;
+                } finally {
+                    shared.dispose();
+                    other.dispose();
+                }
             })
 
             it('can be created by Alice and joined by Bob', async () => {
@@ -319,7 +341,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 // Wait for Alice's link language to be wired (see simple
                 // test comment for rationale).
                 await pollUntil(async () => {
-                    const p = await alice.perspective.byUUID(aliceP1.uuid);
+                    const p = await alice.perspective.byUUID(aliceP1!.uuid);
                     const s = p?.state;
                     return s !== PerspectiveState.Private
                         && s !== PerspectiveState.NeighboudhoodCreationInitiated;
@@ -365,7 +387,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Bob to receive Alice's post-burst links
                 await pollUntil(async () => {
-                    const links = await testContext.bob.perspective.queryLinks(bobP1.uuid, new LinkQuery({source: 'ad4m://alice'}));
+                    const links = await testContext.bob.perspective.queryLinks(bobP1!.uuid, new LinkQuery({source: 'ad4m://alice'}));
                     console.log(`Bob has ${links.length}/3 of Alice's post-burst links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "bob receives alice's post-burst links" });
@@ -386,7 +408,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                 // Wait for Alice to receive Bob's links
                 await pollUntil(async () => {
-                    const links = await testContext.alice.perspective.queryLinks(aliceP1.uuid, new LinkQuery({source: 'ad4m://bob'}));
+                    const links = await testContext.alice.perspective.queryLinks(aliceP1!.uuid, new LinkQuery({source: 'ad4m://bob'}));
                     console.log(`Alice has ${links.length}/3 of Bob's links`);
                     return links.length >= 3;
                 }, { timeoutMs: 40000, intervalMs: 2000, label: "alice receives bob's links" });
@@ -431,7 +453,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //         return null;
             //     };
 
-            //     aliceP1.addSyncStateChangeListener(aliceSyncChangeHandler);
+            //     aliceP1.on('sync-state-change', ({ state }) => aliceSyncChangeHandler(state));
 
             //     await testContext.alice.perspective.addLink(aliceP1.uuid, {source: 'ad4m://root', target: 'test://test'})
 
@@ -449,7 +471,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
             //     let bobP1 = await testContext.bob.perspective.byUUID(bobHandler.uuid);
             //     expect(bobP1?.state).to.be.equal(PerspectiveState.LinkLanguageInstalledButNotSynced);
 
-            //     bobP1!.addSyncStateChangeListener(bobSyncChangeHandler);
+            //     bobP1!.on('sync-state-change', ({ state }) => bobSyncChangeHandler(state));
 
             //     //These next assertions are flaky since they depend on holochain not syncing right away, which most of the time is the case
 
@@ -594,7 +616,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('they can send signals via `sendSignal` and receive callbacks via `addSignalHandler`', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -603,7 +625,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;
@@ -611,7 +633,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                     bobNH!.addSignalHandler(bobHandler)
 
                     let link = new LinkExpression()
-                    link.author = aliceDID;
+                    link.author = aliceDID!;
                     link.timestamp = new Date().toISOString();
                     link.data = new Link({source: "alice", target: "bob", predicate: "signal"});
                     link.proof = new ExpressionProof("sig", "key");
@@ -646,7 +668,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
                 it('supports loopback functionality for broadcasts', async () => {
                     let aliceCalls = 0;
                     let aliceData = null;
-                    const aliceHandler = async (payload: Perspective) => {
+                    const aliceHandler = async (payload: PerspectiveExpression) => {
                         aliceCalls += 1;
                         //@ts-ignore
                         aliceData = payload;
@@ -655,7 +677,7 @@ export default function neighbourhoodTests(testContext: TestContext, getLinkLang
 
                     let bobCalls = 0;
                     let bobData = null;
-                    const bobHandler = async (payload: Perspective) => {
+                    const bobHandler = async (payload: PerspectiveExpression) => {
                         bobCalls += 1;
                         //@ts-ignore
                         bobData = payload;
