@@ -73,7 +73,9 @@ use crate::types::{Link, LinkQuery, LinkStatus};
 /// One consensus event recorded on this replica: the atoms that settled an
 /// edge, now marked, with the cache advanced to match. A pass reports it
 /// when it records it for the first time; the pass after a vote also
-/// reports the one that vote completed ([`run_pass_after_vote`]).
+/// reports the one that vote counts in ([`run_pass_after_vote`]). So one
+/// settle can appear in more than one response on one replica: two users of
+/// it whose votes both count in the quorum, both racing the same sweep.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -254,7 +256,7 @@ pub async fn run_flow_consensus_pass(
 
 /// A vote a propose or accept call just wrote: `did`'s, on `proposal_uri`,
 /// a proposal that had not yet contributed to a settled edge when the vote
-/// was written. That is the vote that can complete a quorum.
+/// was written. That is a vote that can count in a quorum.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OwnVote {
     pub proposal_uri: String,
@@ -265,14 +267,32 @@ pub(crate) struct OwnVote {
 ///
 /// **Contract (#1332).** The outcomes are what [`run_flow_consensus_pass`]
 /// recorded for the first time, plus, when `own` is given, the settle that
-/// vote completed: the edge whose atoms include `own.proposal_uri` and whose
-/// quorum's voters include `own.did`, once it is recorded on this replica.
-/// It is reported whichever pass recorded it. A concurrent pass on this
-/// replica (the debounced sync sweep, or the definition-change sweep, run
-/// for any user of it) can read the vote and record the settle between the
-/// vote's write and this pass, and this pass then finds the edge marked and
-/// returns nothing. The caller's vote still completed the quorum, and the
-/// call has to say so.
+/// vote counts in: the edge whose counted votes include `own.did`'s vote on
+/// `own.proposal_uri` ([`SettledEdge::counted`](super::fold::SettledEdge)),
+/// once it is recorded on this replica. It is reported whichever pass
+/// recorded it. A concurrent pass on this replica (the debounced sync sweep,
+/// or the definition-change sweep, run for any user of it) can read the vote
+/// and record the settle between the vote's write and this pass, and this
+/// pass then finds the edge marked and returns nothing. The caller's vote
+/// still counts in the quorum, and the call has to say so.
+///
+/// The match is on the vote, not on the DID and the proposal separately.
+/// With twin proposals on one edge, the caller's DID can be counted through
+/// an earlier vote on the twin while this vote is the duplicate the fold
+/// skipped. That vote counts in nothing, and the call reports nothing.
+///
+/// "Counts in" is not "completed". At `{n: 3}`, if the second and the third
+/// vote both race the sweep, both calls report the settle, just as on `dev`
+/// with no sweep in between whichever pass records first reports it.
+///
+/// The report is the fold at lookup time, not the quorum the recording pass
+/// saw: marks carry no voter set. If a vote in the recorded quorum was
+/// withdrawn since and this vote now counts in its place, the call reports
+/// the new voters.
+///
+/// On a replica's first derivation of the instance, the pass catches up
+/// silently and reports nothing; this lookup still reports the caller's own
+/// settle, and only that one. Earlier settles stay unreported.
 ///
 /// This adds one edge and filters nothing. Which settles *other* users of
 /// the replica should see in a response is #1152's question, not this one.
@@ -315,11 +335,15 @@ pub(crate) async fn run_pass_after_vote(
     outcomes
 }
 
-/// The recorded settle `own` completed, if there is one: see
+/// The recorded settle `own` counts in, if there is one: see
 /// [`run_pass_after_vote`]. "Recorded" means every atom of the edge carries
 /// this replica's mark, so a [`FireOutcome`] still means "marked, with the
 /// cache advanced". An edge the pass failed to record is reported by the
 /// next pass instead, as before.
+///
+/// The marks read are every user's on this replica
+/// ([`ReadSet::marked_proposals`](super::read_set::ReadSet::marked_proposals)).
+/// If #1152 makes marks per user, it must decide which marks this lookup reads.
 ///
 /// Folds the raw read-set, for the reason given at the fold in
 /// [`run_flow_consensus_pass`]: it was just read from this replica's own
@@ -346,8 +370,9 @@ async fn recorded_settle_of(
         .settled
         .iter()
         .find(|edge| {
-            edge.atom_uris.contains(&own.proposal_uri)
-                && edge.voters.contains(&own.did)
+            edge.counted
+                .iter()
+                .any(|(did, uri)| *did == own.did && *uri == own.proposal_uri)
                 && edge.atom_uris.iter().all(|uri| marked.contains(uri))
         })
         .map(|edge| FireOutcome {

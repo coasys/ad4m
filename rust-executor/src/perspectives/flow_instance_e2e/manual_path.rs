@@ -933,6 +933,76 @@ async fn a_vote_outside_the_quorum_does_not_claim_a_settle_a_concurrent_pass_rec
     );
 }
 
+/// The report is for the caller's *vote*, not for the caller's DID and the
+/// voted proposal taken separately. Twin proposals on one `{n: 3}` edge
+/// pool into one quorum. Alice is counted through her mint P1, and her
+/// later vote on Carol's twin P2 is a duplicate the fold skips. Dave's vote
+/// completes the quorum {Alice, Carol, Dave} over atoms {P1, P2}, and a
+/// concurrent pass records it. Alice is among the voters and P2 is among the
+/// atoms, but her P2 vote counts in nothing, so her call reports nothing.
+///
+/// Red if the lookup checks "DID among the voters" and "proposal among the
+/// atoms" independently.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicate_vote_on_a_twin_proposal_does_not_claim_a_settle_a_concurrent_pass_recorded() {
+    use crate::perspectives::flow_instance::accept::cast_vote;
+    use crate::perspectives::flow_instance::pass::run_pass_after_vote;
+
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":3}"#).await;
+    let instance = f.instance_uri.clone();
+    let from = f.derived().await.state;
+    let seal = seal_for(&f, "scoped").await;
+
+    let p1 = propose_flow_transition(&mut f.perspective, &instance, "scoped", &[], None, &f.ctx)
+        .await
+        .expect("Alice mints P1")
+        .proposal_uri;
+    tick().await;
+    let carol = TestSigner::generate();
+    let p2 = sync_proposal_from(&mut f, &carol, "twin-1332", &from, "scoped", &seal).await;
+    sync_vote_from(&mut f, &carol, &p2).await;
+    assert_ne!(p1, p2, "precondition: two twin proposals on one edge");
+    assert_eq!(f.derived().await.state, from, "2 of 3 settles nothing");
+    tick().await;
+
+    // `acceptProposal(P2)`: `already` is per proposal, so the vote is written.
+    let cast = cast_vote(&mut f.perspective, &p2, &f.ctx)
+        .await
+        .expect("Alice's vote on the twin lands");
+    assert!(cast.own.is_some(), "precondition: a new vote was written");
+    tick().await;
+
+    let dave = TestSigner::generate();
+    sync_vote_from(&mut f, &dave, &p1).await;
+    let swept = consensus_pass(&mut f).await;
+    assert_eq!(swept.len(), 1, "precondition: {swept:?}");
+    let mut atoms = vec![p1.clone(), p2.clone()];
+    atoms.sort();
+    assert_eq!(
+        swept[0].contributing_proposal_uris, atoms,
+        "precondition: P2 is among the atoms"
+    );
+    assert!(
+        swept[0].voters.contains(&acting_did(&f)),
+        "precondition: Alice is among the voters, through P1: {:?}",
+        swept[0].voters
+    );
+    let edge = f.derived().await.settled[0].clone();
+    assert!(
+        !edge.counted.contains(&(acting_did(&f), p2.clone())),
+        "precondition: Alice's P2 vote is the duplicate the fold skipped: {:?}",
+        edge.counted
+    );
+
+    let reported =
+        run_pass_after_vote(&mut f.perspective, &instance, cast.own.as_ref(), &f.ctx).await;
+    assert!(
+        reported.is_empty(),
+        "Alice's P2 vote counts in nothing, Dave's completed the quorum: {reported:?}"
+    );
+}
+
 /// A vote on a proposal that settled an edge on an earlier visit to its
 /// state completes nothing, so it reports nothing. In a cyclic flow the
 /// instance is back in `review`, Alice's old `review → changes_requested`
