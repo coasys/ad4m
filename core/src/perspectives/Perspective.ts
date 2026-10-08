@@ -1,6 +1,9 @@
 import { ExpressionGeneric } from "../expression/Expression";
-import { Link, LinkExpression, LinkExpressionInput, LinkInput } from "../links/Links";
+import { Link, LinkExpression, LinkExpressionInput, LinkInput, linkExpressionToWire } from "../links/Links";
 import { LinkQuery } from "./LinkQuery";
+import type { DecoratedPerspective } from "../generated/api/DecoratedPerspective";
+import type { Perspective as WirePerspective } from "../generated/api/Perspective";
+import type { PerspectiveExpression as WirePerspectiveExpression } from "../generated/api/PerspectiveExpression";
 
 /** A Perspective represents subjective meaning, encoded through
 * associations between expressions, a.k.a. Links, that is a graph
@@ -24,6 +27,15 @@ export class Perspective {
         } else {
             this.links = []
         }
+    }
+
+    /** Build a Perspective (with its query helpers) from the executor's wire shape. */
+    static fromWire(wire: DecoratedPerspective | null): Perspective {
+        return new Perspective((wire?.links ?? []).map(LinkExpression.fromWire))
+    }
+
+    static toWire(perspective: Perspective): WirePerspective {
+        return { links: perspective.links.map(linkExpressionToWire) }
     }
     
     /** Convenience function for filtering links just like with PerspectiveProxy */
@@ -104,4 +116,8 @@ export class PerspectiveUnsignedInput {
         return obj
     }
 }
-export class PerspectiveExpression extends ExpressionGeneric(Perspective) {};
+export class PerspectiveExpression extends ExpressionGeneric(Perspective) {
+    static fromWire(wire: WirePerspectiveExpression): PerspectiveExpression {
+        return new PerspectiveExpression(wire.author, wire.timestamp, Perspective.fromWire(wire.data), wire.proof)
+    }
+};
