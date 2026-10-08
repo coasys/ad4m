@@ -1,5 +1,5 @@
 # The vhost of /etc/nginx/sites-available/staging-ad4m-dev on marvin (enabled
-# via sites-enabled). Installing it needs root; see docs-src/headless-executor.md.
+# via sites-enabled). Installing it needs root; see deploy/staging/README.md.
 # Below this header the live file matches this one line for line, the
 # /internal/ block (applied 2026-09-30) and client_max_body_size (applied
 # 2026-10-06) included.

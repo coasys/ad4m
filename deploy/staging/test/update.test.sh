@@ -587,7 +587,7 @@ check "and is named as a rollback" [ "$(jq -r .last_result "$T/state13/status.js
 check "and nothing is stopped or started" bash -c "! grep -q systemctl '$T/calls'"
 check "and the data stays in place" [ "$(cat "$T/data13/written-by")" = "$before13" ]
 check "and status.json names no data moved aside" [ "$(jq -r .failed_data "$T/state13/status.json")" = null ]
-# The runbook's third case: the data was not moved, so rolling back again
+# The README's third rollback case: the data was not moved, so rolling back again
 # is allowed and finishes.
 run rollback
 check "a rollback again after a kill before the move rolls back" \
@@ -641,7 +641,7 @@ check "the timer's next run still rolls the deploy back" \
 
 # 28. A rollback by hand after an automatic rollback could not restore the
 # data is refused: the deployed build's data is only in its snapshot, which
-# the operator restores (runbook: Roll back).
+# the operator restores (README: Roll back).
 export AD4M_STAGING_STATE=$T/state17 AD4M_STAGING_DATA=$T/data17 AD4M_STAGING_SRC=$T/src17
 push_staging "$one"
 run

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploys origin/staging to the staging executor (ad4m-staging.service) when
-# it has moved. Run by ad4m-staging-update.service; runbook in
-# docs-src/headless-executor.md.
+# it has moved. Run by ad4m-staging-update.service. Setup, status values
+# and the rollback cases: deploy/staging/README.md.
 #
 #   fetch the staging branch head -- deployed, or failed last time? -- yes --> exit
 #     | no
@@ -242,16 +242,16 @@ if [[ $COMMAND == rollback ]]; then
   # Refusals below leave status.json alone: its last_result says how the
   # unfinished step ended. A deploy killed in its gate, a rollback that
   # moved `current` or a failed restore leave `current` != deployed_sha;
-  # the timer's next run or the operator resolves those (runbook: Roll back).
+  # the timer's next run or the operator resolves those (README: Roll back).
   live=$(readlink "$STATE/current" || true)
   if [[ ${live#releases/} != "$current" ]]; then
-    log "error: current is ${live:-missing}, not the deployed $current; an unfinished deploy or rollback comes first (runbook: Roll back)"
+    log "error: current is ${live:-missing}, not the deployed $current; an unfinished deploy or rollback comes first (README: Roll back)"
     exit 1
   fi
   # An unfinished rollback that moved the data aside holds the only copy of
   # the newer build's data in $DATA.failed; a second one would replace it.
   if [[ $(field in_flight) == rollback && -n $(field failed_data) ]]; then
-    log "error: the unfinished rollback by hand keeps the data of $(field failed_data) in $DATA.failed; resolve it by hand first (runbook: Roll back)"
+    log "error: the unfinished rollback by hand keeps the data of $(field failed_data) in $DATA.failed; resolve it by hand first (README: Roll back)"
     exit 1
   fi
   # The snapshot taken when $current replaced $previous holds $previous's data.
@@ -265,7 +265,7 @@ if [[ $COMMAND == rollback ]]; then
   failed=$(field staging_sha)
   # in_flight tells the next run that this rollback did not finish, whether
   # it was killed before `current` moved or after: every run stops until an
-  # operator has looked (runbook: Roll back).
+  # operator has looked (README: Roll back).
   set_status in_flight rollback failed_data null last_result "rolling back by hand from $current to $previous"
   rc=0
   roll_back "${failed:-$current}" "$snapshot" "$previous" || rc=$?
@@ -295,7 +295,7 @@ live=${live#releases/}
 # `current`, the failed restore below keeps its own message.
 if [[ -n $live && $(field in_flight) == rollback ]]; then
   previous=$(field previous_sha)
-  log "the rollback by hand from $deployed to $previous did not finish; staging is left as it is for an operator (runbook: Roll back)"
+  log "the rollback by hand from $deployed to $previous did not finish; staging is left as it is for an operator (README: Roll back)"
   # A rollback whose gate failed has written its result; keep it.
   [[ $(field last_result) == "rolled_back by hand: "* ]] && exit 1
   fail "error: the rollback by hand from $deployed to $previous was interrupted; left to the operator"
@@ -303,7 +303,7 @@ fi
 if [[ $live != "$deployed" ]]; then
   if [[ -z $live ]]; then
     # status.json keeps the error of the failed restore.
-    log "no build is current while $deployed is deployed: a restore failed; staging stays stopped until an operator restores the data (runbook: Roll back)"
+    log "no build is current while $deployed is deployed: a restore failed; staging stays stopped until an operator restores the data (README: Roll back)"
     exit 1
   fi
   # Without a deployed build there is no data to go back to, and a lost
