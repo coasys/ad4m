@@ -258,11 +258,11 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
     )
     .await?;
 
-    // The listeners are bound before these lines: the integration tests take the "starting"
-    // line as the server being ready.
+    // The listeners are bound before these lines. Test harnesses (tests/js startExecutor) take
+    // the cleartext "API server starting on" line as the server being ready, so it is logged
+    // with and without TLS.
     if let (Some((tls_listener, tls_app)), Some(rustls_config)) = (https, rustls_config) {
         let tls_port = tls_listener.local_addr()?.port();
-        log::info!("Starting API server (HTTP) on {}", listener.local_addr()?);
         log::info!(
             "Starting API server (HTTPS) on {}",
             tls_listener.local_addr()?
@@ -286,12 +286,11 @@ pub async fn start_server(config: Ad4mConfig) -> Result<(), AnyError> {
                     )
                 });
         });
-    } else {
-        log::info!(
-            "API server starting on http://{}/api/v1",
-            listener.local_addr()?
-        );
     }
+    log::info!(
+        "API server starting on http://{}/api/v1",
+        listener.local_addr()?
+    );
 
     axum::serve(listener, app.into_make_service()).await?;
 
