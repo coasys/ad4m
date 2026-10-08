@@ -2545,10 +2545,15 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         let is_flow = matches!(sdna_type, SdnaType::Flow);
+        // Validate before touching the store: see `add_sdna_inner`.
+        let shacl_links = shacl_json
+            .as_deref()
+            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .transpose()?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
-            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
                 .await?
         };
 
@@ -2666,14 +2671,27 @@ impl PerspectiveInstance {
             .iter()
             .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
 
+        // Parse every entry before writing any of them, so one invalid shape
+        // refuses the whole batch instead of leaving it half-applied.
+        let entries = entries
+            .into_iter()
+            .map(|(name, sdna_code, sdna_type, shacl_json)| {
+                let shacl_links = shacl_json
+                    .as_deref()
+                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .transpose()?;
+                Ok((name, sdna_code, sdna_type, shacl_links))
+            })
+            .collect::<Result<Vec<_>, AnyError>>()?;
+
         let results = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
 
             let mut results = Vec::with_capacity(entries.len());
-            for (name, sdna_code, sdna_type, shacl_json) in entries {
+            for (name, sdna_code, sdna_type, shacl_links) in entries {
                 let result = self
-                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
                     .await?;
                 results.push(result);
             }
@@ -2695,12 +2713,18 @@ impl PerspectiveInstance {
     }
 
     /// Inner implementation of add_sdna without mutex acquisition.
+    ///
+    /// Takes the SHACL already parsed: the purge of an existing class's
+    /// SHACL and the `has_subject_class` / `sdna` writes below are shared
+    /// links, so a shape that `parse_shacl_to_links` refuses must be refused
+    /// before any of them run. Otherwise a rejected re-registration deletes
+    /// the class for every peer (#1348).
     async fn add_sdna_inner(
         &mut self,
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
-        shacl_json: Option<String>,
+        shacl_links: Option<Vec<Link>>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         let predicate = match sdna_type {
@@ -2720,7 +2744,7 @@ impl PerspectiveInstance {
         // Without this, divergent old/new SHACL property triples coexist in
         // the store and the loader produces non-deterministic shapes.
         //
-        // When `shacl_json` is `None` and the class already exists, we
+        // When `shacl_links` is `None` and the class already exists, we
         // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
@@ -2751,7 +2775,7 @@ impl PerspectiveInstance {
                 .collect();
 
             if !existing_target_class_uris.is_empty() {
-                if shacl_json.is_none() {
+                if shacl_links.is_none() {
                     log::info!(
                         "Class '{}' SHACL definition already exists, skipping duplicate",
                         name
@@ -2793,8 +2817,7 @@ impl PerspectiveInstance {
             .await?;
 
         // Handle SHACL links if SHACL JSON provided explicitly
-        if let Some(shacl) = shacl_json {
-            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+        if let Some(shacl_links) = shacl_links {
             self.add_links(shacl_links, LinkStatus::Shared, None, context)
                 .await?;
             // SHACL just changed for this class — drop any cached shape so the
@@ -8647,6 +8670,120 @@ mod tests {
             .get_shape("Recipe")
             .expect("re-parse after invalidation");
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// A shape `parse_shacl_to_links` refuses must leave the store untouched
+    /// (#908, #1348). The purge of an existing class and the
+    /// `has_subject_class` / `sdna` writes are shared links, so refusing
+    /// only after them deletes the class for every peer.
+    #[tokio::test]
+    async fn test_add_sdna_refused_shape_leaves_the_store_untouched() {
+        fn post_shacl(writer_datatype: Option<&str>) -> String {
+            let datatype = writer_datatype
+                .map(|d| format!(r#""datatype": "{d}","#))
+                .unwrap_or_default();
+            format!(
+                r#"{{
+                    "target_class": "ns://Post",
+                    "properties": [
+                        {{ "path": "ns://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "ns://writer", "name": "writer", {datatype}
+                           "relation_kind": "hasOne", "class": "ns://AuthorShape",
+                           "target_class_name": "Author" }}
+                    ]
+                }}"#
+            )
+        }
+        fn all_links(perspective: &PerspectiveInstance) -> Vec<(String, Option<String>, String)> {
+            let mut links: Vec<_> = perspective
+                .get_links_local(&LinkQuery::default())
+                .expect("get_links_local")
+                .into_iter()
+                .map(|(l, _)| (l.data.source, l.data.predicate, l.data.target))
+                .collect();
+            links.sort();
+            links
+        }
+        fn shape_summary(shape: &ModelShape) -> Vec<(String, Option<String>)> {
+            shape
+                .properties
+                .iter()
+                .map(|p| (p.name.clone(), p.datatype.clone()))
+                .collect()
+        }
+        let ctx = AgentContext::main_agent();
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(None)),
+                &ctx,
+            )
+            .await
+            .expect("valid registration");
+        let links_before = all_links(&perspective);
+        let shape_before = shape_summary(&perspective.get_shape("Post").expect("shape"));
+        assert!(
+            shape_before.contains(&("writer".to_string(), None)),
+            "{shape_before:?}"
+        );
+
+        // Re-registering the existing class with both options.
+        let err = perspective
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string"))),
+                &ctx,
+            )
+            .await
+            .expect_err("both datatype and class must be refused");
+        assert!(err.to_string().contains("datatype"), "{err}");
+        assert_eq!(all_links(&perspective), links_before, "re-registration");
+        // Re-read from the store, not the cache.
+        perspective.invalidate_shape("Post");
+        assert_eq!(
+            shape_summary(&perspective.get_shape("Post").expect("original shape")),
+            shape_before
+        );
+
+        // First registration of a new class, alone and inside a batch where
+        // a valid entry comes first: nothing of either may be written.
+        perspective
+            .add_sdna(
+                "Draft".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string")).replace("ns://Post", "ns://Draft")),
+                &ctx,
+            )
+            .await
+            .expect_err("first registration");
+        assert_eq!(all_links(&perspective), links_before, "first registration");
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(None).replace("ns://Post", "ns://Note")),
+                    ),
+                    (
+                        "Post".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(Some("xsd://string"))),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect_err("batch");
+        assert_eq!(all_links(&perspective), links_before, "batch");
     }
 
     #[tokio::test]
