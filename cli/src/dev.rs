@@ -1,7 +1,8 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use clap::Subcommand;
 use colour::{self, green_ln};
 use std::fs;
+use tokio::task::JoinHandle;
 
 use crate::bootstrap_publish::*;
 
@@ -34,43 +35,37 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             rust_executor::init::init(Some(ad4m_test_dir.clone()), None)
                 .map_err(|err| anyhow::anyhow!("Error in init: {:?}", err))?;
 
-            let run_handle = tokio::task::spawn(async move {
-                rust_executor::run(rust_executor::Ad4mConfig {
-                    app_data_path: Some(ad4m_test_dir_clone),
-                    network_bootstrap_seed: None,
-                    language_language_only: Some(false),
-                    run_dapp_server: Some(false),
-                    port: None,
-                    hc_admin_port: None,
-                    hc_app_port: None,
-                    hc_use_bootstrap: None,
-                    hc_use_local_proxy: None,
-                    hc_use_mdns: None,
-                    hc_use_proxy: None,
-                    connect_holochain: None,
-                    run_holochain: None,
-                    admin_credential: Some(String::from("*")),
-                    hc_proxy_url: None,
-                    hc_bootstrap_url: None,
-                    hc_relay_url: None,
-                    localhost: None,
-                    auto_permit_cap_requests: Some(true),
-                    tls: None,
-                    log_holochain_metrics: None,
-                    enable_multi_user: None,
-                    enable_mcp: None,
-                    mcp_port: None,
-                    smtp_config: None,
-                    pid_file: None,
-                    ..Default::default()
-                })
-                .await
-                .join()
-                .expect("Error awaiting executor main thread")
-                .expect("REST API server failed");
-            });
+            let run_handle = tokio::task::spawn(run_executor(rust_executor::Ad4mConfig {
+                app_data_path: Some(ad4m_test_dir_clone),
+                network_bootstrap_seed: None,
+                language_language_only: Some(false),
+                run_dapp_server: Some(false),
+                port: None,
+                hc_admin_port: None,
+                hc_app_port: None,
+                hc_use_bootstrap: None,
+                hc_use_local_proxy: None,
+                hc_use_mdns: None,
+                hc_use_proxy: None,
+                connect_holochain: None,
+                run_holochain: None,
+                admin_credential: Some(String::from("*")),
+                hc_proxy_url: None,
+                hc_bootstrap_url: None,
+                hc_relay_url: None,
+                localhost: None,
+                auto_permit_cap_requests: Some(true),
+                tls: None,
+                log_holochain_metrics: None,
+                enable_multi_user: None,
+                enable_mcp: None,
+                mcp_port: None,
+                smtp_config: None,
+                pid_file: None,
+                ..Default::default()
+            }));
 
-            let test_res = tokio::task::spawn(async move {
+            let test = tokio::task::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 let client = ad4m_client::Ad4mClient::connect(
                     String::from("http://127.0.0.1:4000"),
@@ -106,15 +101,13 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                 println!("Expression create: {:?}", expression);
                 let expression = client.expressions.expression(expression.unwrap()).await;
                 println!("Expression get: {:?}", expression);
-            })
-            .await;
-            green_ln!("Test future finished with: {:?}", test_res);
+            });
+            let outcome = run_against_executor(run_handle, test).await;
 
-            run_handle.abort();
             //Cleanup test agent
             let _ = fs::remove_dir_all(std::path::Path::new(&ad4m_test_dir));
             green_ln!("Test agent cleaned up\n");
-            std::process::exit(0);
+            exit_with(outcome, "Language test")
         }
         DevFunctions::GenerateBootstrap {
             agent_path,
@@ -196,46 +189,40 @@ pub async fn run(command: DevFunctions) -> Result<()> {
             let admin_credential = random_admin_credential();
             let publish_credential = admin_credential.clone();
 
-            tokio::task::spawn(async move {
-                rust_executor::run(rust_executor::Ad4mConfig {
-                    app_data_path: Some(data_path.to_str().unwrap().to_string()),
-                    network_bootstrap_seed: Some(
-                        temp_publish_bootstrap_path.to_str().unwrap().to_string(),
-                    ),
-                    language_language_only: Some(true),
-                    run_dapp_server: Some(false),
-                    port: None,
-                    hc_admin_port: None,
-                    hc_app_port: None,
-                    hc_use_bootstrap: None,
-                    hc_use_local_proxy: None,
-                    hc_use_mdns: None,
-                    hc_use_proxy: None,
-                    connect_holochain: None,
-                    run_holochain: None,
-                    admin_credential: Some(admin_credential),
-                    hc_proxy_url: None,
-                    hc_bootstrap_url: None,
-                    hc_relay_url: None,
-                    localhost: None,
-                    auto_permit_cap_requests: Some(true),
-                    tls: None,
-                    log_holochain_metrics: None,
-                    enable_multi_user: None,
-                    enable_mcp: None,
-                    mcp_port: None,
-                    smtp_config: None,
-                    pid_file: None,
-                    ..Default::default()
-                })
-                .await
-                .join()
-                .expect("Error awaiting executor main thread")
-                .expect("REST API server failed");
-            });
+            let run_handle = tokio::task::spawn(run_executor(rust_executor::Ad4mConfig {
+                app_data_path: Some(data_path.to_str().unwrap().to_string()),
+                network_bootstrap_seed: Some(
+                    temp_publish_bootstrap_path.to_str().unwrap().to_string(),
+                ),
+                language_language_only: Some(true),
+                run_dapp_server: Some(false),
+                port: None,
+                hc_admin_port: None,
+                hc_app_port: None,
+                hc_use_bootstrap: None,
+                hc_use_local_proxy: None,
+                hc_use_mdns: None,
+                hc_use_proxy: None,
+                connect_holochain: None,
+                run_holochain: None,
+                admin_credential: Some(admin_credential),
+                hc_proxy_url: None,
+                hc_bootstrap_url: None,
+                hc_relay_url: None,
+                localhost: None,
+                auto_permit_cap_requests: Some(true),
+                tls: None,
+                log_holochain_metrics: None,
+                enable_multi_user: None,
+                enable_mcp: None,
+                mcp_port: None,
+                smtp_config: None,
+                pid_file: None,
+                ..Default::default()
+            }));
 
             //Spawn in a new thread so we can continue reading logs in loop below, whilst publishing is happening
-            let publish_fut = tokio::task::spawn(async move {
+            let publish = tokio::task::spawn(async move {
                 green_ln!("Runing publish fut");
                 tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
                 green_ln!("AD4M ready for publishing\n");
@@ -246,23 +233,153 @@ pub async fn run(command: DevFunctions) -> Result<()> {
                     lang_lang_source.clone(),
                 )
                 .await;
-            })
-            .await;
-            green_ln!("Publish future finished with: {:?}", publish_fut);
-
-            // tokio::select! {
-            //     biased;
-
-            //     _ = run_fut => {
-            //         green_ln!("AD4M finished running\n");
-            //     }
-            //     _ = publish_fut => {
-            //         green_ln!("AD4M finished publishing\n");
-            //     }
-            // }
+            });
+            let outcome = run_against_executor(run_handle, publish).await;
+            exit_with(outcome, "Publish")
         }
-    };
-    Ok(())
+    }
+}
+
+/// Starts an executor and resolves when it stops. That is `Ok` only when the
+/// REST API thread returned cleanly, `Err` when the API failed to start (e.g.
+/// the port is taken) or the executor panicked.
+///
+/// [`rust_executor::run`] hands back the API thread. Joining it on a runtime
+/// worker would block that worker for the executor's whole lifetime, so the
+/// join runs on the blocking pool.
+async fn run_executor(config: rust_executor::Ad4mConfig) -> Result<()> {
+    let api_thread = rust_executor::run(config).await;
+    match tokio::task::spawn_blocking(move || api_thread.join()).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(e))) => Err(anyhow!("REST API server failed: {e:?}")),
+        Ok(Err(_)) => Err(anyhow!("executor main thread panicked")),
+        Err(e) => Err(anyhow!("executor join task failed: {e}")),
+    }
+}
+
+/// Runs `workflow` against the executor kept up by `executor`.
+///
+/// `executor` only completes when the executor stops, so if it completes
+/// first the workflow has been running against nothing: the workflow is
+/// aborted and the executor's error is returned. An executor that stops
+/// cleanly before the workflow is done is an error for the same reason. A
+/// workflow that panics is an error too. Otherwise the workflow's value is
+/// returned and the executor task is dropped; the executor's own threads are
+/// stopped by process exit.
+async fn run_against_executor<T>(
+    mut executor: JoinHandle<Result<()>>,
+    mut workflow: JoinHandle<T>,
+) -> Result<T> {
+    tokio::select! {
+        executor_stopped = &mut executor => {
+            workflow.abort();
+            Err(match executor_stopped {
+                Ok(Ok(())) => anyhow!("executor stopped before the workflow finished"),
+                Ok(Err(e)) => e,
+                Err(e) => anyhow!("executor task panicked: {e}"),
+            })
+        }
+        finished = &mut workflow => {
+            executor.abort();
+            finished.map_err(|e| anyhow!("workflow panicked: {e}"))
+        }
+    }
+}
+
+/// Ends the process with the workflow's outcome. Both workflows leave
+/// executor threads running that would otherwise keep the process alive, and
+/// a failed executor must not end in exit code 0.
+fn exit_with(outcome: Result<()>, workflow: &str) -> ! {
+    match outcome {
+        Ok(()) => {
+            green_ln!("{workflow} finished\n");
+            std::process::exit(0)
+        }
+        Err(e) => {
+            colour::red_ln!("{workflow} failed: {e:?}\n");
+            std::process::exit(1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::pending;
+    use std::time::Duration;
+    use tokio::task::spawn;
+    use tokio::time::timeout;
+
+    /// Bounds every test: with the executor handle ignored, a workflow that
+    /// never finishes would hang instead of failing.
+    const BOUND: Duration = Duration::from_secs(2);
+
+    #[tokio::test]
+    async fn executor_error_fails_the_workflow() {
+        let executor = spawn(async { Err(anyhow!("REST API server failed: port taken")) });
+        let workflow = spawn(pending::<()>());
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("must fail as soon as the executor stops, not wait for the workflow");
+
+        let err = outcome.expect_err("executor failure must fail the workflow");
+        assert!(err.to_string().contains("port taken"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn executor_panic_fails_the_workflow() {
+        let executor = spawn(async { panic!("Error awaiting executor main thread") });
+        let workflow = spawn(pending::<()>());
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("must fail as soon as the executor panics");
+
+        let err = outcome.expect_err("executor panic must fail the workflow");
+        assert!(
+            err.to_string().contains("executor task panicked"),
+            "{err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_stopping_cleanly_fails_an_unfinished_workflow() {
+        let executor = spawn(async { Ok(()) });
+        let workflow = spawn(pending::<()>());
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("must fail as soon as the executor stops");
+
+        let err = outcome.expect_err("an executor that stops early must fail the workflow");
+        assert!(err.to_string().contains("stopped before"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn workflow_result_is_returned_while_executor_runs() {
+        let executor = spawn(pending::<Result<()>>());
+        let workflow = spawn(async { 42 });
+
+        let outcome = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("a finished workflow must not wait for the executor");
+
+        assert_eq!(outcome.expect("workflow result is passed through"), 42);
+    }
+
+    #[tokio::test]
+    async fn workflow_panic_is_an_error() {
+        let executor = spawn(pending::<Result<()>>());
+        let workflow = spawn(async { panic!("could not connect to executor") });
+
+        let outcome: Result<()> = timeout(BOUND, run_against_executor(executor, workflow))
+            .await
+            .expect("a panicked workflow must not wait for the executor");
+
+        let err = outcome.expect_err("workflow panic must be an error");
+        assert!(err.to_string().contains("workflow panicked"), "{err:?}");
+    }
 }
 
 /// 32 random bytes, hex-encoded.
