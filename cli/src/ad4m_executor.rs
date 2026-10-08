@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
             }
             None
         };
-        let _ = tokio::spawn(async move {
+        let startup = tokio::spawn(async move {
             rust_executor::run(Ad4mConfig {
                 app_data_path,
                 network_bootstrap_seed,
@@ -282,9 +282,18 @@ async fn main() -> Result<()> {
                 pid_file,
                 ..Default::default()
             })
-            .await;
+            .await
         })
         .await;
+        // Exit 1 when the REST API fails (e.g. the port is taken), instead of
+        // running on with no API.
+        match startup {
+            Ok(api_thread) => rust_executor::exit_when_api_fails(api_thread),
+            Err(e) => {
+                eprintln!("rust_executor::run panicked during startup: {e}");
+                exit(1);
+            }
+        }
 
         let _ = ctrlc::set_handler(move || {
             println!("Received CTRL-C! Exiting...");
