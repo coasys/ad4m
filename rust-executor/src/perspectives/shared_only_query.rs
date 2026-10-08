@@ -24,13 +24,21 @@
 //! exist. A triple with no status at all (data older than the store's status
 //! requirement) does not match either, which is the fail-closed side.
 //!
-//! Not rewritten: `EXISTS` / `NOT EXISTS` inside a `FILTER` expression. They
-//! decide which rows match but never bind a value, so no Local content reaches
-//! the result through them. Property paths and `SERVICE` are refused, because a
-//! path's intermediate hops cannot be checked one by one.
+//! The rewrite also reaches every graph pattern nested in an expression: an
+//! `EXISTS` / `NOT EXISTS` in a `FILTER`, a `BIND`, an `OPTIONAL`'s filter,
+//! an `ORDER BY` key, a `HAVING` condition or an aggregate, at any depth and
+//! inside sub-selects. Such a pattern decides more than which rows match:
+//! wrapped in `IF`, `COALESCE`, an order key or an aggregate, its verdict
+//! becomes a bound value or an ordering, so an unrestricted one would leak one
+//! bit about Local links per row. Every match on the algebra below is
+//! exhaustive, with no `_` arm, so a variant a future `spargebra` adds fails
+//! to compile here instead of passing through unrestricted.
+//!
+//! Property paths and `SERVICE` are refused, because a path's intermediate hops
+//! cannot be checked one by one.
 
 use deno_core::anyhow::{anyhow, Error as AnyError};
-use spargebra::algebra::{Expression, GraphPattern};
+use spargebra::algebra::{AggregateExpression, Expression, GraphPattern, OrderExpression};
 use spargebra::term::{
     BlankNode, Literal, NamedNode, NamedNodePattern, TermPattern, TriplePattern, Variable,
 };
@@ -109,14 +117,14 @@ impl Rewriter {
             } => GraphPattern::LeftJoin {
                 left: Box::new(self.pattern(*left)?),
                 right: Box::new(self.pattern(*right)?),
-                expression,
+                expression: expression.map(|e| self.expression(e)).transpose()?,
             },
             GraphPattern::Lateral { left, right } => GraphPattern::Lateral {
                 left: Box::new(self.pattern(*left)?),
                 right: Box::new(self.pattern(*right)?),
             },
             GraphPattern::Filter { expr, inner } => GraphPattern::Filter {
-                expr,
+                expr: self.expression(expr)?,
                 inner: Box::new(self.pattern(*inner)?),
             },
             GraphPattern::Union { left, right } => GraphPattern::Union {
@@ -134,16 +142,20 @@ impl Rewriter {
             } => GraphPattern::Extend {
                 inner: Box::new(self.pattern(*inner)?),
                 variable,
-                expression,
+                expression: self.expression(expression)?,
             },
             GraphPattern::Minus { left, right } => GraphPattern::Minus {
                 left: Box::new(self.pattern(*left)?),
                 right: Box::new(self.pattern(*right)?),
             },
+            // Constants only: no pattern and no expression to restrict.
             values @ GraphPattern::Values { .. } => values,
             GraphPattern::OrderBy { inner, expression } => GraphPattern::OrderBy {
                 inner: Box::new(self.pattern(*inner)?),
-                expression,
+                expression: expression
+                    .into_iter()
+                    .map(|e| self.order_expression(e))
+                    .collect::<Result<_, _>>()?,
             },
             GraphPattern::Project { inner, variables } => GraphPattern::Project {
                 inner: Box::new(self.pattern(*inner)?),
@@ -171,7 +183,79 @@ impl Rewriter {
             } => GraphPattern::Group {
                 inner: Box::new(self.pattern(*inner)?),
                 variables,
-                aggregates,
+                aggregates: aggregates
+                    .into_iter()
+                    .map(|(v, a)| Ok((v, self.aggregate(a)?)))
+                    .collect::<Result<_, AnyError>>()?,
+            },
+        })
+    }
+
+    /// `expression` with every graph pattern nested in it (`EXISTS`, which
+    /// `NOT EXISTS` wraps) restricted like the query's own.
+    fn expression(&mut self, expression: Expression) -> Result<Expression, AnyError> {
+        Ok(match expression {
+            Expression::Exists(p) => Expression::Exists(Box::new(self.pattern(*p)?)),
+            leaf @ (Expression::NamedNode(_)
+            | Expression::Literal(_)
+            | Expression::Variable(_)
+            | Expression::Bound(_)) => leaf,
+            Expression::Or(a, b) => Expression::Or(self.boxed(a)?, self.boxed(b)?),
+            Expression::And(a, b) => Expression::And(self.boxed(a)?, self.boxed(b)?),
+            Expression::Equal(a, b) => Expression::Equal(self.boxed(a)?, self.boxed(b)?),
+            Expression::SameTerm(a, b) => Expression::SameTerm(self.boxed(a)?, self.boxed(b)?),
+            Expression::Greater(a, b) => Expression::Greater(self.boxed(a)?, self.boxed(b)?),
+            Expression::GreaterOrEqual(a, b) => {
+                Expression::GreaterOrEqual(self.boxed(a)?, self.boxed(b)?)
+            }
+            Expression::Less(a, b) => Expression::Less(self.boxed(a)?, self.boxed(b)?),
+            Expression::LessOrEqual(a, b) => {
+                Expression::LessOrEqual(self.boxed(a)?, self.boxed(b)?)
+            }
+            Expression::Add(a, b) => Expression::Add(self.boxed(a)?, self.boxed(b)?),
+            Expression::Subtract(a, b) => Expression::Subtract(self.boxed(a)?, self.boxed(b)?),
+            Expression::Multiply(a, b) => Expression::Multiply(self.boxed(a)?, self.boxed(b)?),
+            Expression::Divide(a, b) => Expression::Divide(self.boxed(a)?, self.boxed(b)?),
+            Expression::UnaryPlus(a) => Expression::UnaryPlus(self.boxed(a)?),
+            Expression::UnaryMinus(a) => Expression::UnaryMinus(self.boxed(a)?),
+            Expression::Not(a) => Expression::Not(self.boxed(a)?),
+            Expression::If(a, b, c) => {
+                Expression::If(self.boxed(a)?, self.boxed(b)?, self.boxed(c)?)
+            }
+            Expression::In(a, list) => Expression::In(self.boxed(a)?, self.expressions(list)?),
+            Expression::Coalesce(list) => Expression::Coalesce(self.expressions(list)?),
+            Expression::FunctionCall(f, args) => {
+                Expression::FunctionCall(f, self.expressions(args)?)
+            }
+        })
+    }
+
+    fn boxed(&mut self, e: Box<Expression>) -> Result<Box<Expression>, AnyError> {
+        Ok(Box::new(self.expression(*e)?))
+    }
+
+    fn expressions(&mut self, list: Vec<Expression>) -> Result<Vec<Expression>, AnyError> {
+        list.into_iter().map(|e| self.expression(e)).collect()
+    }
+
+    fn order_expression(&mut self, e: OrderExpression) -> Result<OrderExpression, AnyError> {
+        Ok(match e {
+            OrderExpression::Asc(e) => OrderExpression::Asc(self.expression(e)?),
+            OrderExpression::Desc(e) => OrderExpression::Desc(self.expression(e)?),
+        })
+    }
+
+    fn aggregate(&mut self, a: AggregateExpression) -> Result<AggregateExpression, AnyError> {
+        Ok(match a {
+            count @ AggregateExpression::CountSolutions { .. } => count,
+            AggregateExpression::FunctionCall {
+                name,
+                expr,
+                distinct,
+            } => AggregateExpression::FunctionCall {
+                name,
+                expr: self.expression(expr)?,
+                distinct,
             },
         })
     }
@@ -272,6 +356,31 @@ mod tests {
         assert!(shared_only_query("SELECT ?o WHERE { ?s <ns://a>+ ?o }").is_err());
         assert!(shared_only_query("CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }").is_err());
         assert!(shared_only_query("not sparql").is_err());
+    }
+
+    /// Every `EXISTS` in an expression is restricted too, `NOT EXISTS` and
+    /// nested ones included (#1058 review, item 4).
+    #[test]
+    fn restricts_exists_inside_expressions() {
+        let q = shared_only_query(
+            "SELECT ?t WHERE { ?m <ns://body> ?b . \
+             OPTIONAL { ?m <ns://x> ?y FILTER(EXISTS { ?p <ns://a> ?q }) } \
+             BIND(IF(EXISTS { ?x <ns://body> ?s }, 1, 0) AS ?t) \
+             FILTER(NOT EXISTS { ?e <ns://b> ?f FILTER(EXISTS { ?g <ns://c> ?h }) }) } \
+             GROUP BY ?t HAVING (COUNT(IF(EXISTS { ?i <ns://d> ?j }, 1, 0)) > 0) \
+             ORDER BY DESC(IF(EXISTS { ?k <ns://e> ?l }, 1, 0))",
+        )
+        .unwrap();
+        // One reifier condition per link triple: ?m body, ?m x, ?p a, ?x body,
+        // ?e b, ?g c, ?i d, ?k e.
+        for n in 0..8 {
+            assert!(
+                q.contains(&format!("__ad4m_shared_reifier_{n}")),
+                "{n}: {q}"
+            );
+        }
+        assert!(!q.contains("__ad4m_shared_reifier_8"), "{q}");
+        Query::parse(&q, None).unwrap();
     }
 
     #[test]
