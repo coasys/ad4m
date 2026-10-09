@@ -2370,3 +2370,73 @@ async fn a_write_tool_does_not_touch_another_agents_local_graph() {
         .unwrap();
     assert_eq!(kept.len(), 1, "the admin removed Alice's Local link");
 }
+
+/// The tools of a pass read what the pass reads (#1324 review). The
+/// auto-processor's harness pass reads shared graphs only and applies what the
+/// LLM proposes as Shared, so a `_query` tool on it must not return an
+/// instance from the runner's own Local graph. The same tool on an ordinary
+/// view does, which shows the Local instance is reachable at all.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_shared_graphs_only_gives_its_tools_no_local_graph() {
+    use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Channel", CHANNEL_SDNA)]).await;
+    let uuid = perspective.persisted.lock().await.uuid.clone();
+    for (id, graph) in [
+        ("flux://channel/shared", None),
+        ("flux://channel/local", Some(LOCAL_GRAPH_ALIAS.to_string())),
+    ] {
+        perspective
+            .create_subject(
+                crate::types::SubjectClassOption {
+                    class_name: Some("Channel".to_string()),
+                    query: None,
+                },
+                id.to_string(),
+                Some(json!({ "name": id })),
+                None,
+                &ctx,
+                graph,
+            )
+            .await
+            .unwrap();
+    }
+    register_perspective(uuid.clone(), perspective.clone());
+    let _guard = PerspectiveGuard(uuid.clone());
+    let context = || McpContext {
+        admin_credential: Some("test-admin".to_string()),
+        auth_token: Arc::new(RwLock::new(Some("test-admin".to_string()))),
+        dynamic_class_tools: true,
+    };
+    let query = |handler: Ad4mMcpHandler| {
+        let uuid = uuid.clone();
+        async move {
+            handler
+                .call_tool_by_name("channel_query", json!({ "perspective_id": uuid }))
+                .await
+                .unwrap()
+        }
+    };
+    let runner = crate::agent::did_for_context(&ctx).unwrap();
+
+    let ordinary = query(Ad4mMcpHandler::for_pass(
+        &perspective.clone().for_viewer(runner.clone()),
+        context(),
+    ))
+    .await;
+    assert!(
+        ordinary.contains("flux://channel/local") && ordinary.contains("flux://channel/shared"),
+        "{ordinary}"
+    );
+
+    let shared_only = query(Ad4mMcpHandler::for_pass(
+        &perspective.clone().for_viewer(runner).for_shared_reads(),
+        context(),
+    ))
+    .await;
+    assert!(shared_only.contains("flux://channel/shared"), "{shared_only}");
+    assert!(
+        !shared_only.contains("flux://channel/local"),
+        "a shared-only pass's tool read the runner's Local graph: {shared_only}"
+    );
+}

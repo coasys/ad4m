@@ -2799,6 +2799,11 @@ impl PerspectiveInstance {
         self
     }
 
+    /// Whether this instance came from [`Self::for_shared_reads`].
+    pub(crate) fn reads_shared_graphs_only(&self) -> bool {
+        self.shared_reads
+    }
+
     /// The graph scope a read on this instance runs in: [`Self::read_scope`]
     /// for the instance's viewer, or `requested` unchanged for the executor.
     /// After [`Self::for_shared_reads`], no Local graph: a requested one is
