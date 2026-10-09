@@ -806,18 +806,20 @@ pub(crate) fn wrap_event_nested(event_type: &str, payload_key: &str, raw_json: &
 
 /// Whether a per-owner event reaches the session of `current_did`. A session
 /// whose DID did not resolve still gets shared events, but never a link in a
-/// Local graph.
+/// Local graph: `link` for an added or removed link, `oldLink` and `newLink`
+/// for an update.
 pub(crate) fn matches_owner(msg: &str, current_did: Option<&str>) -> bool {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str(msg) else {
         return true;
     };
     match (map.get("owner"), current_did) {
         (Some(serde_json::Value::String(owner)), Some(did)) => owner == did,
-        (_, None) => !map
-            .get("link")
-            .and_then(|link| link.get("graph"))
-            .and_then(|graph| graph.as_str())
-            .is_some_and(crate::perspectives::sparql_store::is_local_graph),
+        (_, None) => !["link", "oldLink", "newLink"].iter().any(|key| {
+            map.get(*key)
+                .and_then(|link| link.get("graph"))
+                .and_then(|graph| graph.as_str())
+                .is_some_and(crate::perspectives::sparql_store::is_local_graph)
+        }),
         _ => true,
     }
 }
