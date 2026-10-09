@@ -22,7 +22,10 @@
 //!    flag values of a class the subscription scans. This is how a new
 //!    record enters, and how a deleted one leaves the count.
 //! 3. **`near`**: a predicate read on records in the result, written on a
-//!    node that is in the last result or is a parent-scope anchor.
+//!    node that is in the last result or is a parent-scope anchor. For a node
+//!    in the last result this is a fast path: `scan` (a top-level record
+//!    carries its flag) or `via` (an included record is linked to its parent
+//!    in the result) matches the same write, after a store read.
 //! 4. **`scan`**: a predicate of a scanned class (the subscribed class and
 //!    any class a `where` quantifier reads), written on a node that is an
 //!    instance of that class: it has one of the class's flag links. This is
