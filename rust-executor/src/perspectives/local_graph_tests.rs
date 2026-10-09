@@ -1537,3 +1537,130 @@ async fn a_local_vote_on_a_co_owned_perspective_queues_every_owners_pass() {
     );
     shared.settle_flow_passes().await;
 }
+
+/// A signed `Local` link from a client that names no graph lands in the Local
+/// graph of the agent the request reads as (#1357), like a plain write.
+#[tokio::test]
+async fn a_signed_local_link_without_a_graph_lands_in_the_viewers_local_graph() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let shared = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let mut p = shared.clone().for_viewer(alice_did.clone());
+    let signed = LinkExpression::from(
+        crate::agent::create_signed_expression(link("signed").normalize(), &alice).unwrap(),
+    );
+    assert_eq!(signed.graph, None);
+
+    let written = p
+        .add_link_expression(signed, LinkStatus::Local, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (written.graph, written.status),
+        (Some(local_graph_iri(&alice_did)), Some(LinkStatus::Local))
+    );
+    assert!(
+        shared
+            .clone()
+            .for_viewer(bob_did)
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty(),
+        "Bob co-owns the perspective but reads Alice's signed Local link"
+    );
+}
+
+/// A subscription's first result is computed as its subscriber reads: their
+/// own Local rows in, other agents' out. The shared instance reads no Local
+/// graph (#1358), so a subscription that ran its first query there would miss
+/// the subscriber's own data until the next change.
+#[tokio::test]
+async fn a_subscriptions_first_result_holds_its_subscribers_local_rows() {
+    let (alice, alice_did) = user("alice");
+    let (bob, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let main = AgentContext::main_agent();
+    let shacl = r#"{
+        "target_class": "t://Note",
+        "constructor_actions": [
+            {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Note"}
+        ],
+        "destructor_actions": [],
+        "properties": [
+            {
+                "path": "t://text", "name": "text", "datatype": "xsd://string",
+                "min_count": 1, "max_count": 1, "writable": true,
+                "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://text", "target": "value"}]
+            }
+        ]
+    }"#;
+    p.add_sdna(
+        "Note".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(shacl.to_string()),
+        &main,
+    )
+    .await
+    .unwrap();
+    let local = Some(LOCAL_GRAPH_ALIAS.to_string());
+    for (id, ctx, graph) in [
+        ("t://note/alice", &alice, local.clone()),
+        ("t://note/bob", &bob, local),
+        ("t://note/shared", &main, None),
+    ] {
+        p.create_subject(
+            SubjectClassOption {
+                class_name: Some("Note".to_string()),
+                query: None,
+            },
+            id.to_string(),
+            Some(serde_json::json!({ "text": id })),
+            None,
+            ctx,
+            graph,
+        )
+        .await
+        .unwrap();
+    }
+
+    let (_, sparql) = p
+        .subscribe_and_query(
+            "SELECT ?s WHERE { ?s <t://text> ?o }".to_string(),
+            alice.user_email.clone(),
+        )
+        .await
+        .unwrap();
+    let rows: Vec<Value> = serde_json::from_str(&sparql).unwrap();
+    let mut subjects: Vec<&str> = rows.iter().filter_map(|r| r["s"].as_str()).collect();
+    subjects.sort();
+    assert_eq!(
+        subjects,
+        vec!["t://note/alice", "t://note/shared"],
+        "SPARQL subscription's first result: {sparql}"
+    );
+
+    let (_, model) = p
+        .model_subscribe_and_query(
+            "Note".to_string(),
+            "{}".to_string(),
+            alice.user_email.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_str(&model).unwrap();
+    let mut ids: Vec<&str> = v["instances"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no instances in {model}"))
+        .iter()
+        .filter_map(|i| i["id"].as_str())
+        .collect();
+    ids.sort();
+    assert_eq!(
+        ids,
+        vec!["t://note/alice", "t://note/shared"],
+        "model subscription's first result: {model}"
+    );
+}
