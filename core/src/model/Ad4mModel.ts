@@ -1182,6 +1182,158 @@ export class Ad4mModel {
   }
 
 
+  // ── One query over several classes (#1238) ────────────────────────────────
+
+  /**
+   * Build the wire parameters for one query over several classes.
+   *
+   * Each class normalises the query as it would for itself — its polymorphic
+   * include defaults, its `$` projections, its parent predicate — and the
+   * results are merged: includes and projections by key (the first class that
+   * declares a key decides its form), the parent scope only when every class
+   * that can resolve it resolves it to the same predicate.
+   * @internal
+   */
+  static prepareUnionQueryParams(
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+  ): { classNames: string[]; queryJson: string } {
+    if (!classes.length) throw new Error('A query over several classes needs at least one class');
+    const { parent, preferClasses, ...rest } = query;
+    const inputs = classes.map((c) => JSON.parse(c.prepareModelQueryParams(rest).queryJson));
+    const merged: any = { ...inputs[0] };
+    if (preferClasses) merged.preferClasses = preferClasses;
+    for (const key of ['include', 'projections'] as const) {
+      const combined = Object.assign({}, ...inputs.map((i) => i[key] ?? {}).reverse());
+      if (Object.keys(combined).length) merged[key] = combined;
+      else delete merged[key];
+    }
+    if (parent) {
+      // A model-form scope names its predicate through the relation that
+      // targets the queried class, so each class may resolve it differently
+      // or not at all. One query has one scope.
+      const scopes: string[] = [];
+      let firstError: unknown;
+      for (const c of classes) {
+        try {
+          scopes.push(JSON.stringify(JSON.parse(c.prepareModelQueryParams({ parent }).queryJson).parent));
+        } catch (e) {
+          firstError ??= e;
+        }
+      }
+      if (!scopes.length) throw firstError;
+      if (new Set(scopes).size > 1) {
+        throw new Error(
+          'parent(): the classes resolve the parent scope to different predicates; ' +
+          'pass the predicate itself (or a `field`) so they share one scope',
+        );
+      }
+      merged.parent = JSON.parse(scopes[0]);
+    }
+    return {
+      classNames: classes.map((c) => c.getModelMetadata().className),
+      queryJson: JSON.stringify(merged),
+    };
+  }
+
+  /**
+   * Build each row of a union result as the class the executor hydrated it as
+   * (`__subjectClass`). A row of a class not in `classes` stays plain JSON.
+   * @internal
+   */
+  static parseUnionResult(
+    classes: (typeof Ad4mModel)[],
+    perspective: PerspectiveProxy,
+    raw: any,
+    include?: IncludeMap,
+    properties?: string[],
+  ): Ad4mModel[] {
+    const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const arr = data.instances || data;
+    if (!Array.isArray(arr)) return [];
+    const byName = new Map(classes.map((c) => [c.getModelMetadata().className, c]));
+    return arr.map((json: any) => {
+      const cls = byName.get(json?.[SUBJECT_CLASS_KEY]);
+      return cls ? jsonToModelInstance(cls as any, perspective, json, include, properties) : json;
+    });
+  }
+
+  /** @internal */
+  static async executeUnionQuery(
+    perspective: PerspectiveProxy,
+    classes: (typeof Ad4mModel)[],
+    query: Query = {},
+    options?: CallOptions,
+  ): Promise<ResultsWithTotalCount<Ad4mModel>> {
+    const { classNames, queryJson } = Ad4mModel.prepareUnionQueryParams(classes, query);
+    const result = await perspective.modelQuery(classNames, queryJson, options);
+    const results = Ad4mModel.parseUnionResult(classes, perspective, result, query.include, query.properties);
+    const snapshotRelations = query.include
+      ? Object.fromEntries(Object.entries(query.include).filter(([k]) => !k.startsWith('$')))
+      : undefined;
+    for (const inst of results) {
+      (inst as any).takeSnapshot?.(
+        snapshotRelations && Object.keys(snapshotRelations).length > 0 ? snapshotRelations : undefined,
+      );
+    }
+    return { results, totalCount: result.totalCount };
+  }
+
+  /**
+   * One query over several model classes (#1238).
+   *
+   * `where`, `order`, `limit` and `offset` apply once, over the union. Each
+   * result is an instance of the class the executor hydrated it as: the first
+   * `preferClasses` entry it conforms to, otherwise the most specific of
+   * `classes` it conforms to. A record that is several of them is returned
+   * once; `__subjectClasses` on it names every class it conforms to.
+   *
+   * - `where` on a property a class does not declare excludes that class's rows.
+   * - `order` on such a property sorts those rows last, in both directions,
+   *   then by id.
+   *
+   * @example
+   * ```typescript
+   * const items = await Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], {
+   *   parent: { id: canvas.id, predicate: "canvas://item" },
+   *   order: { zIndex: "ASC" },
+   *   limit: 50,
+   * });
+   * for (const item of items) {
+   *   if (item instanceof Placement) { ... }
+   * }
+   * ```
+   */
+  static async findAllOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+    options?: CallOptions,
+  ): Promise<InstanceType<C[number]>[]> {
+    const { results } = await Ad4mModel.executeUnionQuery(perspective, classes, query ?? {}, options);
+    return results as InstanceType<C[number]>[];
+  }
+
+  /**
+   * A {@link ModelQueryBuilder} over several model classes: the builder form of
+   * {@link findAllOf}. `subscribe()` registers one subscription, which re-runs
+   * when any of the classes changes.
+   *
+   * @example
+   * ```typescript
+   * const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
+   *   .parent(canvas.id, "canvas://item");
+   * await builder.subscribe((items) => render(items));
+   * ```
+   */
+  static queryOf<C extends (typeof Ad4mModel)[]>(
+    perspective: PerspectiveProxy,
+    classes: [...C],
+    query?: Query,
+  ): ModelQueryBuilder<InstanceType<C[number]>> {
+    return new ModelQueryBuilder<InstanceType<C[number]>>(perspective, Ad4mModel, query, classes);
+  }
+
   // instancesFromQueryResult — removed (superseded by Rust executeModelQuery pipeline)
 
   /**

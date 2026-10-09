@@ -42,10 +42,40 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
   /** Tail of the subscribe/dispose chain; see `serialize()`. */
   private subscriptionChain: Promise<void> = Promise.resolve();
 
-  constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query) {
+  /** Set for a query over several classes (`Ad4mModel.queryOf`, #1238). */
+  private unionClasses?: (typeof Ad4mModel)[];
+
+  constructor(perspective: PerspectiveProxy, ctor: typeof Ad4mModel, query?: Query, unionClasses?: (typeof Ad4mModel)[]) {
     this.perspective = perspective;
     this.ctor = ctor;
     if (query) this.queryParams = query;
+    if (unionClasses) this.unionClasses = unionClasses;
+  }
+
+  /** The wire parameters for `params`: one class, or the union's class list. */
+  private prepare(params: Query): { className: string | string[]; queryJson: string } {
+    if (this.unionClasses) {
+      const { classNames, queryJson } = (this.ctor as any).prepareUnionQueryParams(this.unionClasses, params);
+      return { className: classNames, queryJson };
+    }
+    return (this.ctor as any).prepareModelQueryParams(params, this.modelClassName);
+  }
+
+  /** Run `params` once and build model instances from the rows. */
+  private execute(params: Query): Promise<ResultsWithTotalCount<T>> {
+    if (this.unionClasses) {
+      return (this.ctor as any).executeUnionQuery(this.perspective, this.unionClasses, params);
+    }
+    return (this.ctor as any).executeModelQuery(this.perspective, params, this.modelClassName);
+  }
+
+  /** Build model instances from a raw result pushed by a subscription. */
+  private parse(raw: any): T[] {
+    const { include, properties } = this.queryParams;
+    if (this.unionClasses) {
+      return (this.ctor as any).parseUnionResult(this.unionClasses, this.perspective, raw, include, properties);
+    }
+    return (this.ctor as any).parseModelResult(this.perspective, raw, include, properties);
   }
 
   /**
@@ -388,7 +418,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * Shared query execution logic — routes through the executor-side modelQuery endpoint.
    */
   private async executeSparqlQuery(): Promise<T[]> {
-    const { results } = await (this.ctor as any).executeModelQuery(this.perspective, this.queryParams, this.modelClassName);
+    const { results } = await this.execute(this.queryParams);
     return results;
   }
 
@@ -453,13 +483,9 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // the re-subscribe would otherwise release the id just handed back.
     await this.dispose();
 
-    const ctor = this.ctor;
-
     // Build the model query params (className, queryJson).  The executor
     // resolves the shape from the perspective's SHACL triples.
-    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
-      this.queryParams, this.modelClassName
-    );
+    const { className, queryJson } = this.prepare(this.queryParams);
 
     // Register model subscription via Rust — this builds trigger SPARQL internally,
     // registers the subscription, and runs the initial query in one call.
@@ -468,9 +494,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     );
 
     // Convert JSON instances to model class instances
-    const parseResults = (raw: any): T[] => {
-      return (ctor as any).parseModelResult(this.perspective, raw, this.queryParams.include, this.queryParams.properties);
-    };
+    const parseResults = (raw: any): T[] => this.parse(raw);
 
     // Transforms are now applied by the Rust executor during hydration
     const initialResults = parseResults(initialModelResult);
@@ -578,7 +602,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    * ```
    */
   async count(): Promise<number> {
-    const { totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, { ...this.queryParams, limit: 0 }, this.modelClassName);
+    const { totalCount } = await this.execute({ ...this.queryParams, limit: 0 });
     return totalCount;
   }
 
@@ -630,9 +654,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     await this.dispose();
 
     const countParams = { ...this.queryParams, limit: 0 };
-    const { className, queryJson } = (this.ctor as any).prepareModelQueryParams(
-      countParams, this.modelClassName
-    );
+    const { className, queryJson } = this.prepare(countParams);
 
     const { subscriptionId, result: initialModelResult } = await this.perspective.modelSubscribe(
       className, queryJson
@@ -726,7 +748,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
    */
   async paginate(pageSize: number, pageNumber: number): Promise<PaginationResult<T>> {
     const paginationQuery = { ...(this.queryParams || {}), limit: pageSize, offset: pageSize * (pageNumber - 1), count: true };
-    const { results, totalCount } = await (this.ctor as any).executeModelQuery(this.perspective, paginationQuery, this.modelClassName);
+    const { results, totalCount } = await this.execute(paginationQuery);
     return { results, totalCount, pageSize, pageNumber };
   }
 
@@ -787,17 +809,13 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     // the re-subscribe would otherwise release the id just handed back.
     await this.dispose();
 
-    const ctor = this.ctor;
-
     // Subscribe to the full result set (no limit/offset) so the subscription
     // detects changes anywhere in the dataset. Rust builds trigger SPARQL
     // from the shape predicates.
     const subscriptionParams = { ...(this.queryParams || {}) };
     delete subscriptionParams.limit;
     delete subscriptionParams.offset;
-    const { className, queryJson } = (ctor as any).prepareModelQueryParams(
-      subscriptionParams, this.modelClassName
-    );
+    const { className, queryJson } = this.prepare(subscriptionParams);
 
     const { subscriptionId } = await this.perspective.modelSubscribe(
       className, queryJson
@@ -833,7 +851,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
       }
       fetching = true;
       try {
-        const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+        const { results, totalCount } = await this.execute(paginatedQuery);
         if (!disposed) callback({ results, totalCount, pageSize, pageNumber });
       } finally {
         fetching = false;
@@ -905,7 +923,7 @@ export class ModelQueryBuilder<T extends Ad4mModel> {
     };
 
     // Initial fetch (single call with count: true)
-    const { results, totalCount } = await (ctor as any).executeModelQuery(this.perspective, paginatedQuery, this.modelClassName);
+    const { results, totalCount } = await this.execute(paginatedQuery);
     return { results, totalCount, pageSize, pageNumber };
   }
 
