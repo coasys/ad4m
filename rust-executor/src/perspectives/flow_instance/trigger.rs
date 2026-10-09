@@ -15,6 +15,17 @@
 //! that lands while one is waiting is folded into it, and the pass reads the
 //! store only after the wait, so it sees every link that queued it.
 //!
+//! **Flow jobs.** Work a writer wants done on its own write's behalf but not
+//! before it returns — an interpretation pass's spawn, proposal and
+//! consensus passes — goes on the same queue as a [`FlowJob`]
+//! ([`PerspectiveInstance::schedule_flow_job`]). It runs in the next queued
+//! pass, before that pass's sync sweep.
+//!
+//! **One pass at a time.** A queued pass waits for the one before it to
+//! finish before it takes its work, so two passes never write a
+//! perspective's flow state over each other, and whatever arrives while one
+//! runs is folded into the next.
+//!
 //! **What triggers.** Proposal links (the atom fields and `flow/instance`),
 //! votes (`acceptedBy`) and `FlowInstance` instances (`flow/flow_uri`,
 //! `flow/base`) — additions and removals alike, since deleting a vote
@@ -42,8 +53,10 @@ use crate::agent::AgentContext;
 use crate::perspectives::flow_classes::{FLOW_BASE_PREDICATE, FLOW_URI_PREDICATE};
 use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedPerspectiveDiff, LinkQuery};
+use futures::future::BoxFuture;
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// How long a queued pass waits for the rest of a sync burst before it
@@ -151,17 +164,44 @@ impl FlowTouch {
     }
 }
 
+/// Deferred flow work for one perspective, run by the next queued pass with
+/// a clone of the perspective. See the module doc.
+pub type FlowJob = Box<dyn FnOnce(PerspectiveInstance) -> BoxFuture<'static, ()> + Send>;
+
 /// Per-perspective coalescing state behind
-/// [`PerspectiveInstance::schedule_flow_consensus_pass`]. Pure, so the
-/// "one pass queued at a time" rule is testable without a runtime.
-#[derive(Debug, Default)]
+/// [`PerspectiveInstance::schedule_flow_consensus_pass`] and
+/// [`PerspectiveInstance::schedule_flow_job`]. Pure apart from the run lock,
+/// so the "one pass queued at a time" rule is testable without a runtime.
+#[derive(Default)]
 pub struct FlowPassQueue {
     pending: FlowTouch,
+    jobs: Vec<FlowJob>,
     scheduled: bool,
     /// Passes taken from the queue and not yet finished. Only read by
     /// [`PerspectiveInstance::settle_flow_passes`], which tests use to wait
     /// out a sweep instead of sleeping past the debounce.
     running: usize,
+    /// Held by a pass from before it takes its work until it finishes, so
+    /// passes run one after another.
+    run_lock: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl std::fmt::Debug for FlowPassQueue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FlowPassQueue")
+            .field("pending", &self.pending)
+            .field("jobs", &self.jobs.len())
+            .field("scheduled", &self.scheduled)
+            .field("running", &self.running)
+            .finish()
+    }
+}
+
+/// What one pass runs: the jobs, in the order they were queued, then a
+/// sweep over `touch` when it is not empty.
+pub struct FlowPassWork {
+    pub touch: FlowTouch,
+    pub jobs: Vec<FlowJob>,
 }
 
 impl FlowPassQueue {
@@ -172,13 +212,27 @@ impl FlowPassQueue {
         !std::mem::replace(&mut self.scheduled, true)
     }
 
+    /// Add `job` to the pending pass. `true` when the caller must spawn that
+    /// pass, as for [`enqueue`](Self::enqueue).
+    pub fn enqueue_job(&mut self, job: FlowJob) -> bool {
+        self.jobs.push(job);
+        !std::mem::replace(&mut self.scheduled, true)
+    }
+
     /// Hand the pending work to the pass that is about to run, and open
     /// the queue for the next one. Anything that arrives from here on
     /// spawns a fresh pass, so nothing lands in a gap.
-    pub fn take(&mut self) -> FlowTouch {
+    pub fn take(&mut self) -> FlowPassWork {
         self.scheduled = false;
         self.running += 1;
-        std::mem::take(&mut self.pending)
+        FlowPassWork {
+            touch: std::mem::take(&mut self.pending),
+            jobs: std::mem::take(&mut self.jobs),
+        }
+    }
+
+    fn run_lock(&self) -> Arc<tokio::sync::Mutex<()>> {
+        self.run_lock.clone()
     }
 
     /// The pass handed work by [`take`](Self::take) has finished.
@@ -210,6 +264,19 @@ impl PerspectiveInstance {
         self.enqueue_flow_pass(FlowTouch::of_local_diff(diff));
     }
 
+    /// Queue `job` to run in the next flow pass, after the debounce and after
+    /// any pass already running here has finished. Returns immediately.
+    pub(crate) fn schedule_flow_job(&self, job: FlowJob) {
+        let spawn = self
+            .flow_pass_queue
+            .lock()
+            .expect("flow pass queue poisoned")
+            .enqueue_job(job);
+        if spawn {
+            self.spawn_flow_pass();
+        }
+    }
+
     fn enqueue_flow_pass(&self, touch: FlowTouch) {
         if touch.is_empty() {
             return;
@@ -219,21 +286,37 @@ impl PerspectiveInstance {
             .lock()
             .expect("flow pass queue poisoned")
             .enqueue(touch);
-        if !spawn {
-            // A pass is already waiting; it reads after the debounce, so it
-            // will see these links too.
-            return;
+        if spawn {
+            self.spawn_flow_pass();
         }
+        // Otherwise a pass is already waiting; it reads after the debounce,
+        // so it will see these links too.
+    }
+
+    fn spawn_flow_pass(&self) {
         let mut this = self.clone();
         tokio::spawn(async move {
             tokio::time::sleep(FLOW_PASS_DEBOUNCE).await;
-            let touch = this
+            let run_lock = this
+                .flow_pass_queue
+                .lock()
+                .expect("flow pass queue poisoned")
+                .run_lock();
+            // Taken only once the previous pass is done: what queued while it
+            // ran is folded into this one rather than racing it.
+            let _running = run_lock.lock().await;
+            let FlowPassWork { touch, jobs } = this
                 .flow_pass_queue
                 .lock()
                 .expect("flow pass queue poisoned")
                 .take();
             if !this.is_teardown.load(Ordering::Acquire) {
-                this.run_sync_triggered_flow_pass(touch).await;
+                for job in jobs {
+                    job(this.clone()).await;
+                }
+                if !touch.is_empty() {
+                    this.run_sync_triggered_flow_pass(touch).await;
+                }
             }
             this.flow_pass_queue
                 .lock()
@@ -248,7 +331,15 @@ impl PerspectiveInstance {
     /// recorded what it expected to record. Panics after ten seconds.
     #[cfg(test)]
     pub(crate) async fn settle_flow_passes(&self) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        self.settle_flow_passes_within(Duration::from_secs(10))
+            .await
+    }
+
+    /// [`settle_flow_passes`](Self::settle_flow_passes) with a deadline of
+    /// the caller's choosing, for passes whose jobs call a real model.
+    #[cfg(test)]
+    pub(crate) async fn settle_flow_passes_within(&self, limit: Duration) {
+        let deadline = std::time::Instant::now() + limit;
         loop {
             if self
                 .flow_pass_queue
@@ -260,7 +351,7 @@ impl PerspectiveInstance {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "a flow pass was still queued or running after 10 s"
+                "a flow pass was still queued or running after {limit:?}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -657,7 +748,7 @@ mod tests {
         assert!(queue.enqueue(first.clone()), "the first touch spawns");
         assert!(!queue.enqueue(second.clone()), "the second rides along");
 
-        let taken = queue.take();
+        let taken = queue.take().touch;
         assert_eq!(taken.instances, first.instances);
         assert_eq!(taken.proposals, second.proposals);
         assert!(
@@ -670,7 +761,64 @@ mod tests {
             queue.enqueue(first),
             "after take, the next touch spawns again — nothing lands in a gap"
         );
-        assert!(queue.take().proposals.is_empty(), "take drains");
+        assert!(queue.take().touch.proposals.is_empty(), "take drains");
+    }
+
+    /// Jobs share the one queued pass with touches, keep their order, and
+    /// are drained by `take`.
+    #[test]
+    fn jobs_ride_the_queued_pass_in_order() {
+        fn noop() -> FlowJob {
+            Box::new(|_| Box::pin(async {}))
+        }
+        let mut queue = FlowPassQueue::default();
+        assert!(queue.enqueue_job(noop()), "the first job spawns");
+        assert!(!queue.enqueue_job(noop()), "the second rides along");
+        assert!(
+            !queue.enqueue(FlowTouch {
+                definition: true,
+                ..FlowTouch::default()
+            }),
+            "so does a touch"
+        );
+        let work = queue.take();
+        assert_eq!(work.jobs.len(), 2);
+        assert!(work.touch.definition);
+        assert!(!queue.is_idle(), "running until finish");
+        queue.finish();
+        assert!(queue.is_idle());
+        assert!(queue.take().jobs.is_empty(), "take drains");
+    }
+
+    /// A pass queued while another runs waits for it to finish, so two
+    /// writers' flow work never interleaves on one perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_pass_waits_for_the_running_one() {
+        let (p, _shapes, _ctx) =
+            crate::perspectives::interpretation_test_support::setup_perspective_no_llm(&[]).await;
+        let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::default();
+        let job = |name: [&'static str; 2], hold: Duration| -> FlowJob {
+            let log = log.clone();
+            Box::new(move |_| {
+                Box::pin(async move {
+                    log.lock().unwrap().push(name[0]);
+                    tokio::time::sleep(hold).await;
+                    log.lock().unwrap().push(name[1]);
+                })
+            })
+        };
+
+        p.schedule_flow_job(job(["a start", "a end"], Duration::from_millis(800)));
+        // Past the debounce: the first pass has taken its job and is running.
+        tokio::time::sleep(FLOW_PASS_DEBOUNCE + Duration::from_millis(150)).await;
+        assert_eq!(*log.lock().unwrap(), vec!["a start"]);
+        p.schedule_flow_job(job(["b start", "b end"], Duration::ZERO));
+
+        p.settle_flow_passes().await;
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["a start", "a end", "b start", "b end"]
+        );
     }
 
     // ---- flow_pass_agents ---------------------------------------------
