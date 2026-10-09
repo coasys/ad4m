@@ -938,6 +938,7 @@ impl InterpretationFlowWork {
     /// the flow's first-state `requires` are evaluated against this run's own
     /// evidence in the same job rather than the next one.
     async fn run(self, perspective: &mut PerspectiveInstance) {
+        let started = std::time::Instant::now();
         let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
             perspective,
             &self.created,
@@ -964,12 +965,15 @@ impl InterpretationFlowWork {
             self.flow_filter.as_deref(),
         )
         .await;
-        if !proposals.is_empty() {
-            log::info!(
-                "interpretation: flow pass minted {} proposal(s): {proposals:?}",
-                proposals.len()
-            );
-        }
+        log::debug!("interpretation: flow pass minted proposals {proposals:?}");
+        // The pass's own `interpretation done` latency no longer includes
+        // this, so the two lines together say where a slow pass spent it.
+        log::info!(
+            "✅ 🌱 interpretation flow work done latency={}ms spawned={} proposals={}",
+            started.elapsed().as_millis(),
+            spawned.len(),
+            proposals.len()
+        );
     }
 }
 
