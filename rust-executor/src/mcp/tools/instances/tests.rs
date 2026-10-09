@@ -324,7 +324,13 @@ async fn instance_writes_honour_the_local_flag() {
             .await,
     );
 
-    let perspective = crate::perspectives::get_perspective(&uuid).unwrap();
+    // Read as the writer (the admin acts as the main agent): the shared
+    // instance reads no Local graph (#1358).
+    let main_did =
+        crate::agent::did_for_context(&crate::agent::AgentContext::main_agent()).unwrap();
+    let perspective = crate::perspectives::get_perspective(&uuid)
+        .unwrap()
+        .for_viewer(main_did);
     let statuses = |predicate: &'static str| {
         let perspective = perspective.clone();
         let base_uri = base_uri.clone();
@@ -2361,7 +2367,10 @@ async fn a_write_tool_does_not_touch_another_agents_local_graph() {
         }))
         .await;
 
+    // Read as Alice: the shared instance reads no Local graph (#1358).
     let kept = raw
+        .clone()
+        .for_viewer(crate::agent::did_for_context(&alice).unwrap())
         .get_links(&LinkQuery {
             target: Some("ad4m://msg/private".to_string()),
             ..Default::default()
