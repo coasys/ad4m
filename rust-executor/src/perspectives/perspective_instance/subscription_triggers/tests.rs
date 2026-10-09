@@ -10,7 +10,7 @@
 //! apps built on one base class do.
 
 use super::super::{ChangedPredicates, PerspectiveInstance};
-use super::reruns;
+use super::{reruns, ModelTrigger, StoreLookups};
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
 use crate::types::{DecoratedLinkExpression, Link, LinkStatus};
@@ -403,6 +403,36 @@ async fn a_batch_without_its_links_falls_back_to_predicates() {
     assert_eq!(reruns::count(&id), 0);
     p.check_subscribed_queries(only("ns://title")).await;
     assert_eq!(reruns::count(&id), 1);
+}
+
+/// A trigger over several classes (the shape #1238's union subscription
+/// hands over): a create of either class matches, a create of a third class
+/// does not. Built directly, as dev has no union subscribe.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_trigger_over_two_classes_matches_a_create_of_either() {
+    let mut p = blog().await;
+    let empty = r#"{"instances":[]}"#;
+    let posts_and_notes = p.build_model_trigger(["Post", "Note"], "{}", empty);
+    let posts = p.build_model_trigger(["Post"], "{}", empty);
+
+    record(&mut p, "ns://n1", "Note", &[("ns://body", "b")]).await;
+    let note = take_writes(&p).await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    let post = take_writes(&p).await;
+    record(&mut p, "ns://c1", "Comment", &[("ns://text", "t")]).await;
+    let comment = take_writes(&p).await;
+
+    let matches = |trigger: &ModelTrigger, writes: &ChangedPredicates| match writes {
+        ChangedPredicates::Specific(writes) => {
+            trigger.matches(writes, &mut StoreLookups::new(&p.sparql_store))
+        }
+        _ => panic!("expected recorded links"),
+    };
+
+    assert!(matches(&posts_and_notes, &note), "a Note joins the union");
+    assert!(matches(&posts_and_notes, &post), "a Post joins the union");
+    assert!(!matches(&posts_and_notes, &comment), "a Comment is neither");
+    assert!(!matches(&posts, &note), "a Note is not a Post");
 }
 
 // ── Measured: one app's shape ───────────────────────────────────────────

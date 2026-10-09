@@ -219,27 +219,65 @@ impl TriggerRules {
         }
         Some(out)
     }
+
+    /// Fold `other` in: the result re-runs on every write either would.
+    /// Matching is a disjunction over the rules, so the union never misses a
+    /// write one of the two matches; it can only match a few more.
+    fn merge(&mut self, other: TriggerRules) {
+        self.every_write |= other.every_write;
+        self.any.extend(other.any);
+        for (predicate, values) in other.joins {
+            self.joins.entry(predicate).or_default().extend(values);
+        }
+        for set in [(&mut self.near, other.near), (&mut self.via, other.via)] {
+            match set {
+                (mine, Predicates::All) => *mine = Predicates::All,
+                (_, Predicates::None) => {}
+                (mine, Predicates::Some(theirs)) => theirs.iter().for_each(|p| mine.add(p)),
+            }
+        }
+        for (predicate, flags) in other.scan {
+            let entry = self.scan.entry(predicate).or_default();
+            for flag in flags {
+                if !entry.contains(&flag) {
+                    entry.push(flag);
+                }
+            }
+        }
+        self.anchors.extend(other.anchors);
+        self.anchors_any_predicate |= other.anchors_any_predicate;
+    }
 }
 
 impl super::PerspectiveInstance {
-    /// The trigger for a model subscription on `class_name` with
-    /// `query_json`, watching the nodes of its first `result`.
-    pub(super) fn build_model_trigger(
+    /// The trigger for a model subscription over `class_names` with
+    /// `query_json`, watching the nodes of its first `result`. Each class
+    /// contributes its own rules; a query over several classes (#1238)
+    /// re-runs on a write any of them matches.
+    pub(super) fn build_model_trigger<'a>(
         &self,
-        class_name: &str,
+        class_names: impl IntoIterator<Item = &'a str>,
         query_json: &str,
         result: &str,
     ) -> ModelTrigger {
-        let shape = self.get_shape(class_name).ok();
-        let side = self.model_query_side_predicates(shape.as_deref(), query_json);
-        let rules = build_rules(
-            class_name,
-            query_json,
-            &self.shape_resolver(),
-            side,
-            &super::extract_predicates_from_sparql,
-        );
-        ModelTrigger::new(rules, result)
+        let mut rules: Option<TriggerRules> = None;
+        for class_name in class_names {
+            let shape = self.get_shape(class_name).ok();
+            let side = self.model_query_side_predicates(shape.as_deref(), query_json);
+            let class_rules = build_rules(
+                class_name,
+                query_json,
+                &self.shape_resolver(),
+                side,
+                &super::extract_predicates_from_sparql,
+            );
+            match &mut rules {
+                Some(rules) => rules.merge(class_rules),
+                None => rules = Some(class_rules),
+            }
+        }
+        // No class to watch: nothing to tell writes apart by.
+        ModelTrigger::new(rules.unwrap_or_else(TriggerRules::every_write), result)
     }
 }
 
