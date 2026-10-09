@@ -78,6 +78,10 @@ enum ChangedGraphs {
 use uuid;
 use uuid::Uuid;
 
+#[cfg(test)]
+#[path = "perspective_instance_subscription_tests.rs"]
+mod subscription_tests;
+
 static MAX_COMMIT_BYTES: usize = 3_000_000; //3MiB
 static MAX_PENDING_DIFFS_COUNT: usize = 150;
 static MAX_PENDING_SECONDS: u64 = 3;
@@ -418,6 +422,13 @@ struct SubscribedQuery {
     /// graph_iris (which generates FROM clauses in the query). When set, only changes
     /// in these graphs trigger re-evaluation. For raw SPARQL subscriptions, this is None.
     graph_scope: Option<Vec<String>>,
+    /// Number of subscribers currently holding this entry. `subscribe_and_query`
+    /// and `model_subscribe_and_query` hand the same id to every caller that
+    /// registers the same (query, user) pair, so one re-evaluation and one push
+    /// serve all of them. `dispose_query_subscription` releases one hold and
+    /// removes the entry only when the last holder is gone. Keepalive eviction
+    /// ignores this count: an entry nobody keeps alive is removed regardless.
+    holders: usize,
 }
 
 /// A batch with its creation timestamp, for timeout-based cleanup.
@@ -589,6 +600,11 @@ pub struct PerspectiveInstance {
     /// nothing behind.
     #[cfg(test)]
     fail_add_link_after: Arc<AtomicI64>,
+    /// Test-only: makes [`Self::get_shape_or_wait`] treat this perspective as
+    /// joined to a neighbourhood, so a test can exercise the cross-peer wait
+    /// without a running link language. Compiled out in non-test builds.
+    #[cfg(test)]
+    force_shape_sync_wait: Arc<AtomicBool>,
 }
 
 /// Cache-backed `ShapeResolver` borrowed from a `PerspectiveInstance` for the
@@ -657,6 +673,8 @@ impl PerspectiveInstance {
             flow_pass_queue: Arc::new(std::sync::Mutex::new(Default::default())),
             #[cfg(test)]
             fail_add_link_after: Arc::new(AtomicI64::new(-1)),
+            #[cfg(test)]
+            force_shape_sync_wait: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -707,7 +725,7 @@ impl PerspectiveInstance {
         match self.get_shape(class_name) {
             Ok(shape) => return Ok(shape),
             Err(e) => {
-                if self.link_language.read().await.is_none() {
+                if !self.shapes_may_still_sync().await {
                     return Err(e);
                 }
             }
@@ -715,16 +733,35 @@ impl PerspectiveInstance {
         let deadline = Instant::now() + budget;
         let poll = Duration::from_millis(100);
         loop {
-            if Instant::now() >= deadline {
-                // Falls through with the original error message so
-                // callers see the same wording they did before.
-                return self.get_shape(class_name);
+            let now = Instant::now();
+            if now >= deadline {
+                // Keeps the original message as a prefix (callers match on
+                // it) and says a wait happened, so "addSdna first" is not
+                // read as the whole story by a peer whose shape is syncing.
+                return self.get_shape(class_name).map_err(|e| {
+                    if budget.is_zero() {
+                        e
+                    } else {
+                        anyhow!("{e} (waited {budget:?} for it to sync from a peer)")
+                    }
+                });
             }
-            sleep(poll).await;
+            // Never sleep past the deadline: the caller's budget is shared.
+            sleep(poll.min(deadline - now)).await;
             if let Ok(shape) = self.get_shape(class_name) {
                 return Ok(shape);
             }
         }
+    }
+
+    /// Whether a class missing from the store can still arrive from a peer:
+    /// true once the perspective has a link language.
+    async fn shapes_may_still_sync(&self) -> bool {
+        #[cfg(test)]
+        if self.force_shape_sync_wait.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.has_link_language().await
     }
 
     /// Borrow a cache-backed `ShapeResolver` for the lifetime of a single
@@ -1483,9 +1520,9 @@ impl PerspectiveInstance {
                 .publish(
                     &PERSPECTIVE_SYNC_STATE_CHANGE_TOPIC,
                     &serde_json::to_string(&PerspectiveStateFilter {
+                        perspective_uuid: handle.uuid.clone(),
                         perspective: handle,
-                        state: serde_json::to_string(&state)
-                            .expect("must be able to serialze PerspectiveState"),
+                        state: state.clone(),
                     })
                     .unwrap(),
                 )
@@ -1897,6 +1934,11 @@ impl PerspectiveInstance {
     }
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
+        // Every write reaches here, local or synced, so this is where a local
+        // change to a flow definition queues the re-derivation that a synced
+        // one gets from `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+
         // Get handle without holding lock during pubsub operations
         let handle = {
             let persisted_guard = self.persisted.lock().await;
@@ -2355,6 +2397,10 @@ impl PerspectiveInstance {
 
             // Update both Prolog engines: subscription (immediate) + query (lazy)
             self.update_prolog_engines(decorated_diff.clone()).await;
+
+            // An update publishes its own topic rather than going through
+            // `pubsub_publish_diff`, so it queues the definition sweep here.
+            self.schedule_flow_pass_on_definition_change(&decorated_diff);
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
@@ -2837,10 +2883,15 @@ impl PerspectiveInstance {
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         let is_flow = matches!(sdna_type, SdnaType::Flow);
+        // Validate before touching the store: see `add_sdna_inner`.
+        let shacl_links = shacl_json
+            .as_deref()
+            .map(|shacl| parse_shacl_to_links(shacl, &name))
+            .transpose()?;
         let result = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
-            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+            self.add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
                 .await?
         };
 
@@ -2958,14 +3009,27 @@ impl PerspectiveInstance {
             .iter()
             .any(|(_, _, sdna_type, _)| matches!(sdna_type, SdnaType::Flow));
 
+        // Parse every entry before writing any of them, so one invalid shape
+        // refuses the whole batch instead of leaving it half-applied.
+        let entries = entries
+            .into_iter()
+            .map(|(name, sdna_code, sdna_type, shacl_json)| {
+                let shacl_links = shacl_json
+                    .as_deref()
+                    .map(|shacl| parse_shacl_to_links(shacl, &name))
+                    .transpose()?;
+                Ok((name, sdna_code, sdna_type, shacl_links))
+            })
+            .collect::<Result<Vec<_>, AnyError>>()?;
+
         let results = {
             let mutex = self.sdna_change_mutex.clone();
             let _guard = mutex.lock().await;
 
             let mut results = Vec::with_capacity(entries.len());
-            for (name, sdna_code, sdna_type, shacl_json) in entries {
+            for (name, sdna_code, sdna_type, shacl_links) in entries {
                 let result = self
-                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_json, context)
+                    .add_sdna_inner(name, sdna_code, sdna_type, shacl_links, context)
                     .await?;
                 results.push(result);
             }
@@ -2987,12 +3051,18 @@ impl PerspectiveInstance {
     }
 
     /// Inner implementation of add_sdna without mutex acquisition.
+    ///
+    /// Takes the SHACL already parsed: the purge of an existing class's
+    /// SHACL and the `has_subject_class` / `sdna` writes below are shared
+    /// links, so a shape that `parse_shacl_to_links` refuses must be refused
+    /// before any of them run. Otherwise a rejected re-registration deletes
+    /// the class for every peer (#1348).
     async fn add_sdna_inner(
         &mut self,
         name: String,
         mut sdna_code: String,
         sdna_type: SdnaType,
-        shacl_json: Option<String>,
+        shacl_links: Option<Vec<Link>>,
         context: &AgentContext,
     ) -> Result<bool, AnyError> {
         let predicate = match sdna_type {
@@ -3012,7 +3082,7 @@ impl PerspectiveInstance {
         // Without this, divergent old/new SHACL property triples coexist in
         // the store and the loader produces non-deterministic shapes.
         //
-        // When `shacl_json` is `None` and the class already exists, we
+        // When `shacl_links` is `None` and the class already exists, we
         // preserve the historical no-op behaviour: nothing to refresh.
         if matches!(sdna_type, SdnaType::SubjectClass) {
             // Check for any existing SubjectClass with this name, regardless of namespace
@@ -3043,7 +3113,7 @@ impl PerspectiveInstance {
                 .collect();
 
             if !existing_target_class_uris.is_empty() {
-                if shacl_json.is_none() {
+                if shacl_links.is_none() {
                     log::info!(
                         "Class '{}' SHACL definition already exists, skipping duplicate",
                         name
@@ -3085,8 +3155,7 @@ impl PerspectiveInstance {
             .await?;
 
         // Handle SHACL links if SHACL JSON provided explicitly
-        if let Some(shacl) = shacl_json {
-            let shacl_links = parse_shacl_to_links(&shacl, &name)?;
+        if let Some(shacl_links) = shacl_links {
             self.add_links(shacl_links, LinkStatus::Shared, None, context, None)
                 .await?;
             // SHACL just changed for this class — drop any cached shape so the
@@ -4214,12 +4283,26 @@ impl PerspectiveInstance {
     /// SHACL has not yet synced from a remote peer, waits up to
     /// [`MODEL_QUERY_SHAPE_WAIT`] before erroring so cross-peer callers
     /// can query classes registered by another peer without racing
-    /// p-diff-sync (see [`get_shape_or_wait`]).
+    /// p-diff-sync (see [`get_shape_or_wait`]). The same budget, not a
+    /// fresh one, covers the classes the query's `include`s hydrate.
     pub async fn model_query(
         &self,
         class_name: &str,
         query_json: &str,
         graph_iris: Option<&[String]>,
+    ) -> Result<String, deno_core::anyhow::Error> {
+        self.model_query_within(class_name, query_json, graph_iris, MODEL_QUERY_SHAPE_WAIT)
+            .await
+    }
+
+    /// [`Self::model_query`] with the shape-wait budget as a parameter, so
+    /// tests can exercise its expiry without waiting the production 20 s.
+    async fn model_query_within(
+        &self,
+        class_name: &str,
+        query_json: &str,
+        graph_iris: Option<&[String]>,
+        shape_wait: Duration,
     ) -> Result<String, deno_core::anyhow::Error> {
         let graph_iris = self.scope_for(graph_iris)?;
         let graph_iris = graph_iris.as_deref();
@@ -4238,15 +4321,11 @@ impl PerspectiveInstance {
 
         // Cross-peer safety: on a shared perspective we may be asked about
         // a class whose SHACL hasn't synced yet. Poll briefly rather than
-        // fail immediately. The subsequent recursive resolves inside
-        // `execute_model_query` use the plain (non-waiting) resolver
-        // because at that point the top-level shape has been resolved so
-        // referenced target-classes are extremely likely to also be
-        // present already — a nested wait per relation would multiply
-        // latency for a case we haven't seen bite in practice.
-        let _ = self
-            .get_shape_or_wait(class_name, MODEL_QUERY_SHAPE_WAIT)
-            .await?;
+        // fail immediately. One budget covers the whole query: the classes
+        // its includes reach get whatever this wait leaves (see the retry
+        // around `execute_model_query` below).
+        let deadline = Instant::now() + shape_wait;
+        let _ = self.get_shape_or_wait(class_name, shape_wait).await?;
         let resolver = self.shape_resolver();
         let shape = resolver.get_shape(class_name)?;
 
@@ -4285,14 +4364,44 @@ impl PerspectiveInstance {
             }
         }
 
-        let result = super::model_query::execute_model_query(
-            &self.sparql_store,
-            shape.as_ref(),
-            &query_input,
-            &resolver,
-            graph_iris,
-        )
-        .await?;
+        // Include recursion resolves each target class through the plain,
+        // non-waiting resolver and fails on the first one not stored. A peer
+        // can hold the queried class's SHACL before an included one's (#909),
+        // so on a miss wait for that class with what is left of the budget
+        // and run the query again. Classes are only ever waited for when a
+        // hydration actually needs them. That holds only while the resolver
+        // call sites that drop a missing shape (`.ok()` / `None`) keep doing
+        // so: dotted `where`/`order` keys in `model_query/query.rs`,
+        // projections, `links.rs` and polymorphic includes. Switch one to `?`
+        // and its `MissingShape` reaches this loop, so that path waits too.
+        // Each class is waited for at most once: a class that
+        // goes missing again after its wait succeeded fails the query rather
+        // than looping. Local-only perspectives fail at once, as before —
+        // `get_shape_or_wait` does not wait there.
+        let mut waited_for: HashSet<String> = HashSet::new();
+        let result = loop {
+            let err = match super::model_query::execute_model_query(
+                &self.sparql_store,
+                shape.as_ref(),
+                &query_input,
+                &resolver,
+                graph_iris,
+            )
+            .await
+            {
+                Ok(result) => break result,
+                Err(err) => err,
+            };
+            let Some(missing) = err.downcast_ref::<super::model_query::MissingShape>() else {
+                return Err(err);
+            };
+            if !waited_for.insert(missing.class_name.clone()) {
+                return Err(err);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            self.get_shape_or_wait(&missing.class_name, remaining)
+                .await?;
+        };
 
         serde_json::to_string(&result).map_err(|e| {
             deno_core::anyhow::anyhow!("Failed to serialize model query result: {}", e)
@@ -4727,10 +4836,13 @@ impl PerspectiveInstance {
                 let trigger_match =
                     serde_json::to_string(&matches).unwrap_or_else(|_| "[]".to_string());
 
-                let payload = TriggeredNotification {
-                    notification: notification.clone(),
-                    perspective_id: uuid.clone(),
-                    trigger_match,
+                let payload = NotificationTriggeredEvent {
+                    perspective_uuid: uuid.clone(),
+                    notification: TriggeredNotification {
+                        notification: notification.clone(),
+                        perspective_id: uuid.clone(),
+                        trigger_match,
+                    },
                 };
 
                 let message = serde_json::to_string(&payload).unwrap();
@@ -4963,6 +5075,7 @@ impl PerspectiveInstance {
                     .publish(
                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                            perspective_uuid: handle.uuid.clone(),
                             perspective: handle,
                             signal,
                             recipient: Some(recipient),
@@ -5067,6 +5180,7 @@ impl PerspectiveInstance {
                                     .publish(
                                         &NEIGHBOURHOOD_SIGNAL_TOPIC,
                                         &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                            perspective_uuid: handle.uuid.clone(),
                                             perspective: handle,
                                             signal,
                                             recipient: Some(user_did),
@@ -5106,6 +5220,7 @@ impl PerspectiveInstance {
                         .publish(
                             &NEIGHBOURHOOD_SIGNAL_TOPIC,
                             &serde_json::to_string(&NeighbourhoodSignalFilter {
+                                perspective_uuid: handle.uuid.clone(),
                                 perspective: handle,
                                 signal,
                                 recipient: Some(main_agent_did),
@@ -6197,6 +6312,7 @@ impl PerspectiveInstance {
                 sleep(delay).await;
             }
             let filter = PerspectiveQuerySubscriptionFilter {
+                perspective_uuid: uuid.clone(),
                 uuid,
                 subscription_id,
                 subscriber_did,
@@ -6226,11 +6342,16 @@ impl PerspectiveInstance {
                 .map(|(id, _)| id.clone())
         };
 
-        // Return existing subscription if found
+        // Return existing subscription if found. The caller becomes one more
+        // holder of the shared entry; see `SubscribedQuery::holders`.
         if let Some(existing_id) = existing_subscription {
             let existing_result = {
-                let queries = self.subscribed_queries.lock().await;
-                queries.get(&existing_id).map(|q| q.last_result.clone())
+                let mut queries = self.subscribed_queries.lock().await;
+                queries.get_mut(&existing_id).map(|q| {
+                    q.holders += 1;
+                    q.last_keepalive = Instant::now();
+                    q.last_result.clone()
+                })
             };
 
             if let Some(last_result) = existing_result {
@@ -6280,6 +6401,7 @@ impl PerspectiveInstance {
             predicates,
             model_query_params: None,
             graph_scope,
+            holders: 1,
         };
 
         // Now insert the subscription
@@ -6361,7 +6483,9 @@ impl PerspectiveInstance {
         };
 
         if let Some(existing_id) = existing_subscription {
-            // Update last_result and trigger metadata with fresh data
+            // Update last_result and trigger metadata with fresh data. The
+            // caller becomes one more holder of the shared entry; see
+            // `SubscribedQuery::holders`.
             {
                 let mut queries = self.subscribed_queries.lock().await;
                 if let Some(q) = queries.get_mut(&existing_id) {
@@ -6369,6 +6493,7 @@ impl PerspectiveInstance {
                     q.predicates = predicate_set.clone();
                     q.last_result = initial_result.clone();
                     q.last_keepalive = Instant::now();
+                    q.holders += 1;
                 }
             }
             return Ok((existing_id, initial_result));
@@ -6389,6 +6514,7 @@ impl PerspectiveInstance {
                 graph_iris: graph_iris.clone(),
             }),
             graph_scope: graph_iris,
+            holders: 1,
         };
 
         self.subscribed_queries
@@ -6472,13 +6598,30 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Release one subscriber's hold on `subscription_id`. The entry is removed
+    /// (and the prolog service notified) only when no holder remains, so a
+    /// subscription shared by several subscribers keeps pushing updates to the
+    /// others. Returns `Ok(true)` when the id was registered, `Ok(false)` when
+    /// it was unknown (already removed or evicted).
     pub async fn dispose_query_subscription(
         &self,
         subscription_id: String,
     ) -> Result<bool, AnyError> {
-        let removed_query = {
+        let (found, removed_query) = {
             let mut queries = self.subscribed_queries.lock().await;
-            queries.remove(&subscription_id)
+            match queries.get_mut(&subscription_id) {
+                None => (false, None),
+                Some(q) if q.holders > 1 => {
+                    q.holders -= 1;
+                    log::debug!(
+                        "🔗 subscription {} released by one holder, {} remaining",
+                        subscription_id,
+                        q.holders
+                    );
+                    (true, None)
+                }
+                Some(_) => (true, queries.remove(&subscription_id)),
+            }
         };
 
         if let Some(query) = removed_query {
@@ -6491,10 +6634,8 @@ impl PerspectiveInstance {
             {
                 log::warn!("Failed to notify prolog service of subscription end: {}", e);
             }
-            Ok(true)
-        } else {
-            Ok(false)
         }
+        Ok(found)
     }
 
     async fn check_subscribed_queries(
@@ -6601,7 +6742,12 @@ impl PerspectiveInstance {
                 let scope_for =
                     |requested: Option<&[String]>| self_clone.read_scope(&agent_context, requested);
 
-                // Model subscriptions: re-run execute_model_query instead of raw SPARQL
+                // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
+                // With no shape wait: every subscription on the perspective is
+                // re-checked under one `join_all` below, so a wait here for one
+                // subscription's unsynced class would hold back every other
+                // subscription's update. A class still missing fails this pass
+                // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
                     let scope = match scope_for(params.graph_iris.as_deref()) {
                         Ok(scope) => scope,
@@ -6611,7 +6757,12 @@ impl PerspectiveInstance {
                         }
                     };
                     match self_clone
-                        .model_query(&params.class_name, &params.query_json, scope.as_deref())
+                        .model_query_within(
+                            &params.class_name,
+                            &params.query_json,
+                            scope.as_deref(),
+                            Duration::ZERO,
+                        )
                         .await
                     {
                         Ok(r) => r,
@@ -6948,7 +7099,9 @@ impl PerspectiveInstance {
     /// Auto-processor watch loop (P-B2b2 polling MVP).
     ///
     /// One instance per perspective, joined into `start_background_tasks`.
-    /// Every `TICK_MS`:
+    /// Every tick (`AUTO_PROCESSOR_TICK_MS` while turns are pending, backing
+    /// off to `AUTO_PROCESSOR_IDLE_TICK_MAX_MS` while idle, see
+    /// [`next_tick_delay_ms`](crate::perspectives::auto_processor::watcher::next_tick_delay_ms)):
     ///   1. Load every `AutoProcessorConfig` declared on this perspective's
     ///      shared graph (`load_processors`). Zero configs = no-op tick.
     ///   2. Per config, run its `source_scope_query` to gather the current
@@ -6975,16 +7128,27 @@ impl PerspectiveInstance {
     /// the main agent; a multi-user test spawns one loop per managed user so the
     /// `ProcessingClaim` election runs across distinct DIDs on one executor.
     pub(crate) async fn auto_processor_watch_loop(&self, context: AgentContext) {
-        use crate::perspectives::auto_processor::watcher::WatcherState;
+        use crate::perspectives::auto_processor::watcher::{
+            next_tick_delay_ms, WatcherState, AUTO_PROCESSOR_TICK_MS,
+        };
         use std::time::{SystemTime, UNIX_EPOCH};
-
-        const TICK_MS: u64 = 500;
 
         let uuid = self.uuid.clone();
         let mut watcher = WatcherState::new();
+        let mut delay_ms = AUTO_PROCESSOR_TICK_MS;
 
         while !self.is_teardown.load(Ordering::Acquire) {
-            sleep(Duration::from_millis(TICK_MS)).await;
+            // Sleep in base-tick slices so teardown is observed as promptly
+            // while backed off as at the base rate.
+            let mut remaining = delay_ms;
+            while remaining > 0 {
+                if self.is_teardown.load(Ordering::Acquire) {
+                    return;
+                }
+                let step = remaining.min(AUTO_PROCESSOR_TICK_MS);
+                sleep(Duration::from_millis(step)).await;
+                remaining -= step;
+            }
             if self.is_teardown.load(Ordering::Acquire) {
                 return;
             }
@@ -6992,8 +7156,10 @@ impl PerspectiveInstance {
                 Ok(d) => d.as_millis() as i64,
                 Err(_) => continue, // clock before epoch — skip tick
             };
-            self.run_auto_processor_tick(&mut watcher, now_ms, &context)
+            let had_pending = self
+                .run_auto_processor_tick(&mut watcher, now_ms, &context)
                 .await;
+            delay_ms = next_tick_delay_ms(delay_ms, had_pending);
         }
 
         log::debug!("auto_processor_watch_loop ended for perspective {}", uuid);
@@ -7014,12 +7180,22 @@ impl PerspectiveInstance {
     /// loop passes the main agent; a multi-user test passes each managed user's
     /// context so the `ProcessingClaim` election runs across distinct DIDs
     /// (proving two users on one executor don't double-process).
+    ///
+    /// Returns whether a declared processor had turns pending after recording,
+    /// i.e. whether the loop must keep polling at the base rate (#1072). It is
+    /// sampled before draining, so a drained batch that is retried (stand-down,
+    /// awaiting author, missing shapes, pass error) keeps the base rate: the
+    /// next tick re-records it. `false` when no processor is declared or every
+    /// gathered turn was already processed or deferred. If loading the
+    /// processors fails, any queued turn counts. A per-config query failure
+    /// records nothing for that config, so a failing scope query backs off
+    /// instead of logging a warning twice a second.
     pub(crate) async fn run_auto_processor_tick(
         &self,
         watcher: &mut crate::perspectives::auto_processor::watcher::WatcherState,
         now_ms: i64,
         context: &AgentContext,
-    ) {
+    ) -> bool {
         use crate::perspectives::auto_processor::{
             config::load_processors,
             cursor::{load_processed_source_ids, turn_in_source_window},
@@ -7045,11 +7221,11 @@ impl PerspectiveInstance {
                     "auto_processor_tick [{}]: load_processors failed: {e:#}",
                     uuid
                 );
-                return;
+                return watcher.has_pending();
             }
         };
         if configs.is_empty() {
-            return;
+            return false;
         }
 
         // 1. Record new-since-last-processed turns per config (payload kept).
@@ -7104,6 +7280,8 @@ impl PerspectiveInstance {
             }
         }
 
+        let had_pending = watcher.has_pending_for(configs.iter().map(|c| c.processor_id.as_str()));
+
         // 2. Drain + run a pass per config.
         for cfg in &configs {
             let Some(batch) = watcher.drain_ready_batch(cfg, now_ms) else {
@@ -7115,13 +7293,17 @@ impl PerspectiveInstance {
             let item_ids: Vec<String> = batch.iter().map(|t| t.id.clone()).collect();
             let batch_id = crate::perspectives::auto_processor::claim::batch_key(&item_ids);
             // Signal the batch is ready before the pass runs, so listeners
-            // (tests, the WS layer) can await "processing started".
-            emit(
+            // (tests, the WS layer) can await "processing started". Tagged with
+            // the acting agent like every signal `run_one_pass` emits: the WS
+            // layer delivers an untagged event to admin sessions only.
+            let mut ready =
                 AutoProcessorEvent::new(&uuid, &cfg.processor_id, AutoProcessorStep::BatchReady)
                     .with_items(&item_ids)
-                    .with_batch_key(&batch_id),
-            )
-            .await;
+                    .with_batch_key(&batch_id);
+            if let Ok(me) = did_for_context(context) {
+                ready = ready.with_agent_did(&me);
+            }
+            emit(ready).await;
             let mut perspective_clone = view.clone();
             // Stall-fallback: if this batch has been standing down for its online
             // elected author past `claim_ttl_ms`, escalate past election straight
@@ -7181,6 +7363,7 @@ impl PerspectiveInstance {
                 }
             }
         }
+        had_pending
     }
 
     /// Reset the fallback sync interval to 30 seconds when new links are added
@@ -9226,6 +9409,339 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // #909: an include's target-class SHACL that has not synced yet gets the
+    // same bounded wait as the queried class's own.
+    // -----------------------------------------------------------------------
+
+    const NESTED_TASK_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"}
+        ]
+    }"#;
+
+    /// A `Board` whose `tasks` relation targets `Task`, one board linked to one
+    /// task, and only `Board`'s SHACL registered — the state a peer is in when
+    /// the queried class has synced and the included one has not.
+    async fn nested_include_fixture() -> PerspectiveInstance {
+        let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+    }
+
+    const NESTED_BOARD_SHACL: &str = r#"{
+        "target_class": "board://Board",
+        "properties": [
+            {"path": "board://name", "name": "name", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "board://has_task", "name": "tasks", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Task"}
+        ]
+    }"#;
+
+    async fn add_class(perspective: &mut PerspectiveInstance, name: &str, shacl: &str) {
+        perspective
+            .add_sdna(
+                name.into(),
+                "".into(),
+                SdnaType::SubjectClass,
+                Some(shacl.into()),
+                &AgentContext::main_agent(),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("add {name}: {e}"));
+    }
+
+    /// Writes `triples` straight into the store as shared links, the way they
+    /// land from a peer, without triggering a subscription pass.
+    fn add_shared_triples(perspective: &PerspectiveInstance, triples: &[(&str, &str, &str)]) {
+        let signer = TestSigner::generate();
+        for (i, (s, p, t)) in triples.iter().enumerate() {
+            let data = Link {
+                source: s.to_string(),
+                predicate: Some(p.to_string()),
+                target: t.to_string(),
+            };
+            let ts = format!("2024-01-15T10:00:{:02}.000Z", i);
+            let signed = signer.sign_at(data, ts.parse().expect("fixture timestamp"));
+            let mut link = LinkExpression::from(signed);
+            link.status = Some(crate::types::LinkStatus::Shared);
+            perspective.sparql_store.add_link(&link).expect("add link");
+        }
+    }
+
+    const NESTED_INCLUDE_QUERY: &str = r#"{"include":{"tasks":true}}"#;
+
+    /// On a shared perspective, `Task`'s SHACL arriving while the query waits
+    /// lets the include hydrate instead of failing the whole query.
+    #[tokio::test]
+    async fn test_model_query_waits_for_late_include_target_shape() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_sync = async move {
+            sleep(Duration::from_millis(500)).await;
+            syncing
+                .add_sdna(
+                    "Task".into(),
+                    "".into(),
+                    SdnaType::SubjectClass,
+                    Some(NESTED_TASK_SHACL.into()),
+                    &AgentContext::main_agent(),
+                )
+                .await
+                .expect("add Task");
+        };
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, None, Duration::from_secs(10)),
+            late_sync
+        );
+
+        let result: serde_json::Value =
+            serde_json::from_str(&result.expect("query waits for Task's shape")).unwrap();
+        let tasks = result["instances"][0]["tasks"]
+            .as_array()
+            .expect("tasks array");
+        assert_eq!(tasks.len(), 1, "one task included: {result}");
+        assert_eq!(tasks[0]["id"], "ad4m://task1", "task hydrated: {result}");
+    }
+
+    /// On a shared perspective, a target-class SHACL that never arrives fails
+    /// the query with the usual message — but only once the budget is spent.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_after_budget() {
+        let perspective = nested_include_fixture().await;
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+        let budget = Duration::from_millis(800);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
+            .await
+            .expect_err("Task's shape never arrives");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed >= budget,
+            "error only after the budget is spent, came after {elapsed:?}"
+        );
+        assert!(
+            err.to_string().contains("waited"),
+            "error says a wait happened, got: {err}"
+        );
+    }
+
+    /// A local-only perspective has no peer to wait for: a missing target
+    /// class is a caller bug and fails at once, whatever the budget.
+    #[tokio::test]
+    async fn test_model_query_include_target_shape_errors_at_once_when_local() {
+        let perspective = nested_include_fixture().await;
+        let budget = Duration::from_secs(10);
+
+        let started = Instant::now();
+        let err = perspective
+            .model_query_within("Board", NESTED_INCLUDE_QUERY, None, budget)
+            .await
+            .expect_err("Task is not registered");
+        let elapsed = started.elapsed();
+
+        assert!(
+            err.to_string()
+                .contains("No SHACL shape stored for class 'Task'"),
+            "error names the missing class, got: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "local-only must not wait, took {elapsed:?}"
+        );
+        assert!(
+            !err.to_string().contains("waited"),
+            "no wait happened, so the error must not claim one: {err}"
+        );
+    }
+
+    const TASK_WITH_COMMENTS_SHACL: &str = r#"{
+        "target_class": "task://Task",
+        "properties": [
+            {"path": "task://title", "name": "title", "min_count": 1, "max_count": 1, "resolve_language": "literal"},
+            {"path": "task://has_comment", "name": "comments", "node_kind": "IRI", "relation_kind": "hasMany", "target_class_name": "Comment"}
+        ]
+    }"#;
+
+    const TWO_LEVEL_INCLUDE_QUERY: &str = r#"{"include":{"tasks":{"include":{"comments":true}}}}"#;
+
+    /// Budget for the shared-budget tests. A class that lands late does so
+    /// at 0.6 × this, so one shared budget ends at 1.0 × and a fresh one
+    /// per wait at 1.6 × — far enough apart to tell without flaking.
+    const SHARED_BUDGET: Duration = Duration::from_secs(2);
+
+    /// Asserts a query that waited for two classes ended by one budget's
+    /// deadline, not two, and failed on the class that never arrived.
+    fn assert_one_budget_spent(err: &AnyError, elapsed: Duration, never_arrives: &str) {
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "No SHACL shape stored for class '{never_arrives}'"
+            )),
+            "fails on the class that never arrives, got: {msg}"
+        );
+        assert!(
+            msg.contains("waited"),
+            "error says a wait happened, got: {msg}"
+        );
+        assert!(
+            elapsed >= SHARED_BUDGET,
+            "the budget is used in full before failing, came after {elapsed:?}"
+        );
+        assert!(
+            elapsed < SHARED_BUDGET.mul_f32(1.4),
+            "two waits share one budget of {SHARED_BUDGET:?}, but the query took {elapsed:?}"
+        );
+    }
+
+    /// Two missing include targets, `Board → Task → Comment`: `Task` lands
+    /// part-way through the budget, `Comment` never does. The wait for
+    /// `Comment` gets only what `Task`'s wait left, not a fresh budget.
+    #[tokio::test]
+    async fn test_model_query_include_waits_share_one_budget() {
+        let perspective = nested_include_fixture().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://comment1", "comment://body", "literal:string:c"),
+                ("ad4m://task1", "task://has_comment", "ad4m://comment1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_task = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Task", TASK_WITH_COMMENTS_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", TWO_LEVEL_INCLUDE_QUERY, None, SHARED_BUDGET),
+            late_task
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Comment's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Comment");
+    }
+
+    /// The queried class itself lands part-way through the budget and its
+    /// include target never does. The include's wait draws on the deadline
+    /// set before the top-level wait, not on one restarted after it.
+    #[tokio::test]
+    async fn test_model_query_top_level_and_include_waits_share_one_budget() {
+        let perspective = setup().await;
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://board1", "board://name", "literal:string:Sprint1"),
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+            ],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        let mut syncing = perspective.clone();
+        let late_board = async move {
+            sleep(SHARED_BUDGET.mul_f32(0.6)).await;
+            add_class(&mut syncing, "Board", NESTED_BOARD_SHACL).await;
+        };
+        let started = Instant::now();
+        let (result, ()) = tokio::join!(
+            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, None, SHARED_BUDGET),
+            late_board
+        );
+        let elapsed = started.elapsed();
+
+        let err = result.expect_err("Task's shape never arrives");
+        assert_one_budget_spent(&err, elapsed, "Task");
+    }
+
+    /// Subscription re-checks run under one `join_all`, so a model
+    /// subscription waiting for an include target that never syncs must not
+    /// hold back another subscription's update on the same perspective.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_subscription_recheck_does_not_wait_for_missing_include_shape() {
+        let mut perspective = setup().await;
+        add_class(&mut perspective, "Board", NESTED_BOARD_SHACL).await;
+        add_shared_triples(
+            &perspective,
+            &[("ad4m://board1", "board://name", "literal:string:Sprint1")],
+        );
+        perspective
+            .force_shape_sync_wait
+            .store(true, Ordering::SeqCst);
+
+        // No board has tasks yet, so hydration does not need `Task`.
+        let (board_sub, _) = perspective
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+            .await
+            .expect("subscribe to Board");
+        let (other_sub, _) = perspective
+            .subscribe_and_query("SELECT ?s ?o WHERE { ?s <ns://title> ?o . }".into(), None)
+            .await
+            .expect("subscribe to titles");
+
+        // A task syncs in under the board, but `Task`'s SHACL never does;
+        // an unrelated link for the other subscription lands alongside.
+        add_shared_triples(
+            &perspective,
+            &[
+                ("ad4m://task1", "task://title", "literal:string:t"),
+                ("ad4m://board1", "board://has_task", "ad4m://task1"),
+                ("ns://thing/1", "ns://title", "literal:string:hello"),
+            ],
+        );
+
+        let started = Instant::now();
+        perspective
+            .check_subscribed_queries(ChangedPredicates::CheckAll)
+            .await;
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the pass waited {elapsed:?} for Task's shape (budget {MODEL_QUERY_SHAPE_WAIT:?})"
+        );
+        let queries = perspective.subscribed_queries.lock().await;
+        assert!(
+            queries[&other_sub].last_result.contains("ns://thing/1"),
+            "the other subscription is updated in the same pass, got: {}",
+            queries[&other_sub].last_result
+        );
+        assert!(
+            !queries[&board_sub].last_result.contains("ad4m://task1"),
+            "the Board subscription skips this pass, got: {}",
+            queries[&board_sub].last_result
+        );
+    }
+
     #[tokio::test]
     async fn test_shape_cache_returns_same_arc_on_second_call() {
         let mut perspective = setup().await;
@@ -9298,6 +9814,120 @@ mod tests {
             .get_shape("Recipe")
             .expect("re-parse after invalidation");
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    /// A shape `parse_shacl_to_links` refuses must leave the store untouched
+    /// (#908, #1348). The purge of an existing class and the
+    /// `has_subject_class` / `sdna` writes are shared links, so refusing
+    /// only after them deletes the class for every peer.
+    #[tokio::test]
+    async fn test_add_sdna_refused_shape_leaves_the_store_untouched() {
+        fn post_shacl(writer_datatype: Option<&str>) -> String {
+            let datatype = writer_datatype
+                .map(|d| format!(r#""datatype": "{d}","#))
+                .unwrap_or_default();
+            format!(
+                r#"{{
+                    "target_class": "ns://Post",
+                    "properties": [
+                        {{ "path": "ns://title", "name": "title", "datatype": "xsd://string" }},
+                        {{ "path": "ns://writer", "name": "writer", {datatype}
+                           "relation_kind": "hasOne", "class": "ns://AuthorShape",
+                           "target_class_name": "Author" }}
+                    ]
+                }}"#
+            )
+        }
+        fn all_links(perspective: &PerspectiveInstance) -> Vec<(String, Option<String>, String)> {
+            let mut links: Vec<_> = perspective
+                .get_links_local(&LinkQuery::default())
+                .expect("get_links_local")
+                .into_iter()
+                .map(|(l, _)| (l.data.source, l.data.predicate, l.data.target))
+                .collect();
+            links.sort();
+            links
+        }
+        fn shape_summary(shape: &ModelShape) -> Vec<(String, Option<String>)> {
+            shape
+                .properties
+                .iter()
+                .map(|p| (p.name.clone(), p.datatype.clone()))
+                .collect()
+        }
+        let ctx = AgentContext::main_agent();
+        let mut perspective = setup().await;
+        perspective
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(None)),
+                &ctx,
+            )
+            .await
+            .expect("valid registration");
+        let links_before = all_links(&perspective);
+        let shape_before = shape_summary(&perspective.get_shape("Post").expect("shape"));
+        assert!(
+            shape_before.contains(&("writer".to_string(), None)),
+            "{shape_before:?}"
+        );
+
+        // Re-registering the existing class with both options.
+        let err = perspective
+            .add_sdna(
+                "Post".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string"))),
+                &ctx,
+            )
+            .await
+            .expect_err("both datatype and class must be refused");
+        assert!(err.to_string().contains("datatype"), "{err}");
+        assert_eq!(all_links(&perspective), links_before, "re-registration");
+        // Re-read from the store, not the cache.
+        perspective.invalidate_shape("Post");
+        assert_eq!(
+            shape_summary(&perspective.get_shape("Post").expect("original shape")),
+            shape_before
+        );
+
+        // First registration of a new class, alone and inside a batch where
+        // a valid entry comes first: nothing of either may be written.
+        perspective
+            .add_sdna(
+                "Draft".to_string(),
+                String::new(),
+                SdnaType::SubjectClass,
+                Some(post_shacl(Some("xsd://string")).replace("ns://Post", "ns://Draft")),
+                &ctx,
+            )
+            .await
+            .expect_err("first registration");
+        assert_eq!(all_links(&perspective), links_before, "first registration");
+        perspective
+            .add_sdna_batch(
+                vec![
+                    (
+                        "Note".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(None).replace("ns://Post", "ns://Note")),
+                    ),
+                    (
+                        "Post".to_string(),
+                        String::new(),
+                        SdnaType::SubjectClass,
+                        Some(post_shacl(Some("xsd://string"))),
+                    ),
+                ],
+                &ctx,
+            )
+            .await
+            .expect_err("batch");
+        assert_eq!(all_links(&perspective), links_before, "batch");
     }
 
     #[tokio::test]

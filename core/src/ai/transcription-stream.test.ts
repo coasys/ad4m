@@ -47,7 +47,7 @@ describe('AIClient transcription streams (L7)', () => {
     await ai.openTranscriptionStream('model', text => received.push(text));
 
     await expect(ai.closeTranscriptionStream('stream-1')).rejects.toThrow('close failed');
-    FakeWebSocket.last?.push({ type: 'transcription-text', streamId: 'stream-1', text: 'after close' });
+    FakeWebSocket.last?.push({ type: 'transcription-text', streamId: 'stream-1', text: 'after close', userDid: null });
     expect(received).toEqual([]);
     api.closeAll();
   });

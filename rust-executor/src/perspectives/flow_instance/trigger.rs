@@ -21,7 +21,12 @@
 //! regresses the state and the cache must follow. A role revocation
 //! tombstone (`flow/role_grant_revoked`, #1027) triggers too, but names a
 //! role instance rather than a flow instance, and any flow instance's gate may
-//! read it — so it sweeps every flow instance. **What does not.** Chat, tasks,
+//! read it — so it sweeps every flow instance. So does a change to a flow's
+//! **definition** (the [`FLOW_DEFINITION_PREDICATES`] the fold reads): the fold
+//! re-judges every settled edge under the definition the reader holds, so a
+//! changed rule, state or transition changes what every instance derives — and
+//! that one is swept on a local write too, since the author's own replica has
+//! no vote or mint to run the pass after. **What does not.** Chat, tasks,
 //! anything outside the flow vocabulary; and a peer's legacy `Shared` cache
 //! or mark, which this replica neither reads nor mirrors. Role instances
 //! themselves (`fromRole` grants) are not in the vocabulary — they are
@@ -47,6 +52,27 @@ use std::time::Duration;
 /// same result for a fraction of the work.
 pub const FLOW_PASS_DEBOUNCE: Duration = Duration::from_millis(300);
 
+/// The parts of a `SHACLFlow` definition the fold reads: states and the
+/// value that picks the genesis, transitions, and consensus rules (on the
+/// flow or on a state). `rdf://type`, `ad4m://context` and the
+/// interpretation fields are left out — the first two are written by every
+/// class, and none of them changes what an instance derives.
+///
+/// A `fromRole` gate is inside the rule literal, so changing the gate is
+/// covered. Not covered: an edit to the role class's own shape, which the
+/// gate's model query reads to resolve grants. That is rare, and triggering
+/// on `sh://path` would sweep on every class registration in the perspective;
+/// such an edit is picked up on the next flow-relevant diff instead.
+pub const FLOW_DEFINITION_PREDICATES: [&str; 7] = [
+    "ad4m://consensusRule",
+    "ad4m://hasState",
+    "ad4m://stateName",
+    "ad4m://stateValue",
+    "ad4m://hasTransition",
+    "ad4m://fromState",
+    "ad4m://toState",
+];
+
 /// The flow-relevant subjects of one inbound diff. Empty for the common
 /// case — a diff with nothing from the flow vocabulary in it.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -61,6 +87,12 @@ pub struct FlowTouch {
     /// not a flow instance, and a role instance can gate any flow instance's votes — so the
     /// pass sweeps every instance in the perspective.
     pub every_instance: bool,
+    /// The diff changed a flow definition. Which flow is not resolved: a
+    /// state's or transition's links name that state or transition, not the
+    /// flow, and definitions change rarely — so this sweeps every instance,
+    /// as a revocation does. Kept apart from `every_instance` because it is
+    /// also honoured on a local write.
+    pub definition: bool,
 }
 
 impl FlowTouch {
@@ -84,20 +116,38 @@ impl FlowTouch {
                 ROLE_GRANT_REVOKED_PREDICATE => {
                     touch.every_instance = true;
                 }
+                p if FLOW_DEFINITION_PREDICATES.contains(&p) => {
+                    touch.definition = true;
+                }
                 _ => {}
             }
         }
         touch
     }
 
+    /// Only the definition part of [`of_diff`](Self::of_diff), for a local
+    /// write. This replica's own votes and mints already run the pass after
+    /// themselves; a definition change is the one local write nothing else
+    /// re-derives for.
+    pub fn of_local_diff(diff: &DecoratedPerspectiveDiff) -> Self {
+        FlowTouch {
+            definition: Self::of_diff(diff).definition,
+            ..FlowTouch::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.instances.is_empty() && self.proposals.is_empty() && !self.every_instance
+        self.instances.is_empty()
+            && self.proposals.is_empty()
+            && !self.every_instance
+            && !self.definition
     }
 
     fn absorb(&mut self, other: FlowTouch) {
         self.instances.extend(other.instances);
         self.proposals.extend(other.proposals);
         self.every_instance |= other.every_instance;
+        self.definition |= other.definition;
     }
 }
 
@@ -108,6 +158,10 @@ impl FlowTouch {
 pub struct FlowPassQueue {
     pending: FlowTouch,
     scheduled: bool,
+    /// Passes taken from the queue and not yet finished. Only read by
+    /// [`PerspectiveInstance::settle_flow_passes`], which tests use to wait
+    /// out a sweep instead of sleeping past the debounce.
+    running: usize,
 }
 
 impl FlowPassQueue {
@@ -123,7 +177,18 @@ impl FlowPassQueue {
     /// spawns a fresh pass, so nothing lands in a gap.
     pub fn take(&mut self) -> FlowTouch {
         self.scheduled = false;
+        self.running += 1;
         std::mem::take(&mut self.pending)
+    }
+
+    /// The pass handed work by [`take`](Self::take) has finished.
+    pub fn finish(&mut self) {
+        self.running = self.running.saturating_sub(1);
+    }
+
+    /// Nothing queued and nothing running.
+    pub fn is_idle(&self) -> bool {
+        !self.scheduled && self.running == 0
     }
 }
 
@@ -133,7 +198,19 @@ impl PerspectiveInstance {
     /// persisted; returns immediately. See the module doc for what counts
     /// as a touch and how bursts coalesce.
     pub(crate) fn schedule_flow_consensus_pass(&self, diff: &DecoratedPerspectiveDiff) {
-        let touch = FlowTouch::of_diff(diff);
+        self.enqueue_flow_pass(FlowTouch::of_diff(diff));
+    }
+
+    /// The local counterpart: queue a sweep when this replica's own write
+    /// changed a flow definition, and nothing otherwise. Called for every
+    /// published diff, so a synced one arrives here as well as through
+    /// [`schedule_flow_consensus_pass`](Self::schedule_flow_consensus_pass);
+    /// the queue folds the second into the pass the first queued.
+    pub(crate) fn schedule_flow_pass_on_definition_change(&self, diff: &DecoratedPerspectiveDiff) {
+        self.enqueue_flow_pass(FlowTouch::of_local_diff(diff));
+    }
+
+    fn enqueue_flow_pass(&self, touch: FlowTouch) {
         if touch.is_empty() {
             return;
         }
@@ -155,11 +232,38 @@ impl PerspectiveInstance {
                 .lock()
                 .expect("flow pass queue poisoned")
                 .take();
-            if this.is_teardown.load(Ordering::Acquire) {
+            if !this.is_teardown.load(Ordering::Acquire) {
+                this.run_sync_triggered_flow_pass(touch).await;
+            }
+            this.flow_pass_queue
+                .lock()
+                .expect("flow pass queue poisoned")
+                .finish();
+        });
+    }
+
+    /// Wait until no flow pass is queued or running here. For tests: a write
+    /// to a flow definition queues a sweep that runs a debounce later, and a
+    /// test that runs its own pass meanwhile can find the sweep has already
+    /// recorded what it expected to record. Panics after ten seconds.
+    #[cfg(test)]
+    pub(crate) async fn settle_flow_passes(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if self
+                .flow_pass_queue
+                .lock()
+                .expect("flow pass queue poisoned")
+                .is_idle()
+            {
                 return;
             }
-            this.run_sync_triggered_flow_pass(touch).await;
-        });
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a flow pass was still queued or running after 10 s"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 
     /// Resolve the touched proposals to their instances, then sweep **once
@@ -170,10 +274,15 @@ impl PerspectiveInstance {
     /// touched is a question about `Shared` links, so it has the same answer
     /// for every agent. Only the recording is per agent.
     async fn run_sync_triggered_flow_pass(&mut self, touch: FlowTouch) {
-        let instance_filter: Option<Vec<String>> = if touch.every_instance {
+        let instance_filter: Option<Vec<String>> = if touch.every_instance || touch.definition {
             log::debug!(
-                "sync-triggered flow pass on {}: a role revocation synced in; sweeping every instance",
-                self.uuid
+                "flow pass on {}: {}; sweeping every instance",
+                self.uuid,
+                if touch.definition {
+                    "a flow definition changed"
+                } else {
+                    "a role revocation synced in"
+                }
             );
             None
         } else {
@@ -459,6 +568,7 @@ mod tests {
                 instances: set(&["ad4m://flow/instance/a", "ad4m://flow/instance/b"]),
                 proposals: set(&["ad4m://flow/proposal/p2", "ad4m://flow/proposal/p3"]),
                 every_instance: false,
+                definition: false,
             }
         );
     }
@@ -477,6 +587,57 @@ mod tests {
         assert!(touch.instances.is_empty() && touch.proposals.is_empty());
     }
 
+    /// Every part of a definition the fold reads is a touch, and sweeps: a
+    /// state's or transition's links do not name the flow.
+    #[test]
+    fn a_definition_change_touches_every_instance() {
+        for predicate in FLOW_DEFINITION_PREDICATES {
+            let diff = DecoratedPerspectiveDiff::from_removals(vec![link(
+                "ns://Flow.done",
+                predicate,
+                "literal:string:x",
+            )]);
+            let touch = FlowTouch::of_diff(&diff);
+            assert!(touch.definition && !touch.is_empty(), "{predicate}");
+            assert!(touch.instances.is_empty() && touch.proposals.is_empty());
+        }
+    }
+
+    /// `rdf://type` and `ad4m://context` are written by every class, so they
+    /// are not a definition change.
+    #[test]
+    fn generic_class_links_are_not_a_definition_change() {
+        let diff = DecoratedPerspectiveDiff::from_additions(vec![
+            link("ns://Flow", "rdf://type", "ad4m://Flow"),
+            link("ns://Flow", "ad4m://context", "literal:string:x"),
+        ]);
+        assert!(FlowTouch::of_diff(&diff).is_empty());
+    }
+
+    /// A local write queues only for a definition change: this replica's own
+    /// votes already run the pass after themselves.
+    #[test]
+    fn a_local_diff_keeps_only_the_definition() {
+        let vote = link(
+            "ad4m://flow/proposal/p",
+            ACCEPTED_BY_PREDICATE,
+            "did:key:me",
+        );
+        let rule = link("ns://Flow.done", "ad4m://consensusRule", "literal:string:x");
+
+        let only_vote = DecoratedPerspectiveDiff::from_additions(vec![vote.clone()]);
+        assert!(FlowTouch::of_local_diff(&only_vote).is_empty());
+
+        let both = DecoratedPerspectiveDiff::from_additions(vec![vote, rule]);
+        assert_eq!(
+            FlowTouch::of_local_diff(&both),
+            FlowTouch {
+                definition: true,
+                ..FlowTouch::default()
+            }
+        );
+    }
+
     /// One pass queued at a time: the first touch spawns, later ones merge
     /// into it, `take` hands everything to the running pass and re-arms.
     #[test]
@@ -486,11 +647,13 @@ mod tests {
             instances: set(&["ad4m://flow/instance/a"]),
             proposals: HashSet::new(),
             every_instance: false,
+            definition: false,
         };
         let second = FlowTouch {
             instances: HashSet::new(),
             proposals: set(&["ad4m://flow/proposal/p"]),
             every_instance: true,
+            definition: true,
         };
         assert!(queue.enqueue(first.clone()), "the first touch spawns");
         assert!(!queue.enqueue(second.clone()), "the second rides along");
@@ -502,6 +665,7 @@ mod tests {
             taken.every_instance,
             "a sweep-everything touch survives the merge"
         );
+        assert!(taken.definition, "and so does a definition change");
 
         assert!(
             queue.enqueue(first),

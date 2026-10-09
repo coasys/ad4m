@@ -239,7 +239,11 @@ pub async fn run(ad4m_client: Ad4mClient, command: Option<PerspectiveFunctions>)
         PerspectiveFunctions::Watch { id } => {
             println!("Watching perspective {} for link changes...", id);
             println!("(Press Ctrl+C to stop)\n");
-            let mut rx = ad4m_client.subscribe_events();
+            let mut rx = ad4m_client
+                .watch_events(serde_json::json!({
+                    "link-added": [id], "link-removed": [id], "link-updated": [id]
+                }))
+                .await?;
             loop {
                 match rx.recv().await {
                     Ok(event) => {

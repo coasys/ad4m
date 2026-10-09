@@ -2,8 +2,10 @@
 //!
 //! 19 handlers covering agent info, auth, trust, entanglement, and profile.
 
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::Arc;
+use ts_rs::TS;
 
 use crate::agent::capabilities::*;
 use crate::agent::{
@@ -19,7 +21,7 @@ use crate::types::domain::Perspective as DomainPerspective;
 use crate::types::*;
 
 use super::types::*;
-use super::ws_handler::{HandlerMap, ParamExt, WsRpcError};
+use super::ws_handler::{HandlerMap, NoParams, ParamExt, WsRpcError};
 
 /// Convert a client-supplied profile link into the decorated form, **deriving
 /// the validity verdict on this replica** rather than believing the caller.
@@ -412,6 +414,18 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
     let body: UnlockAgentRequest = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
+    let agent = unlock_main_agent(body.passphrase).await?;
+    Ok(serde_json::to_value(agent)?)
+}
+
+/// Unlocks the main agent's wallet with `passphrase`, then starts what an
+/// unlocked agent needs (system languages, the Holochain conductor, the
+/// agent's profile publish) and announces the new status. Shared by
+/// `agent.unlock` and the executor's own unlock at startup
+/// ([`crate::unlock_agent_at_startup`]). Errs when the wallet rejects the
+/// passphrase; the returned status carries `error` when the wallet stayed
+/// locked or a service failed to start.
+pub(crate) async fn unlock_main_agent(passphrase: String) -> Result<AgentStatus, WsRpcError> {
     let agent_instance = AgentService::global_instance();
     {
         let mut agent_service = agent_instance
@@ -421,7 +435,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
             .as_mut()
             .ok_or_else(|| WsRpcError::internal("Agent not initialized"))?;
         agent_ref
-            .unlock(body.passphrase.clone())
+            .unlock(passphrase.clone())
             .map_err(|e| WsRpcError::internal(e.to_string()))?;
     }
 
@@ -439,7 +453,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         let language_language_only = config.language_language_only.unwrap_or(false);
 
         if config.run_holochain.unwrap_or(true) {
-            let startup = spawn_conductor_startup(body.passphrase.clone());
+            let startup = spawn_conductor_startup(passphrase);
             if let Err(e) = startup.load_core_languages(language_language_only).await {
                 log::error!("Error loading system languages: {:?}", e);
                 init_errors.push(format!("Failed to load system languages: {}", e));
@@ -491,7 +505,7 @@ async fn unlock_agent(params: Value, ctx: Arc<RequestContext>) -> Result<Value, 
         )
         .await;
 
-    Ok(serde_json::to_value(agent)?)
+    Ok(agent)
 }
 
 /// agent.sign — sign a message
@@ -737,16 +751,10 @@ async fn add_entanglement(params: Value, ctx: Arc<RequestContext>) -> Result<Val
     check_capability(&ctx.capabilities, &AGENT_UPDATE_CAPABILITY)
         .map_err(|e| WsRpcError::forbidden(e))?;
 
-    let body: EntanglementProofsWrapper = serde_json::from_value(params.clone())
+    let body: AgentAddEntanglementProofsParams = serde_json::from_value(params)
         .map_err(|e| WsRpcError::bad_request(format!("Invalid params: {}", e)))?;
 
-    // Check for preflight mode
-    let preflight = params
-        .get("preflight")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    if preflight {
+    if body.preflight.unwrap_or(false) {
         let signed = sign_device_key(
             body.proofs
                 .first()
@@ -852,32 +860,88 @@ async fn entanglement_proof_preflight(
 ///
 /// Message types match the client SDK's `apiClient.call()` type strings.
 pub fn register_ws_handlers(map: &mut HandlerMap) {
-    map.register("agent.get", get_agent);
-    map.register("agent.getApps", get_apps);
-    map.register("agent.byDid", get_agent_by_did);
-    map.register("agent.updateProfile", update_profile);
-    map.register("agent.generate", generate_agent);
-    map.register("agent.import", import_agent);
-    map.register("agent.lock", lock_agent);
-    map.register("agent.unlock", unlock_agent);
-    map.register("agent.sign", sign_message);
-    map.register("agent.removeApp", remove_app);
-    map.register("agent.requestCapability", request_capability);
-    map.register("agent.permitCapability", permit_capability_handler);
-    map.register("agent.generateJwt", generate_jwt);
-    map.register("agent.revokeToken", revoke_token);
-    map.register("agent.status", get_agent_status);
-    map.register("agent.isLocked", is_locked);
-    map.register("agent.getTrustedAgents", get_trusted_agents);
-    map.register("agent.addTrustedAgents", add_trusted_agents);
-    map.register("agent.deleteTrustedAgents", delete_trusted_agents);
-    map.register("agent.getEntanglementProofs", get_entanglement);
-    map.register("agent.addEntanglementProofs", add_entanglement);
-    map.register("agent.deleteEntanglementProofs", delete_entanglement);
-    map.register(
+    map.method::<NoParams, Agent>("agent.get", get_agent).read();
+    map.method::<NoParams, Vec<Apps>>("agent.getApps", get_apps)
+        .read();
+    map.method::<AgentByDidParams, Option<Agent>>("agent.byDid", get_agent_by_did)
+        .read();
+    map.method::<UpdateProfileRequest, Agent>("agent.updateProfile", update_profile);
+    map.method::<GenerateAgentRequest, AgentStatus>("agent.generate", generate_agent)
+        .long();
+    // Always fails (not implemented); the result type is the SDK's `AgentStatus`.
+    map.method::<ImportAgentRequest, AgentStatus>("agent.import", import_agent);
+    map.method::<LockAgentRequest, AgentStatus>("agent.lock", lock_agent);
+    map.method::<UnlockAgentRequest, AgentStatus>("agent.unlock", unlock_agent)
+        .long();
+    map.method::<SignMessageRequest, AgentSignature>("agent.sign", sign_message);
+    map.method::<AgentRemoveAppParams, Vec<Apps>>("agent.removeApp", remove_app);
+    map.method::<RequestCapabilityRequest, String>("agent.requestCapability", request_capability);
+    map.method::<PermitCapabilityRequest, String>(
+        "agent.permitCapability",
+        permit_capability_handler,
+    );
+    map.method::<GenerateJwtRequest, String>("agent.generateJwt", generate_jwt);
+    map.method::<AgentRevokeTokenParams, Vec<Apps>>("agent.revokeToken", revoke_token);
+    map.method::<NoParams, AgentStatus>("agent.status", get_agent_status)
+        .read();
+    map.method::<NoParams, bool>("agent.isLocked", is_locked)
+        .read();
+    map.method::<NoParams, Vec<String>>("agent.getTrustedAgents", get_trusted_agents)
+        .read();
+    map.method::<TrustedAgentsWrapper, Vec<String>>("agent.addTrustedAgents", add_trusted_agents);
+    map.method::<TrustedAgentsWrapper, Vec<String>>(
+        "agent.deleteTrustedAgents",
+        delete_trusted_agents,
+    );
+    map.method::<NoParams, Vec<EntanglementProof>>("agent.getEntanglementProofs", get_entanglement)
+        .read();
+    map.method::<AgentAddEntanglementProofsParams, Vec<EntanglementProof>>(
+        "agent.addEntanglementProofs",
+        add_entanglement,
+    );
+    map.method::<EntanglementProofsWrapper, Vec<EntanglementProof>>(
+        "agent.deleteEntanglementProofs",
+        delete_entanglement,
+    );
+    map.method::<EntanglementProofPreflightRequest, EntanglementProof>(
         "agent.entanglementProofPreflight",
         entanglement_proof_preflight,
-    );
+    )
+    .read();
+}
+
+// ── Contracts ───────────────────────────────────────────────────────────────
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentByDidParams {
+    pub did: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRemoveAppParams {
+    pub id: String,
+}
+
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentRevokeTokenParams {
+    pub token: String,
+}
+
+/// `{ proofs }`, plus `preflight: true` to sign the first proof's device key
+/// instead of storing the proofs.
+#[derive(Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub struct AgentAddEntanglementProofsParams {
+    pub proofs: Vec<EntanglementProofInput>,
+    #[ts(optional)]
+    pub preflight: Option<bool>,
 }
 
 #[cfg(test)]

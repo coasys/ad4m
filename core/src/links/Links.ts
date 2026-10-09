@@ -1,5 +1,10 @@
 import { ExpressionGeneric, ExpressionGenericInput } from '../expression/Expression';
-import { LinkStatus } from "../perspectives/PerspectiveProxy";
+import type { DecoratedLinkExpression } from "../generated/api/DecoratedLinkExpression";
+import type { LinkExpression as WireLinkExpression } from "../generated/api/LinkExpression";
+import type { LinkExpressionInput as WireLinkExpressionInput } from "../generated/api/LinkExpressionInput";
+import type { LinkMutations as WireLinkMutations } from "../generated/api/LinkMutations";
+import type { LinkStatus as WireLinkStatus } from "../generated/api/LinkStatus";
+import type { PerspectiveLinkDiff } from "../generated/api/PerspectiveLinkDiff";
 export class Link {
     source: string;
     target: string;
@@ -23,6 +28,13 @@ export class LinkExpressionMutations {
         this.additions = additions
         this.removals = removals
     }
+
+    static fromWire(diff: PerspectiveLinkDiff): LinkExpressionMutations {
+        return new LinkExpressionMutations(
+            diff.additions.map(LinkExpression.fromWire),
+            diff.removals.map(LinkExpression.fromWire),
+        )
+    }
 }
 export class LinkInput {
     source: string;
@@ -41,16 +53,53 @@ export class LinkExpression extends ExpressionGeneric(Link) {
         }
         return hash;
     }
-    status?: LinkStatus;
+    status?: WireLinkStatus;
 
     graph?: string;
+
+    /** Build a LinkExpression (with `hash()`) from the executor's wire shape. */
+    static fromWire(wire: WireLinkExpression | DecoratedLinkExpression): LinkExpression {
+        const link = new LinkExpression(wire.author, wire.timestamp, wire.data, wire.proof)
+        if (wire.status) link.status = wire.status
+        if (wire.graph) link.graph = wire.graph
+        return link
+    }
 };
 export class LinkExpressionInput extends ExpressionGenericInput(LinkInput) {
     hash: () => number;
-    status?: LinkStatus;
+    status?: WireLinkStatus;
 
     graph?: string;
 };
+
+export function linkExpressionToWire(link: LinkExpression): WireLinkExpression {
+    return {
+        author: link.author,
+        timestamp: link.timestamp,
+        data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate ?? null },
+        proof: { key: link.proof.key, signature: link.proof.signature },
+        status: link.status ?? null,
+        ...(link.graph ? { graph: link.graph } : {}),
+    }
+}
+
+export function linkExpressionInputToWire(link: LinkExpressionInput): WireLinkExpressionInput {
+    return {
+        author: link.author,
+        timestamp: link.timestamp,
+        data: { source: link.data.source, target: link.data.target, predicate: link.data.predicate },
+        proof: { key: link.proof.key, signature: link.proof.signature, valid: link.proof.valid, invalid: link.proof.invalid },
+        status: link.status,
+        ...(link.graph ? { graph: link.graph } : {}),
+    }
+}
+
+export function linkMutationsToWire(mutations: LinkMutations): WireLinkMutations {
+    return {
+        additions: mutations.additions,
+        removals: mutations.removals.map(linkExpressionInputToWire),
+    }
+}
 
 export function linkEqual(l1: LinkExpression, l2: LinkExpression): boolean {
     return l1.author == l2.author &&

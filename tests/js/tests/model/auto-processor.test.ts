@@ -89,7 +89,7 @@ describeIfLLM("perspective.addAutoProcessor (WS + LLM)", function () {
     p = await ad4m.perspective.add(`auto-processor-${seq}`);
     await ConversationSubgroup.register(p);
     events = [];
-    p.addAutoProcessorEventListener((e) => events.push(e));
+    p.on("auto-processor-event", (e) => events.push(e));
   });
 
   afterEach(async () => {
