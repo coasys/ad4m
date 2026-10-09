@@ -364,6 +364,12 @@ pub(super) fn evaluate_getters(
                 Ok(result_json) => {
                     let rows: Vec<Value> = serde_json::from_str(&result_json).unwrap_or_default();
 
+                    // A relation is a set of targets. A read over several
+                    // graphs returns one row per graph that holds a matching
+                    // triple: since #1357 the same flag written Shared and
+                    // Local sits in two graphs. So a relation keeps each
+                    // target once, in first-seen order.
+                    let relation = prop.is_collection || prop.is_scalar_relation;
                     let mut grouped: HashMap<String, Vec<String>> = HashMap::new();
                     for row in &rows {
                         let source = match row.get("source").and_then(|v| v.as_str()) {
@@ -375,10 +381,10 @@ pub(super) fn evaluate_getters(
                             {
                                 if let Some(s) = val.as_str() {
                                     if !s.is_empty() && s != "None" {
-                                        grouped
-                                            .entry(source.to_string())
-                                            .or_default()
-                                            .push(s.to_string());
+                                        let values = grouped.entry(source.to_string()).or_default();
+                                        if !relation || !values.iter().any(|v| v == s) {
+                                            values.push(s.to_string());
+                                        }
                                     }
                                 }
                             }
