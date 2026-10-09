@@ -532,11 +532,7 @@ pub(crate) async fn build_event_stream_for(
                     let current_did = did_cell.get();
                     match result {
                         Ok(ref msg)
-                            if matches_notification_owner(
-                                msg,
-                                current_did.as_deref(),
-                                admin,
-                            ) =>
+                            if matches_notification_owner(msg, current_did.as_deref(), admin) =>
                         {
                             Some(wrap_event(events::NOTIFICATION_TRIGGERED, msg))
                         }

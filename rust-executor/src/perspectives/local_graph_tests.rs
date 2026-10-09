@@ -1840,7 +1840,10 @@ async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_na
     let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "b").await;
     let removed = alice_view.remove_link(expr, None).await.unwrap();
     assert_eq!(removed.graph, None);
-    assert_eq!(graphs_of(&p, &alice_did, "b").await, vec![Some(local.clone())]);
+    assert_eq!(
+        graphs_of(&p, &alice_did, "b").await,
+        vec![Some(local.clone())]
+    );
 
     // Update the Local copy: the shared one is untouched.
     let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "c").await;
@@ -1852,7 +1855,10 @@ async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_na
         .unwrap();
     assert_eq!(updated.graph, Some(local.clone()));
     assert_eq!(graphs_of(&p, &alice_did, "c").await, vec![None]);
-    assert_eq!(graphs_of(&p, &alice_did, "c-new").await, vec![Some(local.clone())]);
+    assert_eq!(
+        graphs_of(&p, &alice_did, "c-new").await,
+        vec![Some(local.clone())]
+    );
 
     // Bob reads only the shared copy, so his removal acts on it, even when
     // Alice's Local copy is the one the store holds first.
@@ -1865,7 +1871,10 @@ async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_na
         .unwrap();
     assert_eq!(removed.len(), 1, "Bob's removal found nothing");
     assert_eq!(removed[0].graph, None);
-    assert_eq!(graphs_of(&p, &alice_did, "d").await, vec![Some(local.clone())]);
+    assert_eq!(
+        graphs_of(&p, &alice_did, "d").await,
+        vec![Some(local.clone())]
+    );
 
     // A copy Bob cannot see is not his to remove, even when it is the only one.
     let mut view = p.clone().for_viewer(alice_did.clone());
@@ -1888,7 +1897,10 @@ async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_na
         .remove_links(vec![unnamed], None)
         .await
         .unwrap();
-    assert!(removed.is_empty(), "Bob removed Alice's Local link: {removed:?}");
+    assert!(
+        removed.is_empty(),
+        "Bob removed Alice's Local link: {removed:?}"
+    );
     assert_eq!(graphs_of(&p, &alice_did, "e").await, vec![Some(local)]);
 }
 
@@ -2078,7 +2090,11 @@ fn a_legacy_local_link_in_the_default_graph_is_not_shareable() {
         additions: vec![legacy.clone(), public],
         removals: vec![legacy],
     });
-    let added: Vec<&str> = out.additions.iter().map(|l| l.data.source.as_str()).collect();
+    let added: Vec<&str> = out
+        .additions
+        .iter()
+        .map(|l| l.data.source.as_str())
+        .collect();
     assert_eq!(added, vec!["ad4m://s/public"]);
     assert!(out.removals.is_empty(), "{:?}", out.removals);
 }
@@ -2114,7 +2130,10 @@ async fn an_exists_in_any_expression_reads_no_hidden_local_graph() {
     };
     let views = [
         ("Alice", p.clone().for_viewer(alice_did)),
-        ("Bob, shared reads", p.clone().for_viewer(bob_did).for_shared_reads()),
+        (
+            "Bob, shared reads",
+            p.clone().for_viewer(bob_did).for_shared_reads(),
+        ),
     ];
     for (who, view) in &views {
         for (shape, template) in SHAPES {
