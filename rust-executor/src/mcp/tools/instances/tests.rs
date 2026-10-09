@@ -2434,7 +2434,10 @@ async fn a_pass_on_shared_graphs_only_gives_its_tools_no_local_graph() {
         context(),
     ))
     .await;
-    assert!(shared_only.contains("flux://channel/shared"), "{shared_only}");
+    assert!(
+        shared_only.contains("flux://channel/shared"),
+        "{shared_only}"
+    );
     assert!(
         !shared_only.contains("flux://channel/local"),
         "a shared-only pass's tool read the runner's Local graph: {shared_only}"
