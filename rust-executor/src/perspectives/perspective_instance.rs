@@ -6153,7 +6153,10 @@ impl PerspectiveInstance {
                 (&model_params, &changed_predicates)
             {
                 if !params.trigger.matches(writes, &mut trigger_lookups) {
-                    log::debug!("⏭️ Skipping model subscription {} — no write matches it", id);
+                    log::debug!(
+                        "⏭️ Skipping model subscription {} — no write matches it",
+                        id
+                    );
                     continue;
                 }
             }

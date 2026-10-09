@@ -60,11 +60,6 @@ const MAX_TRACKED_LINKS: usize = 10_000;
 /// than the query it might save.
 const MAX_NEIGHBOURS: usize = 2_000;
 
-/// How deep the include / projection / quantifier walk goes. The query
-/// itself bounds include depth; this is a guard against a cycle in the walk.
-/// Past it the rules fall back to `every_write`.
-const MAX_WALK_DEPTH: u8 = 8;
-
 /// The writes of one subscription-check batch.
 #[derive(Debug, Clone, Default)]
 pub(super) struct Writes {
@@ -273,8 +268,8 @@ pub(super) fn build_rules(
         getter_predicates,
     };
     walk.rules.any.extend(extra_any);
-    walk.scan_class(&shape, query.where_clause.as_ref(), 0);
-    walk.query(&shape, &query, 0);
+    walk.scan_class(&shape, query.where_clause.as_ref());
+    walk.query(&shape, &query);
     if let Some(parent) = &query.parent {
         walk.parent(parent);
     }
@@ -315,12 +310,7 @@ impl Walk<'_> {
         &mut self,
         shape: &ModelShape,
         where_clause: Option<&std::collections::BTreeMap<String, WhereCondition>>,
-        depth: u8,
     ) {
-        if depth > MAX_WALK_DEPTH {
-            self.rules.every_write = true;
-            return;
-        }
         self.watch_class(shape);
         let flags: Vec<Flag> = shape
             .properties
@@ -353,7 +343,7 @@ impl Walk<'_> {
             }
         }
         if let Some(clause) = where_clause {
-            self.quantifiers(shape, clause, depth);
+            self.quantifiers(shape, clause);
         }
     }
 
@@ -363,16 +353,15 @@ impl Walk<'_> {
         &mut self,
         shape: &ModelShape,
         clause: &std::collections::BTreeMap<String, WhereCondition>,
-        depth: u8,
     ) {
         for (key, condition) in clause {
             match condition {
                 WhereCondition::SubClauses(branches) => {
                     for branch in branches {
-                        self.quantifiers(shape, branch, depth);
+                        self.quantifiers(shape, branch);
                     }
                 }
-                WhereCondition::SubClause(inner) => self.quantifiers(shape, inner, depth),
+                WhereCondition::SubClause(inner) => self.quantifiers(shape, inner),
                 WhereCondition::Ops(ops) if ops.some.is_some() || ops.none.is_some() => {
                     let target = shape
                         .include_relations
@@ -386,7 +375,7 @@ impl Walk<'_> {
                         return;
                     };
                     for inner in [&ops.some, &ops.none].into_iter().flatten() {
-                        self.scan_class(&target, Some(inner), depth + 1);
+                        self.scan_class(&target, Some(inner));
                     }
                 }
                 _ => {}
@@ -395,11 +384,8 @@ impl Walk<'_> {
     }
 
     /// Walk `query`'s includes and projections, which read from `shape`.
-    fn query(&mut self, shape: &ModelShape, query: &ModelQueryInput, depth: u8) {
-        if depth > MAX_WALK_DEPTH {
-            self.rules.every_write = true;
-            return;
-        }
+    /// Recurses over the query, never over the shapes, so it ends.
+    fn query(&mut self, shape: &ModelShape, query: &ModelQueryInput) {
         for (name, value) in query.include.iter().flatten() {
             let sub = match value {
                 IncludeValue::Bool(false) => continue,
@@ -419,9 +405,9 @@ impl Walk<'_> {
                 Some(target) => {
                     self.watch_class(&target);
                     if let Some(clause) = &sub.where_clause {
-                        self.quantifiers(&target, clause, depth + 1);
+                        self.quantifiers(&target, clause);
                     }
-                    self.query(&target, &sub, depth + 1);
+                    self.query(&target, &sub);
                 }
                 None => self.unknown_members(&sub),
             }
@@ -431,7 +417,12 @@ impl Walk<'_> {
                 .properties
                 .iter()
                 .map(|p| (&p.name, &p.predicate))
-                .chain(shape.include_relations.iter().map(|r| (&r.name, &r.predicate)));
+                .chain(
+                    shape
+                        .include_relations
+                        .iter()
+                        .map(|r| (&r.name, &r.predicate)),
+                );
             let Some(predicate) = declared
                 .filter(|(name, predicate)| **name == proj.from && !predicate.is_empty())
                 .map(|(_, predicate)| predicate.clone())
@@ -467,7 +458,7 @@ impl Walk<'_> {
                 Some(target) => {
                     self.watch_class(target);
                     if let Some(clause) = &proj.where_clause {
-                        self.quantifiers(target, clause, depth + 1);
+                        self.quantifiers(target, clause);
                     }
                 }
                 None => {
@@ -583,7 +574,13 @@ impl ModelTrigger {
             .any(|(s, p, t)| self.matches_link(s, p, t, store))
     }
 
-    fn matches_link(&self, source: &str, predicate: &str, target: &str, store: &mut StoreLookups) -> bool {
+    fn matches_link(
+        &self,
+        source: &str,
+        predicate: &str,
+        target: &str,
+        store: &mut StoreLookups,
+    ) -> bool {
         let rules = &self.rules;
         if rules.any.contains(predicate) {
             return true;

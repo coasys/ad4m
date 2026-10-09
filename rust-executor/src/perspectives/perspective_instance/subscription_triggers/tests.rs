@@ -69,13 +69,22 @@ async fn blog() -> PerspectiveInstance {
         &[("text", "ns://text")],
         &[("replies", "ns://reply", "Comment")],
     );
-    let note = sdna("Note", &[("title", "ns://title"), ("body", "ns://body")], &[]);
+    let note = sdna(
+        "Note",
+        &[("title", "ns://title"), ("body", "ns://body")],
+        &[],
+    );
     let (p, _, _) =
         setup_perspective_no_llm(&[("Post", &post), ("Comment", &comment), ("Note", &note)]).await;
     p
 }
 
-async fn add(p: &mut PerspectiveInstance, source: &str, predicate: &str, target: &str) -> DecoratedLinkExpression {
+async fn add(
+    p: &mut PerspectiveInstance,
+    source: &str,
+    predicate: &str,
+    target: &str,
+) -> DecoratedLinkExpression {
     p.add_link(
         Link {
             source: source.into(),
@@ -168,7 +177,11 @@ async fn an_included_records_edit_reruns_the_including_subscription() {
     add(&mut p, "ns://c1", "ns://text", "literal:string:edited").await;
     check(&p).await;
 
-    assert_eq!(reruns::count(&id), 1, "the edit must re-run the subscription");
+    assert_eq!(
+        reruns::count(&id),
+        1,
+        "the edit must re-run the subscription"
+    );
     let now = last_result(&p, &id).await;
     assert!(now.to_string().contains("edited"), "{now}");
 }
@@ -229,7 +242,11 @@ async fn a_record_that_entered_later_is_watched_two_includes_deep() {
     add(&mut p, "ns://r1", "ns://text", "literal:string:deep").await;
     check(&p).await;
 
-    assert_eq!(reruns::count(&id), before + 1, "the reply's edit must re-run");
+    assert_eq!(
+        reruns::count(&id),
+        before + 1,
+        "the reply's edit must re-run"
+    );
     assert!(last_result(&p, &id).await.to_string().contains("deep"));
 }
 
@@ -290,7 +307,9 @@ async fn deleting_a_record_outside_the_page_reruns() {
     assert_eq!(shown.len(), 1, "{first}");
     let hidden = if shown[0] == "ns://p1" { f2 } else { f1 };
 
-    p.remove_link(hidden.into(), None).await.expect("remove_link");
+    p.remove_link(hidden.into(), None)
+        .await
+        .expect("remove_link");
     check(&p).await;
 
     assert_eq!(reruns::count(&id), 1);
