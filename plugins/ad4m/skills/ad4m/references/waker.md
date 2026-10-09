@@ -41,14 +41,14 @@ For mention subscriptions, the wake message includes per-item details with resol
 
 ```json
 {
-  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\n\nMentioned items (1):\n  Item: literal:string:msg-123\n  Parents: literal:string:channel-1 (via ad4m://has_child), literal:string:post-7 (via we://comment)",
+  "text": "You were @mentioned in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: mention-abc\nEvent type: mention\nMentioned items (1):\n  Item: literal:string:msg-123\n  Parents: ad4m://obj/call-1 (via we://children), ad4m://obj/thread-5 (via ad4m://has_child)",
   "mode": "now"
 }
 ```
 
 The `Mentioned items` section lists each item that triggered the wake:
 - **Item** — the base address of the instance whose property text carried your name or DID
-- **Parents** — every node with a link pointing at this item, each with the predicate it links through. `ad4m://has_child` is core's containment edge (Flux channels); apps name their own — WE hangs an utterance under its call through `we://children` and a reply under its post through `we://comment`. The predicate is how you get back out to the item's siblings.
+- **Parents** — every node with a link pointing at this item, each with the predicate it links through. `ad4m://has_child` is core's containment edge (Flux channels); apps name their own — WE hangs an utterance under its call through `we://children` and a reply under its post through `we://comment`. The predicate is how you get back out to the item's siblings. Links the executor itself writes at items (`ad4m://ontology/*`, `ad4m://interp/*`, `ad4m://flow/*`) and a link from the item to itself are left out. `(unknown)` means nothing else links to it.
 
 **The item is not necessarily a message.** The subscription is a SPARQL query over links, not over a `Message` class: it matches any link whose literal target contains one of your profile names or your DID, excluding `ad4m://ontology/*` proof metadata. If the space declares a `Message` class with a `body` property, the query is scoped to that one predicate for speed; in a space with a user-defined ontology and no such class it scans every other link. So the address you are handed is the source of whichever link carried your name — a task, a proposal, a comment, a field of a class this space invented. Treat "message" as one possible answer, never the assumption.
 
@@ -70,7 +70,7 @@ Some containers must not be written into — for a space an app created, that ap
 
 ```json
 {
-  "text": "New items in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\n\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: children-xyz\nEvent type: channel-messages",
+  "text": "New items in an AD4M neighbourhood.\nRead the AD4M skill for instructions on how to handle this.\nAgent DID: did:key:z6Mk...\nPerspective: cda8c4fc-...\nSubscription: children-xyz\nEvent type: channel-messages",
   "mode": "now"
 }
 ```
