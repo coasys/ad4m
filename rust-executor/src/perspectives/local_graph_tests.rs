@@ -1701,3 +1701,424 @@ async fn a_subscriptions_first_result_holds_its_subscribers_local_rows() {
         "model subscription's first result: {model}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Marvin's review of 9eb5c58fd (#812)
+// ---------------------------------------------------------------------------
+
+/// A notification trigger reads its owner's Local graph, so the event that
+/// carries its match reaches that owner's sessions only, not every co-owner
+/// of the perspective (review item 2, the rule #1324 set for subscriptions).
+#[tokio::test]
+async fn a_triggered_notification_reaches_only_its_owner() {
+    use crate::api::events_ws::matches_notification_owner;
+    use crate::pubsub::RUNTIME_NOTIFICATION_TRIGGERED_TOPIC;
+
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    // The session filter checks ownership through the global registry.
+    super::register_perspective(p.uuid.clone(), p.clone());
+    let notification = crate::types::Notification {
+        id: Uuid::new_v4().to_string(),
+        granted: true,
+        description: "mine".to_string(),
+        app_name: "t".to_string(),
+        app_url: "t".to_string(),
+        app_icon_path: "t".to_string(),
+        trigger: "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string(),
+        perspective_ids: vec![p.uuid.clone()],
+        webhook_url: String::new(),
+        webhook_auth: String::new(),
+        user_email: alice.user_email.clone(),
+    };
+
+    let mut events = get_global_pubsub()
+        .await
+        .subscribe(&RUNTIME_NOTIFICATION_TRIGGERED_TOPIC)
+        .await;
+    PerspectiveInstance::publish_notification_matches(
+        p.uuid.clone(),
+        std::collections::BTreeMap::from([(
+            notification,
+            vec![serde_json::json!({ "s": "ad4m://s/alice-private" })],
+        )]),
+    )
+    .await;
+    let msg = loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), events.recv())
+            .await
+            .expect("no notification was published")
+            .unwrap();
+        let v: Value = serde_json::from_str(&msg).unwrap();
+        if v["perspectiveUuid"].as_str() == Some(p.uuid.as_str()) {
+            break msg;
+        }
+    };
+    assert!(
+        matches_notification_owner(&msg, Some(&alice_did), false),
+        "Alice's session gets her notification: {msg}"
+    );
+    assert!(
+        !matches_notification_owner(&msg, Some(&bob_did), false),
+        "Bob co-owns the perspective but the notification is Alice's: {msg}"
+    );
+    assert!(
+        !matches_notification_owner(&msg, None, false),
+        "a session whose DID hasn't resolved gets nothing"
+    );
+    super::unregister_perspective(&p.uuid);
+}
+
+/// Alice's link `name`, stored twice: in the default graph, then re-added
+/// as the same signed expression with status Local, which puts the copy in
+/// her Local graph. The reifier IRI leaves the graph out, so both copies
+/// match one author + timestamp + triple.
+async fn one_expression_in_two_graphs(
+    p: &PerspectiveInstance,
+    alice: &AgentContext,
+    alice_did: &str,
+    name: &str,
+) -> LinkExpression {
+    let mut view = p.clone().for_viewer(alice_did.to_string());
+    let shared = view
+        .add_link(link(name), LinkStatus::Shared, None, alice, None)
+        .await
+        .unwrap();
+    let expression = LinkExpression::from(shared);
+    let mut again = expression.clone();
+    again.graph = None;
+    view.add_link_expression(again, LinkStatus::Local, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        graphs_of(p, alice_did, name).await,
+        vec![None, Some(local_graph_iri(alice_did))]
+    );
+    expression
+}
+
+/// The graphs `viewer` reads link `name` in, sorted (`None` = default graph).
+async fn graphs_of(p: &PerspectiveInstance, viewer: &str, name: &str) -> Vec<Option<String>> {
+    let mut graphs: Vec<Option<String>> = p
+        .clone()
+        .for_viewer(viewer.to_string())
+        .get_links(&LinkQuery {
+            source: Some(format!("ad4m://s/{name}")),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|l| l.graph)
+        .collect();
+    graphs.sort();
+    graphs
+}
+
+/// With one expression in two graphs, a removal or an update acts on the
+/// copy in the graph the request names (none = the default graph), never on
+/// whichever copy the store returns first. A copy the caller cannot see never
+/// hides one it can (review item 3).
+#[tokio::test]
+async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_names() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let local = local_graph_iri(&alice_did);
+    let mut alice_view = p.clone().for_viewer(alice_did.clone());
+
+    // Remove the Local copy: the shared one stays.
+    let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "a").await;
+    let mut named = expr.clone();
+    named.graph = Some(LOCAL_GRAPH_ALIAS.to_string());
+    let removed = alice_view.remove_link(named, None).await.unwrap();
+    assert_eq!(removed.graph, Some(local.clone()));
+    assert_eq!(graphs_of(&p, &alice_did, "a").await, vec![None]);
+
+    // Remove naming no graph: the default-graph copy goes, the Local one stays.
+    let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "b").await;
+    let removed = alice_view.remove_link(expr, None).await.unwrap();
+    assert_eq!(removed.graph, None);
+    assert_eq!(graphs_of(&p, &alice_did, "b").await, vec![Some(local.clone())]);
+
+    // Update the Local copy: the shared one is untouched.
+    let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "c").await;
+    let mut named = expr.clone();
+    named.graph = Some(local.clone());
+    let updated = alice_view
+        .update_link(named, link("c-new"), None, &alice)
+        .await
+        .unwrap();
+    assert_eq!(updated.graph, Some(local.clone()));
+    assert_eq!(graphs_of(&p, &alice_did, "c").await, vec![None]);
+    assert_eq!(graphs_of(&p, &alice_did, "c-new").await, vec![Some(local.clone())]);
+
+    // Bob reads only the shared copy, so his removal acts on it, even when
+    // Alice's Local copy is the one the store holds first.
+    let expr = one_expression_in_two_graphs(&p, &alice, &alice_did, "d").await;
+    let removed = p
+        .clone()
+        .for_viewer(bob_did.clone())
+        .remove_links(vec![expr], None)
+        .await
+        .unwrap();
+    assert_eq!(removed.len(), 1, "Bob's removal found nothing");
+    assert_eq!(removed[0].graph, None);
+    assert_eq!(graphs_of(&p, &alice_did, "d").await, vec![Some(local)]);
+}
+
+/// A shape acts for every agent, so a Local graph can't give its property an
+/// initial value either: Bob's Local constructor on a shared shape is not
+/// read (review item 4).
+#[tokio::test]
+async fn a_local_constructor_does_not_set_a_shared_shapes_initial_value() {
+    use super::model_query::shape::load_shape_from_store;
+    let (bob, bob_did) = user("bob");
+    let mut p = setup(Some(vec![bob_did.clone()])).await;
+    let main = AgentContext::main_agent();
+    let shacl = r#"{
+        "target_class": "t://Note",
+        "constructor_actions": [],
+        "destructor_actions": [],
+        "properties": [
+            {
+                "path": "t://text", "name": "text", "datatype": "xsd://string",
+                "min_count": 0, "max_count": 1, "writable": true,
+                "setter": [{"action": "setSingleTarget", "source": "this", "predicate": "t://text", "target": "value"}]
+            }
+        ]
+    }"#;
+    p.add_sdna(
+        "Note".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(shacl.to_string()),
+        &main,
+    )
+    .await
+    .unwrap();
+    // Drop the shared (empty) constructor, so Bob's Local one is the only
+    // constructor in the store.
+    let ctor = p
+        .get_links(&LinkQuery {
+            predicate: Some("ad4m://constructor".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(ctor.len(), 1, "{ctor:?}");
+    let shape_uri = ctor[0].data.source.clone();
+    p.remove_link(LinkExpression::from(ctor[0].clone()), None)
+        .await
+        .unwrap();
+    p.add_link(
+        Link {
+            source: shape_uri,
+            predicate: Some("ad4m://constructor".to_string()),
+            target: r#"literal:string:[{"action":"addLink","source":"this","predicate":"t://text","target":"literal:string:planted"}]"#
+                .to_string(),
+        },
+        LinkStatus::Shared,
+        None,
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+
+    let shape = load_shape_from_store(&p.sparql_store, "Note").unwrap();
+    let text = shape
+        .properties
+        .iter()
+        .find(|prop| prop.name == "text")
+        .expect("the shape has `text`");
+    assert_eq!(text.initial_value, None, "Bob's Local constructor was read");
+}
+
+/// A `link-updated` event names its links `oldLink` and `newLink`. A session
+/// whose DID hasn't resolved gets no update of a Local link (review item 5).
+#[test]
+fn a_local_link_update_does_not_reach_a_session_without_a_did() {
+    use crate::api::events_ws::matches_owner;
+    let local = serde_json::json!({ "graph": local_graph_iri("did:key:alice") });
+    let shared = serde_json::json!({ "graph": SHARED_GRAPH });
+    let update = |old: &Value, new: &Value| {
+        serde_json::json!({
+            "perspectiveUuid": "p",
+            "owner": "did:key:alice",
+            "oldLink": old,
+            "newLink": new,
+        })
+        .to_string()
+    };
+    assert!(!matches_owner(&update(&local, &local), None));
+    assert!(!matches_owner(&update(&local, &shared), None));
+    assert!(!matches_owner(&update(&shared, &local), None));
+    assert!(matches_owner(&update(&shared, &shared), None));
+    assert!(matches_owner(
+        &update(&local, &local),
+        Some("did:key:alice")
+    ));
+}
+
+/// A signed `Local` link with no viewer to write for lands in the main
+/// agent's Local graph, as `add_link` puts it: a Local link always lives in a
+/// Local graph (review item 6).
+#[tokio::test]
+async fn a_local_link_expression_without_a_viewer_lands_in_the_main_agents_local_graph() {
+    let mut p = setup(None).await;
+    let main = AgentContext::main_agent();
+    let main_did = crate::agent::did_for_context(&main).unwrap();
+    let signed = LinkExpression::from(
+        crate::agent::create_signed_expression(link("unstamped").normalize(), &main).unwrap(),
+    );
+    let written = p
+        .add_link_expression(signed, LinkStatus::Local, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (written.graph, written.status),
+        (Some(local_graph_iri(&main_did)), Some(LinkStatus::Local))
+    );
+}
+
+/// A signed link that names the own graph of a Local subject goes to that
+/// Local graph, as `add_link` redirects it; it must not create the shared
+/// graph `ad4m://graph/<S>` and sync (review item 6).
+#[tokio::test]
+async fn a_signed_link_into_a_local_subjects_own_graph_stays_local() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let shared = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let mut p = shared.clone().for_viewer(alice_did.clone());
+    p.add_link(
+        Link {
+            source: "ad4m://obj/draft".to_string(),
+            predicate: Some("ad4m://title".to_string()),
+            target: "literal:string:mine".to_string(),
+        },
+        LinkStatus::Shared,
+        None,
+        &alice,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    let mut signed = LinkExpression::from(
+        crate::agent::create_signed_expression(
+            Link {
+                source: "ad4m://obj/draft".to_string(),
+                predicate: Some("ad4m://has_child".to_string()),
+                target: "ad4m://obj/child".to_string(),
+            }
+            .normalize(),
+            &alice,
+        )
+        .unwrap(),
+    );
+    signed.graph = Some("ad4m://graph/ad4m://obj/draft".to_string());
+
+    let written = p
+        .add_link_expression(signed, LinkStatus::Shared, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (written.graph, written.status),
+        (Some(local_graph_iri(&alice_did)), Some(LinkStatus::Local))
+    );
+    assert!(
+        !shared
+            .sparql_store
+            .contains_named_graph("ad4m://graph/ad4m://obj/draft"),
+        "the Local subject's own graph was created"
+    );
+}
+
+/// A Local link written before #1357 sits in the default graph. It never
+/// reaches the link language either, so a Shared removal can't send its
+/// triple (review note 7).
+#[test]
+fn a_legacy_local_link_in_the_default_graph_is_not_shareable() {
+    init();
+    let mut legacy = LinkExpression::from(
+        crate::agent::create_signed_expression(
+            link("legacy").normalize(),
+            &AgentContext::main_agent(),
+        )
+        .unwrap(),
+    );
+    legacy.status = Some(LinkStatus::Local);
+    let public = shared_in("public", SHARED_GRAPH);
+    let out = super::perspective_instance::shareable(&PerspectiveDiff {
+        additions: vec![legacy.clone(), public],
+        removals: vec![legacy],
+    });
+    let added: Vec<&str> = out.additions.iter().map(|l| l.data.source.as_str()).collect();
+    assert_eq!(added, vec!["ad4m://s/public"]);
+    assert!(out.removals.is_empty(), "{:?}", out.removals);
+}
+
+/// An `EXISTS` inside an expression can't reach a Local graph a read leaves
+/// out: the scope is set on the dataset, not by rewriting the query. Eight
+/// places an `EXISTS` can hide, each with a plain and a `GRAPH ?g` probe, on
+/// a viewer (Bob's Local graph) and on a shared-reads view (its own viewer's
+/// Local graph). The control probe on a shared link changes every result, so
+/// each query would show a leak (review note 8b).
+#[tokio::test]
+async fn an_exists_in_any_expression_reads_no_hidden_local_graph() {
+    let (p, alice_did, bob_did) = two_users_and_shared_links().await;
+    const SHAPES: [(&str, &str); 8] = [
+        ("BIND/IF", "SELECT ?s ?r WHERE { ?s <ad4m://p> ?o . BIND(IF(PROBE, 1, 0) AS ?r) }"),
+        ("FILTER NOT EXISTS", "SELECT ?s WHERE { ?s <ad4m://p> ?o . FILTER(NOT PROBE) }"),
+        ("ORDER BY", "SELECT ?s WHERE { { ?s <ad4m://p> ?o } UNION { GRAPH ?h { ?s <ad4m://p> ?o } } } ORDER BY (IF(PROBE, 0 - STRLEN(STR(?s)), STRLEN(STR(?s))))"),
+        ("HAVING", "SELECT ?s WHERE { ?s <ad4m://p> ?o } GROUP BY ?s HAVING (PROBE)"),
+        ("aggregate", "SELECT (SUM(IF(PROBE, 1, 0)) AS ?n) WHERE { ?s <ad4m://p> ?o }"),
+        ("sub-select", "SELECT ?s ?r WHERE { { SELECT ?s (IF(PROBE, 1, 0) AS ?r) WHERE { ?s <ad4m://p> ?o } } }"),
+        ("OPTIONAL filter", "SELECT ?s ?m WHERE { ?s <ad4m://p> ?o . OPTIONAL { ?m <ad4m://p> ?o2 . FILTER(PROBE) } }"),
+        ("nested EXISTS + VALUES", "SELECT ?s ?r WHERE { ?s <ad4m://p> ?o . BIND(IF(EXISTS { VALUES ?n { 1 } FILTER(PROBE) }, 1, 0) AS ?r) }"),
+    ];
+    let probe = |subject: &str, graph_var: bool| {
+        if graph_var {
+            format!("EXISTS {{ GRAPH ?g {{ <ad4m://s/{subject}> ?pp ?x }} }}")
+        } else {
+            format!("EXISTS {{ <ad4m://s/{subject}> ?pp ?x }}")
+        }
+    };
+    let views = [
+        ("Alice", p.clone().for_viewer(alice_did)),
+        ("Bob, shared reads", p.clone().for_viewer(bob_did).for_shared_reads()),
+    ];
+    for (who, view) in &views {
+        for (shape, template) in SHAPES {
+            for graph_var in [false, true] {
+                let run = |subject: &str| {
+                    let query = template.replace("PROBE", &probe(subject, graph_var));
+                    let json = view
+                        .sparql_query(query.clone())
+                        .unwrap_or_else(|e| panic!("{shape}: {e:#}\n{query}"));
+                    let mut rows: Vec<String> = serde_json::from_str::<Vec<Value>>(&json)
+                        .unwrap()
+                        .iter()
+                        .map(Value::to_string)
+                        .collect();
+                    if shape != "ORDER BY" {
+                        rows.sort();
+                    }
+                    rows
+                };
+                let absent = run("nothing-here");
+                assert_eq!(
+                    run("bob"),
+                    absent,
+                    "{who}: {shape} (GRAPH ?g: {graph_var}) read Bob's Local link"
+                );
+                assert_ne!(
+                    run("shared"),
+                    absent,
+                    "{who}: {shape} (GRAPH ?g: {graph_var}) can't tell a link apart"
+                );
+            }
+        }
+    }
+}

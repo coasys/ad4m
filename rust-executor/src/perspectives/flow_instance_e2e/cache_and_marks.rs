@@ -539,3 +539,76 @@ async fn a_forged_fired_mark_moves_nothing() {
     );
     assert_eq!(derived.settled[0].voters.len(), 2);
 }
+
+// ---------------------------------------------------------------------------
+// The pass reads its own bookkeeping, whatever view it is handed (#812 review)
+// ---------------------------------------------------------------------------
+
+/// The auto-processor hands the pass a shared-reads view (#1324), and the
+/// cache and the marks are its runner's Local links (#1360). The pass still
+/// reads them: a settle is reported once, and a second pass adds no second
+/// `currentState` and no second mark.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pass_on_a_shared_reads_view_reads_its_own_cache_and_marks() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let minted = f.mint_one().await;
+    let shared_pass = |f: &Fixture| f.perspective.clone().for_shared_reads();
+
+    let mut view = shared_pass(&f);
+    let first = run_flow_consensus_pass(&mut view, None, &f.ctx, None, None).await;
+    assert_eq!(first.len(), 1, "the settle is reported: {first:?}");
+    let mut view = shared_pass(&f);
+    let rerun = run_flow_consensus_pass(&mut view, None, &f.ctx, None, None).await;
+    assert!(rerun.is_empty(), "reported twice: {rerun:?}");
+
+    let local_cache: Vec<_> = current_state_links(&f)
+        .await
+        .into_iter()
+        .filter(|l| l.status == Some(LinkStatus::Local))
+        .collect();
+    assert_eq!(local_cache.len(), 1, "{local_cache:?}");
+    let marks: Vec<_> = links_of(&f, &minted)
+        .await
+        .into_iter()
+        .filter(|l| l.data.predicate.as_deref() == Some(RESOLVED_AS_PREDICATE))
+        .collect();
+    assert_eq!(marks.len(), 1, "{marks:?}");
+    assert_eq!(f.cached_state().await, "scoped");
+}
+
+/// Each co-owner keeps their own `currentState` (#1360): Bob's pass writes
+/// his cache into his Local graph and leaves Alice's (the fixture agent's)
+/// as it was.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_pass_writes_their_own_cache_and_leaves_the_others() {
+    use crate::perspectives::sparql_store::local_graph_iri;
+    let mut f = seed_satisfied_fixture(None).await;
+    f.mint_one().await;
+    assert_eq!(consensus_pass(&mut f).await.len(), 1);
+    let alices_before = current_state_links(&f).await;
+    assert_eq!(alices_before.len(), 1, "{alices_before:?}");
+
+    let bob = second_agent("bob-own-cache@e2e.test");
+    let bob_did = crate::agent::did_for_context(&bob).unwrap();
+    run_flow_consensus_pass(&mut f.perspective, None, &bob, None, None).await;
+
+    let bobs: Vec<_> = f
+        .perspective
+        .clone()
+        .for_viewer(bob_did.clone())
+        .get_links(&LinkQuery {
+            source: Some(f.instance_uri.clone()),
+            predicate: Some(FLOW_CURRENT_STATE_PREDICATE.to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(bobs.len(), 1, "{bobs:?}");
+    assert_eq!(bobs[0].graph, Some(local_graph_iri(&bob_did)));
+    assert_eq!(bobs[0].status, Some(LinkStatus::Local));
+    assert_eq!(
+        current_state_links(&f).await,
+        alices_before,
+        "Alice's cache was touched"
+    );
+}

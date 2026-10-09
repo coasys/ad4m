@@ -4872,7 +4872,7 @@ impl PerspectiveInstance {
             .collect()
     }
 
-    async fn publish_notification_matches(
+    pub(crate) async fn publish_notification_matches(
         uuid: String,
         match_map: BTreeMap<Notification, Vec<serde_json::Value>>,
     ) {

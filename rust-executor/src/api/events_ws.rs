@@ -522,7 +522,7 @@ pub(crate) async fn build_event_stream_for(
             .await,
         events::NOTIFICATION_TRIGGERED,
         d_notif,
-        matches_perspective_owner
+        |msg: &str, did: Option<&str>| matches_notification_owner(msg, did, false)
     );
     let s_exc = broadcast_stream_nested!(
         pubsub.subscribe(&EXCEPTION_OCCURRED_TOPIC).await,
@@ -884,6 +884,15 @@ pub(crate) fn matches_perspective_owner(msg: &str, current_did: Option<&str>) ->
         .ok()
         .and_then(|v| v.get("perspectiveUuid")?.as_str().map(str::to_string))
         .is_some_and(|uuid| perspective_is_owned_by(&uuid, did))
+}
+
+/// Which sessions a `notification-triggered` event reaches.
+pub(crate) fn matches_notification_owner(
+    msg: &str,
+    current_did: Option<&str>,
+    _is_admin: bool,
+) -> bool {
+    matches_perspective_owner(msg, current_did)
 }
 
 /// A `query-subscription-update` reaches the session of the agent that
