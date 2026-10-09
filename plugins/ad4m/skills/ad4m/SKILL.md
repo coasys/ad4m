@@ -256,7 +256,7 @@ Type the parent the same way, then read what else is under it — `ad4m_instance
 
 ### Step 3: answer in the shape the ontology allows
 
-`ad4m_instance_create(..., parent=<the SAME parent>)`, normally as the class the item's siblings are. If no class fits what you want to say, ask rather than invent one. Why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
+`ad4m_instance_create(..., parent=<the SAME parent>)` when that parent's predicate is `ad4m://has_child`, normally as the class the item's siblings are. `parent=` always writes `ad4m://has_child`, so for any other predicate (We's `we://children`, for example) create the instance without `parent` and then call `ad4m_add_link(perspective_id, source=<the SAME parent>, predicate=<that predicate>, target=<the new instance>)`. If no class fits what you want to say, ask rather than invent one. Why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 

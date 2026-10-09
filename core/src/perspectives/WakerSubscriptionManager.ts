@@ -43,7 +43,8 @@ export interface MentionMessage {
 
 /**
  * Predicate families the executor writes at items that are not containment:
- * - `ad4m://ontology/` — store metadata (author, timestamp, proof);
+ * - `ad4m://ontology/` — store metadata (author, timestamp, proof). Only a
+ *   guard: `for_each_matched_link` already skips these (sparql_store.rs);
  * - `ad4m://interp/` — the interpretation overlay's shadow of a real predicate
  *   (`ad4m://interp/inferred/<p>`), which only repeats a parent `<p>` lists;
  * - `ad4m://flow/` — a FlowInstance's `base` and a FlowTransitionProposal's
