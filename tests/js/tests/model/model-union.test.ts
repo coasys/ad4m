@@ -176,6 +176,25 @@ describe("Ad4mModel — one query over several classes", function () {
     expect(asNote[0]).to.be.instanceOf(UnionNote);
   });
 
+  it("keeps a record of both classes that passes `where` as one of them", async () => {
+    const both = await UnionTask.create(perspective, { position: 1, status: "open" });
+    await perspective.add(
+      new Link({ source: both.id, predicate: "test://union/kind", target: "test://union/note" }),
+    );
+    await UnionNote.create(perspective, { position: 2, body: "other" });
+
+    // `status` is the task's alone, so only the task reading passes; even a
+    // preference for the note reading must not drop the record.
+    for (const preferClasses of [undefined, ["UnionNote"]]) {
+      const rows = await Ad4mModel.findAllOf(perspective, [UnionTask, UnionNote], {
+        where: { status: "open" },
+        ...(preferClasses && { preferClasses }),
+      });
+      expect(rows.map((r) => r.id)).to.deep.equal([both.id]);
+      expect(rows[0]).to.be.instanceOf(UnionTask);
+    }
+  });
+
   it("one live subscription fires on an edit to each class", async () => {
     const { t1, n2 } = await interleaved();
     const batches: Ad4mModel[][] = [];

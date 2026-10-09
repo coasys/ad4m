@@ -1190,8 +1190,9 @@ export class Ad4mModel {
    * Each class normalises the query as it would for itself — its polymorphic
    * include defaults, its `$` projections, its parent predicate — and the
    * results are merged: includes and projections by key (the first class that
-   * declares a key decides its form), the parent scope only when every class
-   * that can resolve it resolves it to the same predicate.
+   * declares a key decides its form; a projection two classes tag with
+   * different target classes is refused), the parent scope only when every
+   * class that can resolve it resolves it to the same predicate.
    * @internal
    */
   static prepareUnionQueryParams(
@@ -1201,6 +1202,32 @@ export class Ad4mModel {
     if (!classes.length) throw new Error('A query over several classes needs at least one class');
     const { parent, preferClasses, ...rest } = query;
     const inputs = classes.map((c) => JSON.parse(c.prepareModelQueryParams(rest).queryJson));
+    // A projection is tagged with its relation's target class, at every depth,
+    // and the executor hydrates a list projection (and resolves its `where`)
+    // as that class. Two classes that tag the same key differently cannot share
+    // one form of it, so the key is refused rather than read as the first's.
+    const tags = new Map<string, string>();
+    const collectTags = (node: any, path: string) => {
+      if (!node || typeof node !== 'object') return;
+      for (const [k, v] of Object.entries(node)) {
+        if (k === 'targetClassName' && typeof v === 'string') {
+          const seen = tags.get(path);
+          if (seen !== undefined && seen !== v) {
+            throw new Error(
+              `projection '${path}': the classes resolve it to different target classes ` +
+              `(${seen}, ${v}); query those classes separately`,
+            );
+          }
+          tags.set(path, v);
+        } else {
+          collectTags(v, path ? `${path}.${k}` : k);
+        }
+      }
+    };
+    for (const input of inputs) {
+      collectTags(input.include, 'include');
+      collectTags(input.projections, 'projections');
+    }
     const merged: any = { ...inputs[0] };
     if (preferClasses) merged.preferClasses = preferClasses;
     for (const key of ['include', 'projections'] as const) {

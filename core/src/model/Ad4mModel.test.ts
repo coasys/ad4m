@@ -3922,6 +3922,37 @@ describe("Ad4mModel.findAllOf / queryOf (one query over several classes, #1238)"
     expect(JSON.parse(perspective.modelQuery.mock.calls[0][1]).limit).toBe(0);
   });
 
+  it("refuses a projection key the classes tag with different target classes", () => {
+    @Model({ name: "UnionCardU" })
+    class UnionCardU extends Ad4mModel {
+      @Property({ through: "u://title" })
+      title: string = "";
+    }
+    @Model({ name: "UnionWaypointU" })
+    class UnionWaypointU extends Ad4mModel {
+      @Property({ through: "u://x" })
+      x: string = "";
+    }
+    @Model({ name: "UnionPlacementU" })
+    class UnionPlacementU extends Ad4mModel {
+      @HasMany(() => UnionCardU, { through: "u://items" })
+      items: string[] = [];
+    }
+    @Model({ name: "UnionRouteU" })
+    class UnionRouteU extends Ad4mModel {
+      @HasMany(() => UnionWaypointU, { through: "u://items" })
+      items: string[] = [];
+    }
+    const include = { $items: { from: "items", where: { title: "a" } } } as any;
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionRouteU], { include }),
+    ).toThrow(/different target classes/);
+    // Same target on both: accepted.
+    expect(() =>
+      Ad4mModel.prepareUnionQueryParams([UnionPlacementU, UnionPlacementU], { include }),
+    ).not.toThrow();
+  });
+
   it("keeps a raw parent predicate and refuses a scope the classes resolve differently", () => {
     const { queryJson } = Ad4mModel.prepareUnionQueryParams([UnionTaskU, UnionNoteU], {
       parent: { id: "u://canvas", predicate: "u://item" },
