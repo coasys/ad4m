@@ -6411,8 +6411,11 @@ impl PerspectiveInstance {
         // No DID, no subscription: an update must name the session it is for.
         let subscriber_did = did_for_context(&agent_context)?;
         let result_string = if is_sparql_query(&query) {
-            let scope = self.read_scope(&agent_context, None)?;
-            self.sparql_query_with_graphs(query.clone(), scope.as_deref())?
+            // As the subscriber reads: their own Local graph in, others' out.
+            // The shared instance would refuse their Local graph (#1358).
+            self.clone()
+                .for_viewer(subscriber_did.clone())
+                .sparql_query_with_graphs(query.clone(), None)?
         } else {
             let initial_result = self
                 .prolog_query_subscription_with_context(query.clone(), &agent_context)
@@ -6478,10 +6481,11 @@ impl PerspectiveInstance {
             None => None,
         };
 
-        // 1. Run the initial model query
-        let scope = self.read_scope(&agent_context, graph_iris.as_deref())?;
+        // 1. Run the initial model query, as the subscriber reads.
         let initial_result = self
-            .model_query(&class_name, &query_json, scope.as_deref())
+            .clone()
+            .for_viewer(subscriber_did.clone())
+            .model_query(&class_name, &query_json, graph_iris.as_deref())
             .await?;
 
         // 2. Build trigger SPARQL from shape predicates resolved through the cache.
@@ -6778,10 +6782,17 @@ impl PerspectiveInstance {
                 } else {
                     crate::agent::AgentContext::main_agent()
                 };
-                // Recomputed on every run: graphs created since the subscription
-                // started belong in it, and other agents' Local graphs never do.
-                let scope_for =
-                    |requested: Option<&[String]>| self_clone.read_scope(&agent_context, requested);
+                // Read as the subscriber, recomputed on every run: graphs created
+                // since the subscription started belong in it, and other agents'
+                // Local graphs never do. The shared instance reads no Local graph
+                // at all (#1358), the subscriber's own included.
+                let view = match did_for_context(&agent_context) {
+                    Ok(did) => self_clone.for_viewer(did),
+                    Err(e) => {
+                        log::error!("❌ 🔗 subscription has no DID to read as: {}", e);
+                        return None;
+                    }
+                };
 
                 // Model subscriptions: re-run execute_model_query instead of raw SPARQL.
                 // With no shape wait: every subscription on the perspective is
@@ -6790,18 +6801,11 @@ impl PerspectiveInstance {
                 // subscription's update. A class still missing fails this pass
                 // at once and is retried on the next one.
                 let result_string = if let Some(ref params) = model_params {
-                    let scope = match scope_for(params.graph_iris.as_deref()) {
-                        Ok(scope) => scope,
-                        Err(e) => {
-                            log::error!("❌ 🔗 🧠 model-based subscription scope failed: {}", e);
-                            return None;
-                        }
-                    };
-                    match self_clone
+                    match view
                         .model_query_within(
                             &params.class_name,
                             &params.query_json,
-                            scope.as_deref(),
+                            params.graph_iris.as_deref(),
                             Duration::ZERO,
                         )
                         .await
@@ -6813,10 +6817,7 @@ impl PerspectiveInstance {
                         }
                     }
                 } else if is_sparql_query(&query_string) {
-                    let result = scope_for(None).and_then(|scope| {
-                        self_clone.sparql_query_with_graphs(query_string, scope.as_deref())
-                    });
-                    match result {
+                    match view.sparql_query_with_graphs(query_string, None) {
                         Ok(r) => r,
                         Err(e) => {
                             log::error!("❌ 🔗 🔎 SPARQL subscription query failed: {}", e);
@@ -6824,7 +6825,7 @@ impl PerspectiveInstance {
                         }
                     }
                 } else {
-                    match self_clone
+                    match view
                         .prolog_query_subscription_with_context(query_string, &agent_context)
                         .await
                     {
