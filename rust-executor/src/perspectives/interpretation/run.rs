@@ -580,13 +580,14 @@ pub struct InterpretationDebug {
 /// This is the shape `run_interpretation_with_strategy_and_model` returns
 /// now; delegators (`run_interpretation`, `run_interpretation_with_strategy`)
 /// preserve their `Vec<String>` return by extracting `.bases`.
+///
+/// The pass's flow work is not part of it: that runs on the perspective's
+/// flow pass queue after the pass returns (see
+/// [`apply_ops_and_queue_flow_passes`]).
 #[derive(Debug, Clone)]
 pub struct InterpretationOutcome {
     pub bases: Vec<String>,
     pub debug: Option<InterpretationDebug>,
-    /// URIs of the `FlowTransitionProposal`s the deterministic flow pass
-    /// minted after this pass's writes were committed.
-    pub flow_proposals: Vec<String>,
 }
 
 pub async fn run_interpretation_with_strategy_and_model(
@@ -808,7 +809,7 @@ pub async fn run_interpretation_with_strategy_and_model(
         } else {
             None
         };
-        let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
+        let bases = apply_ops_and_queue_flow_passes(
             perspective,
             shapes,
             ops,
@@ -825,21 +826,16 @@ pub async fn run_interpretation_with_strategy_and_model(
         )
         .await?;
 
-        Ok(InterpretationOutcome {
-            bases,
-            debug,
-            flow_proposals,
-        })
+        Ok(InterpretationOutcome { bases, debug })
     }
     .await;
     match outcome_result {
         Ok(outcome) => {
             log::info!(
-                "✅ 🧠 interpretation done model={} latency={}ms bases_written={} flow_proposals={}",
+                "✅ 🧠 interpretation done model={} latency={}ms bases_written={}",
                 model_override.unwrap_or("<default>"),
                 interpretation_started.elapsed().as_millis(),
                 outcome.bases.len(),
-                outcome.flow_proposals.len()
             );
             Ok(outcome)
         }
@@ -857,20 +853,24 @@ pub async fn run_interpretation_with_strategy_and_model(
 
 /// Shared tail of both interpretation paths (single-shot strategy and the
 /// tool-calling harness): capture the created bases from the planned ops
-/// **before** they move into the apply, apply with overlay, run the spawn pass
-/// on the created items, then the flow proposal pass on the relevant subjects.
+/// **before** they move into the apply, apply with overlay (records and
+/// mint-scope links in one batch), then queue the pass's flow work and
+/// return the affected bases.
 ///
 /// Extracted so the capture-before-move ordering — the one place the flow
 /// wiring reasons about a value taken before a move — is a single testable
-/// unit instead of a convention duplicated at two call sites. Returns
-/// `(bases, flow_proposals)`.
+/// unit instead of a convention duplicated at two call sites.
 ///
-/// Spawn runs before the proposal pass: a freshly created item whose class is
-/// in some flow's `inputTypes` gets its `FlowInstance` minted now, so the
-/// flow's first-state `requires` are evaluated against this run's own evidence
-/// in the same pass rather than the next one.
+/// **The flow work does not hold the pass up.** The spawn pass, the proposal
+/// pass (which may call the model again for a semantic check) and the
+/// consensus pass change nothing the caller reads, so they go on the
+/// perspective's flow pass queue ([`PerspectiveInstance::schedule_flow_job`])
+/// and run once this returns: a caller sees its records as soon as they are
+/// written, and two passes in quick succession run their flow work one after
+/// the other rather than over each other. Failures there are logged, as they
+/// always were.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_ops_and_run_flow_passes(
+pub(crate) async fn apply_ops_and_queue_flow_passes(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
     ops: Vec<InterpretationOp>,
@@ -884,10 +884,10 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     flow_subjects: &[String],
     flow_filter: Option<&[String]>,
     mint_scopes: &MintScopes,
-) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-    // Captured before `ops` moves into the apply: the spawn pass below is
-    // scoped to *created* instances (design §10 v1), and the returned
-    // `bases` mix created and updated indistinguishably.
+) -> anyhow::Result<Vec<String>> {
+    // Captured before `ops` moves into the apply: the spawn pass is scoped to
+    // *created* instances (design §10 v1), and the returned `bases` mix
+    // created and updated indistinguishably.
     let created = crate::perspectives::flow_spawn::created_bases_of(&ops);
     let bases = apply_with_overlay(
         perspective,
@@ -903,33 +903,74 @@ pub(crate) async fn apply_ops_and_run_flow_passes(
     )
     .await?;
 
-    let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
-        perspective,
-        &created,
-        context,
-        flow_filter,
-    )
-    .await;
-    if !spawned.is_empty() {
-        log::info!(
-            "🌱 interpretation: spawned {} flow instance(s) on new items",
-            spawned.len()
-        );
-    }
+    let work = InterpretationFlowWork {
+        created,
+        bases: bases.clone(),
+        flow_subjects: flow_subjects.to_vec(),
+        context: context.clone(),
+        llm_proposals: llm_proposals.to_vec(),
+        task_id: task.task_id.clone(),
+        flow_filter: flow_filter.map(<[String]>::to_vec),
+    };
+    perspective.schedule_flow_job(Box::new(move |mut perspective| {
+        Box::pin(async move {
+            work.run(&mut perspective).await;
+        })
+    }));
+    Ok(bases)
+}
 
-    // The affected instance base URIs (created, updated, or given new
-    // relations). Links are owned by `create_subject` / `update_subject`.
-    let flow_proposals = run_flow_post_pass(
-        perspective,
-        &bases,
-        flow_subjects,
-        context,
-        llm_proposals,
-        &task.task_id,
-        flow_filter,
-    )
-    .await;
-    Ok((bases, flow_proposals))
+/// One interpretation pass's flow work, owned so it can wait on the flow
+/// pass queue after the pass has returned.
+struct InterpretationFlowWork {
+    created: Vec<String>,
+    bases: Vec<String>,
+    flow_subjects: Vec<String>,
+    context: AgentContext,
+    llm_proposals: Vec<crate::perspectives::interpretation::LlmFlowProposal>,
+    task_id: String,
+    flow_filter: Option<Vec<String>>,
+}
+
+impl InterpretationFlowWork {
+    /// Spawn runs before the proposal pass: a freshly created item whose class
+    /// is in some flow's `inputTypes` gets its `FlowInstance` minted first, so
+    /// the flow's first-state `requires` are evaluated against this run's own
+    /// evidence in the same job rather than the next one.
+    async fn run(self, perspective: &mut PerspectiveInstance) {
+        let spawned = crate::perspectives::flow_spawn::run_flow_spawn_pass(
+            perspective,
+            &self.created,
+            &self.context,
+            self.flow_filter.as_deref(),
+        )
+        .await;
+        if !spawned.is_empty() {
+            log::info!(
+                "🌱 interpretation: spawned {} flow instance(s) on new items",
+                spawned.len()
+            );
+        }
+
+        // The affected instance base URIs (created, updated, or given new
+        // relations). Links are owned by `create_subject` / `update_subject`.
+        let proposals = run_flow_post_pass(
+            perspective,
+            &self.bases,
+            &self.flow_subjects,
+            &self.context,
+            &self.llm_proposals,
+            &self.task_id,
+            self.flow_filter.as_deref(),
+        )
+        .await;
+        if !proposals.is_empty() {
+            log::info!(
+                "interpretation: flow pass minted {} proposal(s): {proposals:?}",
+                proposals.len()
+            );
+        }
+    }
 }
 
 /// Shared flow post-processing for both interpretation paths (single-shot
@@ -1243,7 +1284,7 @@ pub async fn run_interpretation_with_harness_and_model(
     // once the shape is agreed.
     // Same tail as the single-shot path — one shared unit, so the
     // capture-before-move ordering can't drift between the two.
-    let (bases, flow_proposals) = apply_ops_and_run_flow_passes(
+    let bases = apply_ops_and_queue_flow_passes(
         perspective,
         shapes,
         ops,
@@ -1261,19 +1302,12 @@ pub async fn run_interpretation_with_harness_and_model(
     .await?;
 
     log::warn!("harness: apply_with_overlay produced {} bases", bases.len());
-    if !flow_proposals.is_empty() {
-        log::info!(
-            "harness: flow pass minted {} proposal(s): {flow_proposals:?}",
-            flow_proposals.len()
-        );
-    }
 
     Ok(InterpretationOutcome {
         bases,
         // No single prompt/response to snapshot on the multi-turn harness
         // loop; per-tool-call events carry the debug surface instead.
         debug: None,
-        flow_proposals,
     })
 }
 
@@ -1906,12 +1940,13 @@ mod tests {
         assert!(matches!(&deduped[0], InterpretationOp::Update { .. }));
     }
 
-    // ---- apply_ops_and_run_flow_passes — the shared interpretation tail ----
+    // ---- apply_ops_and_queue_flow_passes — the shared interpretation tail ----
     //
     // The central wiring claim of the spawn slice: an interpretation pass
     // whose ops CREATE an instance of a class some flow lists in `inputTypes`
-    // ends with a `FlowInstance` on that item — and the created-bases capture
-    // happens before the ops move into the apply. Both interpretation paths
+    // ends with a `FlowInstance` on that item once its queued flow work has
+    // run — and the created-bases capture happens before the ops move into
+    // the apply. Both interpretation paths
     // (single-shot + harness) share this tail, so this covers the call
     // Marvin flagged as untested without needing an LLM in the loop.
 
@@ -1941,10 +1976,10 @@ mod tests {
         ctx: &AgentContext,
         ops: Vec<InterpretationOp>,
         flow_filter: Option<&[String]>,
-    ) -> (Vec<String>, Vec<String>) {
+    ) -> Vec<String> {
         try_run_tail(p, shapes, ctx, ops, flow_filter, &MintScopes::default())
             .await
-            .expect("apply_ops_and_run_flow_passes failed")
+            .expect("apply_ops_and_queue_flow_passes failed")
     }
 
     async fn try_run_tail(
@@ -1954,8 +1989,8 @@ mod tests {
         ops: Vec<InterpretationOp>,
         flow_filter: Option<&[String]>,
         mint_scopes: &MintScopes,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>)> {
-        apply_ops_and_run_flow_passes(
+    ) -> anyhow::Result<Vec<String>> {
+        apply_ops_and_queue_flow_passes(
             p,
             shapes,
             ops,
@@ -2012,7 +2047,7 @@ mod tests {
         seed_instance(&mut perspective, &ctx, &shapes[0], existing, "already here").await;
 
         let created = "soa://tail/task/minted";
-        let (mut bases, _) = try_run_tail(
+        let mut bases = try_run_tail(
             &mut perspective,
             &shapes,
             &ctx,
@@ -2101,7 +2136,7 @@ mod tests {
         .await;
 
         let base = "soa://tail/task/created";
-        let (bases, _proposals) = run_tail(
+        let bases = run_tail(
             &mut perspective,
             &shapes,
             &ctx,
@@ -2114,6 +2149,7 @@ mod tests {
             bases.iter().any(|b| b == base),
             "the Create op must land as a written base, got {bases:?}"
         );
+        perspective.settle_flow_passes().await;
         let live = live_on(&perspective, base).await;
         assert_eq!(
             live.len(),
@@ -2141,7 +2177,7 @@ mod tests {
         // `Some(&[])` is the auto-processor's "no flows selected" — the pass
         // must be flow-blind even though the catalogue has a matching flow.
         let base = "soa://tail/task/filtered";
-        let (bases, proposals) = run_tail(
+        let bases = run_tail(
             &mut perspective,
             &shapes,
             &ctx,
@@ -2151,7 +2187,7 @@ mod tests {
         .await;
 
         assert!(bases.iter().any(|b| b == base), "the write itself proceeds");
-        assert!(proposals.is_empty(), "flow-blind pass mints no proposals");
+        perspective.settle_flow_passes().await;
         let live = live_on(&perspective, base).await;
         assert!(
             live.is_empty(),
@@ -2176,7 +2212,7 @@ mod tests {
         let base = "soa://tail/task/updated";
         seed_instance(&mut perspective, &ctx, &shapes[0], base, "already here").await;
 
-        let (_bases, _proposals) = run_tail(
+        run_tail(
             &mut perspective,
             &shapes,
             &ctx,
@@ -2192,10 +2228,57 @@ mod tests {
         )
         .await;
 
+        perspective.settle_flow_passes().await;
         let live = live_on(&perspective, base).await;
         assert!(
             live.is_empty(),
             "an updated (not created) item must not spawn, got {live:?}"
         );
+    }
+
+    /// The tail returns once the records and their mint-scope links are
+    /// written, before any flow work; the flow work still runs afterwards,
+    /// on the perspective's flow pass queue.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn interpretation_tail_returns_before_its_flow_work_runs() {
+        let (mut perspective, shapes, ctx) = setup_perspective_no_llm(&[("Task", TASK_SDNA)]).await;
+        seed_flow(
+            &mut perspective,
+            &ctx,
+            &delivery_flow_json_for("Task"),
+            "Delivery",
+        )
+        .await;
+        // Writing the flow definition queued a sweep of its own; let it run
+        // so the only pass left queued below is this tail's.
+        perspective.settle_flow_passes().await;
+
+        let base = "soa://tail/task/deferred";
+        let bases = try_run_tail(
+            &mut perspective,
+            &shapes,
+            &ctx,
+            vec![tail_create_task_op(base)],
+            None,
+            &two_parents(),
+        )
+        .await
+        .expect("tail");
+
+        assert!(bases.iter().any(|b| b == base));
+        assert_eq!(
+            targets_of(&perspective, "app://collection/1", "app://child").await,
+            vec![base.to_string()],
+            "the record's parent link is written by the time the tail returns"
+        );
+        assert!(
+            live_on(&perspective, base).await.is_empty(),
+            "no flow instance yet: the spawn waits on the flow pass queue"
+        );
+
+        perspective.settle_flow_passes().await;
+        let live = live_on(&perspective, base).await;
+        assert_eq!(live.len(), 1, "the queued flow work spawned the instance");
+        assert_eq!(live[0].current_state, "identified");
     }
 }

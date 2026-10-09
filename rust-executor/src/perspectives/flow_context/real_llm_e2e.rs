@@ -374,6 +374,11 @@ async fn run_gated_pipeline_attempt(
     print_placements(&placements);
     let counts = graph_count_by_type(&perspective, &shapes).await;
     let tasks = counts.get("task").copied().unwrap_or(0);
+    // The proposal pass runs on the flow pass queue after the pass returns,
+    // and its semantic check calls the model again.
+    perspective
+        .settle_flow_passes_within(std::time::Duration::from_secs(300))
+        .await;
     let proposals = proposals_for_instance(&perspective, &inst_uri).await;
     (perspective, tasks, inst_uri, proposals)
 }
