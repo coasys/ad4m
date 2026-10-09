@@ -1381,6 +1381,10 @@ pub struct QuerySubscription {
 pub struct PerspectiveQuerySubscriptionFilter {
     pub uuid: String,
     pub subscription_id: String,
+    /// The agent that created the subscription. The events socket delivers
+    /// the update to this agent's session only: `result` was computed as
+    /// this agent reads, so it may hold rows from their Local graph.
+    pub subscriber_did: String,
     pub result: String,
 }
 

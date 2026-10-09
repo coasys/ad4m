@@ -404,6 +404,10 @@ struct SubscribedQuery {
     last_result: String,
     last_keepalive: Instant,
     user_email: Option<String>,
+    /// The agent the subscription reads for. Every result is computed in
+    /// this agent's scope, and the published update names it so the events
+    /// socket delivers to this agent's session only.
+    subscriber_did: String,
     /// Predicate IRIs extracted from the SPARQL/Prolog query at registration time.
     /// If empty, the subscription is always re-checked (safe fallback for variable predicates).
     predicates: HashSet<String>,
@@ -565,6 +569,9 @@ pub struct PerspectiveInstance {
     /// Its reads leave out other agents' Local graphs. `None` — the shared
     /// instance the executor itself uses — reads everything.
     viewer: Option<String>,
+    /// Set by [`Self::for_shared_reads`]: every read leaves out every Local
+    /// graph, the viewer's own included.
+    shared_reads: bool,
     /// The one debounced flow consensus pass this perspective may have
     /// queued for inbound neighbourhood links — see
     /// `flow_instance::trigger`. A std mutex: held for a field swap, never
@@ -619,6 +626,7 @@ impl PerspectiveInstance {
 
         PerspectiveInstance {
             viewer: None,
+            shared_reads: false,
             persisted: Arc::new(Mutex::new(handle.clone())),
             uuid: handle.uuid.clone(),
 
@@ -1740,9 +1748,17 @@ impl PerspectiveInstance {
     /// Whether this instance's viewer reads the stored `link`. The executor's
     /// own view (no viewer) reads every link.
     pub(crate) fn sees(&self, link: &DecoratedLinkExpression) -> bool {
-        self.viewer
-            .as_deref()
-            .is_none_or(|viewer| link_visible_to(link, viewer))
+        link.graph.as_deref().is_none_or(|g| self.reads_graph(g))
+    }
+
+    /// Whether this instance reads named graph `iri`: not another agent's
+    /// Local graph, and no Local graph at all after [`Self::for_shared_reads`].
+    fn reads_graph(&self, iri: &str) -> bool {
+        !(self.shared_reads && is_local_graph(iri))
+            && self
+                .viewer
+                .as_deref()
+                .is_none_or(|viewer| graph_visible_to(iri, viewer))
     }
 
     /// Resolve the graph a write by `context` names, and the status its links
@@ -2652,10 +2668,10 @@ impl PerspectiveInstance {
     /// The links matching `q`, as this instance's viewer sees them (see
     /// [`Self::for_viewer`]). The shared instance reads every graph.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        match &self.viewer {
-            Some(viewer) => self.get_links_for(q, viewer).await,
-            None => self.get_links_unscoped(q).await,
+        if self.viewer.is_none() && !self.shared_reads {
+            return self.get_links_unscoped(q).await;
         }
+        self.get_links_for(q).await
     }
 
     async fn get_links_unscoped(
@@ -2732,21 +2748,22 @@ impl PerspectiveInstance {
         Ok(links)
     }
 
-    /// [`Self::get_links`] as `viewer` sees it: other agents' Local graphs left
-    /// out. When the store holds such graphs, a `limit` applies after the
-    /// filter, so a page never comes back short.
-    async fn get_links_for(
-        &self,
-        q: &LinkQuery,
-        viewer: &str,
-    ) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        if !self.sparql_store.has_hidden_graphs(viewer)? {
+    /// [`Self::get_links`] as this instance reads it ([`Self::sees`]): the
+    /// graphs it doesn't read left out. When the store holds such graphs, a
+    /// `limit` applies after the filter, so a page never comes back short.
+    async fn get_links_for(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
+        if self
+            .sparql_store
+            .named_graphs()?
+            .iter()
+            .all(|g| self.reads_graph(g))
+        {
             return self.get_links_unscoped(q).await;
         }
         let mut unlimited = q.clone();
         unlimited.limit = None;
         let mut links = self.get_links_unscoped(&unlimited).await?;
-        links.retain(|l| link_visible_to(l, viewer));
+        links.retain(|l| self.sees(l));
         if let Some(limit) = q.limit {
             links.truncate(limit as usize);
         }
@@ -2773,12 +2790,39 @@ impl PerspectiveInstance {
         self
     }
 
+    /// This instance, reading shared graphs only: every Local graph leaves
+    /// every read, the viewer's own included. For background work that writes
+    /// what it reads into shared graphs, such as an auto-processor pass. It
+    /// doesn't depend on what an unscoped read covers.
+    pub fn for_shared_reads(mut self) -> Self {
+        self.shared_reads = true;
+        self
+    }
+
     /// The graph scope a read on this instance runs in: [`Self::read_scope`]
     /// for the instance's viewer, or `requested` unchanged for the executor.
+    /// After [`Self::for_shared_reads`], no Local graph: a requested one is
+    /// refused.
     fn scope_for(&self, requested: Option<&[String]>) -> Result<Option<Vec<String>>, AnyError> {
-        match &self.viewer {
-            Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested),
-            None => Ok(requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec)),
+        let scope = match &self.viewer {
+            Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested)?,
+            None => requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec),
+        };
+        if !self.shared_reads {
+            return Ok(scope);
+        }
+        let requested = requested.is_some_and(|r| !r.is_empty());
+        match scope {
+            Some(graphs) if requested => {
+                if let Some(local) = graphs.iter().find(|g| is_local_graph(g)) {
+                    return Err(anyhow!("A shared read cannot read Local graph {}", local));
+                }
+                Ok(Some(graphs))
+            }
+            Some(graphs) => Ok(Some(
+                graphs.into_iter().filter(|g| !is_local_graph(g)).collect(),
+            )),
+            None => Ok(self.sparql_store.shared_scope()?),
         }
     }
 
@@ -3805,9 +3849,7 @@ impl PerspectiveInstance {
     /// agents' Local graphs stay out.
     pub fn named_graphs(&self) -> Result<Vec<String>, deno_core::anyhow::Error> {
         let mut graphs = self.sparql_store.named_graphs()?;
-        if let Some(viewer) = self.viewer.as_deref() {
-            graphs.retain(|g| graph_visible_to(g, viewer));
-        }
+        graphs.retain(|g| self.reads_graph(g));
         Ok(graphs)
     }
 
@@ -6145,6 +6187,7 @@ impl PerspectiveInstance {
     async fn send_subscription_update(
         &self,
         subscription_id: String,
+        subscriber_did: String,
         result: String,
         delay: Option<Duration>,
     ) {
@@ -6156,6 +6199,7 @@ impl PerspectiveInstance {
             let filter = PerspectiveQuerySubscriptionFilter {
                 uuid,
                 subscription_id,
+                subscriber_did,
                 result,
             };
             get_global_pubsub()
@@ -6202,6 +6246,8 @@ impl PerspectiveInstance {
         } else {
             crate::agent::AgentContext::main_agent()
         };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
         let result_string = if is_sparql_query(&query) {
             let scope = self.read_scope(&agent_context, None)?;
             self.sparql_query_with_graphs(query.clone(), scope.as_deref())?
@@ -6230,6 +6276,7 @@ impl PerspectiveInstance {
             last_result: result_string.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates,
             model_query_params: None,
             graph_scope,
@@ -6259,6 +6306,8 @@ impl PerspectiveInstance {
             Some(email) => crate::agent::AgentContext::for_user_email(email.clone()),
             None => crate::agent::AgentContext::main_agent(),
         };
+        // No DID, no subscription: an update must name the session it is for.
+        let subscriber_did = did_for_context(&agent_context)?;
         // Requested graphs, resolved for the subscriber (the Local alias becomes
         // a concrete IRI), so change triggers compare against stored graphs.
         let graph_iris = match graph_iris.filter(|g| !g.is_empty()) {
@@ -6332,6 +6381,7 @@ impl PerspectiveInstance {
             last_result: initial_result.clone(),
             last_keepalive: Instant::now(),
             user_email,
+            subscriber_did,
             predicates: predicate_set,
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
@@ -6619,7 +6669,11 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
-                        updates_to_send.push((id, result_string));
+                        updates_to_send.push((
+                            id,
+                            stored_query.subscriber_did.clone(),
+                            result_string,
+                        ));
                     } else {
                         log::trace!(
                             "📭 🔗 subscription {} result unchanged (len={})",
@@ -6632,8 +6686,9 @@ impl PerspectiveInstance {
         }
 
         // Send updates outside the lock
-        for (id, result_string) in updates_to_send {
-            self.send_subscription_update(id, result_string, None).await;
+        for (id, subscriber_did, result_string) in updates_to_send {
+            self.send_subscription_update(id, subscriber_did, result_string, None)
+                .await;
         }
 
         // Remove timed out queries and notify prolog service
@@ -6661,6 +6716,39 @@ impl PerspectiveInstance {
                 }
             }
         }
+    }
+
+    /// Whether a write since the last check is waiting for one. A write
+    /// records its predicates on a spawned task, so a test waits for this
+    /// before calling [`Self::check_subscriptions_now`].
+    #[cfg(test)]
+    pub(crate) fn subscription_check_pending(&self) -> bool {
+        self.trigger_prolog_subscription_check
+            .load(Ordering::Acquire)
+    }
+
+    /// One subscription check over the changes recorded since the last one.
+    /// The loop calls it after its debounce window; a test calls it directly.
+    pub(crate) async fn check_subscriptions_now(&self) {
+        // Reset the trigger AFTER the loop's debounce sleep, so triggers that
+        // arrived during the window are covered by this check.
+        self.trigger_prolog_subscription_check
+            .swap(false, Ordering::AcqRel);
+        // Drain both fields as a single atomic snapshot (one lock) —
+        // see `changed_predicates_and_graphs` for why this must not
+        // be two separate lock/replace operations.
+        let (changed_preds, changed_graphs) = std::mem::replace(
+            &mut *self.changed_predicates_and_graphs.lock().await,
+            (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
+        );
+
+        log::debug!(
+            "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
+            self.uuid,
+            changed_preds
+        );
+        self.check_subscribed_queries(changed_preds, changed_graphs)
+            .await;
     }
 
     async fn subscribed_queries_loop(&self) {
@@ -6692,26 +6780,7 @@ impl PerspectiveInstance {
             if should_check {
                 // Batch debounce: wait a short window for more changes to accumulate
                 sleep(Duration::from_millis(BATCH_WINDOW_MS)).await;
-
-                // Atomically reset trigger AFTER the sleep, so we catch any
-                // triggers that arrived during the debounce window.
-                self.trigger_prolog_subscription_check
-                    .swap(false, Ordering::AcqRel);
-                // Drain both fields as a single atomic snapshot (one lock) —
-                // see `changed_predicates_and_graphs` for why this must not
-                // be two separate lock/replace operations.
-                let (changed_preds, changed_graphs) = std::mem::replace(
-                    &mut *self.changed_predicates_and_graphs.lock().await,
-                    (ChangedPredicates::NoneRecorded, ChangedGraphs::NoneRecorded),
-                );
-
-                log::debug!(
-                    "🔔 🔗 subscription check triggered for perspective {} with changed_preds: {:?}",
-                    self.uuid,
-                    changed_preds
-                );
-                self.check_subscribed_queries(changed_preds, changed_graphs)
-                    .await;
+                self.check_subscriptions_now().await;
             }
 
             // Periodic subscription logging and proactive timeout cleanup
@@ -6959,10 +7028,11 @@ impl PerspectiveInstance {
         };
 
         let uuid = self.uuid.clone();
-        // The pass reads as the agent it runs for: another agent's Local graph
-        // must never reach the LLM or the shared graphs the pass writes to.
+        // The pass reads as the agent it runs for, and from shared graphs only:
+        // it writes what it extracts as Shared, so no Local graph may reach the
+        // LLM or the pass's output, the running agent's own included.
         let view = match did_for_context(context) {
-            Ok(did) => self.clone().for_viewer(did),
+            Ok(did) => self.clone().for_viewer(did).for_shared_reads(),
             Err(e) => {
                 log::warn!("auto_processor_tick [{}]: no DID for the pass: {e:#}", uuid);
                 return;

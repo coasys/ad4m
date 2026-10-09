@@ -1331,14 +1331,25 @@ impl SparqlStore {
     /// [`Self::query`] over the graphs every agent shares: Local graphs left
     /// out. For reads that shape behaviour for all agents, such as SHACL shapes.
     pub fn query_shared(&self, query_string: &str) -> Result<String, Error> {
+        match self.shared_scope()? {
+            Some(scope) => self.query_with_graphs(query_string, Some(&scope)),
+            None => self.query(query_string),
+        }
+    }
+
+    /// The graphs every agent shares: the default graph plus each named graph
+    /// that isn't Local. `None` when the store holds no Local graph, so the
+    /// read keeps its unscoped fast path.
+    pub fn shared_scope(&self) -> Result<Option<Vec<String>>, Error> {
         let named = self.named_graphs()?;
         if !named.iter().any(|g| is_local_graph(g)) {
-            return self.query(query_string);
+            return Ok(None);
         }
-        let scope: Vec<String> = std::iter::once(DEFAULT_GRAPH.to_string())
-            .chain(named.into_iter().filter(|g| !is_local_graph(g)))
-            .collect();
-        self.query_with_graphs(query_string, Some(&scope))
+        Ok(Some(
+            std::iter::once(DEFAULT_GRAPH.to_string())
+                .chain(named.into_iter().filter(|g| !is_local_graph(g)))
+                .collect(),
+        ))
     }
 
     fn sparql_evaluator(&self) -> SparqlEvaluator {
@@ -1661,14 +1672,6 @@ impl SparqlStore {
             }
         }
         Ok(graphs)
-    }
-
-    /// Whether the store holds a Local graph of an agent other than `viewer`.
-    pub fn has_hidden_graphs(&self, viewer: &str) -> Result<bool, Error> {
-        Ok(self
-            .named_graphs()?
-            .iter()
-            .any(|iri| !graph_visible_to(iri, viewer)))
     }
 
     /// The graph scope a read by `viewer` runs in.

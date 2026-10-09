@@ -1980,7 +1980,14 @@ export class Ad4mModel {
     const instance = new this(perspective) as T;
     Object.assign(instance, data);
     const metadata = (this as typeof Ad4mModel).getModelMetadata();
-    const parentGraphIri = resolveParentGraph(options?.parent);
+    // A graph-rooted child would otherwise land in its own, shared graph, which
+    // the executor never redirects. So when the scope doesn't name the
+    // parent's graph, read where the parent lives.
+    const parentGraphIri =
+      metadata.graph && !options?.graph && !hasExplicitGraph(options?.parent)
+        ? (await localGraphOfParent(perspective, options?.parent)) ??
+          resolveParentGraph(options?.parent)
+        : resolveParentGraph(options?.parent);
     // A Local parent keeps its children Local, even a graph-rooted child: there
     // the graph is a privacy rule, not a placement preference.
     instance._resolvedGraphIri =
@@ -2414,4 +2421,25 @@ function resolveParentGraph(parent?: Scope): string | undefined {
   if (parent.graph) return parent.graph;
   const parentMeta = (parent.model as typeof Ad4mModel).getModelMetadata?.();
   return parentMeta?.graph ? Ad4mModel.graphIriFor(parent.id) : undefined;
+}
+
+function hasExplicitGraph(parent?: Scope): boolean {
+  return !!parent && 'graph' in parent && !!parent.graph;
+}
+
+/**
+ * The Local graph a parent lives in, read from the store: every link the
+ * caller reads with the parent as source sits in that one Local graph (the
+ * executor's rule for a Local subject). `undefined` for a shared or unknown
+ * parent, and for a scope without a single parent id.
+ */
+async function localGraphOfParent(
+  perspective: PerspectiveProxy,
+  parent?: Scope,
+): Promise<string | undefined> {
+  if (!parent || !('id' in parent) || typeof parent.id !== 'string') return undefined;
+  const links = await perspective.get(new LinkQuery({ source: parent.id }));
+  const graphs = new Set(links.map((l) => l.graph));
+  const [graph] = graphs;
+  return graphs.size === 1 && isLocalGraph(graph) ? graph : undefined;
 }
