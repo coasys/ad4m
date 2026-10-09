@@ -1499,6 +1499,43 @@ async fn subject_classes_of_does_not_read_another_agents_local_graph() {
     assert_eq!(bobs.get("t://note/bob"), Some(&vec!["Note".to_string()]));
 }
 
+/// A class acts for every agent, so the class list ignores a declaration in a
+/// Local graph, its own author's included. The list reads raw store rows, so
+/// the viewer scope does not do this for it.
+#[tokio::test]
+async fn a_class_declared_in_a_local_graph_is_not_listed() {
+    let (bob, bob_did) = user("bob");
+    let (_, alice_did) = user("alice");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let main = AgentContext::main_agent();
+    let declare = |class: &str| Link {
+        source: format!("t://{class}"),
+        predicate: Some("rdf://type".to_string()),
+        target: "ad4m://SubjectClass".to_string(),
+    };
+    p.add_link(declare("Public"), LinkStatus::Shared, None, &main, None)
+        .await
+        .unwrap();
+    p.add_link(
+        declare("Secret"),
+        LinkStatus::Shared,
+        None,
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+
+    for (who, view) in [
+        ("the executor", p.clone()),
+        ("Alice", p.clone().for_viewer(alice_did)),
+        ("Bob", p.clone().for_viewer(bob_did)),
+    ] {
+        let classes = view.get_subject_classes_from_shacl().await.unwrap();
+        assert_eq!(classes, vec!["Public".to_string()], "{who}'s class list");
+    }
+}
+
 /// Each co-owner keeps their flow `currentState` cache in their own Local
 /// graph (#1360), and a local vote runs the pass for the voter only. On a
 /// co-owned perspective a local flow write therefore queues the pass a synced

@@ -615,6 +615,62 @@ mod tests {
         assert_eq!(kind_of(plain), "update");
     }
 
+    /// The listing reads raw store rows, so it drops the rows its reader may
+    /// not see: Bob's Local `inferred/<p>` on a shared overlay never reaches
+    /// Alice's list, and Bob's own list keeps it.
+    #[tokio::test]
+    async fn list_overlays_leaves_out_another_agents_local_rows() {
+        use crate::perspectives::local_graph_tests::user;
+        use crate::perspectives::sparql_store::LOCAL_GRAPH_ALIAS;
+        let (mut p, _s, ctx) = setup_perspective_no_llm(&[]).await;
+        let (_, alice_did) = user("alice");
+        let (bob, bob_did) = user("bob");
+        let base = "soa://ext/Task/shared";
+        add(&mut p, base, OVERLAY_KIND_PRED, "update", &ctx).await;
+        add(
+            &mut p,
+            base,
+            &format!("{INFERRED_PREFIX}soa://title"),
+            "literal:string:public",
+            &ctx,
+        )
+        .await;
+        p.add_link(
+            Link {
+                source: base.into(),
+                predicate: Some(format!("{INFERRED_PREFIX}soa://secret")),
+                target: "literal:string:private".into(),
+            },
+            LinkStatus::Shared,
+            None,
+            &bob,
+            Some(LOCAL_GRAPH_ALIAS.to_string()),
+        )
+        .await
+        .unwrap();
+
+        let inferred = |views: Vec<OverlayView>| {
+            let mut preds: Vec<String> = views
+                .into_iter()
+                .find(|v| v.base == base)
+                .expect("the shared overlay is listed")
+                .inferred
+                .into_iter()
+                .map(|(pred, _)| pred)
+                .collect();
+            preds.sort();
+            preds
+        };
+        let alices = list_overlays(&p.clone().for_viewer(alice_did))
+            .await
+            .unwrap();
+        assert_eq!(inferred(alices), vec!["soa://title"]);
+        let bobs = list_overlays(&p.clone().for_viewer(bob_did))
+            .await
+            .unwrap();
+        assert_eq!(inferred(bobs), vec!["soa://secret", "soa://title"]);
+    }
+
     /// The previous `list_overlays`, kept as the parity and timing reference:
     /// one `get_links` for the `kind` links, then `overlay_of` (a `get_links`
     /// of every link of the base) once per base.
