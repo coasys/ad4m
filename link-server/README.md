@@ -63,6 +63,9 @@ Control the server through environment variables or CLI flags:
 | `AUTO_ADMIT` | `--auto-admit` | `false` | Admit every agent automatically when they authenticate |
 | `MAX_DIFFS_PER_ROOM` | `--max-diffs` | `10000` | Maximum diff entries retained per room (older entries pruned) |
 | `BODY_LIMIT` | `--body-limit` | `10485760` | Maximum HTTP request body size in bytes (10 MiB) |
+| `OPERATOR_PORT` | `--operator-port` | off | Also serve the [admission UI](#admission-ui-operator-listener) and its API on this port |
+| `OPERATOR_HOST` | `--operator-host` | `127.0.0.1` | Address of the operator listener; must be loopback |
+| `OPERATOR_TOKEN_FILE` | `--operator-token-file` | none | File (mode 600) holding the operator API token; required with `--operator-port` |
 
 ### Rooms
 
@@ -91,6 +94,95 @@ curl https://your-server:3456/rooms/YOUR_ROOM/acl \
 ```
 
 For open communities, start the server with `AUTO_ADMIT=true` and skip member management entirely.
+
+Removing a DID ends its access at once: its sessions are revoked and its open WebSockets are closed (code `4005`).
+
+### Admission UI (operator listener)
+
+The `/acl` endpoint needs a JWT of the room admin's DID, and only the executor holding that agent's key can get one. The neighbourhood's creator is often on a laptop, so whoever runs the server can turn on a second listener with a small web page and API to list rooms and admit or remove DIDs:
+
+```bash
+umask 077; openssl rand -hex 32 > /srv/link-server/operator-token     # mode 600, never on argv
+link-server --host 127.0.0.1 --port 13102 --data /srv/link-server/data \
+  --operator-port 13104 --operator-token-file /srv/link-server/operator-token
+```
+
+- The listener binds to loopback only and refuses any other address. It is a separate Fastify app, so the public port never serves it.
+- Every `/api/*` call needs `Authorization: Bearer <operator token>`, compared in constant time. The token is read from a file that only its owner may read. It never goes on argv or into a URL, and the request log has no headers in it.
+- `POST` needs `Content-Type: application/json`. Requests a browser marks `Sec-Fetch-Site: cross-site` are refused.
+- Every ACL change is logged as `operator acl change` with the room, the DID and the `X-Forwarded-User` the proxy set.
+- The operator only manages rooms that exist (rooms are still created by their first agent). The operator cannot remove the room admin.
+
+**Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. The admin's server-link-language grants room keys to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once the admin's executor has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
+
+**Wiring it behind a sign-in.** Put a reverse proxy in front that signs the human in and injects the token, so the browser never holds it. With nginx and [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) (GitHub provider, `github_users` allowlist), on a host of its own:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name link-admin.example.org;
+    # ssl_certificate ... ;
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    client_max_body_size 16k;
+
+    location /oauth2/ {
+        proxy_pass http://127.0.0.1:4181;       # oauth2-proxy for this host
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Auth-Request-Redirect "";
+    }
+    location = /oauth2/auth {
+        internal;
+        proxy_pass http://127.0.0.1:4181;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Uri $request_uri;
+    }
+    location @sign_in { return 302 /oauth2/start?rd=$request_uri; }
+
+    location / {
+        auth_request /oauth2/auth;
+        error_page 401 = @sign_in;
+        auth_request_set $op_user $upstream_http_x_auth_request_user;
+        auth_request_set $op_cookie $upstream_http_set_cookie;
+        add_header Set-Cookie $op_cookie;
+        add_header X-Robots-Tag "noindex, nofollow" always;
+
+        proxy_pass http://127.0.0.1:13104;
+        # One line, root-only file (mode 600):  proxy_set_header Authorization "Bearer <operator token>";
+        # proxy_set_header replaces whatever Authorization the client sent.
+        include /etc/nginx/snippets/link-admin-token.conf;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-User $op_user;   # set here, never passed through
+        proxy_set_header Cookie "";                   # the sign-in cookie stays at the proxy
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
+
+```toml
+# oauth2-proxy.cfg (client secret and cookie secret in files, not here)
+provider = "github"
+client_id = "<GitHub OAuth app for link-admin.example.org>"
+client_secret_file = "/path/to/client-secret"        # mode 600
+cookie_secret_file = "/path/to/cookie-secret"        # mode 600
+redirect_url = "https://link-admin.example.org/oauth2/callback"
+github_users = ["alice", "bob"]
+email_domains = ["*"]
+http_address = "127.0.0.1:4181"
+reverse_proxy = true
+upstreams = ["static://202"]
+set_xauthrequest = true
+cookie_name = "_link_admin_oauth2"
+cookie_secure = true
+cookie_samesite = "lax"
+```
+
+The page uses relative URLs, so it also works mounted under a path such as `location /link-admin/ { ... proxy_pass http://127.0.0.1:13104/; }` on a host that already has an oauth2-proxy sign-in.
 
 ### Connecting AD4M agents to this server
 
@@ -143,6 +235,16 @@ GET  /rooms/:roomId/keys       -> { keys: [...], e2e_enabled } | 404 (no E2E)
 GET  /rooms/:roomId/keys/missing  (admin only) -> { membersNeedingHistoricalKeys }
 POST /rooms/:roomId/keys/rotate (admin only) -> { version, recipients, membersNeedingHistoricalKeys }
 GET  /rooms/:roomId/ws              (WebSocket upgrade — first message must be {type:"auth",token:"<jwt>"})
+```
+
+Operator listener (only with `--operator-port`; all `/api/*` need the operator token):
+
+```
+GET  /                          admission page (+ /admin.js)
+GET  /api/whoami                -> { operator }   (X-Forwarded-User)
+GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
+GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt, members: [{ did, addedAt, hasX25519Key, online }] }
+POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
 ```
 
 ### WebSocket messages

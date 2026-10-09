@@ -149,6 +149,10 @@ export class LinkServerDB {
   private prepareStatements() {
     return {
       getRoom: this.raw.prepare("SELECT * FROM rooms WHERE id = ?"),
+      listRooms: this.raw.prepare(
+        `SELECT r.*, (SELECT COUNT(*) FROM acl a WHERE a.room_id = r.id) AS member_count
+         FROM rooms r ORDER BY r.created_at DESC`
+      ),
       createRoom: this.raw.prepare(
         "INSERT INTO rooms (id, admin_did, created_at, e2e_enabled, revision) VALUES (?, ?, ?, 0, ?)"
       ),
@@ -242,6 +246,11 @@ export class LinkServerDB {
 
   getRoom(roomId: string): RoomRow | undefined {
     return this.stmts.getRoom.get(roomId) as RoomRow | undefined;
+  }
+
+  /** Every room with its ACL size, newest first. Operator listing only. */
+  listRooms(): Array<RoomRow & { member_count: number }> {
+    return this.stmts.listRooms.all() as Array<RoomRow & { member_count: number }>;
   }
 
   createRoom(roomId: string, adminDid: string): RoomRow {
