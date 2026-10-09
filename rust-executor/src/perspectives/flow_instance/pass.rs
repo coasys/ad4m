@@ -99,9 +99,12 @@ pub async fn run_flow_consensus_pass(
     instance_filter: Option<&[String]>,
 ) -> Vec<FireOutcome> {
     // The pass reads as the agent it records for: another agent's Local graph
-    // stays out of the flows, instances and votes it folds.
+    // stays out of the flows, instances and votes it folds. It reads its
+    // agent's own Local graph even on a shared-reads view (the auto-processor
+    // hands it one): its cache and fired marks live there (#1360), and
+    // everything it writes is Local, so nothing it reads reaches a shared graph.
     let mut view = match crate::agent::did_for_context(context) {
-        Ok(did) => perspective.clone().for_viewer(did),
+        Ok(did) => perspective.clone().for_own_bookkeeping(did),
         Err(e) => {
             log::warn!("run_flow_consensus_pass: no DID for the pass: {e:#}");
             return Vec::new();

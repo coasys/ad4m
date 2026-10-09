@@ -2876,6 +2876,17 @@ impl PerspectiveInstance {
         self
     }
 
+    /// This instance, reading as `viewer` with their own Local graph, even if
+    /// it came from [`Self::for_shared_reads`]. For work that keeps its
+    /// agent's own bookkeeping in their Local graph and writes nothing it
+    /// reads into a shared graph: a flow pass, whose cache and fired marks
+    /// are Local (#1360).
+    pub(crate) fn for_own_bookkeeping(mut self, viewer: String) -> Self {
+        self.viewer = Some(viewer);
+        self.shared_reads = false;
+        self
+    }
+
     /// Whether this instance came from [`Self::for_shared_reads`].
     pub(crate) fn reads_shared_graphs_only(&self) -> bool {
         self.shared_reads
