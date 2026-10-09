@@ -7,6 +7,8 @@
  * own copy. Any behaviour change belongs here.
  */
 
+import { LinkQuery } from "./LinkQuery";
+
 export interface WakerSubscription {
   id: string;
   type: "mention" | "channel-messages";
@@ -16,12 +18,65 @@ export interface WakerSubscription {
   neighbourhood?: string;
 }
 
+/** One link pointing at a mentioned item: the node it hangs under, and through which predicate. */
+export interface ParentLink {
+  address: string;
+  predicate: string;
+}
+
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
   /** The message's expression address (source of the body link). */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /** Every distinct node that links to this item: the addresses of `parentLinks`. */
   parents: string[];
+  /**
+   * Every distinct (node, predicate) pair linking to this item, other than the
+   * executor's own bookkeeping (`NON_PARENT_PREDICATE_PREFIXES`). The predicate
+   * is part of the answer because containment is the space's vocabulary, not
+   * core's: Flux hangs a message under its channel through `ad4m://has_child`,
+   * WE hangs an utterance under its call through `we://children` and a reply
+   * under its post through `we://comment`.
+   */
+  parentLinks: ParentLink[];
+}
+
+/**
+ * Predicate families the executor writes at items that are not containment:
+ * - `ad4m://ontology/` — store metadata (author, timestamp, proof). Only a
+ *   guard: `for_each_matched_link` already skips these (sparql_store.rs);
+ * - `ad4m://interp/` — the interpretation overlay's shadow of a real predicate
+ *   (`ad4m://interp/inferred/<p>`), which only repeats a parent `<p>` lists;
+ * - `ad4m://flow/` — a FlowInstance's `base` and a FlowTransitionProposal's
+ *   `evidence`/`output`, which make a flow node look like the item's container.
+ */
+const NON_PARENT_PREDICATE_PREFIXES = ["ad4m://ontology/", "ad4m://interp/", "ad4m://flow/"];
+
+/**
+ * The parent links of `item`, from the links `queryLinks({ target: item })`
+ * returned.
+ *
+ * `queryLinks` returns one row per link, so two authors adding the same
+ * source–predicate–target give two rows; this keeps one per (source, predicate).
+ * It drops the bookkeeping predicates above and a self-loop `item p item`,
+ * whose source is the item, not something it hangs under.
+ */
+export function parentLinksOf(item: string, links: unknown): ParentLink[] {
+  if (!Array.isArray(links)) return [];
+  const seen = new Set<string>();
+  const parentLinks: ParentLink[] = [];
+  for (const link of links) {
+    const source = link?.data?.source;
+    const predicate = link?.data?.predicate;
+    if (typeof source !== "string" || typeof predicate !== "string") continue;
+    if (source === item) continue;
+    if (NON_PARENT_PREDICATE_PREFIXES.some((prefix) => predicate.startsWith(prefix))) continue;
+    const key = JSON.stringify([source, predicate]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parentLinks.push({ address: source, predicate });
+  }
+  return parentLinks;
 }
 
 export interface WakerLogger {
@@ -294,24 +349,28 @@ export class WakerSubscriptionManager {
         // Resolve parents per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
-          const parents: string[] = [];
+          let parentLinks: ParentLink[] = [];
           try {
-            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
             this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            if (Array.isArray(rows)) {
-              // A row omits a variable left unbound in its solution.
-              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
-            }
+            // `queryLinks` maps the target through the same wire→term
+            // translation the write used, so a `literal:string:…` item matches
+            // the RDF literal it is stored as. An IRI written into SPARQL would
+            // not, and would need the address escaped.
+            const links: unknown = await this.perspectiveClient.queryLinks(
+              sub.perspective,
+              new LinkQuery({ target: msgAddr }),
+            );
+            parentLinks = parentLinksOf(msgAddr, links);
           } catch (err: any) {
             this.logger.warn(
               `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
             );
           }
+          const parents = [...new Set(parentLinks.map((link) => link.address))];
           this.logger.info(
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}`,
           );
-          mentions.push({ address: msgAddr, parents });
+          mentions.push({ address: msgAddr, parents, parentLinks });
         }
 
         // Mark all new messages as seen

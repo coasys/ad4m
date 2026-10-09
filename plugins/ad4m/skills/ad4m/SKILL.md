@@ -244,7 +244,7 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### The wake event hands you addresses, not types
 
-`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes it hangs under. Nothing in the event tells you what any of them are; the space's own ontology does.
+`Item` is the address of whatever instance carried your name — the mention query matches links, not a `Message` class, so in a space with a user-defined ontology it is as likely to be a task, a proposal or a comment. `Parents` are the nodes linking to it, each with the predicate it links through (`ad4m://has_child`, or an app's own such as `we://children`). Nothing in the event tells you what any of them are; the space's own ontology does.
 
 ### Step 1: work out what you are looking at
 
@@ -252,11 +252,11 @@ The waker POSTs to your `/hooks/wake` endpoint. Parse `Agent DID`, `Perspective`
 
 ### Step 2: gather just enough context
 
-Type the parent the same way, then read what else is under it — `ad4m_instance_transcript(class_name=…, parent=<Parent>)` for a text-bearing class, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know the classes. The sibling instances are usually what makes the mention intelligible. Walk further up (`query_links(target=<Parent>, predicate="ad4m://has_child")`) or down only when the ask is still unclear. The full procedure, including when each hop is worth its call: `references/waker.md`.
+Type the parent the same way, then read what else is under it — `ad4m_instance_transcript(class_name=…, parent=<Parent>)` for a text-bearing class, `ad4m_instance_query(class_name=…, parent=<Parent>)` for full property maps, `ad4m_get_children(parent=<Parent>)` when you don't yet know the classes — these follow `ad4m://has_child` only; for another predicate use `ad4m_query_links(source=<Parent>, predicate=<it>)`. The sibling instances are usually what makes the mention intelligible. Walk further up (`query_links(target=<Parent>)`) or down only when the ask is still unclear. The full procedure, including when each hop is worth its call: `references/waker.md`.
 
 ### Step 3: answer in the shape the ontology allows
 
-`ad4m_instance_create(..., parent=<the SAME parent>)`, normally as the class the item's siblings are. If no class fits what you want to say, ask rather than invent one. Why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
+`ad4m_instance_create(..., parent=<the SAME parent>)` when that parent's predicate is `ad4m://has_child`, normally as the class the item's siblings are. `parent=` always writes `ad4m://has_child`, so for any other predicate (We's `we://children`, for example) create the instance without `parent` and then call `ad4m_add_link(perspective_id, source=<the SAME parent>, predicate=<that predicate>, target=<the new instance>)`. If no class fits what you want to say, ask rather than invent one. Why the parent must not change, and when to reach for `instance_query` instead: `ad4m_get_documentation(topic="usage")`.
 
 ### When to respond
 
