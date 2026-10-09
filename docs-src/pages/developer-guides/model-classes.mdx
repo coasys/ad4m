@@ -985,6 +985,41 @@ const comments = await Comment.query(perspective)
   .get();
 ```
 
+### Querying Several Classes at Once
+
+`Ad4mModel.findAllOf` and `Ad4mModel.queryOf` run one query over several classes. Use them for a view that shows records of mixed types, such as a canvas holding placements and edge routes, or a feed of several kinds. One query and one subscription replace one per class, and `limit` / `offset` page over all of them together.
+
+```typescript
+const items = await Ad4mModel.findAllOf(perspective, [Placement, EdgeRoute], {
+  parent: { id: canvas.id, predicate: "canvas://item" },
+  order: { zIndex: "ASC" },
+  limit: 50,
+});
+for (const item of items) {
+  if (item instanceof Placement) { /* ... */ }
+}
+
+// Builder form; subscribe() registers one subscription for every class
+const builder = Ad4mModel.queryOf(perspective, [Placement, EdgeRoute])
+  .parent(canvas.id, "canvas://item");
+await builder.subscribe((items) => render(items));
+```
+
+Each result is an instance of the class it was read as, and carries `__subjectClass` (that class's name) and `__subjectClasses` (every class the record conforms to), as members of a [polymorphic relation](#relations) do. The query itself is the same `Query` a single class takes. The rules where the classes differ:
+
+| Situation | Result |
+|---|---|
+| A record conforms to several of the classes | Returned once. It is read as the first `preferClasses` entry it conforms to, otherwise as the most specific of the requested classes it conforms to. |
+| `where` on a property a class does not declare | That class's rows are excluded. `{ status: "open" }` returns only records that have an open status. |
+| `order` on a property a class does not declare, or a record with no value | Those rows sort last in both directions. Ties are broken by id. |
+| `limit` / `offset` | Applied once, over the union, after `where` and `order`. `count()` and `totalCount` count the union after `where`. Without `order`, paging uses `createdAt` ascending, then id. |
+| `include` or a `$` projection over a relation a class does not declare | Skipped for that class's rows. |
+| `subscribe()` | One subscription. It re-runs when a write touches a predicate of any of the classes. |
+
+Two things are refused with an error rather than approximated: a `parent` scope with `limitPerAnchor` or `levels` (each class would slice its own rows per anchor), and an `order` key on a related record (`"author.name"`), which needs every class to declare the relation. A `parent` given as a model class must resolve to the same predicate for every class; otherwise pass the predicate itself.
+
+The raw RPC takes the classes as an array: `perspective.modelQuery(["Placement", "EdgeRoute"], JSON.stringify({ limit: 50 }))`.
+
 ### Unverified Links
 
 Every link carries its author's signature, and the executor checks it when the link is stored. Queries only hydrate from links whose signature verified. A link that fails the check is withheld, for example a gossiped link whose data was changed after signing. Such a link never becomes a property value, a relation target, the instance's `author` or its `updatedAt`, even when it is newer than the signed value. Last-write-wins would otherwise let it win. It is also left out of the rows under [`__links`](#per-link-rows-with-links) and of the sort keys behind `order` with `limit`/`offset`.
