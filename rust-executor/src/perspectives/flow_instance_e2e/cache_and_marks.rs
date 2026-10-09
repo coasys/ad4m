@@ -424,7 +424,7 @@ async fn drop_local_cache(f: &mut Fixture) {
 /// the sync trigger so the test controls when the pass runs.
 async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[&str]) {
     for uri in proposal_uris {
-        for link in links_of(from, uri).await {
+        for link in synced_links_of(from, uri).await {
             to.perspective
                 .add_link_expression(LinkExpression::from(link), LinkStatus::Shared, None)
                 .await
@@ -442,13 +442,19 @@ async fn replicate_proposals(from: &Fixture, to: &mut Fixture, proposal_uris: &[
 /// `the_pass_writes_the_cache_and_the_marks_and_then_has_nothing_to_do`.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_newcomers_first_pass_catches_up_silently_then_reports_normally() {
+    // Seed B first: every fixture setup re-keys the main agent
+    // (`AgentService::init_global_test_instance`), and a fixture reads as the
+    // agent it was seeded for. B is re-stamped to the agent both replicas act
+    // as from here on; the cache its mint wrote for the old key is out of its
+    // view, which is the newcomer this test wants.
+    let mut b = seed_review_flow().await;
     let mut a = seed_review_flow().await;
+    b.perspective = b.perspective.clone().for_viewer(acting_did(&b));
     let h1 = settle(&mut a, "h1", "review", "changes_requested").await;
     let h2 = settle(&mut a, "h2", "changes_requested", "review").await;
 
     // Replica B: same definition, the flow instance as sync delivers it (no
     // cache), and A's history.
-    let mut b = seed_review_flow().await;
     drop_local_cache(&mut b).await;
     replicate_proposals(&a, &mut b, &[&h1, &h2]).await;
 

@@ -105,13 +105,14 @@ async fn forge_fired_mark(f: &mut Fixture, proposal_uri: &str) {
     .await;
 }
 
-/// Give a state its own `consensusRule`, as the flow author would.
+/// Give a state its own `consensusRule`, as the flow author would: Shared,
+/// like the rest of the definition, so every co-signer's pass reads it.
 async fn set_consensus_rule(f: &mut Fixture, state_uri: &str, rule: &str) {
     f.link(
         state_uri,
         "ad4m://consensusRule",
         &literal(rule),
-        LinkStatus::Local,
+        LinkStatus::Shared,
     )
     .await;
     // A rule is part of the definition, so this queued a sweep. Wait it out,
@@ -255,6 +256,16 @@ async fn links_of(f: &Fixture, source: &str) -> Vec<crate::types::DecoratedLinkE
         .expect("get_links")
 }
 
+/// The links of `source` that sync carries to another replica: never a Local
+/// one (this agent's fired marks and cache).
+async fn synced_links_of(f: &Fixture, source: &str) -> Vec<crate::types::DecoratedLinkExpression> {
+    links_of(f, source)
+        .await
+        .into_iter()
+        .filter(|l| l.status != Some(LinkStatus::Local))
+        .collect()
+}
+
 /// `review ⇄ changes_requested`, plus `review → approved`. Every state
 /// carries the same guard so any edge can be sealed, which lets these tests
 /// drive multi-hop and cyclic histories explicitly.
@@ -310,9 +321,11 @@ async fn tick() {
 
 const OWNER_RULE: &str = r#"{"n":1,"fromRole":{"className":"ns://Task","didProperty":"owner"}}"#;
 
+/// Grant this replica's agent the owner role: Shared, as a grant other
+/// replicas count must be.
 async fn grant_owner_role(f: &mut Fixture) {
     let me = acting_did(f);
-    f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Local)
+    f.link(TASK, "ns://owner", &literal(&me), LinkStatus::Shared)
         .await;
 }
 

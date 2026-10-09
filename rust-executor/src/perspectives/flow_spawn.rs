@@ -709,10 +709,16 @@ mod tests {
             "must start at the lowest-value state"
         );
 
-        // It's on the graph, not just in the return value.
-        let live = load_flow_instances(&perspective, &[base.clone()])
-            .await
-            .expect("load_flow_instances");
+        // It's on the graph, not just in the return value. Read as the
+        // minter: the `currentState` cache is its Local link.
+        let live = load_flow_instances(
+            &perspective
+                .clone()
+                .for_viewer(crate::agent::did_for_context(&ctx).unwrap()),
+            &[base.clone()],
+        )
+        .await
+        .expect("load_flow_instances");
         assert_eq!(live.len(), 1, "the mint must be readable back");
         assert_eq!(live[0].instance_uri, spawned[0].instance_uri);
         assert_eq!(live[0].current_state, "identified");

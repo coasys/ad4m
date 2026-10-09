@@ -95,6 +95,16 @@ async fn a_cosigned_completion_mints_and_its_outputs_answer_every_produced_by_su
     assert!(outcome.outcomes.is_empty(), "one vote is short of {{n: 2}}");
 
     let bob = second_agent("bob-produced-by@e2e.test");
+    // Bob's replica has seen the instance before he co-signs: a pass ran for
+    // him when it reached him (sync, or the per-owner sweep on a co-owned
+    // perspective). His cache is his own (#1360), and a first pass is a silent
+    // catch-up, which would swallow the event his vote settles.
+    assert!(
+        run_flow_consensus_pass(&mut f.perspective, None, &bob, None, None)
+            .await
+            .is_empty(),
+        "one vote is still short of {{n: 2}} for Bob"
+    );
     let fired = accept_flow_proposal(&mut f.perspective, &outcome.proposal_uri, &bob)
         .await
         .expect("the co-signer's production path");

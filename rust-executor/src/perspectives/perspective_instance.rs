@@ -7675,6 +7675,14 @@ mod tests {
     use fake::{Fake, Faker};
     use uuid::Uuid;
 
+    /// The instance as the main agent reads it, its own Local graph included.
+    /// The shared instance reads no Local graph (#1358).
+    fn as_main(perspective: &PerspectiveInstance) -> PerspectiveInstance {
+        perspective
+            .clone()
+            .for_viewer(did_for_context(&AgentContext::main_agent()).unwrap())
+    }
+
     async fn setup() -> PerspectiveInstance {
         setup_wallet();
         Ad4mDb::init_global_instance(":memory:").unwrap();
@@ -8226,7 +8234,7 @@ mod tests {
         }
 
         let query = LinkQuery::default();
-        let mut links = perspective.get_links(&query).await.unwrap();
+        let mut links = as_main(&perspective).get_links(&query).await.unwrap();
         assert_eq!(links.len(), 5);
         let mut all_links_sorted = all_links.clone();
         let cmp = |a: &DecoratedLinkExpression, b: &DecoratedLinkExpression| {
@@ -8330,7 +8338,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_remove_link() {
-        let mut perspective = setup().await;
+        let mut perspective = as_main(&setup().await);
         let link = create_link();
         let status = LinkStatus::Local;
 
@@ -8963,7 +8971,7 @@ mod tests {
             uri: &str,
             predicate: &str,
         ) -> Vec<LinkStatus> {
-            perspective
+            as_main(perspective)
                 .get_links(&LinkQuery {
                     source: Some(uri.to_string()),
                     predicate: Some(predicate.to_string()),
@@ -9120,7 +9128,7 @@ mod tests {
             .await
             .expect("create_subject");
 
-        let links = perspective
+        let links = as_main(&perspective)
             .get_links(&LinkQuery {
                 source: Some("t://flow/1".to_string()),
                 predicate: Some("t://current_state".to_string()),
@@ -10366,7 +10374,7 @@ mod tests {
             perspective
                 .add_link(
                     link,
-                    LinkStatus::Local,
+                    LinkStatus::Shared,
                     None,
                     &AgentContext::main_agent(),
                     None,
@@ -10431,7 +10439,7 @@ mod tests {
 
         // Uncancelled — should return JSON with at least the inserted triple.
         let cancel = tokio_util::sync::CancellationToken::new();
-        let result = perspective
+        let result = as_main(&perspective)
             .sparql_query_cancellable("SELECT ?s ?p ?o WHERE { ?s ?p ?o }".to_string(), cancel)
             .await
             .expect("non-cancelled query should succeed");

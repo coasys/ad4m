@@ -1919,10 +1919,16 @@ mod tests {
         .expect("apply_ops_and_run_flow_passes failed")
     }
 
+    /// The instances on `base` as the main agent (every caller here acts as
+    /// it) reads them: the `currentState` cache is its Local link (#1357).
     async fn live_on(p: &PerspectiveInstance, base: &str) -> Vec<FlowInstanceRecord> {
-        load_flow_instances(p, std::slice::from_ref(&base.to_string()))
-            .await
-            .expect("load_flow_instances failed")
+        let main = crate::agent::did_for_context(&AgentContext::main_agent()).unwrap();
+        load_flow_instances(
+            &p.clone().for_viewer(main),
+            std::slice::from_ref(&base.to_string()),
+        )
+        .await
+        .expect("load_flow_instances failed")
     }
 
     #[tokio::test(flavor = "multi_thread")]

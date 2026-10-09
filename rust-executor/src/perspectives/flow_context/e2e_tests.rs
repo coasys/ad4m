@@ -104,7 +104,7 @@ async fn gather_active_flow_contexts_wires_definition_and_instance_e2e() {
         .expect("parse_flow_to_links(Delivery)");
     for link in flow_links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx, None)
+            .add_link(link, LinkStatus::Shared, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }
@@ -251,13 +251,16 @@ async fn load_flow_instances_absent_class_returns_empty() {
 /// "identified" (genesis state).  Only cache-first can return "scoped".
 #[tokio::test(flavor = "multi_thread")]
 async fn gather_active_flow_contexts_cache_first_skips_derive() {
-    let (mut perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    let (perspective, _shapes, ctx) = setup_perspective_no_llm(&[]).await;
+    // Act as the agent whose cache it is: the cache is its Local link, and
+    // replacing it reads the old one first (#1357, #1358).
+    let mut perspective = perspective.for_viewer(crate::agent::did_for_context(&ctx).unwrap());
 
     let flow_links =
         parse_flow_to_links(&delivery_flow_json(), "Delivery").expect("parse_flow_to_links");
     for link in flow_links {
         perspective
-            .add_link(link, LinkStatus::Local, None, &ctx, None)
+            .add_link(link, LinkStatus::Shared, None, &ctx, None)
             .await
             .expect("add_link(flow definition)");
     }

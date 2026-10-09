@@ -446,9 +446,14 @@ mod tests {
         advance_flow_instance_state(&mut perspective, INST_URI, "identified", None, &ctx)
             .await
             .expect("write Local currentState link");
-        let result = local_cached_state(&perspective, INST_URI)
-            .await
-            .expect("local_cached_state");
+        let result = local_cached_state(
+            &perspective
+                .clone()
+                .for_viewer(crate::agent::did_for_context(&ctx).unwrap()),
+            INST_URI,
+        )
+        .await
+        .expect("local_cached_state");
         assert_eq!(
             result.as_deref(),
             Some("identified"),

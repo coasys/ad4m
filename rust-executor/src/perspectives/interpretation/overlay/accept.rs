@@ -391,7 +391,7 @@ mod tests {
                 predicate: Some(pred.into()),
                 target: target.into(),
             }],
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             ctx,
             None,
@@ -937,7 +937,7 @@ mod tests {
                 );
             }
         }
-        p.add_links(links, LinkStatus::Local, None, ctx, None)
+        p.add_links(links, LinkStatus::Shared, None, ctx, None)
             .await
             .unwrap();
     }
@@ -1033,7 +1033,7 @@ mod tests {
                 target: target.into(),
             });
         }
-        p.add_links(links, LinkStatus::Local, None, &ctx, None)
+        p.add_links(links, LinkStatus::Shared, None, &ctx, None)
             .await
             .unwrap();
 
