@@ -65,7 +65,11 @@ There's no dedicated "enable E2E" endpoint. **The first call to `POST /rooms/:ro
 
 ### Operator listener
 
-`--operator-port` + `--operator-token-file` start a second Fastify app (`operator.ts`) on loopback. It lets the server operator list rooms and add/remove DIDs without the room admin's DID key. It is a separate app, not a route prefix, so the public port can never serve it. Any change to who can reach it must keep three properties, each covered by `tests/operator.test.ts`: the token comes from a mode-600 file only (never argv/URL), the request log never sees headers, and removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings.
+`--operator-port` + `--operator-token-file` start a second Fastify app (`operator.ts`) on loopback. It lets the server operator list rooms and add/remove DIDs without the room admin's DID key. It is a separate app, not a route prefix, so the public port can never serve it. Any change to who can reach it must keep these properties, each covered by `tests/operator.test.ts`:
+- The token comes from a mode-600 file only (never argv/URL), and the request log never sees headers.
+- Every `/api` call carries the signed-in login (`X-Forwarded-User`, set by the proxy; trusted only because the listener is loopback). Every ACL change is stored in `acl_changes` with that login. The `/acl` route stores the admin DID.
+- Every POST carries an allowed `Origin` (or `Referer`), as a CSRF guard for the cookie sign-in.
+- Removal goes through `removeMember()` in `routes.ts` (ACL row, sessions and sockets together). The page script builds DOM with `textContent` only, because room ids and DIDs are client-chosen strings.
 
 ## Known gotchas
 

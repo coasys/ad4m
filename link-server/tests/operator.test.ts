@@ -21,6 +21,9 @@ import {
 } from "./helpers.js";
 
 const TOKEN = randomBytes(32).toString("hex");
+const ORIGIN = "https://prs.ad4m.dev";
+/** What nginx adds after the oauth2-proxy subrequest, plus what a same-origin browser POST carries. */
+const SIGNED_IN = { "x-forwarded-user": "lucksus", origin: ORIGIN };
 const here = path.dirname(fileURLToPath(import.meta.url));
 
 interface OperatorHandle {
@@ -37,7 +40,9 @@ async function withOperator(fn: (h: OperatorHandle) => Promise<void>): Promise<v
       done();
     },
   });
-  const server = await startTestServer({ operator: { token: TOKEN, logger: { level: "info", stream } } });
+  const server = await startTestServer({
+    operator: { token: TOKEN, allowedOrigins: [ORIGIN], label: "staging", logger: { level: "info", stream } },
+  });
   try {
     const opApp = server.built.operatorApp!;
     await opApp.listen({ port: 0, host: "127.0.0.1" });
@@ -53,6 +58,7 @@ function op<T = any>(url: string, body?: unknown, headers: Record<string, string
     method: body === undefined ? "GET" : "POST",
     headers: {
       authorization: `Bearer ${TOKEN}`,
+      ...SIGNED_IN,
       ...(body === undefined ? {} : { "content-type": "application/json" }),
       ...headers,
     },
@@ -168,7 +174,7 @@ test("operator mutations refuse non-JSON bodies and cross-site requests", async 
 
     const form = await fetch(`${opUrl}/api/rooms/${roomId}/acl`, {
       method: "POST",
-      headers: { authorization: `Bearer ${TOKEN}`, "content-type": "text/plain" },
+      headers: { authorization: `Bearer ${TOKEN}`, ...SIGNED_IN, "content-type": "text/plain" },
       body: JSON.stringify({ action: "add", did: someone.did }),
     });
     assert.equal(form.status, 415);
@@ -188,9 +194,10 @@ test("the operator token never reaches the log; ACL changes are logged with the 
     await authenticateAgent(server.url, roomId, admin);
 
     await fetch(`${opUrl}/api/rooms`, { headers: { authorization: "Bearer wrong" } });
-    await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did }, { "x-forwarded-user": "lucksus" });
-    const who = await op<{ operator: string }>(`${opUrl}/api/whoami`, undefined, { "x-forwarded-user": "lucksus" });
+    await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did });
+    const who = await op<{ operator: string; instance: string }>(`${opUrl}/api/whoami`);
     assert.equal(who.body.operator, "lucksus");
+    assert.equal(who.body.instance, "staging");
 
     const text = logs.join("");
     assert.ok(text.length > 0, "the operator listener logged requests");
@@ -200,6 +207,104 @@ test("the operator token never reaches the log; ACL changes are logged with the 
     assert.equal(change.operator, "lucksus");
     assert.equal(change.did, joiner.did);
     assert.equal(change.action, "add");
+    assert.equal(change.instance, "staging");
+  });
+});
+
+test("operator API refuses a request without a signed-in login", async () => {
+  await withOperator(async ({ server, opUrl }) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const joiner = await createTestAgent();
+    await authenticateAgent(server.url, roomId, admin);
+
+    const anonymousGet = await fetch(`${opUrl}/api/rooms`, { headers: { authorization: `Bearer ${TOKEN}` } });
+    assert.equal(anonymousGet.status, 401);
+    const anonymousPost = await fetch(`${opUrl}/api/rooms/${roomId}/acl`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${TOKEN}`, origin: ORIGIN, "content-type": "application/json" },
+      body: JSON.stringify({ action: "add", did: joiner.did }),
+    });
+    assert.equal(anonymousPost.status, 401);
+    const malformed = await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did }, {
+      "x-forwarded-user": "a b<script>",
+    });
+    assert.equal(malformed.status, 401);
+    assert.equal(server.built.db.isMember(roomId, joiner.did), false);
+    assert.deepEqual(server.built.db.getAclChanges(roomId), []);
+  });
+});
+
+test("every admit and remove is stored with the signed-in login, and the room admin's own changes with its DID", async () => {
+  await withOperator(async ({ server, opUrl }) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const joiner = await createTestAgent();
+    const other = await createTestAgent();
+    const adminToken = await authenticateAgent(server.url, roomId, admin);
+
+    await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "add", did: joiner.did }, { "x-forwarded-user": "HexaField" });
+    await op(`${opUrl}/api/rooms/${roomId}/acl`, { action: "remove", did: joiner.did }, { "x-forwarded-user": "jhweir" });
+    await postJson(`${server.url}/rooms/${roomId}/acl`, { action: "add", did: other.did }, adminToken);
+
+    const stored = server.built.db.getAclChanges(roomId).reverse();
+    assert.deepEqual(
+      stored.map((c) => [c.action, c.did, c.actor, c.source]),
+      [
+        ["add", joiner.did, "HexaField", "operator"],
+        ["remove", joiner.did, "jhweir", "operator"],
+        ["add", other.did, admin.did, "room-admin"],
+      ]
+    );
+
+    const detail = await op<{
+      members: Array<{ did: string; addedBy: { actor: string; source: string } | null }>;
+      history: Array<{ action: string; actor: string }>;
+    }>(`${opUrl}/api/rooms/${roomId}`);
+    assert.deepEqual(detail.body.members.find((m) => m.did === other.did)?.addedBy?.actor, admin.did);
+    assert.equal(detail.body.members.find((m) => m.did === admin.did)?.addedBy, null);
+    assert.deepEqual(detail.body.history.map((h) => [h.action, h.actor]), [
+      ["add", admin.did],
+      ["remove", "jhweir"],
+      ["add", "HexaField"],
+    ]);
+  });
+});
+
+test("state changes need an Origin, or a Referer, from the admin page", async () => {
+  await withOperator(async ({ server, opUrl }) => {
+    const roomId = randomUUID();
+    const admin = await createTestAgent();
+    const a = await createTestAgent();
+    const b = await createTestAgent();
+    await authenticateAgent(server.url, roomId, admin);
+    const post = (did: string, headers: Record<string, string>) =>
+      fetch(`${opUrl}/api/rooms/${roomId}/acl`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          "x-forwarded-user": "lucksus",
+          "content-type": "application/json",
+          ...headers,
+        },
+        body: JSON.stringify({ action: "add", did }),
+      });
+
+    // Refused: no Origin and no Referer, a foreign Origin, a foreign Referer, an opaque Origin.
+    assert.equal((await post(a.did, {})).status, 403);
+    assert.equal((await post(a.did, { origin: "https://evil.example" })).status, 403);
+    assert.equal((await post(a.did, { origin: "https://prs.ad4m.dev.evil.example" })).status, 403);
+    assert.equal((await post(a.did, { referer: "https://evil.example/link-admin/staging/" })).status, 403);
+    assert.equal((await post(a.did, { origin: "null" })).status, 403);
+    // A foreign Origin is not rescued by a good Referer.
+    assert.equal((await post(a.did, { origin: "https://evil.example", referer: `${ORIGIN}/link-admin/staging/` })).status, 403);
+    assert.equal(server.built.db.isMember(roomId, a.did), false);
+
+    // Accepted: the page's Origin, or (no Origin) the page as Referer.
+    assert.equal((await post(a.did, { origin: ORIGIN })).status, 200);
+    assert.equal((await post(b.did, { referer: `${ORIGIN}/link-admin/staging/` })).status, 200);
+    assert.equal(server.built.db.isMember(roomId, a.did), true);
+    assert.equal(server.built.db.isMember(roomId, b.did), true);
   });
 });
 
@@ -243,13 +348,19 @@ test("CLI refuses an operator port without a token file, or on a non-loopback ad
   const run = (args: string[]) =>
     spawnSync(process.execPath, ["--import", "tsx", path.join(here, "../src/index.ts"), ...args], {
       encoding: "utf8",
-      env: { ...process.env, OPERATOR_TOKEN_FILE: "", OPERATOR_PORT: "" },
+      env: { ...process.env, OPERATOR_TOKEN_FILE: "", OPERATOR_PORT: "", OPERATOR_ORIGINS: "" },
       timeout: 30_000,
     });
+  const noOrigin = run(["--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent"]);
+  assert.equal(noOrigin.status, 1);
+  assert.match(noOrigin.stderr, /needs --operator-origin/);
   const noToken = run(["--port", "0", "--operator-port", "0"]);
   assert.equal(noToken.status, 1);
   assert.match(noToken.stderr, /needs --operator-token-file/);
-  const exposed = run(["--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent", "--operator-host", "0.0.0.0"]);
+  const exposed = run([
+    "--port", "0", "--operator-port", "0", "--operator-token-file", "/nonexistent",
+    "--operator-origin", ORIGIN, "--operator-host", "0.0.0.0",
+  ]);
   assert.equal(exposed.status, 1);
   assert.match(exposed.stderr, /must be a loopback address/);
 });

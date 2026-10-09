@@ -66,6 +66,8 @@ Control the server through environment variables or CLI flags:
 | `OPERATOR_PORT` | `--operator-port` | off | Also serve the [admission UI](#admission-ui-operator-listener) and its API on this port |
 | `OPERATOR_HOST` | `--operator-host` | `127.0.0.1` | Address of the operator listener; must be loopback |
 | `OPERATOR_TOKEN_FILE` | `--operator-token-file` | none | File (mode 600) holding the operator API token; required with `--operator-port` |
+| `OPERATOR_ORIGINS` (comma-separated) | `--operator-origin` (repeatable) | none | Origin the admission page is served from; POSTs from anywhere else are refused. Required with `--operator-port` |
+| `OPERATOR_LABEL` | `--operator-label` | none | Instance name shown on the admission page (`staging`, `prod`) |
 
 ### Rooms
 
@@ -104,18 +106,22 @@ The `/acl` endpoint needs a JWT of the room admin's DID, and only the executor h
 ```bash
 umask 077; openssl rand -hex 32 > /srv/link-server/operator-token     # mode 600, never on argv
 link-server --host 127.0.0.1 --port 13102 --data /srv/link-server/data \
-  --operator-port 13104 --operator-token-file /srv/link-server/operator-token
+  --operator-port 13104 --operator-token-file /srv/link-server/operator-token \
+  --operator-origin https://admin.example.org --operator-label prod
 ```
+
+One listener serves one instance. Run staging and prod as separate servers with separate operator ports, mounted at separate paths, so a page never switches between instances.
 
 - The listener binds to loopback only and refuses any other address. It is a separate Fastify app, so the public port never serves it.
 - Every `/api/*` call needs `Authorization: Bearer <operator token>`, compared in constant time. The token is read from a file that only its owner may read. It never goes on argv or into a URL, and the request log has no headers in it.
-- `POST` needs `Content-Type: application/json`. Requests a browser marks `Sec-Fetch-Site: cross-site` are refused.
-- Every ACL change is logged as `operator acl change` with the room, the DID and the `X-Forwarded-User` the proxy set.
+- Every `/api/*` call also needs `X-Forwarded-User`, the signed-in login (GitHub login syntax). The proxy sets it from the sign-in subrequest. The header is trusted only because the listener is loopback-only and reached through that proxy, and the proxy must overwrite any value a client sends.
+- CSRF: the sign-in is a cookie, so every `POST` needs an `Origin` from `--operator-origin`. When a browser sends no `Origin`, a `Referer` on that origin is accepted instead. A request with neither is refused, as is one marked `Sec-Fetch-Site: cross-site`. `POST` also needs `Content-Type: application/json`.
+- **Who admitted whom:** every admit and remove is stored in the `acl_changes` table with the login (`source: "operator"`) and logged as `operator acl change`. Changes the room admin makes through `POST /rooms/:id/acl` are stored too, with the admin DID (`source: "room-admin"`). `GET /api/rooms/:id` returns them as `history`, and each member's `addedBy`.
 - The operator only manages rooms that exist (rooms are still created by their first agent). The operator cannot remove the room admin.
 
 **Trust model.** This gives the operator no power it does not already have: the server owns the ACL (and the SQLite file). But it makes ACL changes by the operator a supported path. The admin's server-link-language grants room keys to every ACL member that lacks them, so **a DID the operator admits can read the room's encrypted history** once the admin's executor has been online. Only run this listener where the server's operator is trusted with membership. Removing a member does not rotate the room key: the removed DID keeps the keys it had, but the ACL check stops it from fetching anything new.
 
-**Wiring it behind a sign-in.** Put a reverse proxy in front that signs the human in and injects the token, so the browser never holds it. With nginx and [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) (GitHub provider, `github_users` allowlist), on a host of its own:
+**Wiring it behind a sign-in.** Put a reverse proxy in front that signs the human in and injects the token, so the browser never holds it. With nginx and [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/) (GitHub provider, `github_users` allowlist = the operators), on a host of its own:
 
 ```nginx
 server {
@@ -182,7 +188,7 @@ cookie_secure = true
 cookie_samesite = "lax"
 ```
 
-The page uses relative URLs, so it also works mounted under a path such as `location /link-admin/ { ... proxy_pass http://127.0.0.1:13104/; }` on a host that already has an oauth2-proxy sign-in.
+The page uses relative URLs, so it also works mounted under a path on a host that already has an oauth2-proxy sign-in, one path per instance: `location /link-admin/staging/ { ... proxy_pass http://127.0.0.1:13105/; }`. Start that instance with `--operator-origin https://<that host>`.
 
 ### Connecting AD4M agents to this server
 
@@ -241,9 +247,11 @@ Operator listener (only with `--operator-port`; all `/api/*` need the operator t
 
 ```
 GET  /                          admission page (+ /admin.js)
-GET  /api/whoami                -> { operator }   (X-Forwarded-User)
+GET  /api/whoami                -> { operator, instance }   (X-Forwarded-User, --operator-label)
 GET  /api/rooms                 -> { rooms: [{ id, admin, e2e, createdAt, memberCount }] }
-GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt, members: [{ did, addedAt, hasX25519Key, online }] }
+GET  /api/rooms/:roomId         -> { id, admin, e2e, createdAt,
+                                     members: [{ did, addedAt, hasX25519Key, online, addedBy: { actor, source, at } | null }],
+                                     history: [{ did, action, actor, source, at }] }   (newest first, last 100)
 POST /api/rooms/:roomId/acl     { action: "add"|"remove", did } -> same as GET /api/rooms/:roomId
 ```
 

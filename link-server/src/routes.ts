@@ -338,6 +338,7 @@ export function registerRoutes(app: FastifyInstance, ctx: RouteContext): void {
       } else {
         ctx.db.addAcl(claims.roomId, body.did);
       }
+      ctx.db.recordAclChange(claims.roomId, body.did, body.action, claims.did, "room-admin");
 
       const acl = ctx.db.getAcl(claims.roomId);
       const room = ctx.db.getRoom(claims.roomId)!;

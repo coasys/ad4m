@@ -24,6 +24,7 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
   .tag { display: inline-block; font-size: .75rem; padding: 0 .4rem; border-radius: .6rem; background: #e5e5ea; margin-right: .25rem; }
   .tag.admin { background: #ffe8a3; }
   .tag.online { background: #c9f0d1; }
+  .tag.instance { font-size: .9rem; background: #d6e4ff; vertical-align: middle; }
   form { display: flex; gap: .5rem; margin: .75rem 0; }
   input[type=text] { flex: 1; font: inherit; font-family: ui-monospace, monospace; font-size: .85rem; padding: .35rem .5rem; }
   button { font: inherit; padding: .3rem .8rem; cursor: pointer; }
@@ -32,7 +33,7 @@ export const OPERATOR_PAGE_HTML = `<!doctype html>
 </style>
 </head>
 <body>
-<h1>Link server admission</h1>
+<h1>Link server admission <span id="instance" class="tag instance"></span></h1>
 <div class="muted">Signed in as <span id="who">?</span></div>
 <p class="note">A room is a neighbourhood (the server link language's UID). Its first agent is the room admin.
 An added DID can sync once it reconnects. It can read and write encrypted links only after the
@@ -46,7 +47,9 @@ room admin's executor has been online and granted it the room keys.</p>
     <input id="add-did" type="text" placeholder="did:key:z6Mk..." autocomplete="off" spellcheck="false" required>
     <button type="submit">Admit DID</button>
   </form>
-  <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Keys</th><th></th></tr></thead><tbody></tbody></table>
+  <table id="members"><thead><tr><th>Member</th><th>Added</th><th>Added by</th><th>Keys</th><th></th></tr></thead><tbody></tbody></table>
+  <h2>History</h2>
+  <table id="history"><thead><tr><th>When</th><th>Change</th><th>DID</th><th>By</th></tr></thead><tbody></tbody></table>
 </section>
 <script src="admin.js"></script>
 </body>
@@ -119,6 +122,7 @@ export const OPERATOR_PAGE_JS = `"use strict";
       who.appendChild(el("span", member.did, "mono"));
       row.appendChild(who);
       row.appendChild(el("td", (member.addedAt || "").slice(0, 16).replace("T", " ")));
+      row.appendChild(el("td", member.addedBy ? actorLabel(member.addedBy) : "", "mono"));
       row.appendChild(el("td", member.hasX25519Key ? "registered" : "not yet"));
       var action = el("td");
       if (member.did !== room.admin) {
@@ -130,6 +134,24 @@ export const OPERATOR_PAGE_JS = `"use strict";
         action.appendChild(remove);
       }
       row.appendChild(action);
+      tbody.appendChild(row);
+    });
+    renderHistory(room);
+  }
+
+  function actorLabel(change) {
+    return change.source === "operator" ? change.actor : "room admin";
+  }
+
+  function renderHistory(room) {
+    var tbody = document.querySelector("#history tbody");
+    tbody.replaceChildren();
+    room.history.forEach(function (change) {
+      var row = el("tr");
+      row.appendChild(el("td", change.at.slice(0, 16).replace("T", " ")));
+      row.appendChild(el("td", change.action === "add" ? "admitted" : "removed"));
+      row.appendChild(el("td", change.did, "mono"));
+      row.appendChild(el("td", actorLabel(change), "mono"));
       tbody.appendChild(row);
     });
   }
@@ -157,6 +179,10 @@ export const OPERATOR_PAGE_JS = `"use strict";
 
   api("/whoami").then(function (data) {
     document.getElementById("who").textContent = data.operator || "(no sign-in header)";
+    if (data.instance) {
+      document.getElementById("instance").textContent = data.instance;
+      document.title = "Link server admission: " + data.instance;
+    }
   }).catch(function () {});
   loadRooms().catch(function (e) { showError(e.message); });
 })();

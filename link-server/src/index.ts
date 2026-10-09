@@ -10,6 +10,8 @@ interface CliArgs {
   operatorPort?: number;
   operatorHost: string;
   operatorTokenFile?: string;
+  operatorOrigins: string[];
+  operatorLabel?: string;
 }
 
 const USAGE = `link-server — self-hostable link language server for AD4M
@@ -30,10 +32,17 @@ Options:
   --operator-token-file <path>
                      File (mode 600) holding the operator API token;
                      required with --operator-port
+  --operator-origin <origin>
+                     Origin the admission page is served from (e.g.
+                     https://admin.example.org); POSTs from any other
+                     origin are refused. Repeatable; required with --operator-port
+  --operator-label <name>
+                     Instance name shown on the admission page (e.g. staging)
   -h, --help         Show this help
 
 Each option also reads an environment variable: PORT, DATA_DIR, HOST,
-AUTO_ADMIT, OPERATOR_PORT, OPERATOR_HOST, OPERATOR_TOKEN_FILE.
+AUTO_ADMIT, OPERATOR_PORT, OPERATOR_HOST, OPERATOR_TOKEN_FILE,
+OPERATOR_ORIGINS (comma-separated), OPERATOR_LABEL.
 `;
 
 function envBool(key: string): boolean {
@@ -56,6 +65,8 @@ function parseArgs(argv: string[]): CliArgs {
   let operatorPort = process.env.OPERATOR_PORT ? parsePort("OPERATOR_PORT", process.env.OPERATOR_PORT) : undefined;
   let operatorHost = process.env.OPERATOR_HOST ?? "127.0.0.1";
   let operatorTokenFile = process.env.OPERATOR_TOKEN_FILE || undefined;
+  const operatorOrigins = (process.env.OPERATOR_ORIGINS ?? "").split(",").map((o) => o.trim()).filter(Boolean);
+  let operatorLabel = process.env.OPERATOR_LABEL || undefined;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -97,6 +108,12 @@ function parseArgs(argv: string[]): CliArgs {
       case "--operator-token-file":
         operatorTokenFile = requireValue("--operator-token-file", argv[++i]);
         break;
+      case "--operator-origin":
+        operatorOrigins.push(requireValue("--operator-origin", argv[++i]));
+        break;
+      case "--operator-label":
+        operatorLabel = requireValue("--operator-label", argv[++i]);
+        break;
       case "--auto-admit":
         autoAdmit = true;
         break;
@@ -117,13 +134,17 @@ function parseArgs(argv: string[]): CliArgs {
       console.error("--operator-port needs --operator-token-file (or OPERATOR_TOKEN_FILE)");
       process.exit(1);
     }
+    if (operatorOrigins.length === 0) {
+      console.error("--operator-port needs --operator-origin (or OPERATOR_ORIGINS)");
+      process.exit(1);
+    }
     if (!isLoopbackHost(operatorHost)) {
       console.error(`--operator-host must be a loopback address, not ${operatorHost}`);
       process.exit(1);
     }
   }
 
-  return { port, host, dataDir, autoAdmit, operatorPort, operatorHost, operatorTokenFile };
+  return { port, host, dataDir, autoAdmit, operatorPort, operatorHost, operatorTokenFile, operatorOrigins, operatorLabel };
 }
 
 function parsePort(name: string, value: string | undefined): number {
@@ -151,14 +172,19 @@ async function main(): Promise<void> {
     dataDir: args.dataDir,
     autoAdmit: args.autoAdmit,
     logger: true,
-    operator: operatorToken !== undefined ? { token: operatorToken } : undefined,
+    operator:
+      operatorToken !== undefined
+        ? { token: operatorToken, allowedOrigins: args.operatorOrigins, label: args.operatorLabel }
+        : undefined,
   });
 
   await app.listen({ port: args.port, host: args.host });
   app.log.info(`link-server listening on ${args.host}:${args.port} (data: ${args.dataDir})`);
   if (operatorApp) {
     await operatorApp.listen({ port: args.operatorPort!, host: args.operatorHost });
-    app.log.info(`operator admission UI on ${args.operatorHost}:${args.operatorPort}`);
+    app.log.info(
+      `operator admission UI${args.operatorLabel ? ` (${args.operatorLabel})` : ""} on ${args.operatorHost}:${args.operatorPort}`
+    );
   }
 
   const shutdown = (signal: string) => {

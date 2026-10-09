@@ -23,6 +23,14 @@ import type { WsManager } from "./ws.js";
 export interface OperatorOptions {
   /** The shared secret every /api request must carry as a Bearer token. */
   token: string;
+  /**
+   * Origins (scheme://host[:port]) the page is served from. Every POST must
+   * carry an Origin, or failing that a Referer, from this list (CSRF guard:
+   * the sign-in is a cookie). Required, at least one.
+   */
+  allowedOrigins: string[];
+  /** Instance name shown on the page ("staging", "prod"); one listener serves one instance. */
+  label?: string;
   /** Logger for this listener. Default: same as the public app. */
   logger?: FastifyServerOptions["logger"];
 }
@@ -80,10 +88,52 @@ function isValidDid(did: unknown): did is string {
   }
 }
 
+/** GitHub login syntax: what oauth2-proxy passes on as the signed-in user. */
+const LOGIN_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+
+/** The signed-in login nginx set from the oauth2-proxy subrequest, or null. */
+function operatorOf(headers: Record<string, unknown>): string | null {
+  const user = headers["x-forwarded-user"];
+  return typeof user === "string" && LOGIN_PATTERN.test(user) ? user : null;
+}
+
+/** scheme://host[:port] of a URL, or null if it does not parse. */
+function originOf(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * CSRF guard for state changes: the Origin header, or the Referer when a
+ * browser sends no Origin, must name an allowed origin. A request with
+ * neither is refused.
+ */
+function sameOriginRequest(headers: Record<string, unknown>, allowed: Set<string>): boolean {
+  const origin = headers["origin"];
+  if (typeof origin === "string" && origin !== "null") return allowed.has(origin);
+  const referer = headers["referer"];
+  if (typeof referer === "string") {
+    const o = originOf(referer);
+    return o !== null && allowed.has(o);
+  }
+  return false;
+}
+
 function roomDetail(ctx: OperatorContext, roomId: string) {
   const room = ctx.db.getRoom(roomId);
   if (!room) return undefined;
   const online = new Set(ctx.telepresence.getOnlineAgents(roomId).map((a) => a.did));
+  const history = ctx.db.getAclChanges(roomId);
+  // history is newest first, so the first "add" per DID is the one that admitted it.
+  const addedBy = new Map<string, { actor: string; source: string; at: string }>();
+  for (const change of history) {
+    if (change.action === "add" && !addedBy.has(change.did)) {
+      addedBy.set(change.did, { actor: change.actor, source: change.source, at: change.at });
+    }
+  }
   return {
     id: room.id,
     admin: room.admin_did,
@@ -94,7 +144,9 @@ function roomDetail(ctx: OperatorContext, roomId: string) {
       addedAt: a.added_at,
       hasX25519Key: !!a.x25519_public_key,
       online: online.has(a.did),
+      addedBy: addedBy.get(a.did) ?? null,
     })),
+    history: history.map((c) => ({ did: c.did, action: c.action, actor: c.actor, source: c.source, at: c.at })),
   };
 }
 
@@ -103,6 +155,10 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
     throw new Error(`operator token must be at least ${MIN_OPERATOR_TOKEN_LENGTH} characters`);
   }
   const expected = digest(opts.token);
+  const allowedOrigins = new Set(opts.allowedOrigins.map((o) => originOf(o)).filter((o): o is string => !!o));
+  if (allowedOrigins.size === 0) {
+    throw new Error("operator listener needs at least one allowed origin (e.g. https://admin.example.org)");
+  }
   const app = Fastify({ logger: opts.logger ?? false, bodyLimit: 16 * 1024 });
 
   app.addHook("onSend", async (_request, reply) => {
@@ -131,18 +187,23 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       if (request.headers["sec-fetch-site"] === "cross-site") {
         return reply.code(403).send({ error: "cross-site request refused" });
       }
-      if (request.method === "POST" && !String(request.headers["content-type"] ?? "").startsWith("application/json")) {
-        return reply.code(415).send({ error: "content-type must be application/json" });
+      // Every change is recorded against a person. This listener is loopback
+      // only and reached through nginx, which sets the header from the
+      // sign-in subrequest and never passes a client's own value through.
+      if (!operatorOf(request.headers)) {
+        return reply.code(401).send({ error: "signed-in user required (X-Forwarded-User)" });
+      }
+      if (request.method === "POST") {
+        if (!sameOriginRequest(request.headers, allowedOrigins)) {
+          return reply.code(403).send({ error: "Origin or Referer must be this admin page" });
+        }
+        if (!String(request.headers["content-type"] ?? "").startsWith("application/json")) {
+          return reply.code(415).send({ error: "content-type must be application/json" });
+        }
       }
     });
 
-    /** Login of the signed-in human, as nginx passes it on (audit only, not auth). */
-    const operatorOf = (headers: Record<string, unknown>): string | null => {
-      const user = headers["x-forwarded-user"];
-      return typeof user === "string" && user ? user : null;
-    };
-
-    api.get("/whoami", async (request) => ({ operator: operatorOf(request.headers) }));
+    api.get("/whoami", async (request) => ({ operator: operatorOf(request.headers), instance: opts.label ?? null }));
 
     api.get("/rooms", async () => ({
       rooms: ctx.db.listRooms().map((r) => ({
@@ -183,8 +244,10 @@ export async function buildOperatorApp(ctx: OperatorContext, opts: OperatorOptio
       } else {
         ctx.db.addAcl(roomId, body.did);
       }
+      const operator = operatorOf(request.headers)!;
+      ctx.db.recordAclChange(roomId, body.did, body.action, operator, "operator");
       request.log.info(
-        { operator: operatorOf(request.headers), roomId, action: body.action, did: body.did },
+        { operator, instance: opts.label ?? null, roomId, action: body.action, did: body.did },
         "operator acl change"
       );
       return roomDetail(ctx, roomId);
