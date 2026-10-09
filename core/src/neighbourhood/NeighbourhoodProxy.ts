@@ -110,11 +110,13 @@ export class NeighbourhoodProxy {
      * automatically advertise SFU capability in call-presence.
      */
     async createSession(roomName: string, options?: SessionCreateOptions): Promise<Session> {
+        // `perspective.getNeighbourhoodProxy()` builds the proxy without a DID; the session needs
+        // the caller's own, so ask the executor once.
         if (!this.#agentDid) {
-            throw new Error(
-                "Cannot create a call session without an agent DID — " +
-                "pass agentDid when constructing NeighbourhoodProxy",
-            )
+            this.#agentDid = (await this.#client.callerDid()) ?? ""
+        }
+        if (!this.#agentDid) {
+            throw new Error("Cannot create a call session: the executor reports no agent DID")
         }
         // Fetch SFU status once — reachability only changes at executor restart.
         if (!this.#sfuStatusCache) {
@@ -131,6 +133,7 @@ export class NeighbourhoodProxy {
             agentDid: this.#agentDid,
             neighbourhoodUrl: options?.neighbourhoodUrl ?? "",
             topology: options?.topology ?? "auto",
+            sfuConfig: options?.sfuConfig,
             localSfuStatus: this.#sfuStatusCache ?? undefined,
             availableSfuNodes: () => proxy.availableSfuNodes(),
             // Mesh needs a signalling channel and presence callbacks.

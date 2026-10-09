@@ -121,6 +121,15 @@ describe("topology resolution", () => {
         expect(MeshManager).not.toHaveBeenCalled()
     })
 
+    // Apps show which topology a call runs on from this event, mesh and SFU alike.
+    it("emits topology-changed with 'sfu' once the SFU join completes", async () => {
+        const session = createSession(baseConfig({ topology: "sfu" }))
+        const events: unknown[] = []
+        session.on("topology-changed", (topo: unknown) => events.push(topo))
+        await session.join(fakeMediaStream())
+        expect(events).toEqual(["sfu"])
+    })
+
     it("resolves 'mesh' to mesh path", async () => {
         const session = createSession(baseConfig({
             topology: "mesh",

@@ -63,6 +63,9 @@ export interface Session {
 export interface SessionCreateOptions {
     topology?: SessionTopology
     neighbourhoodUrl?: string
+    /** The neighbourhood's call config. With `topology: "auto"`, its mode decides: any SFU mode
+     *  runs through the SFU, `mesh` stays peer-to-peer. */
+    sfuConfig?: SfuConfig
 }
 
 interface SessionImplConfig {
@@ -375,6 +378,7 @@ export function createSession(config: SessionImplConfig): Session {
             })
 
             await sfuManager.join(localStream)
+            emit("topology-changed", "sfu")
             setState("active")
         },
 
