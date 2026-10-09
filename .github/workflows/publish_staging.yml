@@ -79,6 +79,11 @@ jobs:
     - name: pnpm Install
       run: pnpm install --no-frozen-lockfile
 
+    - name: Create placeholder dapp/dist (include_dir! panics if dir missing)
+      # rust-executor/src/dapp_server.rs embeds include_dir!("dapp/dist");
+      # rust-executor/dapp is a symlink to the root dapp/ package.
+      run: mkdir -p dapp/dist
+
     - name: Generate deno snapshot
       env:
         CARGO_NET_GIT_FETCH_WITH_CLI: "true"
@@ -705,8 +710,6 @@ jobs:
         run: rustc --version && cargo --version
 
       - run: pnpm install --no-frozen-lockfile
-      - run: pnpm build-core-executor
-      - run: ls -al executor/lib
       - run: cargo login ${{ secrets.CARGO_REGISTRY_TOKEN }}
       - name: Publish ad4m-client crate
         working-directory: rust-client

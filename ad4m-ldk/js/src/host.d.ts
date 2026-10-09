@@ -28,6 +28,8 @@ declare module "ad4m:host" {
         status: number;
         body: string;
     }
+    // Rejects on network failures and when the call (headers and body) takes
+    // longer than 10 s; the timeout error names the URL.
     export function httpFetch(url: string, method: string, headersJson: string, body: string): Promise<HttpFetchResponse>;
 
     // Runtime utilities (Spec section 7.7)
