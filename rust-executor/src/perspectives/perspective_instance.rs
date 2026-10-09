@@ -9550,7 +9550,12 @@ mod tests {
                 .expect("add Task");
         };
         let (result, ()) = tokio::join!(
-            perspective.model_query_within("Board", NESTED_INCLUDE_QUERY, None, Duration::from_secs(10)),
+            perspective.model_query_within(
+                "Board",
+                NESTED_INCLUDE_QUERY,
+                None,
+                Duration::from_secs(10)
+            ),
             late_sync
         );
 

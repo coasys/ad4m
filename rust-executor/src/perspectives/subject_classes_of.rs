@@ -352,7 +352,9 @@ fn fetch(
         )
     };
 
-    Ok(serde_json::from_str(&store.query_with_graphs(&query, scope)?)?)
+    Ok(serde_json::from_str(
+        &store.query_with_graphs(&query, scope)?,
+    )?)
 }
 
 #[cfg(test)]

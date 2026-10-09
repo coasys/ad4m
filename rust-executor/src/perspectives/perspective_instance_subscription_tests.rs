@@ -168,9 +168,10 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
         .await
         .expect("add_link");
     perspective
-        .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
-            "ns://title".to_string()
-        ])), ChangedGraphs::NoneRecorded)
+        .check_subscribed_queries(
+            ChangedPredicates::Specific(HashSet::from(["ns://title".to_string()])),
+            ChangedGraphs::NoneRecorded,
+        )
         .await;
 
     let push = next_push_for(&mut rx, &perspective.uuid, &id1).await;

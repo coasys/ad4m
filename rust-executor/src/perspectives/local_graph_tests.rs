@@ -138,7 +138,12 @@ async fn a_write_to_the_alias_lands_in_the_writers_local_graph_as_local() {
     assert_eq!(written.graph, Some(local_graph_iri(&alice_did)));
     assert_eq!(written.status, Some(LinkStatus::Local));
 
-    let stored = p.clone().for_viewer(alice_did.clone()).get_links(&LinkQuery::default()).await.unwrap();
+    let stored = p
+        .clone()
+        .for_viewer(alice_did.clone())
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].graph, Some(local_graph_iri(&alice_did)));
     assert_eq!(stored[0].status, Some(LinkStatus::Local));
@@ -208,7 +213,13 @@ async fn a_write_into_another_agents_local_graph_is_refused() {
         .await
         .is_err());
     // Bob would read a write that landed in his graph.
-    assert!(p.clone().for_viewer(bob_did).get_links(&LinkQuery::default()).await.unwrap().is_empty());
+    assert!(p
+        .clone()
+        .for_viewer(bob_did)
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 /// A batch re-signs its links on commit. That used to drop the graph, so every
@@ -239,7 +250,12 @@ async fn a_batched_write_keeps_its_graph() {
     .unwrap();
     p.commit_batch(batch, &alice).await.unwrap();
 
-    let links = p.clone().for_viewer(alice_did.clone()).get_links(&LinkQuery::default()).await.unwrap();
+    let links = p
+        .clone()
+        .for_viewer(alice_did.clone())
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap();
     let graph_of = |name: &str| {
         let l = links
             .iter()
@@ -471,7 +487,9 @@ async fn editing_an_instance_without_naming_a_graph_writes_where_it_lives() {
     .await
     .unwrap();
 
-    let links = p.clone().for_viewer(alice_did.clone())
+    let links = p
+        .clone()
+        .for_viewer(alice_did.clone())
         .get_links(&LinkQuery {
             source: Some("t://note/private".to_string()),
             ..Default::default()
@@ -509,7 +527,9 @@ async fn editing_an_instance_without_naming_a_graph_writes_where_it_lives() {
     )
     .await
     .unwrap();
-    let tag = p.clone().for_viewer(alice_did.clone())
+    let tag = p
+        .clone()
+        .for_viewer(alice_did.clone())
         .get_links(&LinkQuery {
             predicate: Some("t://tag".to_string()),
             ..Default::default()
@@ -540,7 +560,12 @@ async fn updating_a_link_keeps_its_graph() {
         .await
         .unwrap();
     assert_eq!(updated.graph, Some(local_graph_iri(&alice_did)));
-    let stored = p.clone().for_viewer(alice_did.clone()).get_links(&LinkQuery::default()).await.unwrap();
+    let stored = p
+        .clone()
+        .for_viewer(alice_did.clone())
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap();
     assert_eq!(sources(&stored), vec!["ad4m://s/new"]);
     assert_eq!(stored[0].graph, Some(local_graph_iri(&alice_did)));
 }
@@ -569,7 +594,13 @@ async fn synced_links_that_name_a_local_graph_are_dropped() {
     .await
     .unwrap();
     assert_eq!(
-        sources(&p.clone().for_viewer(alice_did).get_links(&LinkQuery::default()).await.unwrap()),
+        sources(
+            &p.clone()
+                .for_viewer(alice_did)
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+        ),
         vec!["ad4m://s/honest"]
     );
 }
@@ -776,7 +807,13 @@ async fn a_removal_finds_the_stored_link_and_its_graph() {
     p.link_mutations(mutation(&b, None), LinkStatus::Shared, &alice, None)
         .await
         .unwrap();
-    assert!(p.clone().for_viewer(alice_did.clone()).get_links(&LinkQuery::default()).await.unwrap().is_empty());
+    assert!(p
+        .clone()
+        .for_viewer(alice_did.clone())
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap()
+        .is_empty());
 
     // On a viewer's instance, a single removal of a foreign Local link fails.
     let c = p
@@ -799,7 +836,15 @@ async fn a_removal_finds_the_stored_link_and_its_graph() {
         .await
         .unwrap()
         .is_empty());
-    assert_eq!(p.clone().for_viewer(alice_did).get_links(&LinkQuery::default()).await.unwrap().len(), 1);
+    assert_eq!(
+        p.clone()
+            .for_viewer(alice_did)
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// A child written into the own graph of a graph-rooted parent that lives in
@@ -1116,7 +1161,9 @@ async fn a_local_subjects_own_graph_cannot_pull_its_children_out() {
     .await
     .unwrap();
     p.commit_batch(batch, &alice).await.unwrap();
-    let stored = p.clone().for_viewer(alice_did.clone())
+    let stored = p
+        .clone()
+        .for_viewer(alice_did.clone())
         .get_links(&LinkQuery {
             source: Some("t://channel/2".to_string()),
             ..Default::default()
@@ -1221,7 +1268,10 @@ async fn a_local_write_without_a_graph_lands_in_its_writers_local_graph() {
             .unwrap(),
     )
     .unwrap();
-    assert!(rows.is_empty(), "Bob's SPARQL read Alice's Local links: {rows:?}");
+    assert!(
+        rows.is_empty(),
+        "Bob's SPARQL read Alice's Local links: {rows:?}"
+    );
 }
 
 /// A Local command on a subject that lives in a shared graph: the link is
@@ -1298,10 +1348,9 @@ async fn updating_a_local_link_in_the_default_graph_moves_it_into_the_writers_lo
     let (_, bob_did) = user("bob");
     let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
     // As a pre-#812 executor stored it: Local, no graph.
-    let mut legacy: LinkExpression =
-        crate::agent::create_signed_expression(link("old"), &alice)
-            .unwrap()
-            .into();
+    let mut legacy: LinkExpression = crate::agent::create_signed_expression(link("old"), &alice)
+        .unwrap()
+        .into();
     legacy.status = Some(LinkStatus::Local);
     p.sparql_store.add_link(&legacy).unwrap();
 
@@ -1442,7 +1491,11 @@ async fn subject_classes_of_does_not_read_another_agents_local_graph() {
             "{who} classified Bob's Local note: {classes:?}"
         );
     }
-    let bobs = p.clone().for_viewer(bob_did).subject_classes_of(&uris).unwrap();
+    let bobs = p
+        .clone()
+        .for_viewer(bob_did)
+        .subject_classes_of(&uris)
+        .unwrap();
     assert_eq!(bobs.get("t://note/bob"), Some(&vec!["Note".to_string()]));
 }
 
@@ -1468,13 +1521,19 @@ async fn a_local_vote_on_a_co_owned_perspective_queues_every_owners_pass() {
         .add_link(vote(), LinkStatus::Shared, None, &alice, None)
         .await
         .unwrap();
-    assert!(!queued(&alone), "a single owner's own vote already ran its pass");
+    assert!(
+        !queued(&alone),
+        "a single owner's own vote already ran its pass"
+    );
 
     let mut shared = setup(Some(vec![alice_did, bob_did])).await;
     shared
         .add_link(vote(), LinkStatus::Shared, None, &alice, None)
         .await
         .unwrap();
-    assert!(queued(&shared), "Bob's pass was not queued after Alice's vote");
+    assert!(
+        queued(&shared),
+        "Bob's pass was not queued after Alice's vote"
+    );
     shared.settle_flow_passes().await;
 }

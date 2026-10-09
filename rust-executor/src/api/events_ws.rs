@@ -1337,8 +1337,7 @@ mod query_subscription_filter_tests {
     //! in `perspectives::local_graph_tests`.
     use super::matches_query_subscription_owner_with;
 
-    const UPDATE: &str =
-        r#"{"perspectiveUuid":"p","subscriptionId":"s1","subscriberDid":"did:key:alice","result":"[]"}"#;
+    const UPDATE: &str = r#"{"perspectiveUuid":"p","subscriptionId":"s1","subscriberDid":"did:key:alice","result":"[]"}"#;
 
     /// Stub owner-check: both Alice and Bob own the perspective.
     fn owns(_uuid: &str, _did: &str) -> bool {

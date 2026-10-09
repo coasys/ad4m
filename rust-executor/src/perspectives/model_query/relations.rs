@@ -323,10 +323,9 @@ async fn hydrate_polymorphic(
 ) -> Result<(), Error> {
     // `limit`/`offset` were refused before either resolver ran — see
     // `reject_pagination_on_polymorphic`. Nothing to check here.
-    let classes =
-        crate::perspectives::subject_classes_of::subject_classes_of(
-            store, resolver, target_ids, graph_iris,
-        )?;
+    let classes = crate::perspectives::subject_classes_of::subject_classes_of(
+        store, resolver, target_ids, graph_iris,
+    )?;
 
     // Group by class, keeping the ids of each group in the order they arrived so
     // a group's own results stay stable.
