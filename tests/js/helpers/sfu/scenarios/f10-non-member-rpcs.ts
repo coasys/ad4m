@@ -129,6 +129,10 @@ export const f10NonMemberRpcs: Scenario = {
       if (outsiderPrefs.some((p) => p.participantId === join.participantId)) {
         failures.push("outsider sfu.qualityPreferences shows the owner's preference");
       }
+      const outsiderPipes = await outsider.client.call<{ pipes: { roomId: string }[] }>("sfu.cascadeStatus", {});
+      if (outsiderPipes.pipes.some((p) => p.roomId.startsWith(NEIGHBOURHOOD))) {
+        failures.push("outsider sfu.cascadeStatus shows the neighbourhood's pipes");
+      }
       const ownerRooms = await owner.client.call<{ neighbourhoodUrl: string }[]>("sfu.listRooms", {});
       if (!ownerRooms.some((r) => r.neighbourhoodUrl === NEIGHBOURHOOD)) {
         failures.push("owner sfu.listRooms does not show its own room");
