@@ -801,27 +801,26 @@ impl RoleGrantLinks {
         did: &str,
     ) -> anyhow::Result<Self> {
         use crate::perspectives::flow_instance::time::parse_link_timestamp;
-        use crate::perspectives::model_query::LINKS_KEY;
+        use crate::perspectives::model_query::links_rows;
 
         let instance_id = instance["id"].as_str().unwrap_or("<no id>");
+        // A row carries its link's `status`: this executor's read-model flag,
+        // not signed link material. Carried evidence is plain signed links,
+        // and every consumer re-derives its verdict from the signature.
         let rows = |key: &str| -> anyhow::Result<Vec<LinkExpression>> {
-            let Some(rows) = instance[LINKS_KEY][key].as_array() else {
-                bail!(
-                    "role grant links: role instance `{instance_id}` came back without \
-                     `{LINKS_KEY}.{key}`, so its grant history for `{did}` cannot be read; \
-                     refusing to gate (fail-closed)"
-                );
-            };
-            rows.iter()
-                .map(|row| {
-                    serde_json::from_value::<LinkExpression>(row.clone()).map_err(|e| {
-                        anyhow!(
-                            "role grant links: role instance `{instance_id}`: a `{key}` row is \
-                             not a link ({e}): {row}"
-                        )
-                    })
+            let rows: Vec<LinkExpression> = links_rows(instance, key).map_err(|e| {
+                anyhow!(
+                    "role grant links: role instance `{instance_id}`: {e}, so its grant \
+                     history for `{did}` cannot be read; refusing to gate (fail-closed)"
+                )
+            })?;
+            Ok(rows
+                .into_iter()
+                .map(|mut l| {
+                    l.status = None;
+                    l
                 })
-                .collect()
+                .collect())
         };
 
         let did_literal =
