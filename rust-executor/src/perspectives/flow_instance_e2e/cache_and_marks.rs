@@ -667,3 +667,63 @@ async fn a_co_owners_first_accept_reports_the_edge_it_settles() {
         .expect("Bob co-signs");
     assert_eq!(fired.len(), 1, "Bob's vote settles the edge: {fired:?}");
 }
+
+/// Multi-user mode for one test, with `users` as managed users; switched off
+/// again on drop, also when the test panics.
+struct MultiUserForTest;
+
+impl MultiUserForTest {
+    fn enable(users: &[(&str, &str)]) -> Self {
+        crate::db::Ad4mDb::with_global_instance(|db| {
+            db.set_multi_user_enabled(true).unwrap();
+            for (email, did) in users {
+                db.add_user(email, did, "pass").unwrap();
+            }
+        });
+        MultiUserForTest
+    }
+}
+
+impl Drop for MultiUserForTest {
+    fn drop(&mut self) {
+        crate::db::Ad4mDb::with_global_instance(|db| db.set_multi_user_enabled(false)).unwrap();
+    }
+}
+
+/// Since #1360 each agent's `currentState` is their own. When one agent acts
+/// on a perspective another agent owns (an admin client, or a co-owner), the
+/// owner must not read the state from before the action once the call has
+/// returned. So the acting call records the step for every other agent that
+/// keeps bookkeeping here (#812, CI `flow-task-handover`: Alice's
+/// `currentStateName` after Bob's transitions).
+#[tokio::test(flavor = "multi_thread")]
+async fn an_acting_call_records_the_new_state_for_the_perspectives_owner() {
+    use crate::perspectives::flow_instance::pass::local_cached_state;
+    let mut f = seed_satisfied_fixture(None).await;
+    let email = format!("alice-owner-{}@e2e.test", uuid::Uuid::new_v4());
+    let alice = second_agent(&email);
+    let alice_did = crate::agent::did_for_context(&alice).unwrap();
+    let _multi_user = MultiUserForTest::enable(&[(&email, &alice_did)]);
+    let mut handle = f.perspective.persisted.lock().await.clone();
+    handle.owners = Some(vec![alice_did.clone()]);
+    f.perspective.update_from_handle(handle).await;
+
+    // The fixture agent acts on Alice's perspective, as an admin client does.
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the acting agent proposes");
+    assert_eq!(outcome.derived_state, "scoped");
+
+    let alices = local_cached_state(&f.perspective.clone().for_viewer(alice_did), &instance)
+        .await
+        .unwrap();
+    assert_eq!(alices.as_deref(), Some("scoped"), "Alice reads the new state");
+}
