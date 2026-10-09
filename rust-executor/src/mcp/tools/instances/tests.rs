@@ -2388,7 +2388,7 @@ async fn a_pass_on_shared_graphs_only_gives_its_tools_no_local_graph() {
     ] {
         perspective
             .create_subject(
-                crate::types::SubjectClassOption {
+                crate::perspectives::perspective_instance::SubjectClassOption {
                     class_name: Some("Channel".to_string()),
                     query: None,
                 },
