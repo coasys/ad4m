@@ -34,7 +34,9 @@
 //!    relation the query includes or projects, to a node in the last result.
 //!    This is how an included record that was filtered out, or did not conform
 //!    yet, enters the include. It is also what lets a polymorphic include be
-//!    watched without knowing its members' classes.
+//!    watched without knowing its members' classes. A typed relation counts
+//!    as included even without `include`: its conformance getter decides its
+//!    ids on every query, from the target's flag and required properties.
 //!
 //! Wherever the query reads something these rules cannot describe, the rules
 //! fall back to `every_write` or to `any` for the predicates involved. Missing
@@ -46,8 +48,10 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::perspectives::model_query::types::ShapeProperty;
 use crate::perspectives::model_query::{
-    IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver, WhereCondition,
+    conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
+    WhereCondition,
 };
 use crate::perspectives::sparql_store::{canonical_target, SparqlStore};
 use crate::types::DecoratedLinkExpression;
@@ -324,24 +328,59 @@ struct Walk<'a> {
 }
 
 impl Walk<'_> {
-    /// Watch `shape`'s predicates on result nodes (`near`), and, for a
-    /// property with a getter, by predicate alone.
+    /// Watch `shape`'s predicates on result nodes (`near`), and what its
+    /// getters read.
     fn watch_class(&mut self, shape: &ModelShape) {
         for p in &shape.properties {
             self.rules.near.add(&p.predicate);
-            // A getter reads triples the shape does not name, and from nodes
-            // other than the record. Keep today's predicate-only rule for the
-            // property, and add the predicates the getter names.
-            if let Some(getter) = p.getter.as_deref().filter(|_| p.direction.is_none()) {
-                if !p.predicate.is_empty() {
-                    self.rules.any.insert(p.predicate.clone());
-                }
-                self.rules.any.extend((self.getter_predicates)(getter));
+            match (p.getter.as_deref(), p.direction.is_some()) {
+                (Some(getter), true) => self.relation_getter(p, getter),
+                (Some(getter), false) => self.any_getter(p, getter),
+                (None, _) => {}
             }
         }
         for r in &shape.include_relations {
             self.rules.near.add(&r.predicate);
         }
+    }
+
+    /// A relation with a getter is filled by it on every query, `include` or
+    /// not: a typed relation's conformance getter lists only the targets that
+    /// carry the target class's flag and required properties, and its
+    /// `where_filter` drops the ones whose values fail it. So a write on a
+    /// linked target changes the relation. Watch it as an `include: true`
+    /// one level down: the predicates read on the target in `near`, the
+    /// relation in `via`. Without recursing, since only the ids are read.
+    fn relation_getter(&mut self, p: &ShapeProperty, getter: &str) {
+        let Some(on_target) = conformance_predicates(getter, &p.predicate) else {
+            // The model author's own SPARQL: its reads cannot be placed on
+            // the target, so match them by predicate.
+            self.any_getter(p, getter);
+            self.rules
+                .any
+                .extend(p.where_predicates.iter().flat_map(|w| w.values().cloned()));
+            return;
+        };
+        self.rules.via.add(&p.predicate);
+        let filtered = p.where_predicates.iter().flat_map(|w| w.values());
+        for predicate in on_target.iter().chain(filtered) {
+            self.rules.near.add(predicate);
+        }
+    }
+
+    /// A getter that reads triples the shape does not name, from nodes other
+    /// than the record: re-run on the property's predicate and on every
+    /// predicate the getter names. A getter with a variable predicate names
+    /// none, and may read any.
+    fn any_getter(&mut self, p: &ShapeProperty, getter: &str) {
+        if !p.predicate.is_empty() {
+            self.rules.any.insert(p.predicate.clone());
+        }
+        let read = (self.getter_predicates)(getter);
+        if read.is_empty() {
+            self.rules.every_write = true;
+        }
+        self.rules.any.extend(read);
     }
 
     /// A class whose records can enter the result through a write on the

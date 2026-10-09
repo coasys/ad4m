@@ -118,6 +118,7 @@ pub(crate) mod utils;
 /// `fromRole` rule's `author` condition means the same thing whether it is
 /// applied to a grant row here or to a revocation tombstone there.
 pub(crate) use filtering::matches_condition;
+pub(crate) use getters::conformance_predicates;
 pub use getters::evaluate_getters_batch;
 pub(crate) use links::{links_trigger_predicates, LINKS_KEY};
 pub use query::execute_model_query;

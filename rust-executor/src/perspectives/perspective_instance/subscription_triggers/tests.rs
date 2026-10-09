@@ -522,6 +522,40 @@ async fn a_record_linked_under_the_parent_anchor_enters() {
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
 }
 
+/// Getters the rules cannot place on a node fall back to predicates: a
+/// relation getter that is not the generated conformance form re-runs on every
+/// predicate it names, and a getter with a variable predicate names none, so
+/// it re-runs on every write.
+#[tokio::test(flavor = "multi_thread")]
+async fn getters_the_rules_cannot_place_fall_back() {
+    let mut tally: Value =
+        serde_json::from_str(&sdna("Tally", &[], &[("linked", "ns://link", "Note")])).unwrap();
+    tally["properties"][1]["getter"] =
+        json!("SELECT ?target WHERE { <Base> <ns://link> ?mid . ?mid <ns://hop> ?target . }");
+    let mut open = tally.clone();
+    open["properties"].as_array_mut().unwrap().push(json!({
+        "path": "ns://count", "name": "count", "datatype": "xsd:integer",
+        "min_count": 0, "max_count": 1,
+        "getter": "SELECT ?value WHERE { <Base> ?anything ?value . }"
+    }));
+    open["target_class"] = json!("ns://Open");
+    let note = sdna("Note", &[("body", "ns://body")], &[]);
+    let (p, _, _) = setup_perspective_no_llm(&[
+        ("Tally", &tally.to_string()),
+        ("Open", &open.to_string()),
+        ("Note", &note),
+    ])
+    .await;
+    let empty = r#"{"instances":[]}"#;
+
+    let custom = p.build_model_trigger(["Tally"], "{}", empty);
+    assert!(!custom.rules.every_write);
+    assert!(custom.rules.any.contains("ns://hop"), "{:?}", custom.rules);
+
+    let open = p.build_model_trigger(["Open"], "{}", empty);
+    assert!(open.rules.every_write, "{:?}", open.rules);
+}
+
 /// A batch too large to keep its links falls back to predicate matching.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_batch_without_its_links_falls_back_to_predicates() {
