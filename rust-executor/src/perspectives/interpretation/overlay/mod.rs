@@ -109,6 +109,12 @@ pub(super) struct OverlayWrite {
 /// overlays. The run node is minted when there is at least one overlay to
 /// anchor, **or** when an AutoProcessor cursor must be recorded (even if the
 /// LLM wrote nothing — those turns are still consumed).
+///
+/// Every base a `Create` mints is linked under each of `mint_scopes` in the
+/// same batch as the real ops, so a reader never sees a new instance before
+/// its parent links. Upserts are not linked. The returned bases are the
+/// instances only, never the scope parents.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn apply_with_overlay(
     perspective: &mut PerspectiveInstance,
     shapes: &[ModelShape],
@@ -119,6 +125,7 @@ pub(crate) async fn apply_with_overlay(
     context: &AgentContext,
     cursor: Option<&InterpretationRunCursor>,
     debug: Option<&crate::perspectives::interpretation::InterpretationDebug>,
+    mint_scopes: &crate::perspectives::interpretation::MintScopes,
 ) -> anyhow::Result<Vec<String>> {
     if ops.is_empty() {
         if cursor.is_some() {
@@ -176,6 +183,10 @@ pub(crate) async fn apply_with_overlay(
     // the gate later drops a real write (a base that only gains an overlay
     // suggestion was still affected).
     let affected = touched_bases(&ops);
+    // Built before anything is written: a scope that cannot be linked under
+    // fails the pass here, not after the records have landed without it.
+    let mint_links =
+        mint_scopes.link_ops(&crate::perspectives::flow_spawn::created_bases_of(&ops))?;
 
     ensure_interpretation_overlay_classes(perspective, context).await?;
 
@@ -233,6 +244,10 @@ pub(crate) async fn apply_with_overlay(
             other @ InterpretationOp::AddLinks { .. } => real_ops.push(other),
         }
     }
+
+    // Every create is kept by the gate above, so the mint links always have
+    // their target in the same batch.
+    real_ops.extend(mint_links);
 
     // Phase 2: apply the gated real ops (own batch, atomic).
     super::apply_interpretation_ops(perspective, &real_ops, context).await?;
@@ -408,6 +423,7 @@ mod tests {
             ctx,
             None,
             None,
+            &crate::perspectives::interpretation::MintScopes::default(),
         )
         .await
         .expect("apply_with_overlay")

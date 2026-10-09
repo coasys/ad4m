@@ -100,11 +100,12 @@ export class AutoProcessorConfig extends Ad4mModel {
   existingScope?: string;
 
   /**
-   * Serialised `Scope` JSON (absent = mint sites are unlinked). When set,
-   * every freshly created base URI gets an additional `Scope.id
-   * --Scope.predicate--> new-uri` link written into the perspective, so
-   * mints become first-class children of the target scope. Must be the
-   * `Raw` form of `Scope`; `Model` scopes carry no linking predicate.
+   * Serialised `Scope` JSON, one scope or an array of them (absent = mint
+   * sites are unlinked). When set, every freshly created base URI gets a
+   * `Scope.id --Scope.predicate--> new-uri` link per scope, written with the
+   * instance, so mints become first-class children of each target scope.
+   * Must be the `Raw` form of `Scope`; `Model` scopes carry no linking
+   * predicate.
    */
   @Optional({ through: "ad4m://mint_scope" })
   mintScope?: string;

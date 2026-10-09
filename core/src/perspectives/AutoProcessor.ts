@@ -198,15 +198,17 @@ export interface AddAutoProcessorConfig {
    */
   existingScope?: RawScope;
   /**
-   * Optional parent-scope target for newly minted instances: when set,
-   * every base URI the pass CREATES is additionally linked as a child of
-   * `mintScope.id` via the scope's predicate — turning the SoA-tree
-   * "children live under this node" pattern from a URI-prefix convention
-   * into an actual graph edge. Upserts of pre-existing instances are NOT
-   * linked (would multi-parent unrelated graph state). Raw form only —
-   * see `RawScope`; the Rust watcher rejects `Model` scopes at runtime.
+   * Optional parent scopes for newly minted instances: one scope or a list.
+   * Every base URI the pass CREATES is linked as a child of each scope's
+   * `id` via its predicate, in the same write as the instance itself —
+   * turning the SoA-tree "children live under this node" pattern from a
+   * URI-prefix convention into an actual graph edge. A list links each
+   * mint under several parents, e.g. a collection and the conversation it
+   * was drawn from. Upserts of pre-existing instances are NOT linked (would
+   * multi-parent unrelated graph state). Raw form only — see `RawScope`;
+   * the executor refuses any other form when the processor is added.
    */
-  mintScope?: RawScope;
+  mintScope?: RawScope | RawScope[];
   /**
    * Tool-call budget for the interpretation-pass harness this processor
    * runs. Omit / `0` → single-shot LLM path. `N > 0` → engage the
