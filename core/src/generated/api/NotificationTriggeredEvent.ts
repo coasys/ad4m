@@ -5,4 +5,10 @@ import type { TriggeredNotification } from "./TriggeredNotification";
  * The `notification-triggered` event: the triggered notification plus the
  * perspective it fired in.
  */
-export type NotificationTriggeredEvent = { perspectiveUuid: string, notification: TriggeredNotification, };
+export type NotificationTriggeredEvent = { perspectiveUuid: string, notification: TriggeredNotification, 
+/**
+ * The agent the notification belongs to. The events socket delivers the
+ * event to this agent's sessions only: the trigger ran as this agent
+ * reads, so `trigger_match` may hold rows from their Local graph.
+ */
+ownerDid: string, };
