@@ -74,7 +74,7 @@ fn conformance_getter(relation: &str, flag_value: &str, required: &[&str]) -> St
 }
 
 /// Post (title, status, comments → Comment, attachments → any class),
-/// Comment (text, replies → Comment), Note (title, body).
+/// Comment (text, replies → Comment), Note (title, body, remarks → Comment).
 async fn blog() -> PerspectiveInstance {
     let post = sdna(
         "Post",
@@ -92,7 +92,7 @@ async fn blog() -> PerspectiveInstance {
     let note = sdna(
         "Note",
         &[("title", "ns://title"), ("body", "ns://body")],
-        &[],
+        &[("remarks", "ns://remark", "Comment")],
     );
     let (p, _, _) =
         setup_perspective_no_llm(&[("Post", &post), ("Comment", &comment), ("Note", &note)]).await;
@@ -230,6 +230,37 @@ async fn a_polymorphic_members_edit_reruns_the_including_subscription() {
     assert_eq!(reruns::count(&id), 1);
     let now = last_result(&p, &id).await;
     assert!(now.to_string().contains("attached"), "{now}");
+}
+
+/// A polymorphic member's typed relation. The member's class is not known
+/// when subscribing, but its conformance getter runs on every query, so
+/// `remarks` lists `c3` once `c3` carries Comment's flag. Red at 0b57e590b
+/// (#1386 re-review): `via` held only `ns://attachment`, and `c3` is linked
+/// to the member through `ns://remark`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_polymorphic_members_related_record_that_starts_to_conform_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    record(&mut p, "ns://n1", "Note", &[]).await;
+    add(&mut p, "ns://p1", "ns://attachment", "ns://n1").await;
+    add(&mut p, "ns://n1", "ns://remark", "ns://c3").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "include": { "attachments": { "polymorphic": true } } }),
+    )
+    .await;
+    let remarks = |r: &Value| r["instances"][0]["attachments"][0]["remarks"].clone();
+    assert_eq!(remarks(&first), json!([]), "{first}");
+
+    add(&mut p, "ns://c3", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c3 now conforms");
+    let now = last_result(&p, &id).await;
+    assert_eq!(remarks(&now), json!(["ns://c3"]), "{now}");
 }
 
 /// Records that entered the result in earlier batches are watched too: a
