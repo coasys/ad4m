@@ -451,11 +451,8 @@ async fn tasks() -> PerspectiveInstance {
             prop["min_count"] = json!(1);
         }
     }
-    let (p, _, _) = setup_perspective_no_llm(&[
-        ("Task", &task.to_string()),
-        ("Step", &step.to_string()),
-    ])
-    .await;
+    let (p, _, _) =
+        setup_perspective_no_llm(&[("Task", &task.to_string()), ("Step", &step.to_string())]).await;
     p
 }
 
