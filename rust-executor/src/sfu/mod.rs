@@ -30,7 +30,7 @@ pub use gossip::{
     CascadeGossip, GossipTarget, NoopGossip,
 };
 pub use reachability::{is_private_ip, SfuReachability};
-pub use service::{get_sfu_service, SfuService};
+pub use service::{get_sfu_service, SfuService, MAX_MESH_PARTICIPANTS};
 pub use types::{
     CallSessionInfo, IceServer, SfuCallRenegotiationOffer, SfuConfig, SfuDataMessage,
     SfuMigrateEvent, SfuParticipantInfo, SfuPipeRenegotiationAnswer, SfuPipeRenegotiationOffer,

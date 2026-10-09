@@ -795,16 +795,19 @@ impl SfuService {
     ) -> Result<SfuRoomInfo, String> {
         let room_id = RoomId::new(neighbourhood_url, room_name);
         // Read before taking the rooms lock: it reads the neighbourhood's links.
+        // SFU supports ~4x the mesh limit. A neighbourhood with no config gets
+        // the most any config may set: bounded, never unlimited.
         let max = config_store::stored_config(neighbourhood_url)
             .await
-            .map(|c| c.max_mesh_participants as usize * 4); // SFU supports ~4x mesh limit
+            .map_or(MAX_MESH_PARTICIPANTS, |c| c.max_mesh_participants) as usize
+            * 4;
         let mut rooms = self.rooms.write().await;
         if rooms.get_room(&room_id).is_none() {
             Self::check_new_room(&rooms, &room_id)?;
         }
 
         rooms
-            .create_room(room_id.clone(), max)
+            .create_room(room_id.clone(), Some(max))
             .map_err(|e| e.to_string())?;
 
         let room = rooms.get_room(&room_id).unwrap();

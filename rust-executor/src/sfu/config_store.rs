@@ -13,6 +13,7 @@ use crate::perspectives::perspective_instance::PerspectiveInstance;
 use crate::types::{DecoratedLinkExpression, Link, LinkQuery, LinkStatus};
 
 use super::types::SfuConfig;
+use super::MAX_MESH_PARTICIPANTS;
 
 /// Predicate of the config link. Its source is the neighbourhood URL.
 pub const SFU_CONFIG_PREDICATE: &str = "ad4m://sfu_config";
@@ -49,14 +50,20 @@ fn from_literal(target: &str) -> Option<SfuConfig> {
 
 /// The config that counts among `links`: the newest validly signed one by
 /// `creator` that parses. Timestamps are RFC 3339 in UTC, so they order as
-/// strings.
+/// strings. `maxMeshParticipants` is clamped to the range `setConfig`
+/// accepts: a link written past that check (by hand, or by another build)
+/// must not set a room's capacity.
 fn creators_latest(links: &[DecoratedLinkExpression], creator: &str) -> Option<SfuConfig> {
     links
         .iter()
         .filter(|l| l.author == creator && l.proof.valid == Some(true))
         .filter_map(|l| Some((l.timestamp.as_str(), from_literal(&l.data.target)?)))
         .max_by(|a, b| a.0.cmp(b.0))
-        .map(|(_, config)| config)
+        .map(|(_, mut config)| {
+            config.max_mesh_participants =
+                config.max_mesh_participants.clamp(2, MAX_MESH_PARTICIPANTS);
+            config
+        })
 }
 
 /// The neighbourhood's call config, or `None` when it has none (not joined
@@ -193,6 +200,28 @@ mod tests {
             "cascaded"
         );
         assert!(creators_latest(&links, "did:nobody").is_none());
+    }
+
+    #[test]
+    fn a_stored_mesh_limit_outside_the_accepted_range_is_clamped() {
+        let limit = |n: u32| SfuConfig {
+            max_mesh_participants: n,
+            ..Default::default()
+        };
+        let read = |n: u32| {
+            let links = [link(
+                "did:creator",
+                "2026-10-01T00:00:00.000Z",
+                &limit(n),
+                true,
+            )];
+            creators_latest(&links, "did:creator")
+                .unwrap()
+                .max_mesh_participants
+        };
+        assert_eq!(read(0), 2);
+        assert_eq!(read(4_000_000_000), MAX_MESH_PARTICIPANTS);
+        assert_eq!(read(8), 8);
     }
 
     /// The creator's write lands as a link in the neighbourhood's perspective,
