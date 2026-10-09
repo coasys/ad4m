@@ -1871,20 +1871,30 @@ impl PerspectiveInstance {
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<(Option<String>, LinkStatus), AnyError> {
-        let writer = || did_for_context(context);
+        if graph.is_none() && status == LinkStatus::Shared {
+            return Ok((None, status));
+        }
+        self.resolve_write_graph_for(graph, status, &did_for_context(context)?)
+    }
+
+    /// [`Self::resolve_write_graph`] for the writer DID `viewer`.
+    fn resolve_write_graph_for(
+        &self,
+        graph: Option<String>,
+        status: LinkStatus,
+        viewer: &str,
+    ) -> Result<(Option<String>, LinkStatus), AnyError> {
         let Some(graph) = graph else {
             return Ok(match status {
-                LinkStatus::Local => (Some(local_graph_iri(&writer()?)), status),
+                LinkStatus::Local => (Some(local_graph_iri(viewer)), status),
                 LinkStatus::Shared => (None, status),
             });
         };
-        let viewer = writer()?;
-        let graph =
-            self.follow_local_subject(resolve_graph_for(&graph, Some(&viewer))?, &viewer)?;
+        let graph = self.follow_local_subject(resolve_graph_for(&graph, Some(viewer))?, viewer)?;
         Ok(if local_graph_owner(&graph).is_some() {
             (Some(graph), LinkStatus::Local)
         } else if status == LinkStatus::Local {
-            (Some(local_graph_iri(&viewer)), status)
+            (Some(local_graph_iri(viewer)), status)
         } else {
             (Some(graph), status)
         })
@@ -1907,7 +1917,7 @@ impl PerspectiveInstance {
             create_signed_expression(link.normalize(), context)?.into();
         link_expr.graph = graph;
         let result = self
-            .add_link_expression(link_expr, status, batch_id)
+            .add_resolved_link_expression(link_expr, status, batch_id)
             .await?;
 
         if let Some(ref email) = context.user_email {
@@ -2078,7 +2088,34 @@ impl PerspectiveInstance {
         }
     }
 
+    /// Add a link a client signed itself. Its graph gets the rules of
+    /// [`Self::add_link`] ([`Self::resolve_write_graph`]), written for this
+    /// instance's viewer, or for the main agent on the executor's own instance:
+    /// a Local link always lives in a Local graph, and the own graph of a
+    /// Local subject is that Local graph.
     pub async fn add_link_expression(
+        &mut self,
+        link_expression: LinkExpression,
+        status: LinkStatus,
+        batch_id: Option<String>,
+    ) -> Result<DecoratedLinkExpression, AnyError> {
+        let mut link_expression = link_expression;
+        let mut status = status;
+        if link_expression.graph.is_some() || status == LinkStatus::Local {
+            let writer = match self.viewer.clone() {
+                Some(viewer) => viewer,
+                None => did_for_context(&AgentContext::main_agent())?,
+            };
+            (link_expression.graph, status) =
+                self.resolve_write_graph_for(link_expression.graph.take(), status, &writer)?;
+        }
+        self.add_resolved_link_expression(link_expression, status, batch_id)
+            .await
+    }
+
+    /// Store `link_expression` in the graph it names, which the caller has
+    /// already resolved ([`Self::resolve_write_graph`]).
+    async fn add_resolved_link_expression(
         &mut self,
         link_expression: LinkExpression,
         status: LinkStatus,
@@ -2102,27 +2139,6 @@ impl PerspectiveInstance {
         }
 
         link_expression.data.validate()?;
-        // A signed link from a client names its graph itself: resolve it for
-        // the caller, like `add_link` does.
-        let mut link_expression = link_expression;
-        let mut status = status;
-        if let Some(graph) = link_expression.graph.take() {
-            let graph = resolve_graph_for(&graph, self.viewer.as_deref())?;
-            if is_local_graph(&graph) {
-                status = LinkStatus::Local;
-            }
-            link_expression.graph = Some(graph);
-        }
-        // A Local link lives in the Local graph of the agent the write acts
-        // for, not of the author the link names (#1357; see
-        // `resolve_write_graph`). The executor itself has no Local graph.
-        if status == LinkStatus::Local
-            && !link_expression.graph.as_deref().is_some_and(is_local_graph)
-        {
-            if let Some(viewer) = self.viewer.as_deref() {
-                link_expression.graph = Some(local_graph_iri(viewer));
-            }
-        }
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
             let batch = batches
