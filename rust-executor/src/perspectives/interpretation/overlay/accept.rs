@@ -665,9 +665,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inferred(alices), vec!["soa://title"]);
-        let bobs = list_overlays(&p.clone().for_viewer(bob_did))
-            .await
-            .unwrap();
+        let bobs = list_overlays(&p.clone().for_viewer(bob_did)).await.unwrap();
         assert_eq!(inferred(bobs), vec!["soa://secret", "soa://title"]);
     }
 
