@@ -523,6 +523,57 @@ async fn a_record_linked_under_the_parent_anchor_enters() {
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
 }
 
+/// A record moving under a parent several levels down a transitive
+/// traversal. The link's source is neither an anchor nor in the result, so
+/// only the predicate can say it matters.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_record_linked_deep_under_a_transitive_parent_enters() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p4", "Post", &[]).await;
+    add(&mut p, "ns://board", "ns://child", "ns://folder").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "parent": { "ids": "ns://board", "predicate": "ns://child", "transitive": true } }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://folder", "ns://child", "ns://p4").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1);
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
+}
+
+/// A write on a related record that makes a `some` quantifier hold. The
+/// comment is in no result and is not a Post: only its own flag says the
+/// quantifier reads it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_making_a_quantifier_hold_reruns() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    record(&mut p, "ns://c1", "Comment", &[("ns://text", "cold")]).await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(
+        &p,
+        "Post",
+        json!({ "where": { "comments": { "some": { "text": "hot" } } } }),
+    )
+    .await;
+    assert!(ids(&first).is_empty(), "{first}");
+
+    add(&mut p, "ns://c1", "ns://text", "literal:string:hot").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1);
+    assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p1"]);
+}
+
 /// A Comment create, with more Comments in the store than `via` reads around
 /// one node. Post's typed relation makes `ns://comment` a `via` relation, and
 /// the flag link's target, `ns://comment`, is linked to every Comment. Red if
