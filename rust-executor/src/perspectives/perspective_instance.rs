@@ -541,6 +541,16 @@ pub(crate) fn shareable(diff: &PerspectiveDiff) -> PerspectiveDiff {
     }
 }
 
+/// What [`PerspectiveInstance::stored_copy`] found for a requested link.
+enum StoredCopy {
+    /// No copy is stored.
+    Missing,
+    /// Copies are stored, but none the caller reads.
+    Hidden,
+    /// The copy the request acts on.
+    Found(DecoratedLinkExpression),
+}
+
 #[derive(Clone)]
 pub struct PerspectiveInstance {
     pub persisted: Arc<Mutex<PerspectiveHandle>>,
@@ -1800,6 +1810,52 @@ impl PerspectiveInstance {
         }
     }
 
+    /// The stored copy of `requested` that a removal or an update acts on.
+    ///
+    /// One signed expression can sit in more than one graph: the reifier IRI
+    /// leaves the graph out, so an author who re-adds their own link with the
+    /// other status stores a second copy. Only the copies `visible` accepts
+    /// count. With one, that copy. With several, the one in the graph the
+    /// request names (the alias resolved for `viewer`; none = the default
+    /// graph), else an error: acting on whichever copy the store returns
+    /// first could remove a shared link when the Local one was meant.
+    fn stored_copy(
+        &self,
+        requested: &LinkExpression,
+        viewer: Option<&str>,
+        visible: impl Fn(&DecoratedLinkExpression) -> bool,
+    ) -> Result<StoredCopy, AnyError> {
+        let copies = self.sparql_store.get_link_copies(
+            &requested.data.source,
+            requested.data.predicate.as_deref(),
+            &requested.data.target,
+            &requested.author,
+            &requested.timestamp,
+        )?;
+        if copies.is_empty() {
+            return Ok(StoredCopy::Missing);
+        }
+        let mut seen: Vec<DecoratedLinkExpression> =
+            copies.into_iter().filter(|c| visible(c)).collect();
+        if seen.len() <= 1 {
+            return Ok(seen.pop().map_or(StoredCopy::Hidden, StoredCopy::Found));
+        }
+        let named = requested
+            .graph
+            .as_deref()
+            .map(|g| resolve_graph_for(g, viewer))
+            .transpose()?;
+        seen.into_iter()
+            .find(|c| c.graph == named)
+            .map(StoredCopy::Found)
+            .ok_or_else(|| {
+                anyhow!(
+                    "Link is stored in more than one graph, none of them {}",
+                    named.as_deref().unwrap_or("the default graph")
+                )
+            })
+    }
+
     /// Resolve the graph a write by `context` names, and the status its links
     /// get. The Local alias becomes the writer's own Local graph, another
     /// agent's Local graph is refused, the own graph of a Local subject becomes
@@ -1883,18 +1939,11 @@ impl PerspectiveInstance {
 
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            let decorated_link = self
-                .sparql_store
-                .get_link(
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )?
-                .filter(|l| self.sees(l))
-                .ok_or(anyhow!("Link not found"))?;
+            let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link_expression, self.viewer.as_deref(), |l| self.sees(l))?
+            else {
+                return Err(anyhow!("Link not found"));
+            };
 
             let link_from_db = LinkExpression::from(decorated_link.clone());
             let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
@@ -1904,17 +1953,8 @@ impl PerspectiveInstance {
         } else {
             let _handle = self.persisted.lock().await.clone();
 
-            // Query SPARQL store
-            if let Some(decorated_link) = self
-                .sparql_store
-                .get_link(
-                    &link_expression.data.source,
-                    link_expression.data.predicate.as_deref(),
-                    &link_expression.data.target,
-                    &link_expression.author,
-                    &link_expression.timestamp,
-                )?
-                .filter(|l| self.sees(l))
+            if let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link_expression, self.viewer.as_deref(), |l| self.sees(l))?
             {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
@@ -2253,21 +2293,12 @@ impl PerspectiveInstance {
         let mut removals = Vec::new();
         for requested in mutations.removals {
             let requested = LinkExpression::try_from(requested)?;
-            let stored = self.sparql_store.get_link(
-                &requested.data.source,
-                requested.data.predicate.as_deref(),
-                &requested.data.target,
-                &requested.author,
-                &requested.timestamp,
-            )?;
-            match stored {
-                Some(stored) if !link_visible_to(&stored, &viewer) => {
-                    return Err(anyhow!("Link not found"));
-                }
-                Some(stored) => removals.push(LinkExpression::from(stored)),
+            match self.stored_copy(&requested, Some(&viewer), |l| link_visible_to(l, &viewer))? {
+                StoredCopy::Hidden => return Err(anyhow!("Link not found")),
+                StoredCopy::Found(stored) => removals.push(LinkExpression::from(stored)),
                 // Not stored here: nothing to remove from a Local graph.
-                None if requested.graph.as_deref().is_some_and(is_local_graph) => {}
-                None => removals.push(LinkExpression {
+                StoredCopy::Missing if requested.graph.as_deref().is_some_and(is_local_graph) => {}
+                StoredCopy::Missing => removals.push(LinkExpression {
                     status: Some(status.clone()),
                     ..requested
                 }),
@@ -2349,25 +2380,16 @@ impl PerspectiveInstance {
         }
         let handle = self.persisted.lock().await.clone();
 
-        // Query SPARQL store
-        let decorated_link_option = self.sparql_store.get_link(
-            &old_link.data.source,
-            old_link.data.predicate.as_deref(),
-            &old_link.data.target,
-            &old_link.author,
-            &old_link.timestamp,
-        )?;
-
         // `stored` carries the graph the old link lives in; the caller's copy may
         // not. A link in another agent's Local graph does not exist for the caller.
         let viewer = did_for_context(context)?;
         let (stored, link_status) =
-            match decorated_link_option.filter(|l| link_visible_to(l, &viewer)) {
-                Some(decorated) => {
+            match self.stored_copy(&old_link, Some(&viewer), |l| link_visible_to(l, &viewer))? {
+                StoredCopy::Found(decorated) => {
                     let status = decorated.status.clone().unwrap_or(LinkStatus::Local);
                     (LinkExpression::from(decorated), status)
                 }
-                None => {
+                StoredCopy::Missing | StoredCopy::Hidden => {
                     return Err(AnyError::msg(format!(
                         "NH [{}] ({}) Link not found in perspective \"{}\": {:?}",
                         handle
@@ -2504,17 +2526,9 @@ impl PerspectiveInstance {
         // Filter to only existing links and collect their statuses
         let mut existing_links = Vec::new();
         for link in link_expressions {
-            // Query SPARQL store
-            if let Some(decorated_link) = self.sparql_store.get_link(
-                &link.data.source,
-                link.data.predicate.as_deref(),
-                &link.data.target,
-                &link.author,
-                &link.timestamp,
-            )? {
-                if !self.sees(&decorated_link) {
-                    continue;
-                }
+            if let StoredCopy::Found(decorated_link) =
+                self.stored_copy(&link, self.viewer.as_deref(), |l| self.sees(l))?
+            {
                 let link_from_db = LinkExpression::from(decorated_link.clone());
                 let status = decorated_link.status.clone().unwrap_or(LinkStatus::Local);
                 existing_links.push((link_from_db, status));

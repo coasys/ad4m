@@ -1295,6 +1295,25 @@ impl SparqlStore {
             .find(|l| l.author == author && l.timestamp == timestamp))
     }
 
+    /// Every stored copy of one link expression, one per graph it sits in.
+    /// The reifier IRI leaves the graph out, so the same signed expression can
+    /// be stored in more than one graph; [`Self::get_link`] returns whichever
+    /// the store holds first.
+    pub fn get_link_copies(
+        &self,
+        source: &str,
+        predicate: Option<&str>,
+        target: &str,
+        author: &str,
+        timestamp: &str,
+    ) -> Result<Vec<DecoratedLinkExpression>, Error> {
+        let links = self.query_links(Some(source), predicate, Some(target), None, None, None)?;
+        Ok(links
+            .into_iter()
+            .filter(|l| l.author == author && l.timestamp == timestamp)
+            .collect())
+    }
+
     /// Get all links with the given source.
     pub fn get_links_by_source(&self, source: &str) -> Result<Vec<DecoratedLinkExpression>, Error> {
         self.query_links(Some(source), None, None, None, None, None)
