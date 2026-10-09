@@ -1581,6 +1581,7 @@ mod event_spec_tests {
                 uuid: p(),
                 subscription_id: "s".into(),
                 result: "[]".into(),
+                subscriber_did: "did:x".into(),
             }),
             uuid_of(AutoProcessorNeighbourhoodState::new(
                 "p",

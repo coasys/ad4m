@@ -7252,7 +7252,7 @@ impl PerspectiveInstance {
             Ok(did) => self.clone().for_viewer(did).for_shared_reads(),
             Err(e) => {
                 log::warn!("auto_processor_tick [{}]: no DID for the pass: {e:#}", uuid);
-                return;
+                return watcher.has_pending();
             }
         };
         let configs = match load_processors(&view).await {
@@ -9741,7 +9741,7 @@ mod tests {
 
         // No board has tasks yet, so hydration does not need `Task`.
         let (board_sub, _) = perspective
-            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None)
+            .model_subscribe_and_query("Board".into(), NESTED_INCLUDE_QUERY.into(), None, None)
             .await
             .expect("subscribe to Board");
         let (other_sub, _) = perspective
@@ -9762,7 +9762,7 @@ mod tests {
 
         let started = Instant::now();
         perspective
-            .check_subscribed_queries(ChangedPredicates::CheckAll)
+            .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
             .await;
         let elapsed = started.elapsed();
 

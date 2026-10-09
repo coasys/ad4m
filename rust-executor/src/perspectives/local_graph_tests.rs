@@ -1155,7 +1155,14 @@ async fn a_local_write_without_a_graph_lands_in_its_writers_local_graph() {
         .unwrap();
     p.link_mutations(
         crate::types::LinkMutations {
-            additions: vec![link("three")],
+            additions: vec![{
+                let l = link("three");
+                crate::types::LinkInput {
+                    source: l.source,
+                    predicate: l.predicate,
+                    target: l.target,
+                }
+            }],
             removals: vec![],
         },
         LinkStatus::Local,

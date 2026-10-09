@@ -56,11 +56,11 @@ async fn model_subscription_shared_by_two_holders_survives_one_dispose() {
     let query_json = r#"{"where":{"owner":"alice"}}"#;
 
     let (id1, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), None)
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, None)
         .await
         .expect("first model subscribe");
     let (id2, _) = perspective
-        .model_subscribe_and_query("Task".into(), query_json.into(), None)
+        .model_subscribe_and_query("Task".into(), query_json.into(), None, None)
         .await
         .expect("second model subscribe");
     assert_eq!(id1, id2, "same params must share one subscription id");
@@ -91,11 +91,12 @@ async fn model_subscription_shared_by_two_holders_survives_one_dispose() {
             Some(serde_json::json!({ "title": "ship it", "owner": "alice" })),
             None,
             &ctx,
+            None,
         )
         .await
         .expect("create_subject(Task)");
     perspective
-        .check_subscribed_queries(ChangedPredicates::CheckAll)
+        .check_subscribed_queries(ChangedPredicates::CheckAll, ChangedGraphs::NoneRecorded)
         .await;
 
     let push = next_push_for(&mut rx, &perspective.uuid, &id1).await;
@@ -159,16 +160,17 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
                 predicate: Some("ns://title".into()),
                 target: "literal://string:hello".into(),
             },
-            LinkStatus::Local,
+            LinkStatus::Shared,
             None,
             &ctx,
+            None,
         )
         .await
         .expect("add_link");
     perspective
         .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
             "ns://title".to_string()
-        ])))
+        ])), ChangedGraphs::NoneRecorded)
         .await;
 
     let push = next_push_for(&mut rx, &perspective.uuid, &id1).await;
