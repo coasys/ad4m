@@ -24,7 +24,10 @@ const FLAG: &str = "ns://type";
 /// SDNA for class `name`: flag `ns://type` = `ns://<name lowercased>`,
 /// string properties `(name, predicate)`, and hasMany relations
 /// `(name, predicate, target class)`; an empty target class declares none
-/// (a polymorphic relation).
+/// (a polymorphic relation). A relation with a target class carries the
+/// conformance getter the SDK's `buildConformanceFilter` writes for it
+/// (target flag only: these test classes have no required property), so
+/// hydration lists only targets that carry the target's flag.
 fn sdna(name: &str, props: &[(&str, &str)], relations: &[(&str, &str, &str)]) -> String {
     let flag_value = format!("ns://{}", name.to_lowercase());
     let mut properties = vec![json!({
@@ -42,6 +45,11 @@ fn sdna(name: &str, props: &[(&str, &str)], relations: &[(&str, &str, &str)]) ->
         if !target.is_empty() {
             r["target_class_name"] = json!(target);
             r["class"] = json!(format!("ns://{target}Shape"));
+            r["getter"] = json!(conformance_getter(
+                predicate,
+                &format!("ns://{}", target.to_lowercase()),
+                &[]
+            ));
         }
         properties.push(r);
     }
@@ -51,6 +59,17 @@ fn sdna(name: &str, props: &[(&str, &str)], relations: &[(&str, &str, &str)]) ->
         "properties": properties,
     })
     .to_string()
+}
+
+/// The getter `buildConformanceFilter` (core/src/model/decorators.ts) writes
+/// for a relation to a class with flag `ns://type` = `flag_value` and
+/// `required` (non-flag) predicates.
+fn conformance_getter(relation: &str, flag_value: &str, required: &[&str]) -> String {
+    let mut conditions = format!("?target <{FLAG}> <{flag_value}> .");
+    for (i, predicate) in required.iter().enumerate() {
+        conditions.push_str(&format!(" ?target <{predicate}> ?_v{i} ."));
+    }
+    format!("SELECT ?target WHERE {{ <Base> <{relation}> ?target . {conditions} }}")
 }
 
 /// Post (title, status, comments → Comment, attachments → any class),
@@ -368,6 +387,117 @@ async fn a_related_record_that_starts_to_conform_enters_the_include() {
 
     assert_eq!(reruns::count(&id), 1);
     assert!(last_result(&p, &id).await.to_string().contains("late"));
+}
+
+/// The same without `include`. A typed relation (`@HasMany(() => Comment)`)
+/// is filled by its conformance getter on every query, so `post.comments`
+/// lists `c2` once `c2` carries Comment's flag, include or not. Red at
+/// a779ec58d: no rule watched the relation's target (#1386 review).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_related_record_that_starts_to_conform_enters_a_typed_relation() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    add(&mut p, "ns://p1", "ns://comment", "ns://c2").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Post", json!({})).await;
+    assert_eq!(first["instances"][0]["comments"], json!([]), "{first}");
+
+    add(&mut p, "ns://c2", FLAG, "ns://comment").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "c2 now conforms");
+    let now = last_result(&p, &id).await;
+    assert_eq!(now["instances"][0]["comments"], json!(["ns://c2"]), "{now}");
+}
+
+/// Task (steps → Step, conformance requires Step's `label`; `open` → Step
+/// filtered on `state = "done"`), Step (label, state).
+async fn tasks() -> PerspectiveInstance {
+    let mut task: Value = serde_json::from_str(&sdna(
+        "Task",
+        &[],
+        &[
+            ("steps", "ns://has_step", "Step"),
+            ("done", "ns://done_step", "Step"),
+        ],
+    ))
+    .unwrap();
+    for prop in task["properties"].as_array_mut().unwrap() {
+        match prop["name"].as_str() {
+            Some("steps") => {
+                prop["getter"] = json!(conformance_getter(
+                    "ns://has_step",
+                    "ns://step",
+                    &["ns://label"]
+                ))
+            }
+            Some("done") => {
+                prop["where_filter"] = json!({ "state": "done" });
+                prop["where_predicates"] = json!({ "state": "ns://state" });
+            }
+            _ => {}
+        }
+    }
+    let mut step: Value = serde_json::from_str(&sdna(
+        "Step",
+        &[("label", "ns://label"), ("state", "ns://state")],
+        &[],
+    ))
+    .unwrap();
+    for prop in step["properties"].as_array_mut().unwrap() {
+        if prop["name"] == "label" {
+            prop["min_count"] = json!(1);
+        }
+    }
+    let (p, _, _) = setup_perspective_no_llm(&[
+        ("Task", &task.to_string()),
+        ("Step", &step.to_string()),
+    ])
+    .await;
+    p
+}
+
+/// A typed relation's target gets the required property its conformance
+/// reads, after the relation link. Red at a779ec58d.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_required_property_landing_after_the_relation_link_reruns() {
+    let mut p = tasks().await;
+    record(&mut p, "ns://t1", "Task", &[]).await;
+    record(&mut p, "ns://s1", "Step", &[]).await;
+    add(&mut p, "ns://t1", "ns://has_step", "ns://s1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Task", json!({})).await;
+    assert_eq!(first["instances"][0]["steps"], json!([]), "{first}");
+
+    add(&mut p, "ns://s1", "ns://label", "literal:string:write").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "s1 now conforms");
+    let now = last_result(&p, &id).await;
+    assert_eq!(now["instances"][0]["steps"], json!(["ns://s1"]), "{now}");
+}
+
+/// A typed relation's `where_filter` reads a target property the conformance
+/// does not. Red at a779ec58d.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_moving_a_target_into_a_relation_filter_reruns() {
+    let mut p = tasks().await;
+    record(&mut p, "ns://t1", "Task", &[]).await;
+    record(&mut p, "ns://s1", "Step", &[("ns://label", "write")]).await;
+    add(&mut p, "ns://t1", "ns://done_step", "ns://s1").await;
+    check(&p).await;
+
+    let (id, first) = subscribe(&p, "Task", json!({})).await;
+    assert_eq!(first["instances"][0]["done"], json!([]), "{first}");
+
+    add(&mut p, "ns://s1", "ns://state", "literal:string:done").await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 1, "s1 now passes the filter");
+    let now = last_result(&p, &id).await;
+    assert_eq!(now["instances"][0]["done"], json!(["ns://s1"]), "{now}");
 }
 
 /// A record linked under a parent-scope anchor enters.
