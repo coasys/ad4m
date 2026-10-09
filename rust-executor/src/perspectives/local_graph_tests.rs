@@ -1865,7 +1865,31 @@ async fn an_expression_in_two_graphs_is_removed_and_updated_where_the_request_na
         .unwrap();
     assert_eq!(removed.len(), 1, "Bob's removal found nothing");
     assert_eq!(removed[0].graph, None);
-    assert_eq!(graphs_of(&p, &alice_did, "d").await, vec![Some(local)]);
+    assert_eq!(graphs_of(&p, &alice_did, "d").await, vec![Some(local.clone())]);
+
+    // A copy Bob cannot see is not his to remove, even when it is the only one.
+    let mut view = p.clone().for_viewer(alice_did.clone());
+    let only_local = LinkExpression::from(
+        view.add_link(
+            link("e"),
+            LinkStatus::Shared,
+            None,
+            &alice,
+            Some(LOCAL_GRAPH_ALIAS.to_string()),
+        )
+        .await
+        .unwrap(),
+    );
+    let mut unnamed = only_local;
+    unnamed.graph = None;
+    let removed = p
+        .clone()
+        .for_viewer(bob_did)
+        .remove_links(vec![unnamed], None)
+        .await
+        .unwrap();
+    assert!(removed.is_empty(), "Bob removed Alice's Local link: {removed:?}");
+    assert_eq!(graphs_of(&p, &alice_did, "e").await, vec![Some(local)]);
 }
 
 /// A shape acts for every agent, so a Local graph can't give its property an
