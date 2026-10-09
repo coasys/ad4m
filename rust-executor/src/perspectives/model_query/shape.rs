@@ -389,6 +389,9 @@ pub(crate) fn load_shape(store: &SparqlStore, class_name: &str) -> Result<ModelS
 /// constructor actions encoded as `ad4m://constructor` literal JSON on
 /// the shape.  Returns the `target` of any `addLink` action whose
 /// `predicate` matches `predicate`.
+///
+/// Both reads leave Local graphs out, like the rest of the shape: a shape is
+/// cached per perspective and acts for every agent.
 fn initial_value_from_constructor(
     store: &SparqlStore,
     target_class: &str,
@@ -406,7 +409,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let shape_result_json = store.query(&shape_query).ok()?;
+    let shape_result_json = store.query_shared(&shape_query).ok()?;
     let shape_rows: Vec<Value> = serde_json::from_str(&shape_result_json).ok()?;
     let shape_uri = shape_rows.first()?["shapeUri"].as_str()?.to_string();
 
@@ -419,7 +422,7 @@ fn initial_value_from_constructor(
         LIMIT 1
         "#
     );
-    let ctor_result_json = store.query(&ctor_query).ok()?;
+    let ctor_result_json = store.query_shared(&ctor_query).ok()?;
     let ctor_rows: Vec<Value> = serde_json::from_str(&ctor_result_json).ok()?;
     let ctor_literal = ctor_rows.first()?["ctor"].as_str()?.to_string();
 
