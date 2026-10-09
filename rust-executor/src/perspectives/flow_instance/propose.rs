@@ -352,6 +352,9 @@ pub async fn propose_flow_transition(
         }
     };
 
+    // Every other agent with bookkeeping here reads the step once this returns.
+    super::pass::record_for_other_agents(perspective, instance_uri, context).await;
+
     // Re-derive rather than report the pre-call fold: `derived_state` is the
     // answer to "did my click move it?". An error here does NOT unwind the
     // vote — it is written and durable, and retrying this call is a no-op by

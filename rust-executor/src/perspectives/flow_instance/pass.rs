@@ -369,6 +369,40 @@ pub(crate) async fn catch_up_before_acting(
     }
 }
 
+/// Record an acting call's step for every other agent that keeps flow
+/// bookkeeping on this perspective ([`flow_pass_agents`]), before the call
+/// returns.
+///
+/// Each agent's `currentState` and marks are their own (#1360), and the acting
+/// call's pass records for the actor only. Without this, the owner of a
+/// perspective another agent acts on (an admin client, or a co-owner) would
+/// read the state from before the action: until the debounced sweep on a
+/// co-owned perspective, and for good where nothing queues one. Their outcomes
+/// are only logged; the acting call reports its own.
+///
+/// [`flow_pass_agents`]: super::trigger::flow_pass_agents
+pub(crate) async fn record_for_other_agents(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    actor: &AgentContext,
+) {
+    let actor_did = crate::agent::did_for_context(actor).ok();
+    let only = [instance_uri.to_string()];
+    for context in perspective.flow_pass_contexts().await {
+        if crate::agent::did_for_context(&context).ok() == actor_did {
+            continue;
+        }
+        let outcomes = run_flow_consensus_pass(perspective, None, &context, None, Some(&only)).await;
+        if !outcomes.is_empty() {
+            log::debug!(
+                "record_for_other_agents: {} edge(s) of {instance_uri} recorded for {:?}",
+                outcomes.len(),
+                context.user_email
+            );
+        }
+    }
+}
+
 async fn has_local_cache(
     perspective: &PerspectiveInstance,
     instance_uri: &str,
