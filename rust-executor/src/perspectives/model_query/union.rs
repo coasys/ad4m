@@ -15,8 +15,8 @@
 //!                      │      rows hydrated as that class
 //!                      ▼
 //!              2. subject_classes_of(union ids) ──▶ choose() one requested class
-//!                      │      a record answered by two classes is kept once,
-//!                      │      as the class chosen for it
+//!                      │      among those whose step-1 query returned the record;
+//!                      │      a record answered by two classes is kept once
 //!                      ▼
 //!              3. sort once (nulls last, then id), count, limit/offset once
 //!                      ▼
@@ -28,7 +28,9 @@
 //! (<https://github.com/coasys/ad4m/issues/1238#issuecomment-6081266040>):
 //!
 //! - `where` on a property a class does not declare excludes that class's rows,
-//!   the same answer a per-class query gives.
+//!   the same answer a per-class query gives. A record of several requested
+//!   classes is kept when any of its readings passes, and is read as one that
+//!   does.
 //! - `order` sorts rows without the value last in both directions, then by id,
 //!   the rule the store's `ORDER BY` applies to a single class.
 //! - `limit` / `offset` apply once over the union; `totalCount` is the union
@@ -72,6 +74,16 @@ impl From<String> for QueryClasses {
 }
 
 impl QueryClasses {
+    /// A union over `names`, sorted and without duplicates, so that two
+    /// subscriptions naming the same classes in another order share one entry
+    /// (#1311). Order only ever picked the fallback reading of a record of a
+    /// class with no required triples; sorted, that fallback is alphabetical.
+    pub fn union(mut names: Vec<String>) -> Self {
+        names.sort();
+        names.dedup();
+        QueryClasses::Union(names)
+    }
+
     pub fn names(&self) -> &[String] {
         match self {
             QueryClasses::One(name) => std::slice::from_ref(name),
@@ -243,11 +255,13 @@ pub async fn execute_union_query(
     }
 
     // 2. One row per record, as the class chosen for it. The choice is the
-    //    polymorphic include's (`choose`), restricted to the requested classes:
-    //    `preferClasses` first, then the most specific requested class the
-    //    record conforms to. A record that fails `where` as its chosen class is
-    //    dropped even if another class's reading would pass — `where` is asked
-    //    of the record as it will be returned.
+    //    polymorphic include's (`choose`), restricted to the requested classes
+    //    whose step-1 query returned the record: `preferClasses` first, then
+    //    the most specific of them. Step 1 already answered "does it pass as
+    //    this class, under this read's `where` and link filters", so a record
+    //    is kept whenever one of its readings passes — the answer a per-class
+    //    query gives — and a reading the read cannot see (a Local or
+    //    unverified flag under a shared read) can never be the one chosen.
     let classified =
         crate::perspectives::subject_classes_of::subject_classes_of(store, resolver, &all_ids)?;
     let preferred = query.prefer_classes.as_deref().unwrap_or(&[]);
@@ -258,7 +272,10 @@ pub async fn execute_union_query(
             .get(id)
             .map(|all| {
                 all.iter()
-                    .filter(|c| requested.contains(c))
+                    .filter(|c| {
+                        requested.contains(c)
+                            && rows_by_class.get(*c).is_some_and(|r| r.contains_key(id))
+                    })
                     .cloned()
                     .collect()
             })

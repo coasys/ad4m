@@ -207,7 +207,7 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
     let (mut perspective, _shapes, ctx) =
         setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
     let classes =
-        crate::perspectives::model_query::QueryClasses::Union(vec!["Task".into(), "Note".into()]);
+        crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
     let (id, initial) = perspective
         .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None)
         .await
@@ -261,4 +261,88 @@ async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
             push.result
         );
     }
+}
+
+/// A diff whose changed predicates are outside every requested class's trigger
+/// set does not re-run a union subscription. The Task is written for real, so
+/// the query's result *has* changed: a re-run would push it. Reporting only
+/// `ns://unrelated` must therefore produce no push, which an empty
+/// ("re-run on every write") trigger set would.
+#[tokio::test(flavor = "multi_thread")]
+async fn union_model_subscription_ignores_a_write_outside_its_classes() {
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
+    let classes =
+        crate::perspectives::model_query::QueryClasses::union(vec!["Task".into(), "Note".into()]);
+    let (id, _) = perspective
+        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None)
+        .await
+        .expect("union model subscribe");
+
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    perspective
+        .create_subject(
+            SubjectClassOption {
+                class_name: Some("Task".to_string()),
+                query: None,
+            },
+            "ad4m://task/unrelated-diff".to_string(),
+            Some(serde_json::json!({ "title": "quiet", "owner": "bob" })),
+            None,
+            &ctx,
+        )
+        .await
+        .expect("create_subject(Task)");
+    perspective
+        .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
+            "ns://unrelated".to_string(),
+        ])))
+        .await;
+
+    let quiet = tokio::time::timeout(Duration::from_millis(1500), async {
+        loop {
+            let msg = rx.recv().await.expect("pubsub receiver closed");
+            let filter: PerspectiveQuerySubscriptionFilter =
+                serde_json::from_str(&msg).expect("subscription push JSON");
+            if filter.uuid == perspective.uuid && filter.subscription_id == id {
+                return filter;
+            }
+        }
+    })
+    .await;
+    assert!(
+        quiet.is_err(),
+        "a write outside both classes' trigger sets must not re-run the subscription"
+    );
+}
+
+/// The same classes in another order, or named twice, are one union and so
+/// one shared subscription (#1311).
+#[tokio::test(flavor = "multi_thread")]
+async fn union_model_subscriptions_share_regardless_of_class_order() {
+    use crate::perspectives::model_query::QueryClasses;
+    let (perspective, _shapes, _ctx) =
+        setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
+    let query_json = r#"{"includeUnverified":true}"#;
+    let (a, _) = perspective
+        .model_subscribe_and_query(
+            QueryClasses::union(vec!["Task".into(), "Note".into()]),
+            query_json.into(),
+            None,
+        )
+        .await
+        .expect("first union subscribe");
+    let (b, _) = perspective
+        .model_subscribe_and_query(
+            QueryClasses::union(vec!["Note".into(), "Task".into(), "Note".into()]),
+            query_json.into(),
+            None,
+        )
+        .await
+        .expect("second union subscribe");
+    assert_eq!(a, b, "equal unions must share one subscription id");
 }

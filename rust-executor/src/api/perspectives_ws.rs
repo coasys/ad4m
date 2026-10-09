@@ -2992,7 +2992,7 @@ fn query_classes(params: &Value) -> Result<QueryClasses, WsRpcError> {
     };
     match (one, many) {
         (Some(name), None) => Ok(QueryClasses::One(name)),
-        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::Union(names)),
+        (None, Some(names)) if !names.is_empty() => Ok(QueryClasses::union(names)),
         (None, Some(_)) => Err(WsRpcError::bad_request(
             "Parameter 'class_names' must name at least one class".to_string(),
         )),
