@@ -764,8 +764,12 @@ pub(super) struct StoreLookups<'a> {
     /// `(node, predicate)` → `(predicate, other end)` of each link touching
     /// the node, with that predicate (`None`: with any), or `None` past
     /// [`MAX_NEIGHBOURS`].
-    neighbours: HashMap<(String, Option<String>), Option<Vec<(String, String)>>>,
+    neighbours: HashMap<(String, Option<String>), Neighbours>,
 }
+
+/// `(predicate, other end)` of the links read around a node, or `None` past
+/// [`MAX_NEIGHBOURS`].
+type Neighbours = Option<Vec<(String, String)>>;
 
 impl<'a> StoreLookups<'a> {
     pub(super) fn new(store: &'a SparqlStore) -> Self {
