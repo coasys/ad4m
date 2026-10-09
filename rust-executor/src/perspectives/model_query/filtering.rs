@@ -451,7 +451,7 @@ pub(super) fn sort_instances(instances: &mut [Value], order: &[(String, OrderDir
 /// (`"location.name"`) traverses nested objects — if an intermediate value
 /// is an array, the first element is used for sort purposes.  Returns
 /// `Value::Null` for any missing step so unknown paths sort to the end.
-fn extract_sort_value(instance: &Value, key: &str) -> Value {
+pub(super) fn extract_sort_value(instance: &Value, key: &str) -> Value {
     if let Some(dot_pos) = key.find('.') {
         let head = &key[..dot_pos];
         let tail = &key[dot_pos + 1..];

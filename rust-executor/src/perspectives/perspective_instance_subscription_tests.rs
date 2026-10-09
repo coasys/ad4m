@@ -187,3 +187,78 @@ async fn legacy_subscription_shared_by_two_holders_survives_one_dispose() {
         "the last dispose must remove the subscription"
     );
 }
+
+/// A class sharing `Task`'s flag predicate (with its own value) and declaring
+/// a predicate `Task` does not: `ns://body`.
+const NOTE_SDNA: &str = r#"{
+  "target_class":"ns://Note",
+  "constructor_actions":[{"action":"addLink","source":"this","predicate":"ns://type","target":"ns://note"}],
+  "properties":[
+    {"path":"ns://type","name":"type","has_value":"ns://note","min_count":1,"max_count":1},
+    {"path":"ns://body","name":"body","min_count":0,"max_count":1,"resolve_language":"literal","setter":[{"action":"setSingleTarget","source":"this","predicate":"ns://body","target":"value"}]}
+  ]
+}"#;
+
+/// One subscription over two classes (#1238) re-runs on a write to a predicate
+/// only one of them declares, for each of the two. With the trigger set of
+/// only one class, the other class's edit would be skipped as disjoint.
+#[tokio::test(flavor = "multi_thread")]
+async fn union_model_subscription_reruns_on_an_edit_to_either_class() {
+    let (mut perspective, _shapes, ctx) =
+        setup_perspective_no_llm(&[("Task", TASK_SDNA), ("Note", NOTE_SDNA)]).await;
+    let classes =
+        crate::perspectives::model_query::QueryClasses::Union(vec!["Task".into(), "Note".into()]);
+    let (id, initial) = perspective
+        .model_subscribe_and_query(classes, r#"{"includeUnverified":true}"#.into(), None)
+        .await
+        .expect("union model subscribe");
+    assert!(initial.contains("\"totalCount\":0"), "{initial}");
+
+    let mut rx = get_global_pubsub()
+        .await
+        .subscribe(&PERSPECTIVE_QUERY_SUBSCRIPTION_TOPIC)
+        .await;
+
+    for (class, base, props, changed, expected) in [
+        (
+            "Task",
+            "ad4m://task/union-sub",
+            serde_json::json!({ "title": "ship it", "owner": "alice" }),
+            "ns://owner",
+            "\"__subjectClass\":\"Task\"",
+        ),
+        (
+            "Note",
+            "ad4m://note/union-sub",
+            serde_json::json!({ "body": "remember" }),
+            "ns://body",
+            "\"__subjectClass\":\"Note\"",
+        ),
+    ] {
+        perspective
+            .create_subject(
+                SubjectClassOption {
+                    class_name: Some(class.to_string()),
+                    query: None,
+                },
+                base.to_string(),
+                Some(props),
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("create_subject({class}): {e}"));
+        // Only the predicate one class declares is reported as changed.
+        perspective
+            .check_subscribed_queries(ChangedPredicates::Specific(HashSet::from([
+                changed.to_string()
+            ])))
+            .await;
+        let push = next_push_for(&mut rx, &perspective.uuid, &id).await;
+        assert!(
+            push.result.contains(base) && push.result.contains(expected),
+            "a {changed} write must re-run the union subscription, got: {}",
+            push.result
+        );
+    }
+}
