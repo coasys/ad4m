@@ -3334,6 +3334,7 @@ describe("WakerSubscriptionManager", () => {
 
   const mockPerspectiveClientSimple = {
     querySparql: vi.fn(() => Promise.resolve([])),
+    queryLinks: vi.fn(() => Promise.resolve([])),
   };
 
   it("should throw when the executor rejects the subscription, and not keep it active", async () => {
@@ -3639,19 +3640,21 @@ describe("WakerSubscriptionManager", () => {
     const mock = makeMockProxy();
     let capturedMentions: any[] | undefined;
 
-    // Mock perspectiveClient.querySparql to return has_child links for parent resolution
+    // Mock perspectiveClient.queryLinks to return the links pointing at each item
+    const hasChild = (source: string, target: string) => ({
+      author: "did:key:alice",
+      timestamp: "2026-10-09T00:00:00.000Z",
+      data: { source, predicate: "ad4m://has_child", target },
+    });
     const mockPerspectiveClient = {
-      querySparql: vi.fn((_perspectiveId: string, query: string) => {
+      queryLinks: vi.fn((_perspectiveId: string, query: { target?: string }) => {
         // msg-1 has two parents (channel + conversation thread)
-        if (query.includes("msg-1")) {
-          return Promise.resolve([
-            { source: "channel-abc", predicate: "ad4m://has_child" },
-            { source: "conversation-xyz", predicate: "ad4m://has_child" },
-          ]);
+        if (query.target === "msg-1") {
+          return Promise.resolve([hasChild("channel-abc", "msg-1"), hasChild("conversation-xyz", "msg-1")]);
         }
         // msg-2 is only in channel-abc
-        if (query.includes("msg-2")) {
-          return Promise.resolve([{ source: "channel-abc", predicate: "ad4m://has_child" }]);
+        if (query.target === "msg-2") {
+          return Promise.resolve([hasChild("channel-abc", "msg-2")]);
         }
         return Promise.resolve([]);
       }),
@@ -3682,7 +3685,7 @@ describe("WakerSubscriptionManager", () => {
     ]);
     await new Promise(r => setTimeout(r, 50));
 
-    expect(mockPerspectiveClient.querySparql).toHaveBeenCalledTimes(2);
+    expect(mockPerspectiveClient.queryLinks).toHaveBeenCalledTimes(2);
     expect(capturedMentions).toBeDefined();
     expect(capturedMentions).toHaveLength(2);
     // msg-1 has two parents
@@ -3700,7 +3703,7 @@ describe("WakerSubscriptionManager", () => {
     let capturedMentions: any[] | undefined;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.resolve([])),
+      queryLinks: vi.fn(() => Promise.resolve([])),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3737,7 +3740,7 @@ describe("WakerSubscriptionManager", () => {
     let wakeCount = 0;
 
     const mockPerspectiveClient = {
-      querySparql: vi.fn(() => Promise.reject(new Error("network error"))),
+      queryLinks: vi.fn(() => Promise.reject(new Error("network error"))),
     };
 
     const manager = new WakerSubscriptionManager({
@@ -3778,6 +3781,7 @@ describe("WakerSubscriptionManager disposal races", () => {
   });
   const perspectiveClient = {
     querySparql: vi.fn(() => Promise.resolve([])),
+    queryLinks: vi.fn(() => Promise.resolve([])),
   };
 
   /** A proxy whose subscribe() only settles when the test says so. */

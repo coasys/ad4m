@@ -284,17 +284,30 @@ export default function perspectiveTests(testContext: TestContext) {
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
                     // An app's own containment predicate (WE: `we://children` from a call to its utterances).
                     await p.add(new Link({ source: 'test://call', predicate: 'test://children', target: 'test://msg1' }))
+                    // Executor bookkeeping that points at an item without containing it
+                    // (the interpretation overlay's shadow of a real predicate), and a self-loop.
+                    await p.add(new Link({ source: 'test://meta', predicate: 'ad4m://interp/inferred/x', target: 'test://msg1' }))
+                    await p.add(new Link({ source: 'test://msg1', predicate: 'test://self', target: 'test://msg1' }))
+                    // An item whose address is a literal: as a link target it is stored as an
+                    // RDF literal, so only a lookup that translates the target the way the
+                    // write did finds its parent.
+                    await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'literal:string:msg2' }))
                     await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
+                    await p.add(new Link({ source: 'literal:string:msg2', predicate: 'test://mentions', target: 'test://me' }))
 
-                    await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.have.length(1)
-                    const [mention] = wakes[0]!
-                    expect(mention.address).to.equal('test://msg1')
-                    // Order is the store's; the claim is the set. No ad4m://ontology/* row
-                    // (author, timestamp, proof) may surface as a parent.
-                    expect([...mention.parents].sort()).to.deep.equal(['test://call', 'test://channel'])
-                    expect([...mention.parentLinks].sort((a, b) => a.address.localeCompare(b.address))).to.deep.equal([
+                    const mentions = () => wakes.flatMap((wake) => wake ?? [])
+                    await pollUntil(() => mentions().length >= 2, { label: 'waker wakes for test://msg1 and literal:string:msg2' })
+                    const byAddress = new Map(mentions().map((mention) => [mention.address, mention]))
+                    expect([...byAddress.keys()].sort()).to.deep.equal(['literal:string:msg2', 'test://msg1'])
+                    const msg1 = byAddress.get('test://msg1')!
+                    // Order is the store's; the claim is the set. Neither the ad4m://interp/
+                    // link nor the self-loop may surface as a parent.
+                    expect([...msg1.parents].sort()).to.deep.equal(['test://call', 'test://channel'])
+                    expect([...msg1.parentLinks].sort((a, b) => a.address.localeCompare(b.address))).to.deep.equal([
                         { address: 'test://call', predicate: 'test://children' },
+                        { address: 'test://channel', predicate: 'ad4m://has_child' },
+                    ])
+                    expect(byAddress.get('literal:string:msg2')!.parentLinks).to.deep.equal([
                         { address: 'test://channel', predicate: 'ad4m://has_child' },
                     ])
                 } finally {

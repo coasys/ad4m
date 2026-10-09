@@ -7,6 +7,8 @@
  * own copy. Any behaviour change belongs here.
  */
 
+import { LinkQuery } from "./LinkQuery";
+
 export interface WakerSubscription {
   id: string;
   type: "mention" | "channel-messages";
@@ -29,28 +31,51 @@ export interface MentionMessage {
   /** Every distinct node that links to this item: the addresses of `parentLinks`. */
   parents: string[];
   /**
-   * Every link whose target is this item, other than the store's own
-   * `ad4m://ontology/*` metadata. The predicate is part of the answer because
-   * containment is the space's vocabulary, not core's: Flux hangs a message
-   * under its channel through `ad4m://has_child`, WE hangs an utterance under
-   * its call through `we://children` and a reply under its post through
-   * `we://comment`.
+   * Every distinct (node, predicate) pair linking to this item, other than the
+   * executor's own bookkeeping (`NON_PARENT_PREDICATE_PREFIXES`). The predicate
+   * is part of the answer because containment is the space's vocabulary, not
+   * core's: Flux hangs a message under its channel through `ad4m://has_child`,
+   * WE hangs an utterance under its call through `we://children` and a reply
+   * under its post through `we://comment`.
    */
   parentLinks: ParentLink[];
 }
 
 /**
- * The SPARQL query for every link pointing at `address`, or null when the
- * address cannot be written as an IRI reference.
- *
- * The address is the source of whichever link matched the mention query, so
- * any member of the neighbourhood chooses it. A character IRIREF forbids would
- * end the `<…>` early and let the rest of the address run as query syntax, so
- * such an address is not looked up at all.
+ * Predicate families the executor writes at items that are not containment:
+ * - `ad4m://ontology/` — store metadata (author, timestamp, proof);
+ * - `ad4m://interp/` — the interpretation overlay's shadow of a real predicate
+ *   (`ad4m://interp/inferred/<p>`), which only repeats a parent `<p>` lists;
+ * - `ad4m://flow/` — a FlowInstance's `base` and a FlowTransitionProposal's
+ *   `evidence`/`output`, which make a flow node look like the item's container.
  */
-export function parentLinksQuery(address: string): string | null {
-  if (!address || /[\s<>"{}|^`\\]/.test(address)) return null;
-  return `SELECT ?source ?predicate WHERE { ?source ?predicate <${address}> . FILTER(isIRI(?source)) FILTER(!STRSTARTS(STR(?predicate), "ad4m://ontology/")) }`;
+const NON_PARENT_PREDICATE_PREFIXES = ["ad4m://ontology/", "ad4m://interp/", "ad4m://flow/"];
+
+/**
+ * The parent links of `item`, from the links `queryLinks({ target: item })`
+ * returned.
+ *
+ * `queryLinks` returns one row per link, so two authors adding the same
+ * source–predicate–target give two rows; this keeps one per (source, predicate).
+ * It drops the bookkeeping predicates above and a self-loop `item p item`,
+ * whose source is the item, not something it hangs under.
+ */
+export function parentLinksOf(item: string, links: unknown): ParentLink[] {
+  if (!Array.isArray(links)) return [];
+  const seen = new Set<string>();
+  const parentLinks: ParentLink[] = [];
+  for (const link of links) {
+    const source = link?.data?.source;
+    const predicate = link?.data?.predicate;
+    if (typeof source !== "string" || typeof predicate !== "string") continue;
+    if (source === item) continue;
+    if (NON_PARENT_PREDICATE_PREFIXES.some((prefix) => predicate.startsWith(prefix))) continue;
+    const key = JSON.stringify([source, predicate]);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    parentLinks.push({ address: source, predicate });
+  }
+  return parentLinks;
 }
 
 export interface WakerLogger {
@@ -323,29 +348,22 @@ export class WakerSubscriptionManager {
         // Resolve parents per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
-          const parentLinks: ParentLink[] = [];
-          const parentQuery = parentLinksQuery(msgAddr);
-          if (!parentQuery) {
-            this.logger.warn(
-              `[waker] ${sub.id}: not resolving parents for ${JSON.stringify(msgAddr)} — not a valid IRI reference`,
+          let parentLinks: ParentLink[] = [];
+          try {
+            this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
+            // `queryLinks` maps the target through the same wire→term
+            // translation the write used, so a `literal:string:…` item matches
+            // the RDF literal it is stored as. An IRI written into SPARQL would
+            // not, and would need the address escaped.
+            const links: unknown = await this.perspectiveClient.queryLinks(
+              sub.perspective,
+              new LinkQuery({ target: msgAddr }),
             );
-          } else {
-            try {
-              this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-              const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-              if (Array.isArray(rows)) {
-                // A row omits a variable left unbound in its solution.
-                for (const row of rows) {
-                  if (typeof row?.source === "string" && typeof row?.predicate === "string") {
-                    parentLinks.push({ address: row.source, predicate: row.predicate });
-                  }
-                }
-              }
-            } catch (err: any) {
-              this.logger.warn(
-                `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
-              );
-            }
+            parentLinks = parentLinksOf(msgAddr, links);
+          } catch (err: any) {
+            this.logger.warn(
+              `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
+            );
           }
           const parents = [...new Set(parentLinks.map((link) => link.address))];
           this.logger.info(

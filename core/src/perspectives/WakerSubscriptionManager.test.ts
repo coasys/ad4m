@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor, parentLinksQuery } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -18,6 +18,7 @@ describe('WakerSubscriptionManager', () => {
 
   const perspectiveClient = {
     querySparql: () => Promise.resolve([]),
+    queryLinks: () => Promise.resolve([]),
   };
 
   const sub = {
@@ -184,7 +185,12 @@ describe('WakerSubscriptionManager', () => {
     manager.disposeAll();
   });
 
-  /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
+  /** One link as `queryLinks` returns it: the triple under `data`, plus the expression fields. */
+  function link(source: string, predicate: string, target = 'test://message', author = 'did:key:alice') {
+    return { author, timestamp: '2026-10-09T00:00:00.000Z', data: { source, predicate, target } };
+  }
+
+  /** Delivers one new mention and returns the parents it woke with, the link queries made and any warnings. */
   async function wakeWithParentRows(rows: unknown, address = 'test://message') {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
@@ -195,10 +201,10 @@ describe('WakerSubscriptionManager', () => {
         onResult: (cb: (result: any) => Promise<void>) => { deliver = cb; },
       };
     };
-    const queries: string[] = [];
+    const queries: any[] = [];
     const warnings: string[] = [];
     const client = {
-      querySparql: (_uuid: string, query: string) => {
+      queryLinks: (_uuid: string, query: any) => {
         queries.push(query);
         return Promise.resolve(rows);
       },
@@ -220,8 +226,8 @@ describe('WakerSubscriptionManager', () => {
     return { wakes, queries, warnings };
   }
 
-  it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
-    const { wakes } = await wakeWithParentRows([{ source: 'test://parent', predicate: 'ad4m://has_child' }]);
+  it('resolves the parents of a new mention from the links queryLinks returns', async () => {
+    const { wakes } = await wakeWithParentRows([link('test://parent', 'ad4m://has_child')]);
     expect(wakes).toEqual([[{
       address: 'test://message',
       parents: ['test://parent'],
@@ -237,60 +243,88 @@ describe('WakerSubscriptionManager', () => {
    */
   it('asks for every link pointing at the item, not only ad4m://has_child', async () => {
     const { wakes, queries } = await wakeWithParentRows([
-      { source: 'test://call', predicate: 'we://children' },
-      { source: 'test://post', predicate: 'we://comment' },
+      link('test://call', 'we://children'),
+      link('test://post', 'we://comment'),
     ]);
-    expect(queries[0]).toContain('?source ?predicate <test://message>');
-    expect(queries[0]).not.toContain('ad4m://has_child');
-    expect(queries[0]).toContain('FILTER(!STRSTARTS(STR(?predicate), "ad4m://ontology/"))');
+    expect(queries).toHaveLength(1);
+    expect(queries[0].target).toBe('test://message');
+    expect(queries[0].source).toBeUndefined();
+    expect(queries[0].predicate).toBeUndefined();
     expect(wakes[0][0].parentLinks).toEqual([
       { address: 'test://call', predicate: 'we://children' },
       { address: 'test://post', predicate: 'we://comment' },
     ]);
   });
 
+  /**
+   * The address is handed to `queryLinks` as data, never spliced into query
+   * text, so an address no IRI could carry is looked up like any other.
+   */
+  it('looks up an address SPARQL could not hold in an IRI', async () => {
+    const odd = 'test://x> . ?s ?p ?o } #';
+    const { wakes, queries, warnings } = await wakeWithParentRows([link('test://parent', 'test://p', odd)], odd);
+    expect(queries[0].target).toBe(odd);
+    expect(wakes[0][0].parents).toEqual(['test://parent']);
+    expect(warnings).toEqual([]);
+  });
+
   it('lists a parent linked through two predicates once in parents and twice in parentLinks', async () => {
     const { wakes } = await wakeWithParentRows([
-      { source: 'test://call', predicate: 'we://children' },
-      { source: 'test://call', predicate: 'ad4m://has_child' },
+      link('test://call', 'we://children'),
+      link('test://call', 'ad4m://has_child'),
     ]);
     expect(wakes[0][0].parents).toEqual(['test://call']);
     expect(wakes[0][0].parentLinks).toHaveLength(2);
   });
 
-  it('keeps only rows that bind both ?source and ?predicate', async () => {
+  /** `queryLinks` returns a row per link; two authors adding the same triple are one parent link. */
+  it('keeps one parent link per (source, predicate) when several authors added it', async () => {
     const { wakes } = await wakeWithParentRows([
-      { source: 'test://a', predicate: 'test://p' },
+      link('test://call', 'we://children', 'test://message', 'did:key:alice'),
+      link('test://call', 'we://children', 'test://message', 'did:key:bob'),
+    ]);
+    expect(wakes[0][0].parentLinks).toEqual([{ address: 'test://call', predicate: 'we://children' }]);
+  });
+
+  /**
+   * Links the executor writes at an item that are not containment: the
+   * interpretation overlay's shadow of a real predicate, a FlowInstance's base,
+   * a proposal's evidence and output, and the store's own metadata.
+   */
+  it('drops ad4m://ontology/, ad4m://interp/ and ad4m://flow/ links', async () => {
+    const { wakes } = await wakeWithParentRows([
+      link('test://channel', 'ad4m://has_child'),
+      link('test://channel', 'ad4m://interp/inferred/ad4m://has_child'),
+      link('test://flow-instance', 'ad4m://flow/base'),
+      link('test://proposal', 'ad4m://flow/evidence'),
+      link('test://proposal', 'ad4m://flow/output'),
+      link('test://meta', 'ad4m://ontology/author'),
+    ]);
+    expect(wakes[0][0].parentLinks).toEqual([{ address: 'test://channel', predicate: 'ad4m://has_child' }]);
+  });
+
+  it('does not list the item as its own parent', async () => {
+    const { wakes } = await wakeWithParentRows([
+      link('test://message', 'test://self'),
+      link('test://parent', 'ad4m://has_child'),
+    ]);
+    expect(wakes[0][0].parents).toEqual(['test://parent']);
+  });
+
+  it('keeps only links with a string source and predicate', async () => {
+    const { wakes } = await wakeWithParentRows([
+      link('test://a', 'test://p'),
       {},
-      { source: 'test://orphan' },
-      { source: 'test://b', predicate: 'test://p' },
+      { data: { source: 'test://orphan' } },
+      link('test://b', 'test://p'),
     ]);
     expect(wakes[0][0].parents).toEqual(['test://a', 'test://b']);
   });
 
-  it('reports no parents, without a warning, when querySparql returns a non-array', async () => {
+  it('reports no parents, without a warning, when queryLinks returns a non-array', async () => {
     const { wakes, warnings } = await wakeWithParentRows(true);
     expect(wakes).toEqual([[{ address: 'test://message', parents: [], parentLinks: [] }]]);
     expect(warnings).toEqual([]);
-  });
-
-  /**
-   * The mentioned address is a link source any neighbourhood member chose. One
-   * carrying `>` would close the IRI early and run the rest as query syntax.
-   */
-  it('does not query for an address that is not a valid IRI reference', async () => {
-    const hostile = 'test://x> . ?s ?p ?o } #';
-    const { wakes, queries, warnings } = await wakeWithParentRows([{ source: 'test://leak', predicate: 'test://p' }], hostile);
-    expect(queries).toEqual([]);
-    expect(wakes).toEqual([[{ address: hostile, parents: [], parentLinks: [] }]]);
-    expect(warnings.some((w) => w.includes('not a valid IRI reference'))).toBe(true);
-  });
-
-  it('builds no parent query for addresses IRIREF forbids', () => {
-    for (const bad of ['', 'a b', 'a>b', 'a<b', 'a"b', 'a{b', 'a}b', 'a|b', 'a^b', 'a`b', 'a\\b', 'a\nb']) {
-      expect(parentLinksQuery(bad)).toBeNull();
-    }
-    expect(parentLinksQuery('literal://string:hello%20world')).toContain('<literal://string:hello%20world>');
   });
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {
