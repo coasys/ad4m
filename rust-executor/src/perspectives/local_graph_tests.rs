@@ -2063,8 +2063,11 @@ fn a_legacy_local_link_in_the_default_graph_is_not_shareable() {
 /// out: the scope is set on the dataset, not by rewriting the query. Eight
 /// places an `EXISTS` can hide, each with a plain and a `GRAPH ?g` probe, on
 /// a viewer (Bob's Local graph) and on a shared-reads view (its own viewer's
-/// Local graph). The control probe on a shared link changes every result, so
-/// each query would show a leak (review note 8b).
+/// Local graph). A control probe on a link the reader sees changes every
+/// result, so each query would show a leak (review note 8b). The plain probe's
+/// control is the default-graph link: a query that names a graph anywhere
+/// reads the stored default graph as its default graph, not the union. The
+/// `GRAPH ?g` probe's control is the link in a shared named graph.
 #[tokio::test]
 async fn an_exists_in_any_expression_reads_no_hidden_local_graph() {
     let (p, alice_did, bob_did) = two_users_and_shared_links().await;
@@ -2114,7 +2117,7 @@ async fn an_exists_in_any_expression_reads_no_hidden_local_graph() {
                     "{who}: {shape} (GRAPH ?g: {graph_var}) read Bob's Local link"
                 );
                 assert_ne!(
-                    run("shared"),
+                    run(if graph_var { "shared" } else { "default" }),
                     absent,
                     "{who}: {shape} (GRAPH ?g: {graph_var}) can't tell a link apart"
                 );
