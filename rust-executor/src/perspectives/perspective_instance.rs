@@ -62,6 +62,9 @@ enum ChangedPredicates {
 use uuid;
 use uuid::Uuid;
 
+// Which writes re-run a model subscription (#1237).
+mod subscription_triggers;
+
 #[cfg(test)]
 #[path = "perspective_instance_subscription_tests.rs"]
 mod subscription_tests;
@@ -6142,6 +6145,9 @@ impl PerspectiveInstance {
             } else if matches!(changed_predicates, ChangedPredicates::NoneRecorded) {
                 continue;
             }
+
+            #[cfg(test)]
+            subscription_triggers::reruns::note(&id);
 
             // Each future returns Option<(id, new_result)> instead of locking individually.
             // This avoids a lock convoy where N futures all contend on subscribed_queries.
