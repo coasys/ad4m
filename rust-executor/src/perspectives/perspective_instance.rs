@@ -56,8 +56,8 @@ enum ChangedPredicates {
     NoneRecorded,
     /// A predicate-less diff was seen — must check ALL subscriptions
     CheckAll,
-    /// Only specific predicates changed
-    Specific(HashSet<String>),
+    /// Only these links changed
+    Specific(subscription_triggers::Writes),
 }
 use uuid;
 use uuid::Uuid;
@@ -437,6 +437,8 @@ pub struct PerspectiveMemoryStats {
 struct ModelSubscriptionParams {
     class_name: String,
     query_json: String,
+    /// Which writes re-run it; holds the nodes of `last_result`.
+    trigger: subscription_triggers::ModelTrigger,
 }
 
 /// Extract predicate IRIs from a SPARQL query by finding triple patterns.
@@ -4083,8 +4085,8 @@ impl PerspectiveInstance {
         Ok(())
     }
 
-    /// Record the predicates from a diff into `changed_predicates`.
-    /// `None` means "all predicates changed" (check everything).
+    /// Record the links of a diff into `changed_predicates`. A link without a
+    /// predicate makes it `CheckAll` (check everything).
     async fn record_changed_predicates(&self, diff: &DecoratedPerspectiveDiff) {
         let mut changed = self.changed_predicates.lock().await;
 
@@ -4093,30 +4095,20 @@ impl PerspectiveInstance {
             return;
         }
 
-        // Collect predicates from the diff
-        let mut new_preds = HashSet::new();
-        let mut has_predicate_less = false;
-        for link in diff.additions.iter().chain(diff.removals.iter()) {
-            if let Some(ref pred) = link.data.predicate {
-                new_preds.insert(pred.clone());
-            } else {
-                has_predicate_less = true;
-                break;
-            }
-        }
+        // Collect the diff's links; a predicate-less one means check everything.
+        let writes =
+            subscription_triggers::writes_of(diff.additions.iter().chain(diff.removals.iter()));
 
-        if has_predicate_less {
+        let Some(writes) = writes else {
             *changed = ChangedPredicates::CheckAll;
-        } else {
-            match &mut *changed {
-                ChangedPredicates::NoneRecorded => {
-                    *changed = ChangedPredicates::Specific(new_preds);
-                }
-                ChangedPredicates::Specific(existing) => {
-                    existing.extend(new_preds);
-                }
-                ChangedPredicates::CheckAll => unreachable!(),
+            return;
+        };
+        match &mut *changed {
+            ChangedPredicates::NoneRecorded => {
+                *changed = ChangedPredicates::Specific(writes);
             }
+            ChangedPredicates::Specific(existing) => existing.extend(writes),
+            ChangedPredicates::CheckAll => unreachable!(),
         }
     }
 
@@ -5919,6 +5911,7 @@ impl PerspectiveInstance {
         };
 
         let predicate_set: HashSet<String> = trigger_predicates.into_iter().collect();
+        let trigger = self.build_model_trigger(&class_name, &query_json, &initial_result);
 
         // 3. Check for existing subscription with same params
         let existing_subscription = {
@@ -5947,6 +5940,9 @@ impl PerspectiveInstance {
                     q.query = trigger_sparql.clone();
                     q.predicates = predicate_set.clone();
                     q.last_result = initial_result.clone();
+                    if let Some(params) = q.model_query_params.as_mut() {
+                        params.trigger = trigger;
+                    }
                     q.last_keepalive = Instant::now();
                     q.holders += 1;
                 }
@@ -5965,6 +5961,7 @@ impl PerspectiveInstance {
             model_query_params: Some(ModelSubscriptionParams {
                 class_name,
                 query_json,
+                trigger,
             }),
             holders: 1,
         };
@@ -5992,16 +5989,8 @@ impl PerspectiveInstance {
             predicates.extend(shape.predicates());
         }
 
-        // `links` reaches predicates the shape does not declare (a revocation
-        // tombstone); a subscription asking for one must re-run when it lands.
-        if let (Some(shape), Some(qj)) = (&shape, query_json) {
-            if let Ok(query) = serde_json::from_str::<super::model_query::ModelQueryInput>(qj) {
-                predicates.extend(super::model_query::links_trigger_predicates(
-                    shape,
-                    &query,
-                    &self.shape_resolver(),
-                ));
-            }
+        if let Some(qj) = query_json {
+            predicates.extend(self.model_query_side_predicates(shape.as_deref(), qj));
         }
 
         // Extract parent predicate from query JSON (parent-scoped subscriptions
@@ -6015,27 +6004,56 @@ impl PerspectiveInstance {
                 {
                     predicates.push(pred.to_string());
                 }
-                // `producedByFlow` resolves through the flow's receipts and
-                // the flow catalogue, not the shape: re-run when a receipt's
-                // index entry or body lands (sync may deliver them apart) —
-                // the reads `load_flow_receipts` makes — or a flow is
-                // registered, whose definition is written with its
-                // `rdf://type ad4m://Flow` link.
-                if query
-                    .get("where")
-                    .and_then(|w| w.get("producedByFlow"))
-                    .is_some()
-                {
-                    use super::flow_instance::{produced, receipt};
-                    predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
-                    predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
-                    predicates.push("rdf://type".to_string());
-                }
             }
         }
 
         predicates.sort();
         predicates.dedup();
+
+        predicates
+    }
+
+    /// Predicates a model query reads beside its classes' shapes, which a
+    /// subscription matches on the predicate alone.
+    fn model_query_side_predicates(
+        &self,
+        shape: Option<&ModelShape>,
+        query_json: &str,
+    ) -> Vec<String> {
+        let mut predicates = Vec::new();
+
+        // `links` reaches predicates the shape does not declare (a revocation
+        // tombstone); a subscription asking for one must re-run when it lands.
+        if let Some(shape) = shape {
+            if let Ok(query) =
+                serde_json::from_str::<super::model_query::ModelQueryInput>(query_json)
+            {
+                predicates.extend(super::model_query::links_trigger_predicates(
+                    shape,
+                    &query,
+                    &self.shape_resolver(),
+                ));
+            }
+        }
+
+        if let Ok(query) = serde_json::from_str::<serde_json::Value>(query_json) {
+            // `producedByFlow` resolves through the flow's receipts and
+            // the flow catalogue, not the shape: re-run when a receipt's
+            // index entry or body lands (sync may deliver them apart) —
+            // the reads `load_flow_receipts` makes — or a flow is
+            // registered, whose definition is written with its
+            // `rdf://type ad4m://Flow` link.
+            if query
+                .get("where")
+                .and_then(|w| w.get("producedByFlow"))
+                .is_some()
+            {
+                use super::flow_instance::{produced, receipt};
+                predicates.push(produced::FLOW_RECEIPT_INDEX_PREDICATE.to_string());
+                predicates.push(receipt::FLOW_RECEIPT_CONTENT_PREDICATE.to_string());
+                predicates.push("rdf://type".to_string());
+            }
+        }
 
         predicates
     }
@@ -6117,6 +6135,9 @@ impl PerspectiveInstance {
                 .collect::<Vec<_>>()
         };
 
+        // Store reads the model triggers make, shared by every subscription.
+        let mut trigger_lookups = subscription_triggers::StoreLookups::new(&self.sparql_store);
+
         // Create futures for each query check
         for (id, query_string, user_email, last_keepalive, sub_predicates, model_params) in queries
         {
@@ -6126,12 +6147,23 @@ impl PerspectiveInstance {
                 continue;
             }
 
+            // Model subscriptions match each written link against their
+            // trigger (see `subscription_triggers`), not the predicate alone.
+            if let (Some(params), ChangedPredicates::Specific(ref writes)) =
+                (&model_params, &changed_predicates)
+            {
+                if !params.trigger.matches(writes, &mut trigger_lookups) {
+                    log::debug!("⏭️ Skipping model subscription {} — no write matches it", id);
+                    continue;
+                }
+            }
             // Skip subscription if its predicates don't overlap with changed predicates
             // sub_predicates empty => always check (variable predicate in query)
             // ChangedPredicates::CheckAll => always check (couldn't determine changed predicates)
             // ChangedPredicates::NoneRecorded => should not happen here, but skip if it does
-            if !sub_predicates.is_empty() {
-                if let ChangedPredicates::Specific(ref changed) = changed_predicates {
+            else if !sub_predicates.is_empty() {
+                if let ChangedPredicates::Specific(ref writes) = changed_predicates {
+                    let changed = &writes.predicates;
                     if sub_predicates.is_disjoint(changed) {
                         log::debug!(
                             "⏭️ Skipping subscription {} — predicates {:?} disjoint from changed {:?}",
@@ -6222,6 +6254,9 @@ impl PerspectiveInstance {
                             new_len
                         );
                         stored_query.last_result = result_string.clone();
+                        if let Some(params) = stored_query.model_query_params.as_mut() {
+                            params.trigger = params.trigger.with_result(&result_string);
+                        }
                         updates_to_send.push((id, result_string));
                     } else {
                         log::trace!(
@@ -8502,19 +8537,21 @@ mod tests {
         // NoneRecorded + specific → Specific
         state = match state {
             ChangedPredicates::NoneRecorded => {
-                ChangedPredicates::Specific(["p1".to_string()].into())
+                let mut writes = subscription_triggers::Writes::new();
+                writes.record("s", "p1", "t");
+                ChangedPredicates::Specific(writes)
             }
             other => other,
         };
         assert!(matches!(state, ChangedPredicates::Specific(_)));
 
         // Specific + more specific → Specific (union)
-        if let ChangedPredicates::Specific(ref mut set) = state {
-            set.insert("p2".to_string());
+        if let ChangedPredicates::Specific(ref mut writes) = state {
+            writes.record("s", "p2", "t");
         }
-        if let ChangedPredicates::Specific(ref set) = state {
-            assert!(set.contains("p1"));
-            assert!(set.contains("p2"));
+        if let ChangedPredicates::Specific(ref writes) = state {
+            assert!(writes.predicates.contains("p1"));
+            assert!(writes.predicates.contains("p2"));
         }
 
         // Specific + predicate-less → CheckAll
