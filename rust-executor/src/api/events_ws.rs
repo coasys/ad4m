@@ -758,15 +758,14 @@ fn matches_query_subscription_owner_with(
         Ok(serde_json::Value::Object(map)) => map,
         _ => return false,
     };
-    let uuid = match map.get("uuid") {
-        Some(serde_json::Value::String(u)) => u.as_str(),
-        _ => return false,
-    };
-    if !owned_check(uuid, did) {
-        return false;
-    }
+    // The subscriber first: a string compare, so only the subscriber's own
+    // session reaches the ownership check and its perspective lock.
     match map.get("subscriberDid") {
-        Some(serde_json::Value::String(subscriber)) => subscriber == did,
+        Some(serde_json::Value::String(subscriber)) if subscriber == did => {}
+        _ => return false,
+    }
+    match map.get("uuid") {
+        Some(serde_json::Value::String(uuid)) => owned_check(uuid, did),
         _ => false,
     }
 }
@@ -1209,6 +1208,23 @@ mod query_subscription_filter_tests {
             false,
             owns,
         ));
+    }
+
+    #[test]
+    fn a_co_owners_session_never_reaches_the_ownership_check() {
+        // The check takes the perspective lock; only the subscriber's session
+        // may wait on it for an update that is theirs.
+        let reached = std::cell::Cell::new(false);
+        assert!(!matches_query_subscription_owner_with(
+            UPDATE,
+            Some("did:key:bob"),
+            false,
+            |_: &str, _: &str| {
+                reached.set(true);
+                true
+            },
+        ));
+        assert!(!reached.get());
     }
 
     #[test]
