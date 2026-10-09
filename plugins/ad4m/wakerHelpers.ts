@@ -30,8 +30,13 @@ export function buildWakeMessage(
     lines.push(`Mentioned items (${mentions.length}):`);
     for (const m of mentions) {
       lines.push(`  Item: ${m.address}`);
-      if (m.parents.length > 0) {
-        lines.push(`  Parents: ${m.parents.join(", ")}`);
+      // The predicate says what kind of parent it is (`ad4m://has_child`,
+      // `we://children`, `we://comment`, …), which is the agent's only lead on
+      // which link to follow back out to the item's siblings.
+      if (m.parentLinks.length > 0) {
+        lines.push(
+          `  Parents: ${m.parentLinks.map((link) => `${link.address} (via ${link.predicate})`).join(", ")}`,
+        );
       } else {
         lines.push(`  Parents: (unknown)`);
       }

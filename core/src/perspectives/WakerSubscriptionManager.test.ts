@@ -1,4 +1,4 @@
-import { WakerSubscriptionManager, hintFor } from './WakerSubscriptionManager';
+import { WakerSubscriptionManager, hintFor, parentLinksQuery } from './WakerSubscriptionManager';
 
 /**
  * Regression guard for the fork that used to exist between this file and
@@ -185,7 +185,7 @@ describe('WakerSubscriptionManager', () => {
   });
 
   /** Delivers one new mention and returns the parents it woke with, the parent query and any warnings. */
-  async function wakeWithParentRows(rows: unknown) {
+  async function wakeWithParentRows(rows: unknown, address = 'test://message') {
     let deliver: ((result: any) => Promise<void>) | undefined;
     const ProxyClass = function () {
       return {
@@ -214,27 +214,83 @@ describe('WakerSubscriptionManager', () => {
     });
 
     await manager.subscribe({ ...sub, id: 'mention-parents' });
-    await deliver!([{ source: 'test://message' }]);
+    await deliver!([{ source: address }]);
     await waitUntil(() => wakes.length > 0);
     manager.disposeAll();
     return { wakes, queries, warnings };
   }
 
   it('resolves the parents of a new mention from the flat rows querySparql returns', async () => {
-    const { wakes, queries } = await wakeWithParentRows([{ source: 'test://parent' }]);
-    expect(queries[0]).toContain('<ad4m://has_child> <test://message>');
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://parent'] }]]);
+    const { wakes } = await wakeWithParentRows([{ source: 'test://parent', predicate: 'ad4m://has_child' }]);
+    expect(wakes).toEqual([[{
+      address: 'test://message',
+      parents: ['test://parent'],
+      parentLinks: [{ address: 'test://parent', predicate: 'ad4m://has_child' }],
+    }]]);
   });
 
-  it('keeps only string parents when a row leaves ?source unbound', async () => {
-    const { wakes } = await wakeWithParentRows([{ source: 'test://a' }, {}, { source: 'test://b' }]);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: ['test://a', 'test://b'] }]]);
+  /**
+   * Containment is the space's vocabulary: WE hangs an utterance under its call
+   * through `we://children` and a reply under its post through `we://comment`.
+   * A lookup pinned to `ad4m://has_child` woke the agent on every WE mention
+   * with no parent at all, so it could not find the conversation it was in.
+   */
+  it('asks for every link pointing at the item, not only ad4m://has_child', async () => {
+    const { wakes, queries } = await wakeWithParentRows([
+      { source: 'test://call', predicate: 'we://children' },
+      { source: 'test://post', predicate: 'we://comment' },
+    ]);
+    expect(queries[0]).toContain('?source ?predicate <test://message>');
+    expect(queries[0]).not.toContain('ad4m://has_child');
+    expect(queries[0]).toContain('FILTER(!STRSTARTS(STR(?predicate), "ad4m://ontology/"))');
+    expect(wakes[0][0].parentLinks).toEqual([
+      { address: 'test://call', predicate: 'we://children' },
+      { address: 'test://post', predicate: 'we://comment' },
+    ]);
+  });
+
+  it('lists a parent linked through two predicates once in parents and twice in parentLinks', async () => {
+    const { wakes } = await wakeWithParentRows([
+      { source: 'test://call', predicate: 'we://children' },
+      { source: 'test://call', predicate: 'ad4m://has_child' },
+    ]);
+    expect(wakes[0][0].parents).toEqual(['test://call']);
+    expect(wakes[0][0].parentLinks).toHaveLength(2);
+  });
+
+  it('keeps only rows that bind both ?source and ?predicate', async () => {
+    const { wakes } = await wakeWithParentRows([
+      { source: 'test://a', predicate: 'test://p' },
+      {},
+      { source: 'test://orphan' },
+      { source: 'test://b', predicate: 'test://p' },
+    ]);
+    expect(wakes[0][0].parents).toEqual(['test://a', 'test://b']);
   });
 
   it('reports no parents, without a warning, when querySparql returns a non-array', async () => {
     const { wakes, warnings } = await wakeWithParentRows(true);
-    expect(wakes).toEqual([[{ address: 'test://message', parents: [] }]]);
+    expect(wakes).toEqual([[{ address: 'test://message', parents: [], parentLinks: [] }]]);
     expect(warnings).toEqual([]);
+  });
+
+  /**
+   * The mentioned address is a link source any neighbourhood member chose. One
+   * carrying `>` would close the IRI early and run the rest as query syntax.
+   */
+  it('does not query for an address that is not a valid IRI reference', async () => {
+    const hostile = 'test://x> . ?s ?p ?o } #';
+    const { wakes, queries, warnings } = await wakeWithParentRows([{ source: 'test://leak', predicate: 'test://p' }], hostile);
+    expect(queries).toEqual([]);
+    expect(wakes).toEqual([[{ address: hostile, parents: [], parentLinks: [] }]]);
+    expect(warnings.some((w) => w.includes('not a valid IRI reference'))).toBe(true);
+  });
+
+  it('builds no parent query for addresses IRIREF forbids', () => {
+    for (const bad of ['', 'a b', 'a>b', 'a<b', 'a"b', 'a{b', 'a}b', 'a|b', 'a^b', 'a`b', 'a\\b', 'a\nb']) {
+      expect(parentLinksQuery(bad)).toBeNull();
+    }
+    expect(parentLinksQuery('literal://string:hello%20world')).toContain('<literal://string:hello%20world>');
   });
 
   it('names the operator as the fix for a locked executor, on both message shapes', () => {

@@ -261,7 +261,7 @@ export default function perspectiveTests(testContext: TestContext) {
                 expect(queryLinksDeleted.length).to.equal(0);
             })
 
-            it('waker resolves the parent of a new mention', async () => {
+            it('waker resolves every parent of a new mention, through any predicate', async () => {
                 const ad4mClient: Ad4mClient = testContext.ad4mClient!
                 const p = await ad4mClient.perspective.add("waker mention parents")
                 const quiet = { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
@@ -282,10 +282,21 @@ export default function perspectiveTests(testContext: TestContext) {
                         query: 'SELECT ?source WHERE { ?source <test://mentions> <test://me> . }',
                     })
                     await p.add(new Link({ source: 'test://channel', predicate: 'ad4m://has_child', target: 'test://msg1' }))
+                    // An app's own containment predicate (WE: `we://children` from a call to its utterances).
+                    await p.add(new Link({ source: 'test://call', predicate: 'test://children', target: 'test://msg1' }))
                     await p.add(new Link({ source: 'test://msg1', predicate: 'test://mentions', target: 'test://me' }))
 
                     await pollUntil(() => wakes.length > 0, { label: 'waker wake for test://msg1' })
-                    expect(wakes).to.deep.equal([[{ address: 'test://msg1', parents: ['test://channel'] }]])
+                    expect(wakes).to.have.length(1)
+                    const [mention] = wakes[0]!
+                    expect(mention.address).to.equal('test://msg1')
+                    // Order is the store's; the claim is the set. No ad4m://ontology/* row
+                    // (author, timestamp, proof) may surface as a parent.
+                    expect([...mention.parents].sort()).to.deep.equal(['test://call', 'test://channel'])
+                    expect([...mention.parentLinks].sort((a, b) => a.address.localeCompare(b.address))).to.deep.equal([
+                        { address: 'test://call', predicate: 'test://children' },
+                        { address: 'test://channel', predicate: 'ad4m://has_child' },
+                    ])
                 } finally {
                     manager.disposeAll()
                     await ad4mClient.perspective.remove(p.uuid)

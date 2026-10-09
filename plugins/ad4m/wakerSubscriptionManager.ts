@@ -14,9 +14,11 @@
 export {
   WakerSubscriptionManager,
   hintFor,
+  parentLinksQuery,
 } from "../../core/src/perspectives/WakerSubscriptionManager";
 export type {
   MentionMessage,
+  ParentLink,
   WakerLogger,
   WakerSubscription,
   WakerSubscriptionManagerOptions,

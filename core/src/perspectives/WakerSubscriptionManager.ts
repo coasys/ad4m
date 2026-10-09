@@ -16,12 +16,41 @@ export interface WakerSubscription {
   neighbourhood?: string;
 }
 
+/** One link pointing at a mentioned item: the node it hangs under, and through which predicate. */
+export interface ParentLink {
+  address: string;
+  predicate: string;
+}
+
 /** Per-message parent resolution result for mention subscriptions. */
 export interface MentionMessage {
   /** The message's expression address (source of the body link). */
   address: string;
-  /** All parent addresses this message belongs to (channels, conversations, etc.). */
+  /** Every distinct node that links to this item: the addresses of `parentLinks`. */
   parents: string[];
+  /**
+   * Every link whose target is this item, other than the store's own
+   * `ad4m://ontology/*` metadata. The predicate is part of the answer because
+   * containment is the space's vocabulary, not core's: Flux hangs a message
+   * under its channel through `ad4m://has_child`, WE hangs an utterance under
+   * its call through `we://children` and a reply under its post through
+   * `we://comment`.
+   */
+  parentLinks: ParentLink[];
+}
+
+/**
+ * The SPARQL query for every link pointing at `address`, or null when the
+ * address cannot be written as an IRI reference.
+ *
+ * The address is the source of whichever link matched the mention query, so
+ * any member of the neighbourhood chooses it. A character IRIREF forbids would
+ * end the `<…>` early and let the rest of the address run as query syntax, so
+ * such an address is not looked up at all.
+ */
+export function parentLinksQuery(address: string): string | null {
+  if (!address || /[\s<>"{}|^`\\]/.test(address)) return null;
+  return `SELECT ?source ?predicate WHERE { ?source ?predicate <${address}> . FILTER(isIRI(?source)) FILTER(!STRSTARTS(STR(?predicate), "ad4m://ontology/")) }`;
 }
 
 export interface WakerLogger {
@@ -294,24 +323,35 @@ export class WakerSubscriptionManager {
         // Resolve parents per new message
         const mentions: MentionMessage[] = [];
         for (const msgAddr of newMessages) {
-          const parents: string[] = [];
-          try {
-            const parentQuery = `SELECT ?source WHERE { ?source <ad4m://has_child> <${msgAddr}> . }`;
-            this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
-            const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
-            if (Array.isArray(rows)) {
-              // A row omits a variable left unbound in its solution.
-              parents.push(...rows.map((row) => row?.source).filter((source): source is string => typeof source === "string"));
-            }
-          } catch (err: any) {
+          const parentLinks: ParentLink[] = [];
+          const parentQuery = parentLinksQuery(msgAddr);
+          if (!parentQuery) {
             this.logger.warn(
-              `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
+              `[waker] ${sub.id}: not resolving parents for ${JSON.stringify(msgAddr)} — not a valid IRI reference`,
             );
+          } else {
+            try {
+              this.logger.info(`[waker] ${sub.id}: resolving parents for ${msgAddr}`);
+              const rows: unknown = await this.perspectiveClient.querySparql(sub.perspective, parentQuery);
+              if (Array.isArray(rows)) {
+                // A row omits a variable left unbound in its solution.
+                for (const row of rows) {
+                  if (typeof row?.source === "string" && typeof row?.predicate === "string") {
+                    parentLinks.push({ address: row.source, predicate: row.predicate });
+                  }
+                }
+              }
+            } catch (err: any) {
+              this.logger.warn(
+                `[waker] ${sub.id}: parent resolution failed for ${msgAddr} — ${err?.message ?? err}`,
+              );
+            }
           }
+          const parents = [...new Set(parentLinks.map((link) => link.address))];
           this.logger.info(
             `[waker] ${sub.id}: message ${msgAddr} has ${parents.length} parent(s): ${parents.join(", ")}`,
           );
-          mentions.push({ address: msgAddr, parents });
+          mentions.push({ address: msgAddr, parents, parentLinks });
         }
 
         // Mark all new messages as seen

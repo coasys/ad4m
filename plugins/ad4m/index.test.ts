@@ -1550,15 +1550,28 @@ describe("buildWakeMessage", () => {
 
   it("builds a mention wake message with per-item parents", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: ["channel-abc", "conversation-xyz"] },
-      { address: "msg-2", parents: ["channel-abc"] },
+      {
+        address: "msg-1",
+        parents: ["channel-abc", "conversation-xyz"],
+        parentLinks: [
+          { address: "channel-abc", predicate: "ad4m://has_child" },
+          { address: "conversation-xyz", predicate: "we://comment" },
+        ],
+      },
+      {
+        address: "msg-2",
+        parents: ["channel-abc"],
+        parentLinks: [{ address: "channel-abc", predicate: "ad4m://has_child" }],
+      },
     ]);
     expect(msg).toContain("You were @mentioned in an AD4M neighbourhood.");
     expect(msg).toContain("Agent DID: did:key:z6Mk123");
     expect(msg).toContain("Perspective: uuid-123");
     expect(msg).toContain("Mentioned items (2):");
     expect(msg).toContain("Item: msg-1");
-    expect(msg).toContain("Parents: channel-abc, conversation-xyz");
+    expect(msg).toContain(
+      "Parents: channel-abc (via ad4m://has_child), conversation-xyz (via we://comment)",
+    );
     expect(msg).toContain("Item: msg-2");
   });
 
@@ -1570,7 +1583,7 @@ describe("buildWakeMessage", () => {
    */
   it("labels a mentioned address class-agnostically", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "task-1", parents: ["board-abc"] },
+      { address: "task-1", parents: ["board-abc"], parentLinks: [{ address: "board-abc", predicate: "ad4m://has_child" }] },
     ]);
     expect(msg).toContain("Item: task-1");
     expect(msg).not.toContain("Message:");
@@ -1587,7 +1600,7 @@ describe("buildWakeMessage", () => {
 
   it("shows (unknown) parents when empty", () => {
     const msg = buildWakeMessage(config, mentionSub, "did:key:z6Mk123", [
-      { address: "msg-1", parents: [] },
+      { address: "msg-1", parents: [], parentLinks: [] },
     ]);
     expect(msg).toContain("Parents: (unknown)");
   });
@@ -3631,11 +3644,14 @@ describe("WakerSubscriptionManager", () => {
       querySparql: vi.fn((_perspectiveId: string, query: string) => {
         // msg-1 has two parents (channel + conversation thread)
         if (query.includes("msg-1")) {
-          return Promise.resolve([{ source: "channel-abc" }, { source: "conversation-xyz" }]);
+          return Promise.resolve([
+            { source: "channel-abc", predicate: "ad4m://has_child" },
+            { source: "conversation-xyz", predicate: "ad4m://has_child" },
+          ]);
         }
         // msg-2 is only in channel-abc
         if (query.includes("msg-2")) {
-          return Promise.resolve([{ source: "channel-abc" }]);
+          return Promise.resolve([{ source: "channel-abc", predicate: "ad4m://has_child" }]);
         }
         return Promise.resolve([]);
       }),
