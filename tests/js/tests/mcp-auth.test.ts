@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { startExecutor, pollUntil, stopChildProcess } from "../utils/utils";
+import { startExecutor, pollUntil, stopChildProcess, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { callMcpTool, initializeMcp } from './mcp-utils';
@@ -56,10 +56,7 @@ describe("MCP Authentication HTTP Tests", function() {
         registerPorts([apiPort, hcAdminPort, hcAppPort, MCP_PORT]);
 
         // Clean up and create test directory
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
-        fs.mkdirSync(appDataPath, { recursive: true });
+        resetAppDataPath(appDataPath);
 
         // Start executor with MCP enabled
         executorProcess = await startExecutor(

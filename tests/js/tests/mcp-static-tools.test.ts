@@ -29,7 +29,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { sleep, startExecutor, killByPorts } from "../utils/utils";
+import { sleep, startExecutor, killByPorts, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { callMcpTool, listMcpTools, initializeMcp } from './mcp-utils';
@@ -260,10 +260,7 @@ describe("MCP static instance tools (dynamicClassTools off)", function() {
         mcpBaseUrl = `http://127.0.0.1:${mcpPort}/mcp`;
         registerPorts([apiPort, hcAdminPort, hcAppPort, mcpPort]);
 
-        if (fs.existsSync(appDataPath)) {
-            fs.rmSync(appDataPath, { recursive: true });
-        }
-        fs.mkdirSync(appDataPath, { recursive: true });
+        resetAppDataPath(appDataPath);
 
         executorProcess = await startExecutor(
             appDataPath,

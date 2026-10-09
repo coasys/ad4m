@@ -201,6 +201,18 @@ function ensureSharedLocalServices(): ReturnType<typeof runHcLocalServices> {
 }
 
 /**
+ * Empties a test agent's app data dir before startExecutor. The path may be
+ * a symlink left by an earlier run to a /tmp/ad4m-* dir that has since been
+ * deleted: existsSync() is false for such a link and mkdirSync() fails with
+ * ENOENT through it, so remove unconditionally (rmSync removes the link, not
+ * its target).
+ */
+export function resetAppDataPath(appDataPath: string) {
+    rmSync(appDataPath, { recursive: true, force: true });
+    mkdirSync(appDataPath, { recursive: true });
+}
+
+/**
  * How long startExecutor() waits for the readiness markers before it kills
  * the executor and rejects. A healthy start takes well under this; the bound
  * turns a stalled start into a logged failure instead of mocha's 1200 s hang.

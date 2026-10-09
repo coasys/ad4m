@@ -5,7 +5,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, startExecutor, quitExecutor } from "../utils/utils";
+import { baseUrl, startExecutor, quitExecutor, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import fetch from 'node-fetch'
@@ -33,9 +33,7 @@ describe("Multi-User Ad4m-Connect integration tests", () => {
     before(async () => {
         [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
         registerPorts([apiPort, hcAdminPort, hcAppPort]);
-        if (!fs.existsSync(appDataPath)) {
-            fs.mkdirSync(appDataPath, { recursive: true });
-        }
+        resetAppDataPath(appDataPath);
 
         // Start executor with multi-user mode enabled (no admin credential for this test)
         executorProcess = await startExecutor(appDataPath, bootstrapSeedPath,

@@ -7,7 +7,7 @@ import path from 'path'
 import { Ad4mClient, ExpressionProof, Link, LinkExpression, Perspective } from "@coasys/ad4m";
 import { fileURLToPath } from 'url';
 import { expect } from "chai";
-import { startExecutor, baseUrl, runHcLocalServices, quitExecutor } from "../utils/utils";
+import { startExecutor, baseUrl, runHcLocalServices, quitExecutor, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { LinkLangConfig, holochainLinkLang } from "../utils/linkLangConfig";
 import { ChildProcess } from 'child_process';
@@ -58,8 +58,7 @@ describe("Integration tests", function () {
         }
         if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
           fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-        if(!fs.existsSync(appDataPath))
-            fs.mkdirSync(appDataPath)
+        resetAppDataPath(appDataPath);
 
         let localServices = await runHcLocalServices();
         proxyUrl = localServices.proxyUrl;
@@ -106,8 +105,7 @@ describe("Integration tests", function () {
 
           if(!fs.existsSync(path.join(TEST_DIR, 'agents')))
             fs.mkdirSync(path.join(TEST_DIR, 'agents'))
-          if(!fs.existsSync(bobAppDataPath))
-            fs.mkdirSync(bobAppDataPath)
+          resetAppDataPath(bobAppDataPath);
 
           bobExecutorProcess = await startExecutor(bobAppDataPath, bobBootstrapSeedPath,
             bobApiPort, bobHcAdminPort, bobHcAppPort, false, undefined, proxyUrl!, bootstrapUrl!, relayUrl!);

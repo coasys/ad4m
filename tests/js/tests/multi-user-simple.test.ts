@@ -4,7 +4,7 @@ import fs from "fs-extra";
 import { fileURLToPath } from 'url';
 import * as chai from "chai";
 import chaiAsPromised from "chai-as-promised";
-import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep } from "../utils/utils";
+import { baseUrl, pollUntil, startExecutor, runHcLocalServices, gracefulShutdown, sleep, resetAppDataPath } from "../utils/utils";
 import { getFreePorts, registerPorts, deregisterPorts } from "../helpers/ports.js";
 import { ChildProcess } from 'node:child_process';
 import { LinkQuery } from "@coasys/ad4m";
@@ -44,9 +44,7 @@ describe("Multi-User Simple integration tests", () => {
     before(async () => {
         [apiPort, hcAdminPort, hcAppPort] = await getFreePorts(3);
         registerPorts([apiPort, hcAdminPort, hcAppPort]);
-        if (!fs.existsSync(appDataPath)) {
-            fs.mkdirSync(appDataPath, { recursive: true });
-        }
+        resetAppDataPath(appDataPath);
 
         // Start local Holochain services
         let localServices = await runHcLocalServices();
@@ -1893,9 +1891,7 @@ describe("Multi-User Simple integration tests", () => {
             registerPorts([node2GqlPort, node2HcAdminPort, node2HcAppPort]);
 
             console.log("\n=== Setting up Node 2 ===");
-            if (!fs.existsSync(node2AppDataPath)) {
-                fs.mkdirSync(node2AppDataPath, { recursive: true });
-            }
+            resetAppDataPath(node2AppDataPath);
 
             // Start node 2 executor with local services
             node2ExecutorProcess = await startExecutor(
@@ -3017,9 +3013,7 @@ describe("Multi-User Simple integration tests", () => {
             console.log("\n=== [Flux Scenario] Setting up remote standalone node (Node 3) ===");
             [node3GqlPort, node3HcAdminPort, node3HcAppPort] = await getFreePorts(3);
             registerPorts([node3GqlPort, node3HcAdminPort, node3HcAppPort]);
-            if (!fs.existsSync(node3AppDataPath)) {
-                fs.mkdirSync(node3AppDataPath, { recursive: true });
-            }
+            resetAppDataPath(node3AppDataPath);
 
             // Start Node 3 as a standalone main agent (no multi-user)
             node3ExecutorProcess = await startExecutor(
