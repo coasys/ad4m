@@ -276,3 +276,73 @@ async fn union_refuses_per_anchor_slicing_and_relation_order_keys() {
         .unwrap_err();
     assert!(err.to_string().contains("at least one class"), "{err}");
 }
+
+/// A record of two requested classes is kept when one of its readings passes
+/// the query, and is read as that class: `where` on a property only `Task`
+/// declares keeps a Task-and-Note, even when `preferClasses` names `Note`
+/// (it ranks, never excludes). Review R1 / R1b on #1381.
+#[tokio::test]
+async fn union_where_keeps_a_two_class_record_that_passes_as_one_of_them() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://both", Some(1), "open", "10");
+    add(&store, "app://both", "app://flag", "app://note", "10");
+    note(&store, "app://n2", Some(2), "11");
+    for q in [
+        serde_json::json!({"where": {"status": "open"}}),
+        serde_json::json!({"where": {"status": "open"}, "preferClasses": ["Note"]}),
+    ] {
+        let result = execute_union_query(&store, &classes(&["Task", "Note"]), &query(q), &resolver)
+            .await
+            .unwrap();
+        assert_eq!(ids(&result), vec!["app://both"]);
+        assert_eq!(result.instances[0]["__subjectClass"], "Task");
+    }
+}
+
+/// A Local flag of a second class does not hide a Shared record from a shared
+/// read: the read-as class is chosen among the readings that pass the read's
+/// own link filters. Review R2 on #1381.
+#[tokio::test]
+async fn union_a_local_flag_does_not_hide_a_shared_record_from_a_shared_read() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://t1", Some(1), "open", "10");
+    let mut l = link("app://t1", "app://flag", "app://note", "11");
+    l.status = Some(LinkStatus::Local);
+    store.add_link(&l).unwrap();
+    let q = query(serde_json::json!({"linkStatus": "shared"}));
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(ids(&result), vec!["app://t1"]);
+    assert_eq!(result.instances[0]["__subjectClass"], "Task");
+}
+
+/// Rows that tie on the order key keep id order across classes, so a page
+/// boundary between them does not move (#1227). Step 1 returns class by class,
+/// Task first, so without the tie-break the Task would come first.
+#[tokio::test]
+async fn union_breaks_order_ties_by_id_across_classes() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://t9", Some(1), "open", "10");
+    note(&store, "app://n1", Some(1), "11");
+    let q = query(serde_json::json!({"order": {"rank": "ASC"}}));
+    let result = execute_union_query(&store, &classes(&["Task", "Note"]), &q, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(ids(&result), vec!["app://n1", "app://t9"]);
+}
+
+/// A class named twice is read once: rows are not doubled and the total counts
+/// each record once.
+#[tokio::test]
+async fn union_reads_a_class_named_twice_once() {
+    let (store, resolver) = task_and_note();
+    task(&store, "app://t1", Some(1), "open", "10");
+    note(&store, "app://n2", Some(2), "11");
+    let q = query(serde_json::json!({}));
+    let result = execute_union_query(&store, &classes(&["Task", "Note", "Task"]), &q, &resolver)
+        .await
+        .unwrap();
+    assert_eq!(ids(&result), vec!["app://t1", "app://n2"]);
+    assert_eq!(result.total_count, 2);
+}
