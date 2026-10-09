@@ -336,8 +336,11 @@ async fn other_agents_local_graphs_leave_link_and_sparql_reads() {
         ),
         vec!["ad4m://s/alice"]
     );
-    // The executor's shared instance still reads everything.
-    assert_eq!(rows(p.sparql_query(all).unwrap()).len(), 4);
+    // The executor's shared instance reads the shared graphs only (#1358).
+    assert_eq!(
+        rows(p.sparql_query(all).unwrap()),
+        vec!["ad4m://s/default", "ad4m://s/shared"]
+    );
 }
 
 #[tokio::test]
@@ -408,8 +411,8 @@ async fn model_queries_leave_out_other_agents_local_graphs() {
         vec!["t://note/alice", "t://note/shared"]
     );
     assert_eq!(
-        ids(p.model_query("Note", "{}", None).await.unwrap()).len(),
-        3
+        ids(p.model_query("Note", "{}", None).await.unwrap()),
+        vec!["t://note/shared"]
     );
 }
 
@@ -694,12 +697,6 @@ async fn a_subscription_update_reaches_only_its_subscriber() {
         "a session whose DID hasn't resolved gets nothing"
     );
     super::unregister_perspective(&p.uuid);
-}
-
-#[tokio::test]
-async fn the_shared_instance_reads_every_graph() {
-    let (p, _, _) = two_users_and_shared_links().await;
-    assert_eq!(p.get_links(&LinkQuery::default()).await.unwrap().len(), 4);
 }
 
 /// A signed link from a client carries its own graph. It gets the same rules
@@ -1133,4 +1130,329 @@ async fn a_local_subjects_own_graph_cannot_pull_its_children_out() {
                 && l.status == Some(LinkStatus::Local)),
         "{stored:?}"
     );
+}
+
+/// A Local write that names no graph lands in its writer's Local graph (#1357).
+/// Apps write Local links this way (`addLink(uuid, link, "local")`), and so
+/// does the flow engine's `currentState` cache. In the default graph every
+/// co-owner of the perspective would read them.
+#[tokio::test]
+async fn a_local_write_without_a_graph_lands_in_its_writers_local_graph() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+
+    let one = p
+        .add_link(link("one"), LinkStatus::Local, None, &alice, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        (one.graph, one.status),
+        (Some(local_graph_iri(&alice_did)), Some(LinkStatus::Local))
+    );
+    p.add_links(vec![link("two")], LinkStatus::Local, None, &alice, None)
+        .await
+        .unwrap();
+    p.link_mutations(
+        crate::types::LinkMutations {
+            additions: vec![link("three")],
+            removals: vec![],
+        },
+        LinkStatus::Local,
+        &alice,
+        None,
+    )
+    .await
+    .unwrap();
+    let batch = p.create_batch().await;
+    p.add_link(
+        link("four"),
+        LinkStatus::Local,
+        Some(batch.clone()),
+        &alice,
+        None,
+    )
+    .await
+    .unwrap();
+    p.commit_batch(batch, &alice).await.unwrap();
+
+    let mine = p
+        .clone()
+        .for_viewer(alice_did.clone())
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        sources(&mine),
+        vec![
+            "ad4m://s/four",
+            "ad4m://s/one",
+            "ad4m://s/three",
+            "ad4m://s/two"
+        ]
+    );
+    assert!(
+        mine.iter()
+            .all(|l| l.graph == Some(local_graph_iri(&alice_did))
+                && l.status == Some(LinkStatus::Local)),
+        "{mine:?}"
+    );
+
+    let bob_view = p.clone().for_viewer(bob_did);
+    assert!(
+        bob_view
+            .get_links(&LinkQuery::default())
+            .await
+            .unwrap()
+            .is_empty(),
+        "Bob co-owns the perspective but reads Alice's Local links"
+    );
+    let rows: Vec<Value> = serde_json::from_str(
+        &bob_view
+            .sparql_query("SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string())
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(rows.is_empty(), "Bob's SPARQL read Alice's Local links: {rows:?}");
+}
+
+/// A Local command on a subject that lives in a shared graph: the link is
+/// still Alice's alone. A Local link always lives in its writer's Local graph.
+#[tokio::test]
+async fn a_local_command_on_a_shared_subject_lands_in_the_writers_local_graph() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let main = AgentContext::main_agent();
+    p.add_link(
+        Link {
+            source: "t://channel".to_string(),
+            predicate: Some("t://name".to_string()),
+            target: "literal:string:general".to_string(),
+        },
+        LinkStatus::Shared,
+        None,
+        &main,
+        Some(SHARED_GRAPH.to_string()),
+    )
+    .await
+    .unwrap();
+
+    let commands: Vec<Command> = serde_json::from_value(serde_json::json!([{
+        "source": "this", "predicate": "t://read", "target": "value",
+        "action": "addLink", "local": true
+    }]))
+    .unwrap();
+    let params: Vec<Parameter> =
+        serde_json::from_value(serde_json::json!([{ "name": "value", "value": "t://marker" }]))
+            .unwrap();
+    for graph in [None, Some(SHARED_GRAPH.to_string())] {
+        p.execute_commands(
+            commands.clone(),
+            "t://channel".to_string(),
+            params.clone(),
+            None,
+            &alice,
+            graph,
+        )
+        .await
+        .unwrap();
+    }
+
+    let read = |viewer: String| {
+        let view = p.clone().for_viewer(viewer);
+        async move {
+            view.get_links(&LinkQuery {
+                predicate: Some("t://read".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+        }
+    };
+    let alices = read(alice_did.clone()).await;
+    assert!(!alices.is_empty());
+    assert!(
+        alices
+            .iter()
+            .all(|l| l.graph == Some(local_graph_iri(&alice_did))
+                && l.status == Some(LinkStatus::Local)),
+        "{alices:?}"
+    );
+    assert!(read(bob_did).await.is_empty());
+}
+
+/// Editing a Local link stored in the default graph (written before #812)
+/// moves it into its writer's Local graph.
+#[tokio::test]
+async fn updating_a_local_link_in_the_default_graph_moves_it_into_the_writers_local_graph() {
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    // As a pre-#812 executor stored it: Local, no graph.
+    let mut legacy: LinkExpression =
+        crate::agent::create_signed_expression(link("old"), &alice)
+            .unwrap()
+            .into();
+    legacy.status = Some(LinkStatus::Local);
+    p.sparql_store.add_link(&legacy).unwrap();
+
+    let updated = p
+        .update_link(legacy, link("new"), None, &alice)
+        .await
+        .unwrap();
+    assert_eq!(updated.graph, Some(local_graph_iri(&alice_did)));
+    assert_eq!(updated.status, Some(LinkStatus::Local));
+    assert!(p
+        .clone()
+        .for_viewer(bob_did)
+        .get_links(&LinkQuery::default())
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+/// A read with no viewer sees the shared graphs only (#1358). Request paths
+/// stamp a viewer, and background work that writes shared output reads
+/// shared-only; any other path that forgets to scope itself must not read
+/// every user's Local graph.
+#[tokio::test]
+async fn an_unscoped_read_sees_no_local_graph() {
+    let (p, alice_did, _) = two_users_and_shared_links().await;
+    let shared = vec!["ad4m://s/default", "ad4m://s/shared"];
+
+    assert_eq!(
+        sources(&p.get_links(&LinkQuery::default()).await.unwrap()),
+        shared
+    );
+    let rows = |json: String| -> Vec<String> {
+        let mut s: Vec<String> = serde_json::from_str::<Vec<Value>>(&json)
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["s"].as_str().map(str::to_string))
+            .collect();
+        s.sort();
+        s
+    };
+    assert_eq!(
+        rows(
+            p.sparql_query("SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string())
+                .unwrap()
+        ),
+        shared
+    );
+    assert_eq!(
+        rows(
+            p.sparql_query("SELECT ?s WHERE { GRAPH ?g { ?s <ad4m://p> ?o } }".to_string())
+                .unwrap()
+        ),
+        vec!["ad4m://s/shared"]
+    );
+    // Naming a Local graph does not widen it.
+    assert!(!p
+        .sparql_query_with_graphs(
+            "SELECT ?s WHERE { ?s <ad4m://p> ?o }".to_string(),
+            Some(&[local_graph_iri(&alice_did)]),
+        )
+        .map(rows)
+        .is_ok_and(|s| s.iter().any(|s| s == "ad4m://s/alice")));
+    // The viewer's own Local graph is still there for the viewer.
+    assert_eq!(
+        sources(
+            &p.clone()
+                .for_viewer(alice_did)
+                .get_links(&LinkQuery::default())
+                .await
+                .unwrap()
+        ),
+        vec!["ad4m://s/alice", "ad4m://s/default", "ad4m://s/shared"]
+    );
+}
+
+/// `subject_classes_of` reads the store directly. Model queries use it to pick
+/// the class of a polymorphic relation target, so it must not classify a URI
+/// by another agent's Local links (#1358, found by CodeRabbit on #1058).
+#[tokio::test]
+async fn subject_classes_of_does_not_read_another_agents_local_graph() {
+    let (bob, bob_did) = user("bob");
+    let (_, alice_did) = user("alice");
+    let mut p = setup(Some(vec![alice_did.clone(), bob_did.clone()])).await;
+    let main = AgentContext::main_agent();
+    let shacl = r#"{
+        "target_class": "t://Note",
+        "constructor_actions": [
+            {"action": "addLink", "source": "this", "predicate": "rdf://type", "target": "t://Note"}
+        ],
+        "destructor_actions": [],
+        "properties": []
+    }"#;
+    p.add_sdna(
+        "Note".to_string(),
+        String::new(),
+        SdnaType::SubjectClass,
+        Some(shacl.to_string()),
+        &main,
+    )
+    .await
+    .unwrap();
+    p.add_link(
+        Link {
+            source: "t://note/bob".to_string(),
+            predicate: Some("rdf://type".to_string()),
+            target: "t://Note".to_string(),
+        },
+        LinkStatus::Local,
+        None,
+        &bob,
+        Some(LOCAL_GRAPH_ALIAS.to_string()),
+    )
+    .await
+    .unwrap();
+    let uris = ["t://note/bob".to_string()];
+
+    for (who, view) in [
+        ("the executor", p.clone()),
+        ("Alice", p.clone().for_viewer(alice_did)),
+    ] {
+        let classes = view.subject_classes_of(&uris).unwrap();
+        assert!(
+            classes.get("t://note/bob").is_none(),
+            "{who} classified Bob's Local note: {classes:?}"
+        );
+    }
+    let bobs = p.clone().for_viewer(bob_did).subject_classes_of(&uris).unwrap();
+    assert_eq!(bobs.get("t://note/bob"), Some(&vec!["Note".to_string()]));
+}
+
+/// Each co-owner keeps their flow `currentState` cache in their own Local
+/// graph (#1360), and a local vote runs the pass for the voter only. On a
+/// co-owned perspective a local flow write therefore queues the pass a synced
+/// one would, which sweeps once per owner on this node; on a perspective with
+/// one owner it does not, as before.
+#[tokio::test]
+async fn a_local_vote_on_a_co_owned_perspective_queues_every_owners_pass() {
+    use super::flow_instance::atom::ACCEPTED_BY_PREDICATE;
+    let (alice, alice_did) = user("alice");
+    let (_, bob_did) = user("bob");
+    let vote = || Link {
+        source: "ad4m://proposal/1".to_string(),
+        predicate: Some(ACCEPTED_BY_PREDICATE.to_string()),
+        target: "literal:string:yes".to_string(),
+    };
+    let queued = |p: &PerspectiveInstance| !p.flow_pass_queue.lock().unwrap().is_idle();
+
+    let mut alone = setup(Some(vec![alice_did.clone()])).await;
+    alone
+        .add_link(vote(), LinkStatus::Shared, None, &alice, None)
+        .await
+        .unwrap();
+    assert!(!queued(&alone), "a single owner's own vote already ran its pass");
+
+    let mut shared = setup(Some(vec![alice_did, bob_did])).await;
+    shared
+        .add_link(vote(), LinkStatus::Shared, None, &alice, None)
+        .await
+        .unwrap();
+    assert!(queued(&shared), "Bob's pass was not queued after Alice's vote");
+    shared.settle_flow_passes().await;
 }

@@ -157,12 +157,17 @@ fn order_by_specificity(matches: &mut Vec<(String, usize)>) -> Vec<String> {
 /// perspective has not registered. Absence is used rather than an empty list
 /// because an empty list would claim the stronger thing — that the URI belongs
 /// to no class — which this cannot know.
+///
+/// `scope` is the graph scope of the caller's reads (`None`: every graph), so a
+/// URI is never classified by links the caller cannot read, such as another
+/// agent's Local graph (#1358).
 pub fn subject_classes_of(
     store: &SparqlStore,
     resolver: &dyn ShapeResolver,
     uris: &[String],
+    scope: Option<&[String]>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
-    subject_classes_of_with_pending(store, resolver, uris, &[])
+    subject_classes_of_with_pending(store, resolver, uris, &[], scope)
 }
 
 /// [`subject_classes_of`], counting links that are staged but not yet committed.
@@ -182,6 +187,7 @@ pub fn subject_classes_of_with_pending(
     resolver: &dyn ShapeResolver,
     uris: &[String],
     pending: &[(String, String, String)],
+    scope: Option<&[String]>,
 ) -> Result<HashMap<String, Vec<String>>, Error> {
     let mut out: HashMap<String, Vec<String>> = HashMap::new();
     if uris.is_empty() {
@@ -256,7 +262,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !flag_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &flag_preds, true)?;
+        let rows = fetch(store, &values_clause, &flag_preds, true, scope)?;
         for row in &rows {
             let (s, p, o) = match (row["s"].as_str(), row["p"].as_str(), row["o"].as_str()) {
                 (Some(s), Some(p), Some(o)) => (s, p, o),
@@ -276,7 +282,7 @@ pub fn subject_classes_of_with_pending(
     }
 
     if !presence_preds.is_empty() {
-        let rows = fetch(store, &values_clause, &presence_preds, false)?;
+        let rows = fetch(store, &values_clause, &presence_preds, false, scope)?;
         for row in &rows {
             let (s, p) = match (row["s"].as_str(), row["p"].as_str()) {
                 (Some(s), Some(p)) => (s, p),
@@ -328,6 +334,7 @@ fn fetch(
     values_clause: &str,
     preds: &HashSet<&str>,
     with_object: bool,
+    scope: Option<&[String]>,
 ) -> Result<Vec<Value>, Error> {
     let pred_values = preds
         .iter()
@@ -345,7 +352,7 @@ fn fetch(
         )
     };
 
-    Ok(serde_json::from_str(&store.query(&query)?)?)
+    Ok(serde_json::from_str(&store.query_with_graphs(&query, scope)?)?)
 }
 
 #[cfg(test)]

@@ -206,8 +206,20 @@ impl PerspectiveInstance {
     /// published diff, so a synced one arrives here as well as through
     /// [`schedule_flow_consensus_pass`](Self::schedule_flow_consensus_pass);
     /// the queue folds the second into the pass the first queued.
-    pub(crate) fn schedule_flow_pass_on_definition_change(&self, diff: &DecoratedPerspectiveDiff) {
-        self.enqueue_flow_pass(FlowTouch::of_local_diff(diff));
+    ///
+    /// On a perspective with more than one owner, any flow-relevant local
+    /// write queues the pass, as a synced one does. Each owner keeps their
+    /// cache and marks in their own Local graph (#1360), and the writer's
+    /// vote or mint runs the pass for the writer only, so without this a
+    /// co-owner on the same executor would read a stale `currentState` until
+    /// the next synced link.
+    pub(crate) async fn schedule_flow_pass_on_local_write(&self, diff: &DecoratedPerspectiveDiff) {
+        let co_owned = self.persisted.lock().await.get_owners().len() > 1;
+        self.enqueue_flow_pass(if co_owned {
+            FlowTouch::of_diff(diff)
+        } else {
+            FlowTouch::of_local_diff(diff)
+        });
     }
 
     fn enqueue_flow_pass(&self, touch: FlowTouch) {

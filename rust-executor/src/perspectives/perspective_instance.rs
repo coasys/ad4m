@@ -578,7 +578,9 @@ pub struct PerspectiveInstance {
     shape_cache: Arc<std::sync::RwLock<HashMap<String, Arc<ModelShape>>>>,
     /// The agent a request-scoped clone reads for (see [`Self::for_viewer`]).
     /// Its reads leave out other agents' Local graphs. `None` — the shared
-    /// instance the executor itself uses — reads everything.
+    /// instance the executor itself uses — reads the shared graphs only, as
+    /// after [`Self::for_shared_reads`] (#1358): a path that forgets to scope
+    /// itself must not read every user's Local graph.
     viewer: Option<String>,
     /// Set by [`Self::for_shared_reads`]: every read leaves out every Local
     /// graph, the viewer's own included.
@@ -1783,19 +1785,19 @@ impl PerspectiveInstance {
     }
 
     /// Whether this instance's viewer reads the stored `link`. The executor's
-    /// own view (no viewer) reads every link.
+    /// own view (no viewer) reads no Local graph.
     pub(crate) fn sees(&self, link: &DecoratedLinkExpression) -> bool {
         link.graph.as_deref().is_none_or(|g| self.reads_graph(g))
     }
 
     /// Whether this instance reads named graph `iri`: not another agent's
-    /// Local graph, and no Local graph at all after [`Self::for_shared_reads`].
+    /// Local graph, and no Local graph at all without a viewer or after
+    /// [`Self::for_shared_reads`].
     fn reads_graph(&self, iri: &str) -> bool {
-        !(self.shared_reads && is_local_graph(iri))
-            && self
-                .viewer
-                .as_deref()
-                .is_none_or(|viewer| graph_visible_to(iri, viewer))
+        match self.viewer.as_deref() {
+            Some(viewer) if !self.shared_reads => graph_visible_to(iri, viewer),
+            _ => !is_local_graph(iri),
+        }
     }
 
     /// Resolve the graph a write by `context` names, and the status its links
@@ -1803,24 +1805,33 @@ impl PerspectiveInstance {
     /// agent's Local graph is refused, the own graph of a Local subject becomes
     /// that Local graph ([`Self::follow_local_subject`]), and links in a Local
     /// graph are always `Local`, so they never reach the link language.
+    ///
+    /// A `Local` link always lives in its writer's Local graph, whatever graph
+    /// the write names, or none (#1357). Anywhere else every co-owner of the
+    /// perspective on this executor would read it.
     fn resolve_write_graph(
         &self,
         graph: Option<String>,
         status: LinkStatus,
         context: &AgentContext,
     ) -> Result<(Option<String>, LinkStatus), AnyError> {
+        let writer = || did_for_context(context);
         let Some(graph) = graph else {
-            return Ok((None, status));
+            return Ok(match status {
+                LinkStatus::Local => (Some(local_graph_iri(&writer()?)), status),
+                LinkStatus::Shared => (None, status),
+            });
         };
-        let viewer = did_for_context(context)?;
+        let viewer = writer()?;
         let graph =
             self.follow_local_subject(resolve_graph_for(&graph, Some(&viewer))?, &viewer)?;
-        let status = if local_graph_owner(&graph).is_some() {
-            LinkStatus::Local
+        Ok(if local_graph_owner(&graph).is_some() {
+            (Some(graph), LinkStatus::Local)
+        } else if status == LinkStatus::Local {
+            (Some(local_graph_iri(&viewer)), status)
         } else {
-            status
-        };
-        Ok((Some(graph), status))
+            (Some(graph), status)
+        })
     }
 
     pub async fn add_link(
@@ -1935,9 +1946,11 @@ impl PerspectiveInstance {
 
     async fn pubsub_publish_diff(&self, decorated_diff: DecoratedPerspectiveDiff) {
         // Every write reaches here, local or synced, so this is where a local
-        // change to a flow definition queues the re-derivation that a synced
-        // one gets from `diff_from_link_language`. A no-op for anything else.
-        self.schedule_flow_pass_on_definition_change(&decorated_diff);
+        // change to a flow definition (or, on a co-owned perspective, any flow
+        // write) queues the re-derivation that a synced one gets from
+        // `diff_from_link_language`. A no-op for anything else.
+        self.schedule_flow_pass_on_local_write(&decorated_diff)
+            .await;
 
         // Get handle without holding lock during pubsub operations
         let handle = {
@@ -2059,6 +2072,16 @@ impl PerspectiveInstance {
                 status = LinkStatus::Local;
             }
             link_expression.graph = Some(graph);
+        }
+        // A Local link lives in the Local graph of the agent the write acts
+        // for, not of the author the link names (#1357; see
+        // `resolve_write_graph`). The executor itself has no Local graph.
+        if status == LinkStatus::Local
+            && !link_expression.graph.as_deref().is_some_and(is_local_graph)
+        {
+            if let Some(viewer) = self.viewer.as_deref() {
+                link_expression.graph = Some(local_graph_iri(viewer));
+            }
         }
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -2359,10 +2382,19 @@ impl PerspectiveInstance {
             };
 
         let old_link = stored;
-        // The replacement stays in the old link's graph.
+        // The replacement stays in the old link's graph. A Local link stored
+        // outside a Local graph (written before #1357) moves into the writer's.
         let mut new_link_expression =
             LinkExpression::from(create_signed_expression(new_link.normalize(), context)?);
-        new_link_expression.graph = old_link.graph.clone();
+        new_link_expression.graph = match old_link.graph.clone() {
+            graph
+                if link_status == LinkStatus::Local
+                    && !graph.as_deref().is_some_and(is_local_graph) =>
+            {
+                Some(local_graph_iri(&viewer))
+            }
+            graph => graph,
+        };
 
         if let Some(batch_id) = batch_id {
             let mut batches = self.batch_store.write().await;
@@ -2399,8 +2431,9 @@ impl PerspectiveInstance {
             self.update_prolog_engines(decorated_diff.clone()).await;
 
             // An update publishes its own topic rather than going through
-            // `pubsub_publish_diff`, so it queues the definition sweep here.
-            self.schedule_flow_pass_on_definition_change(&decorated_diff);
+            // `pubsub_publish_diff`, so it queues the sweep here.
+            self.schedule_flow_pass_on_local_write(&decorated_diff)
+                .await;
 
             // Publish link updated events - one per owner for proper multi-user isolation
             let pubsub = get_global_pubsub().await;
@@ -2712,11 +2745,8 @@ impl PerspectiveInstance {
     }
 
     /// The links matching `q`, as this instance's viewer sees them (see
-    /// [`Self::for_viewer`]). The shared instance reads every graph.
+    /// [`Self::for_viewer`]). The shared instance reads no Local graph.
     pub async fn get_links(&self, q: &LinkQuery) -> Result<Vec<DecoratedLinkExpression>, AnyError> {
-        if self.viewer.is_none() && !self.shared_reads {
-            return self.get_links_unscoped(q).await;
-        }
         self.get_links_for(q).await
     }
 
@@ -2829,8 +2859,9 @@ impl PerspectiveInstance {
     }
 
     /// This instance, reading as `viewer`: other agents' Local graphs leave
-    /// every read. Request handlers call it on the clone they serve a request
-    /// with; the shared instance keeps the executor's full view.
+    /// every read, and the viewer's own joins them. Request handlers call it on
+    /// the clone they serve a request with; the shared instance reads the
+    /// shared graphs only.
     pub fn for_viewer(mut self, viewer: String) -> Self {
         self.viewer = Some(viewer);
         self
@@ -2846,15 +2877,17 @@ impl PerspectiveInstance {
     }
 
     /// The graph scope a read on this instance runs in: [`Self::read_scope`]
-    /// for the instance's viewer, or `requested` unchanged for the executor.
-    /// After [`Self::for_shared_reads`], no Local graph: a requested one is
-    /// refused.
-    fn scope_for(&self, requested: Option<&[String]>) -> Result<Option<Vec<String>>, AnyError> {
+    /// for the instance's viewer. Without a viewer, or after
+    /// [`Self::for_shared_reads`], no Local graph: a requested one is refused.
+    pub(crate) fn scope_for(
+        &self,
+        requested: Option<&[String]>,
+    ) -> Result<Option<Vec<String>>, AnyError> {
         let scope = match &self.viewer {
             Some(viewer) => self.sparql_store.visible_scope(Some(viewer), requested)?,
             None => requested.filter(|r| !r.is_empty()).map(<[String]>::to_vec),
         };
-        if !self.shared_reads {
+        if self.viewer.is_some() && !self.shared_reads {
             return Ok(scope);
         }
         let requested = requested.is_some_and(|r| !r.is_empty());
@@ -3978,7 +4011,13 @@ impl PerspectiveInstance {
         uris: &[String],
     ) -> Result<std::collections::HashMap<String, Vec<String>>, AnyError> {
         let resolver = self.shape_resolver();
-        super::subject_classes_of::subject_classes_of(&self.sparql_store, &resolver, uris)
+        let scope = self.scope_for(None)?;
+        super::subject_classes_of::subject_classes_of(
+            &self.sparql_store,
+            &resolver,
+            uris,
+            scope.as_deref(),
+        )
     }
 
     /// Cancellation-aware async variant of [`Self::sparql_query`].
@@ -4046,11 +4085,13 @@ impl PerspectiveInstance {
     ) -> Option<String> {
         let pending = self.staged_triples_for(source, batch_id).await;
         let resolver = self.shape_resolver();
+        let scope = self.scope_for(None).ok()?;
         let classes = super::subject_classes_of::subject_classes_of_with_pending(
             &self.sparql_store,
             &resolver,
             &[source.to_string()],
             &pending,
+            scope.as_deref(),
         )
         .ok()?;
         for class_name in classes.get(source)? {

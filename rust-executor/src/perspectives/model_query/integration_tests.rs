@@ -5826,7 +5826,7 @@ async fn test_subject_classes_of_batch() {
         "ns://c".to_string(),
         "ns://nothing".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).unwrap();
+    let result = subject_classes_of(&store, &resolver, &uris, None).unwrap();
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(result.get("ns://b"), Some(&vec!["ImageBlock".to_string()]));
@@ -5886,7 +5886,7 @@ async fn test_subject_classes_of_mixed_absolute_and_unusable_uris() {
         ":leading-colon".to_string(),
         "ns://b".to_string(),
     ];
-    let result = subject_classes_of(&store, &resolver, &uris).expect("the batch still resolves");
+    let result = subject_classes_of(&store, &resolver, &uris, None).expect("the batch still resolves");
 
     assert_eq!(result.get("ns://a"), Some(&vec!["TextBlock".to_string()]));
     assert_eq!(
@@ -5947,7 +5947,7 @@ async fn test_subject_classes_of_skips_class_with_unusable_predicate() {
         .unwrap();
 
     let result =
-        subject_classes_of(&store, &resolver, &["ns://a".to_string()]).expect("the batch resolves");
+        subject_classes_of(&store, &resolver, &["ns://a".to_string()], None).expect("the batch resolves");
 
     assert_eq!(
         result.get("ns://a"),
@@ -5991,7 +5991,7 @@ async fn test_subject_classes_of_requires_every_triple_not_just_a_flag() {
         .add_link(&make_link("ns://a", "ns://flag", "ns://text_block", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()], None).unwrap();
 
     assert!(
         !result.contains_key("ns://a"),
@@ -6048,7 +6048,7 @@ async fn test_subject_classes_of_returns_every_class_most_specific_first() {
         .add_link(&make_link("ns://a", "ns://text", "literal:string:hi", "2"))
         .unwrap();
 
-    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()]).unwrap();
+    let result = subject_classes_of(&store, &resolver, &["ns://a".to_string()], None).unwrap();
 
     let classes = result.get("ns://a").expect("ns://a is classified");
     assert_eq!(
