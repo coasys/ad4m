@@ -3655,6 +3655,35 @@ describe("Ad4mModel named-graph placement", () => {
     expect(parentLinkIn(p)).toBe(aliceLocal);
   });
 
+  it("keeps a graph-rooted child Local when someone else put a link on the Local parent elsewhere", async () => {
+    const p = perspective();
+    const aliceLocal = "ad4m://local/did:key:alice";
+    p.get.mockResolvedValue([
+      { data: { source: "c1", predicate: "test://name", target: "literal:string:mine" }, graph: aliceLocal, author: "did:key:alice" },
+      { data: { source: "c1", predicate: "test://tag", target: "test://x" }, graph: undefined, author: "did:key:bob" },
+    ]);
+    await Channel.create(p, { name: "sub" }, {
+      batchId: "b",
+      parent: { model: Channel, id: "c1", field: "notes" },
+    });
+    expect(createdIn(p)).toBe(aliceLocal);
+    expect(parentLinkIn(p)).toBe(aliceLocal);
+  });
+
+  it("does not follow a parent with a Local link once the parent's own graph exists", async () => {
+    const p = perspective(["ad4m://graph/c1"]);
+    const aliceLocal = "ad4m://local/did:key:alice";
+    p.get.mockResolvedValue([
+      { data: { source: "c1", predicate: "test://read", target: "test://marker" }, graph: aliceLocal, author: "did:key:alice" },
+      { data: { source: "c1", predicate: "test://tag", target: "test://x" }, graph: undefined, author: "did:key:bob" },
+    ]);
+    const sub = await Channel.create(p, { name: "sub" }, {
+      batchId: "b",
+      parent: { model: Channel, id: "c1", field: "notes" },
+    });
+    expect(createdIn(p)).toBe(`ad4m://graph/${sub.id}`);
+  });
+
   it("keeps a graph-rooted child of a shared parent in its own graph", async () => {
     const p = perspective();
     p.get.mockResolvedValue([

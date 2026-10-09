@@ -1,7 +1,7 @@
 import { Literal } from "../Literal";
 import { Link } from "../links/Links";
 import { LinkQuery } from "../perspectives/LinkQuery";
-import { PerspectiveProxy, isLocalGraph } from "../perspectives/PerspectiveProxy";
+import { PerspectiveProxy, LOCAL_GRAPH, isLocalGraph } from "../perspectives/PerspectiveProxy";
 import { CallOptions } from "../apiClient";
 import { makeRandomId } from "./util";
 import { getPropertiesMetadata, getRelationsMetadata, setPropertyRegistryEntry, setRelationRegistryEntry, Model } from "./decorators";
@@ -2428,10 +2428,17 @@ function hasExplicitGraph(parent?: Scope): boolean {
 }
 
 /**
- * The Local graph a parent lives in, read from the store: every link the
- * caller reads with the parent as source sits in that one Local graph (the
- * executor's rule for a Local subject). `undefined` for a shared or unknown
- * parent, and for a scope without a single parent id.
+ * The Local graph a parent lives in, read from the store by the executor's
+ * rule for a Local subject (`follow_local_subject`): every link on the parent
+ * that the caller reads sits in the caller's Local graph, or, while the
+ * parent's own graph `ad4m://graph/<parent>` does not exist, every link the
+ * caller wrote on it does, so a link someone else put elsewhere cannot flip it.
+ * `undefined` for a shared or unknown parent, and for a scope without a single
+ * parent id.
+ *
+ * It errs toward Local: when a shared parent's own links have not reached the
+ * caller yet and the caller has a Local link on it, the child stays Local. A
+ * lost share is better than a leak.
  */
 async function localGraphOfParent(
   perspective: PerspectiveProxy,
@@ -2439,7 +2446,12 @@ async function localGraphOfParent(
 ): Promise<string | undefined> {
   if (!parent || !('id' in parent) || typeof parent.id !== 'string') return undefined;
   const links = await perspective.get(new LinkQuery({ source: parent.id }));
-  const graphs = new Set(links.map((l) => l.graph));
-  const [graph] = graphs;
-  return graphs.size === 1 && isLocalGraph(graph) ? graph : undefined;
+  // The caller reads no other agent's Local graph, so one here is the caller's.
+  const local = links.find((l) => isLocalGraph(l.graph))?.graph;
+  if (!local) return undefined;
+  if (links.every((l) => l.graph === local)) return local;
+  if ((await perspective.graphs()).includes(Ad4mModel.graphIriFor(parent.id))) return undefined;
+  const caller = local.slice(`${LOCAL_GRAPH}/`.length);
+  const own = links.filter((l) => l.author === caller);
+  return own.length > 0 && own.every((l) => l.graph === local) ? local : undefined;
 }
