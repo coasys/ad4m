@@ -354,6 +354,11 @@ export class NeighbourhoodClient {
 
     // ── SFU diagnostic / test-harness endpoints ────────────────────────
 
+    /** The calling agent's own DID — the user's, for a user token. */
+    async callerDid(): Promise<string | null> {
+        return (await this.#apiClient.call("agent.status", {})).did
+    }
+
     /**
      * Read-only: SFU service status including public reachability.
      * Returns whether this executor can relay media to remote
