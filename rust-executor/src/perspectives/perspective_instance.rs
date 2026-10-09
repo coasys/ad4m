@@ -532,9 +532,13 @@ fn extract_from_graph_iris(query: &str) -> Option<Vec<String>> {
 }
 
 /// The part of `diff` that may reach the link language: links in a Local graph
-/// never sync, whatever status a write path gave them.
+/// never sync, whatever status a write path gave them, and neither does a link
+/// whose status is Local, wherever it sits (one written before #1357 is still
+/// in the default graph until #1359 moves it).
 pub(crate) fn shareable(diff: &PerspectiveDiff) -> PerspectiveDiff {
-    let shared = |l: &&LinkExpression| !l.graph.as_deref().is_some_and(is_local_graph);
+    let shared = |l: &&LinkExpression| {
+        !l.graph.as_deref().is_some_and(is_local_graph) && l.status != Some(LinkStatus::Local)
+    };
     PerspectiveDiff {
         additions: diff.additions.iter().filter(shared).cloned().collect(),
         removals: diff.removals.iter().filter(shared).cloned().collect(),
