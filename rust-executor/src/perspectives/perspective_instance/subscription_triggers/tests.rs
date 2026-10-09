@@ -11,9 +11,10 @@
 
 use super::super::{ChangedPredicates, PerspectiveInstance};
 use super::{reruns, ModelTrigger, StoreLookups};
+use crate::agent::signatures::TestSigner;
 use crate::agent::AgentContext;
 use crate::perspectives::interpretation_test_support::setup_perspective_no_llm;
-use crate::types::{DecoratedLinkExpression, Link, LinkStatus};
+use crate::types::{DecoratedLinkExpression, Link, LinkExpression, LinkStatus};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::sync::atomic::Ordering;
@@ -520,6 +521,65 @@ async fn a_record_linked_under_the_parent_anchor_enters() {
 
     assert_eq!(reruns::count(&id), 1);
     assert_eq!(ids(&last_result(&p, &id).await), vec!["ns://p4"]);
+}
+
+/// A Comment create, with more Comments in the store than `via` reads around
+/// one node. Post's typed relation makes `ns://comment` a `via` relation, and
+/// the flag link's target, `ns://comment`, is linked to every Comment. Red if
+/// `via` read every link of a node: past `MAX_NEIGHBOURS` it re-runs, so every
+/// create of a class sharing the flag predicate would re-run every
+/// subscription on a class with a typed relation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_create_does_not_read_around_its_flag_value() {
+    let mut p = blog().await;
+    record(&mut p, "ns://p1", "Post", &[]).await;
+    check(&p).await;
+    let signer = TestSigner::generate();
+    let at = "2024-01-15T10:00:00.000Z".parse().expect("timestamp");
+    for i in 0..=super::MAX_NEIGHBOURS {
+        let link = Link {
+            source: format!("ns://old{i}"),
+            predicate: Some(FLAG.into()),
+            target: "ns://comment".into(),
+        };
+        p.sparql_store
+            .add_link(&LinkExpression::from(signer.sign_at(link, at)))
+            .expect("add link");
+    }
+    let (id, _) = subscribe(&p, "Post", json!({})).await;
+
+    record(&mut p, "ns://c9", "Comment", &[]).await;
+    check(&p).await;
+
+    assert_eq!(reruns::count(&id), 0, "c9 is not a Post, nor linked to one");
+}
+
+/// A write whose target is stored as an RDF literal reads nothing around
+/// the literal: no record carries a flag on it, and no relation reaches it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_literal_target_is_not_read_around() {
+    let mut p = blog().await;
+    let trigger = p.build_model_trigger(
+        ["Post"],
+        r#"{"include":{"comments":true}}"#,
+        r#"{"instances":[{"id":"ns://p1"}]}"#,
+    );
+
+    add(&mut p, "ns://x9", "ns://status", "literal:string:done").await;
+    let ChangedPredicates::Specific(writes) = take_writes(&p).await else {
+        panic!("expected recorded links");
+    };
+    let mut lookups = StoreLookups::new(&p.sparql_store);
+    assert!(!trigger.matches(&writes, &mut lookups), "x9 is not a Post");
+
+    let read: Vec<&String> = lookups
+        .flags
+        .keys()
+        .map(|(node, _)| node)
+        .chain(lookups.neighbours.keys().map(|(node, _)| node))
+        .collect();
+    assert!(read.iter().any(|n| *n == "ns://x9"), "{read:?}");
+    assert!(!read.iter().any(|n| n.starts_with("literal:")), "{read:?}");
 }
 
 /// Getters the rules cannot place on a node fall back to predicates: a

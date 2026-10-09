@@ -53,7 +53,7 @@ use crate::perspectives::model_query::{
     conformance_predicates, IncludeValue, ModelQueryInput, ModelShape, Scope, ShapeResolver,
     WhereCondition,
 };
-use crate::perspectives::sparql_store::{canonical_target, SparqlStore};
+use crate::perspectives::sparql_store::{canonical_target, stored_as_literal, SparqlStore};
 use crate::types::DecoratedLinkExpression;
 
 /// Past this many distinct links in one batch, a batch keeps only its
@@ -61,10 +61,10 @@ use crate::types::DecoratedLinkExpression;
 /// A bulk import must not hold every triple it wrote until the next check.
 const MAX_TRACKED_LINKS: usize = 10_000;
 
-/// How many links touching one node the `via` rule reads before it stops
-/// and re-runs. A node with more neighbours than this is a hub (a shared
-/// literal, a large container), and scanning it on every write would cost more
-/// than the query it might save.
+/// How many links touching one node, through one `via` relation, the `via`
+/// rule reads before it stops and re-runs. A node with more than this is a
+/// large container, and scanning it on every write would cost more than the
+/// query it might save.
 const MAX_NEIGHBOURS: usize = 2_000;
 
 /// The writes of one subscription-check batch.
@@ -73,9 +73,23 @@ pub(super) struct Writes {
     /// Every predicate written or removed. Raw SPARQL subscriptions match on
     /// these alone.
     pub(super) predicates: HashSet<String>,
-    /// `(source, predicate, target)` of each link written or removed, or
-    /// `None` once the batch passed [`MAX_TRACKED_LINKS`].
-    links: Option<HashSet<(String, String, String)>>,
+    /// Each link written or removed, or `None` once the batch passed
+    /// [`MAX_TRACKED_LINKS`].
+    links: Option<HashSet<Written>>,
+}
+
+/// One written or removed link, with what every subscription's check needs
+/// to know about its target worked out once.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Written {
+    source: String,
+    predicate: String,
+    target: String,
+    /// `target` as it reads back from the store (see [`canonical_target`]).
+    canonical: String,
+    /// The target is stored as an RDF literal: the link is a value on its
+    /// source and never links into a record (see [`stored_as_literal`]).
+    literal: bool,
 }
 
 impl Writes {
@@ -93,7 +107,13 @@ impl Writes {
             if links.len() >= MAX_TRACKED_LINKS {
                 self.links = None;
             } else {
-                links.insert((source.into(), predicate.into(), target.into()));
+                links.insert(Written {
+                    source: source.into(),
+                    predicate: predicate.into(),
+                    target: target.into(),
+                    canonical: canonical_target(target),
+                    literal: stored_as_literal(target),
+                });
             }
         }
     }
@@ -649,30 +669,28 @@ impl ModelTrigger {
                     .any(|p| watched.contains(p.as_str())),
             };
         };
-        links
-            .iter()
-            .any(|(s, p, t)| self.matches_link(s, p, t, store))
+        links.iter().any(|link| self.matches_link(link, store))
     }
 
-    fn matches_link(
-        &self,
-        source: &str,
-        predicate: &str,
-        target: &str,
-        store: &mut StoreLookups,
-    ) -> bool {
+    fn matches_link(&self, link: &Written, store: &mut StoreLookups) -> bool {
         let rules = &self.rules;
+        let Written {
+            source,
+            predicate,
+            target,
+            canonical,
+            literal,
+        } = link;
         if rules.any.contains(predicate) {
             return true;
         }
         // A `literal:` target can be spelled more than one way (see
         // `canonical_target`); compare both spellings.
-        let canonical = canonical_target(target);
-        let spellings = [source, target, canonical.as_str()];
+        let spellings = [source, target, canonical];
         if rules
             .joins
             .get(predicate)
-            .is_some_and(|values| values.contains(target) || values.contains(&canonical))
+            .is_some_and(|values| values.contains(target) || values.contains(canonical))
         {
             return true;
         }
@@ -687,7 +705,12 @@ impl ModelTrigger {
         {
             return true;
         }
-        let ends = [source, target];
+        // The ends a write can change a record at. A target stored as an RDF
+        // literal is a value on the source: no record carries a flag on it,
+        // and no relation reaches it. Shared values (`true`, a status, an
+        // emoji) are hubs, so reading around one would cost the most.
+        let both = [source, target];
+        let ends = if *literal { &both[..1] } else { &both[..] };
         if let Some(flags) = rules.scan.get(predicate) {
             if ends
                 .iter()
@@ -697,11 +720,9 @@ impl ModelTrigger {
             }
         }
         if near && !rules.via.is_none() {
-            return ends.iter().any(|e| {
-                store.linked_to(e, |p, other| {
-                    rules.via.contains(p) && self.nodes.contains(other)
-                })
-            });
+            return ends
+                .iter()
+                .any(|e| store.linked_through(e, &rules.via, &self.nodes));
         }
         false
     }
@@ -740,9 +761,10 @@ fn result_nodes(result: &str) -> HashSet<String> {
 pub(super) struct StoreLookups<'a> {
     store: &'a SparqlStore,
     flags: HashMap<(String, Flag), bool>,
-    /// Node → `(predicate, other end)` of each link touching it, or `None`
-    /// past [`MAX_NEIGHBOURS`].
-    neighbours: HashMap<String, Option<Vec<(String, String)>>>,
+    /// `(node, predicate)` → `(predicate, other end)` of each link touching
+    /// the node, with that predicate (`None`: with any), or `None` past
+    /// [`MAX_NEIGHBOURS`].
+    neighbours: HashMap<(String, Option<String>), Option<Vec<(String, String)>>>,
 }
 
 impl<'a> StoreLookups<'a> {
@@ -768,18 +790,33 @@ impl<'a> StoreLookups<'a> {
         hit
     }
 
-    /// Whether a link touching `node` satisfies `wanted(predicate, other
-    /// end)`. A hub past [`MAX_NEIGHBOURS`], or a failed read, answers yes.
-    fn linked_to(&mut self, node: &str, wanted: impl Fn(&str, &str) -> bool) -> bool {
-        let store = self.store;
-        let neighbours = self
-            .neighbours
-            .entry(node.to_string())
-            .or_insert_with(|| store.neighbours(node, MAX_NEIGHBOURS).ok().flatten());
-        match neighbours {
-            None => true,
-            Some(links) => links.iter().any(|(p, other)| wanted(p, other)),
-        }
+    /// Whether `node` is linked, through one of `via`, to one of `nodes`.
+    /// Reads only the links with a `via` predicate when `via` names them, so
+    /// a node with many other links (a flag value every instance points at)
+    /// costs nothing. More than [`MAX_NEIGHBOURS`] such links, or a failed
+    /// read, answers yes.
+    fn linked_through(&mut self, node: &str, via: &Predicates, nodes: &HashSet<String>) -> bool {
+        let predicates: Vec<Option<&str>> = match via {
+            Predicates::None => return false,
+            Predicates::Some(set) => set.iter().map(|p| Some(p.as_str())).collect(),
+            Predicates::All => vec![None],
+        };
+        predicates.into_iter().any(|predicate| {
+            let store = self.store;
+            let neighbours = self
+                .neighbours
+                .entry((node.to_string(), predicate.map(str::to_string)))
+                .or_insert_with(|| {
+                    store
+                        .neighbours(node, predicate, MAX_NEIGHBOURS)
+                        .ok()
+                        .flatten()
+                });
+            match neighbours {
+                None => true,
+                Some(links) => links.iter().any(|(_, other)| nodes.contains(other)),
+            }
+        })
     }
 }
 

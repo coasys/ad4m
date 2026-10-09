@@ -101,6 +101,14 @@ pub(crate) fn canonical_target(target: &str) -> String {
     storage_term_to_target_string(&target_to_storage_term(target))
 }
 
+/// Whether a link target is stored as an RDF literal (`literal:string:`,
+/// `:number:`, `:boolean:`, `:json:`), not as a node. A link source is always
+/// stored as a node, so a triple whose object is such a literal never links
+/// into a record: it is a value on its source.
+pub(crate) fn stored_as_literal(target: &str) -> bool {
+    matches!(target_to_storage_term(target), Term::Literal(_))
+}
+
 /// Inverse of [`target_to_storage_term`]: render a stored [`Term`] back into
 /// the wire-format URL string the SDK / hydration layer expect.
 ///
@@ -1113,18 +1121,21 @@ impl SparqlStore {
     }
 
     /// `(predicate, other end)` of every link triple with `node` at either
-    /// end, other ends in wire spelling. `None` when there are more than
-    /// `limit`: the caller asked to stop there.
+    /// end, and with `predicate` when one is given, other ends in wire
+    /// spelling. `None` when there are more than `limit`: the caller asked to
+    /// stop there.
     pub(crate) fn neighbours(
         &self,
         node: &str,
+        predicate: Option<&str>,
         limit: usize,
     ) -> Result<Option<Vec<(String, String)>>, Error> {
         let mut out = Vec::new();
         let as_subject = NamedNodeRef::new_unchecked(node);
+        let predicate = predicate.map(NamedNodeRef::new_unchecked);
         for quad in self.store.quads_for_pattern(
             Some(as_subject.into()),
-            None,
+            predicate,
             None,
             Some(GraphNameRef::DefaultGraph),
         ) {
@@ -1140,7 +1151,7 @@ impl SparqlStore {
         let as_object = target_to_storage_term(node);
         for quad in self.store.quads_for_pattern(
             None,
-            None,
+            predicate,
             Some(as_object.as_ref()),
             Some(GraphNameRef::DefaultGraph),
         ) {
