@@ -3,4 +3,9 @@
 /**
  * Wire names stay snake_case, as the handlers read them.
  */
-export type PerspectiveModelQueryParams = { uuid: string, class_name: string, query_json: string, };
+export type PerspectiveModelQueryParams = { uuid: string, class_name: string, query_json: string, 
+/**
+ * Named graphs to read; the Local alias names the caller's own Local
+ * graph. Absent: every graph the caller may read.
+ */
+graph_iris?: Array<string>, };

@@ -102,6 +102,7 @@ import type { PerspectiveRejectFlowProposalResult } from "./PerspectiveRejectFlo
 import type { PerspectiveRemoveAutoProcessorParams } from "./PerspectiveRemoveAutoProcessorParams";
 import type { PerspectiveRemoveLinkParams } from "./PerspectiveRemoveLinkParams";
 import type { PerspectiveRemoveLinksParams } from "./PerspectiveRemoveLinksParams";
+import type { PerspectiveRemoveNamedGraphParams } from "./PerspectiveRemoveNamedGraphParams";
 import type { PerspectiveResolveInterpretationParams } from "./PerspectiveResolveInterpretationParams";
 import type { PerspectiveShacl } from "./PerspectiveShacl";
 import type { PerspectiveShaclNameParams } from "./PerspectiveShaclNameParams";
@@ -257,6 +258,7 @@ export interface RpcMethods {
   "perspective.mintFlowReceipt": { params: PerspectiveMintFlowReceiptParams; result: PerspectiveMintFlowReceiptResult };
   "perspective.modelQuery": { params: PerspectiveModelQueryParams; result: string };
   "perspective.modelSubscribe": { params: PerspectiveModelQueryParams; result: PerspectiveModelSubscribeResult };
+  "perspective.namedGraphs": { params: PerspectiveUuidParams; result: Array<string> };
   "perspective.proposeFlowTransition": { params: PerspectiveProposeFlowTransitionParams; result: ProposeOutcome };
   "perspective.publishSnapshot": { params: PerspectiveUuidParams; result: string };
   "perspective.queryLinks": { params: PerspectiveQueryLinksParams; result: Array<DecoratedLinkExpression> };
@@ -268,6 +270,7 @@ export interface RpcMethods {
   "perspective.removeAutoProcessor": { params: PerspectiveRemoveAutoProcessorParams; result: boolean };
   "perspective.removeLink": { params: PerspectiveRemoveLinkParams; result: boolean };
   "perspective.removeLinks": { params: PerspectiveRemoveLinksParams; result: Array<DecoratedLinkExpression> };
+  "perspective.removeNamedGraph": { params: PerspectiveRemoveNamedGraphParams; result: boolean };
   "perspective.runInterpretation": { params: RunInterpretationRequest; result: Array<string> };
   "perspective.runInterpretationWithHarness": { params: RunInterpretationWithHarnessRequest; result: Array<string> };
   "perspective.snapshot": { params: PerspectiveUuidParams; result: DecoratedPerspective | null };
@@ -372,6 +375,7 @@ export const READ_METHODS: ReadonlySet<RpcMethod> = new Set<RpcMethod>([
   "perspective.getSubjectData",
   "perspective.interpretationOverlays",
   "perspective.modelQuery",
+  "perspective.namedGraphs",
   "perspective.queryLinks",
   "perspective.queryProlog",
   "perspective.querySparql",

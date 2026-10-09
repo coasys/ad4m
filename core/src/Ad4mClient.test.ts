@@ -712,6 +712,7 @@ describe('PerspectiveClient', () => {
         const ws = lastOf(MockWebSocket.instances);
         const update = (subscriptionId: string, result: unknown) => event('query-subscription-update', {
             perspectiveUuid: 'uuid-1', uuid: 'uuid-1', subscriptionId, result: JSON.stringify(result),
+            subscriberDid: 'did:test:me',
         });
 
         ws.emit(perspectiveAdded('uuid-ignored'));
