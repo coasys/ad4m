@@ -163,6 +163,9 @@ pub async fn propose_flow_transition(
         ));
     }
     let acting_did = crate::agent::did_for_context(context)?;
+    // Before any vote: this agent's first pass on the instance is a silent
+    // catch-up, and the pass after the vote must report what the vote settles.
+    super::pass::catch_up_before_acting(perspective, instance_uri, context).await;
 
     let reachable = reachable_next_states(flow, &derived.state);
     let target_state = reachable

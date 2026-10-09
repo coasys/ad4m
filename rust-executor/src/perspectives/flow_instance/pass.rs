@@ -191,10 +191,9 @@ pub async fn run_flow_consensus_pass(
         // edges that settle after catch-up.
         //
         // On a co-owned perspective each owner catches up on their own (#1360).
-        // So if Bob's vote settles an edge before any pass ever ran for him on
-        // this instance, that pass is his catch-up and `accept_flow_proposal`
-        // returns no outcome for the edge. The edge is still settled and
-        // marked; only the report is missing.
+        // An acting call (propose, accept) therefore runs the agent's catch-up
+        // before its vote (`catch_up_before_acting`), or the pass after the
+        // vote would be the catch-up and swallow the edge the vote settles.
         let first_pass_here = already_marked.is_empty()
             && match has_local_cache(perspective, &record.instance_uri).await {
                 Ok(cached) => !cached,
@@ -333,6 +332,40 @@ pub(crate) async fn local_cached_state(
             );
             Ok(None)
         }
+    }
+}
+
+/// Run `context`'s catch-up pass on `instance_uri` if none has run for that
+/// agent on this replica yet. An acting call (propose, accept) calls it before
+/// it writes its vote.
+///
+/// Each co-owner keeps their own cache and marks (#1360), so an agent's first
+/// pass on an instance is a silent catch-up (see [`run_flow_consensus_pass`]).
+/// Run after the vote, that catch-up would swallow the very edge the vote
+/// settles, and the acting call would report nothing. Run first, it records
+/// the history as it stood, and the pass after the vote is an ordinary one.
+pub(crate) async fn catch_up_before_acting(
+    perspective: &mut PerspectiveInstance,
+    instance_uri: &str,
+    context: &AgentContext,
+) {
+    let did = match crate::agent::did_for_context(context) {
+        Ok(did) => did,
+        Err(e) => {
+            log::warn!("catch_up_before_acting: no DID for the acting agent: {e:#}");
+            return;
+        }
+    };
+    let own = perspective.clone().for_own_bookkeeping(did);
+    match has_local_cache(&own, instance_uri).await {
+        Ok(true) => {}
+        Ok(false) => {
+            let only = [instance_uri.to_string()];
+            run_flow_consensus_pass(perspective, None, context, None, Some(&only)).await;
+        }
+        Err(e) => log::warn!(
+            "catch_up_before_acting: reading the cache of {instance_uri} failed: {e:#}"
+        ),
     }
 }
 

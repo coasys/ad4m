@@ -152,6 +152,9 @@ pub async fn accept_flow_proposal(
     if already {
         log::debug!("accept_flow_proposal: {proposal_uri} already accepted by {did}");
     } else {
+        // Before the vote: this agent's first pass on the instance is a silent
+        // catch-up, and the pass after the vote must report what the vote settles.
+        super::pass::catch_up_before_acting(perspective, &instance_uri, context).await;
         perspective
             .add_link(
                 Link {
