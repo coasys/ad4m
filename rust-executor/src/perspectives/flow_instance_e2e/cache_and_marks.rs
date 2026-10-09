@@ -612,3 +612,58 @@ async fn a_co_owners_pass_writes_their_own_cache_and_leaves_the_others() {
         "Alice's cache was touched"
     );
 }
+
+/// Since #1360 each co-owner keeps their own cache, so an agent's first pass on
+/// an instance is a silent catch-up. Run after the vote of an acting call, it
+/// swallowed the very edge that vote settles. The acting call now runs the
+/// catch-up before it votes (#812, CI `flow-task-handover`: "n:1 Start fires on
+/// proposeTransition").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_first_proposal_reports_the_edge_it_settles() {
+    let mut f = seed_satisfied_fixture(None).await;
+    let bob = second_agent("bob-first-proposal@e2e.test");
+    let instance = f.instance_uri.clone();
+    let outcome = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &bob,
+    )
+    .await
+    .expect("Bob proposes");
+    assert!(outcome.recorded_vote);
+    assert_eq!(
+        outcome.outcomes.len(),
+        1,
+        "Bob's n:1 edge is reported: {:?}",
+        outcome.outcomes
+    );
+}
+
+/// The same for a co-signer's first accept: the `{n: 2}` edge Bob's vote
+/// settles is reported, with no pass run for him beforehand.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_co_owners_first_accept_reports_the_edge_it_settles() {
+    let mut f = seed_satisfied_fixture(None).await;
+    set_consensus_rule(&mut f, "delivery://Delivery.scoped", r#"{"n":2}"#).await;
+    let instance = f.instance_uri.clone();
+    let proposed = propose_flow_transition(
+        &mut f.perspective,
+        &instance,
+        "scoped",
+        &[task_ref(TASK)],
+        None,
+        &f.ctx,
+    )
+    .await
+    .expect("the proposer");
+    assert!(proposed.outcomes.is_empty(), "one vote is short of {{n: 2}}");
+
+    let bob = second_agent("bob-first-accept@e2e.test");
+    let fired = accept_flow_proposal(&mut f.perspective, &proposed.proposal_uri, &bob)
+        .await
+        .expect("Bob co-signs");
+    assert_eq!(fired.len(), 1, "Bob's vote settles the edge: {fired:?}");
+}

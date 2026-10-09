@@ -927,3 +927,87 @@ async fn proof_valid_a_link_with_no_verdict_does_not_hydrate_by_default() {
     assert_eq!(name_of(None).await, None, "no verdict reads as unverified");
     assert_eq!(name_of(Some(true)).await, Some(json!("real")));
 }
+
+/// A typed relation lists each target once, even when the target's flag sits
+/// in two graphs. Since #1357 a flag written Local lands in its writer's Local
+/// graph, while the same flag written Shared stays in the default graph. A read
+/// scoped to both gets one row per graph, and the generated conformance getter
+/// listed the target twice (#812, CI `integration-tests-model`,
+/// `reads a typed relation from links of the same status`).
+#[tokio::test]
+async fn a_typed_relation_lists_a_target_once_when_its_flag_is_in_two_graphs() {
+    use crate::perspectives::sparql_store::local_graph_iri;
+    let store = SparqlStore::new(None).unwrap();
+    let signer = TestSigner::generate();
+    let r = "pv://r/1";
+    store
+        .add_link(&pv_signed(&signer, r, "ad4m://type", "pv://Recipe", 0))
+        .unwrap();
+    store
+        .add_link(&pv_signed(&signer, "pv://c/1", "ad4m://type", "pv://Comment", 1))
+        .unwrap();
+    let mut local_flag = pv_signed(&signer, "pv://c/1", "ad4m://type", "pv://Comment", 2);
+    local_flag.graph = Some(local_graph_iri("did:key:alice"));
+    local_flag.status = Some(crate::types::LinkStatus::Local);
+    store.add_link(&local_flag).unwrap();
+    store
+        .add_link(&pv_signed(&signer, r, "pv://comment", "pv://c/1", 3))
+        .unwrap();
+
+    let shape_json = json!({
+        "className": "Recipe",
+        "properties": {
+            "type": {"predicate":"ad4m://type","required":true,"flag":true,"initial":"pv://Recipe"}
+        },
+        "relations": {
+            "comments": {
+                "predicate": "pv://comment",
+                "kind": "hasMany",
+                "targetClassName": "Comment",
+                "getter": "SELECT ?target WHERE { <Base> <pv://comment> ?target . ?target <ad4m://type> <pv://Comment> . }"
+            }
+        }
+    })
+    .to_string();
+    let (resolver, shape) = StaticShapeResolver::from_json("Recipe", &shape_json).unwrap();
+    let comments = |scope: Option<Vec<String>>| {
+        let (store, shape, resolver) = (&store, shape.clone(), &resolver);
+        async move {
+            let mut out = Vec::new();
+            for limit in [None, Some(10)] {
+                let result = super::query::execute_model_query(
+                    store,
+                    shape.as_ref(),
+                    &ModelQueryInput {
+                        limit,
+                        ..Default::default()
+                    },
+                    resolver,
+                    scope.as_deref(),
+                )
+                .await
+                .unwrap();
+                out.push(result.instances[0]["comments"].clone());
+            }
+            out
+        }
+    };
+
+    // Alice's read while only her own Local graph exists: nothing is hidden,
+    // so it is the unscoped fast path over the union of all graphs.
+    assert_eq!(
+        store.visible_scope(Some("did:key:alice"), None).unwrap(),
+        None
+    );
+    assert_eq!(comments(None).await, vec![json!(["pv://c/1"]); 2], "union read");
+
+    // Once another agent has a Local graph, Alice's read lists its graphs.
+    let mut bobs = pv_signed(&signer, "pv://other", "pv://p", "pv://o", 4);
+    bobs.graph = Some(local_graph_iri("did:key:bob"));
+    store.add_link(&bobs).unwrap();
+    let scope = store
+        .visible_scope(Some("did:key:alice"), None)
+        .unwrap()
+        .expect("Bob's Local graph is hidden, so the read is scoped");
+    assert_eq!(comments(Some(scope)).await, vec![json!(["pv://c/1"]); 2], "scoped read");
+}
