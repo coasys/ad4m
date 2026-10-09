@@ -97,6 +97,9 @@ fn bearer_credential(context: &RequestContext<RoleServer>) -> Option<String> {
 #[derive(Clone)]
 pub struct Ad4mMcpHandler {
     pub(crate) context: McpContext,
+    /// Set by [`Self::for_pass`] on a pass that reads shared graphs only:
+    /// every perspective a tool reads leaves out every Local graph too.
+    shared_reads: bool,
     tool_router: ToolRouter<Self>,
 }
 
@@ -197,7 +200,30 @@ impl Ad4mMcpHandler {
     pub fn new(context: McpContext) -> Self {
         Self {
             context,
+            shared_reads: false,
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// The tool surface of an interpretation pass that reads through
+    /// `perspective`. The tools read what the pass reads: when the pass reads
+    /// shared graphs only (the auto-processor, which applies what the LLM
+    /// proposes as Shared), so does every tool, the runner's own Local graph
+    /// left out.
+    pub(crate) fn for_pass(perspective: &PerspectiveInstance, context: McpContext) -> Self {
+        Self {
+            shared_reads: perspective.reads_shared_graphs_only(),
+            ..Self::new(context)
+        }
+    }
+
+    /// `perspective` as a tool reads it for `viewer`.
+    fn tool_view(&self, perspective: PerspectiveInstance, viewer: String) -> PerspectiveInstance {
+        let view = perspective.for_viewer(viewer);
+        if self.shared_reads {
+            view.for_shared_reads()
+        } else {
+            view
         }
     }
 
@@ -597,7 +623,7 @@ impl Ad4mMcpHandler {
 
         // The tool reads as its caller: other agents' Local graphs stay out.
         let viewer = crate::agent::did_for_context(&agent_context).map_err(|e| e.to_string())?;
-        Ok((perspective.for_viewer(viewer), agent_context))
+        Ok((self.tool_view(perspective, viewer), agent_context))
     }
 
     /// Convenience wrapper for read operations — checks perspective access but no write capability.
@@ -639,7 +665,7 @@ impl Ad4mMcpHandler {
 
         // The tool reads as its caller: other agents' Local graphs stay out.
         let viewer = crate::agent::did_for_context(&agent_context).map_err(|e| e.to_string())?;
-        Ok(perspective.for_viewer(viewer))
+        Ok(self.tool_view(perspective, viewer))
     }
 
     /// Convenience wrapper for write operations (most common case)

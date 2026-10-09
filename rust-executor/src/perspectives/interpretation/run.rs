@@ -1113,7 +1113,11 @@ pub async fn run_interpretation_with_harness_and_model(
         // Set explicitly so the intent is visible at the construction site.
         dynamic_class_tools: true,
     };
-    let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::new(mcp_context));
+    // The tools read what this pass reads (see `Ad4mMcpHandler::for_pass`).
+    let mcp_handler = Arc::new(crate::mcp::tools::Ad4mMcpHandler::for_pass(
+        perspective,
+        mcp_context,
+    ));
     let ad4m_provider = Arc::new(crate::mcp::tools::provider_impl::Ad4mToolProvider::new(
         mcp_handler,
     ));
