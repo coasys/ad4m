@@ -593,9 +593,11 @@ async fn a_create_does_not_read_around_its_flag_value() {
             predicate: Some(FLAG.into()),
             target: "ns://comment".into(),
         };
-        p.sparql_store
-            .add_link(&LinkExpression::from(signer.sign_at(link, at)))
-            .expect("add link");
+        // Straight into the store: 2 000 `add_link`s would each wake the
+        // recorder.
+        let mut link = LinkExpression::from(signer.sign_at(link, at));
+        link.status = Some(LinkStatus::Shared);
+        p.sparql_store.add_link(&link).expect("add link");
     }
     let (id, _) = subscribe(&p, "Post", json!({})).await;
 
